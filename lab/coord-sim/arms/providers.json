@@ -1,0 +1,21 @@
+{
+  "$schema": "opencode-shaped providers file (root provider registry, PROVIDER-WAVE shape)",
+  "provider": {
+    "yggdrasil": {
+      "npm": "@ai-sdk/anthropic",
+      "name": "Yggdrasil (z.ai coding plan)",
+      "env": [],
+      "options": {
+        "baseURL": "https://api.z.ai/api/anthropic",
+        "apiKey": "{file:/home/dweeb_xyz/Work/bifrost/lab/tool-policy/upstream.key}"
+      },
+      "models": {
+        "glm-5.3": { "name": "GLM 5.3 (smart)" },
+        "glm-5.3-flash": { "name": "GLM 5.3 FlashX (fast)" },
+        "glm-5.3-flash": { "name": "GLM 5.3 Flash (fast, live default)" }
+      }
+    }
+  },
+  "model": "yggdrasil/glm-5.3-flash",
+  "fallback": []
+}

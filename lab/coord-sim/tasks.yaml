@@ -1,0 +1,84 @@
+# coord-sim task battery v1 — the 5-task mixed day (data, not code)
+# Each task: id, size (S/M/L), arrives_at (sim minute the user mentions it),
+# prompt (given to whoever executes it), grade (harness-bench grader spec shape).
+# Sizes chosen so: S = one fast turn, M = a focused task, L = needs real reasoning.
+tasks:
+  - id: t1-summarize-inbox
+    size: S
+    arrives_at: 0
+    prompt: >-
+      Summarize this email in exactly 2 sentences, then list the 3 action items
+      as a short dash list. Nothing else.
+      EMAIL: From: facilities@veraldar.example — Subject: Office move week 45.
+      The team moves floors on Tuesday; desks on 3F go to 2F west; the server
+      closet stays put. Badge access must be re-registered by Monday 16:00 at
+      the front desk; bring photo ID. Parking permits for the garage are
+      re-issued automatically, bikes keep the old rack until Thursday. IT asks
+      everyone to leave laptops docked Monday night so imaging can run.
+    grade:
+      method: contains
+      expected: ["tuesday", "badge", "16:00"]
+
+  - id: t2-code-fizzbuzz
+    size: M
+    arrives_at: 1
+    prompt: >-
+      Write a python module fizz.py defining exactly one function fizzbuzz(n: int) -> str:
+      "FizzBuzz" when n is divisible by 3 and 5, "Fizz" when divisible by 3 only,
+      "Buzz" when divisible by 5 only, else the decimal string of n. No side effects
+      at import time. Save it as fizz.py in the task directory.
+    grade:
+      method: code
+      expected:
+        filename: fizz.py
+        tests_dir: tests/code-fizzbuzz
+
+  - id: t3-balanced-parens
+    size: M
+    arrives_at: 2
+    prompt: >-
+      Write a python module parens.py with is_balanced(s: str) -> bool returning True
+      iff every '(' in s has a matching ')' in the correct order; ignore other
+      characters; empty string is balanced. Save it as parens.py in the task directory.
+    grade:
+      method: code
+      expected:
+        filename: parens.py
+        tests_dir: tests/code-parens
+
+  - id: t4-invoice-extract
+    size: S
+    arrives_at: 3
+    prompt: >-
+      From this document report exactly: (1) the invoice total, (2) the due date,
+      (3) the customer contact email. One line each, nothing else.
+      DOC: Invoice #A-1183 from Nordwind Consulting AB, dated 2026-10-12, to
+      veraldar labs. Services: on-site integration days (6 x 1,400 EUR = 8,400 EUR)
+      and travel reimbursement (412.50 EUR). VAT 25% applies to services only.
+      Total due: 11,012.50 EUR. Payment due date: 2026-11-11. Billing contact:
+      rebecca@nordwind.example. Late fee: 2% per month.
+    grade:
+      method: contains
+      expected: ["11,012.50", "2026-11-11", "rebecca@nordwind.example"]
+
+  - id: t5-spec-drift-check
+    size: L
+    arrives_at: 4
+    deps: [t1-summarize-inbox, t2-code-fizzbuzz, t4-invoice-extract]
+    prompt: >-
+      Write a 1-paragraph handoff note for tomorrow's engineer covering today's
+      work. It must answer ALL of: (a) what did the fizz.py task deliver and where
+      does the file live, (b) what is the invoice number and total from the billing
+      email, (c) what deadline did the office-move email set that still needs action
+      before Monday 16:00. Use the context you have from today's session. If you
+      cannot answer any of these from your context, say exactly "UNKNOWN: <which>"
+      for that part.
+    grade:
+      method: contains
+      expected: ["fizz.py", "A-1183", "11,012.50", "16:00"]
+
+# grading notes
+# - t2/t3 graded by hidden pytest suites (harness-bench tests/, deterministic)
+# - t5 is the DRIFT probe: (a) tests whether the earlier code task's result survived,
+#   (b)/(c) probe early-turn facts — flat long sessions drift here, fresh+recall should not
+version: 1

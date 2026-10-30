@@ -1,0 +1,42 @@
+# models.yaml — the MODEL LANES (addendum 2: pluggable by CONFIG, never code).
+# The owner grants keys → add a lane entry here, flip enabled, rerun `--mode lanes`.
+# `price` is NOTIONAL $/Mtok (subscription billing is flat; the number exists to make
+# price-performance curves comparable) — edit freely when real contract prices land.
+lanes:
+  opus-class:            # the smart lane — planning / overview / hard code
+    enabled: true
+    provider: yggdrasil
+    model: glm-5.3
+    note: smartest model on the owner's current coding-plan key (opus-5.5 seat not granted)
+  sonnet-class:          # the fast-mid lane — implementation workhorse
+    enabled: true
+    provider: yggdrasil
+    model: glm-5.3-flash
+    note: fast-mid (sonnet-5.5 seat not granted); the live root's default model
+  small-cheap:           # the small-cheap lane — quick chat / voice fast-lane candidate
+    enabled: true
+    provider: yggdrasil
+    model: glm-5.2
+    note: terse baseline; known laziness risk (3-token answers) — exactly what we measure
+  gpt-fast:              # owner may grant OpenAI keys → flip enabled, fill base/key env
+    enabled: false
+    provider: openai
+    model: gpt-5.1-mini
+    base_url_env: OPENAI_BASE_URL
+    key_env: OPENAI_API_KEY
+  ollama-pool:           # owner may grant Ollama Cloud → same deal
+    enabled: false
+    provider: ollama
+    model: qwen3-next-80b
+    base_url_env: OLLAMA_BASE_URL
+    key_env: OLLAMA_API_KEY
+
+# NOTIONAL $/Mtok (published API list prices, 2026-10; subscription = flat, so these
+# exist only to normalize the price-performance curve across lanes).
+prices_notional_per_mtok:
+  glm-5.3:        { in: 0.60, out: 2.20 }
+  glm-5.3-flash:  { in: 0.10, out: 0.40 }
+  glm-5.2:        { in: 0.04, out: 0.14 }
+
+# the role table the recommendation fills (report.py reads ledger rows of kind=model-lane)
+roles: [coordinator, builder, quick-chat, voice-fast-lane]
