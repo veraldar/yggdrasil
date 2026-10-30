@@ -10,6 +10,28 @@ import {
 // must match agent/agent.py: @server.rtc_session(agent_name=...)
 const AGENT_NAME = process.env.AGENT_NAME || 'bifrost';
 
+// voice-stab 10-30 — the avalanche fix, client side of the contract:
+// 1. AVAILABILITY GATE. The mint used to dispatch unconditionally, so every
+//    page refresh / PTT press minted a NEW agent job even when the worker was
+//    already drowning (39+ jobs, load 40-51, VAD slower than realtime → dead
+//    mic on :443, 10-30). Now the mint asks the agent worker's own HTTP
+//    health server first (GET /worker → active_jobs + worker_load) and
+//    refuses with status 429 + { error: 'voice_busy' } when the worker is at
+//    or over its load threshold — the PWA renders that as an honest "voice
+//    busy, try again" state instead of spawning job #40 into the fire.
+//    AGENT_BUSY_KILL_SWITCH=1 reverts to always-mint (rollback without a
+//    rebuild — the frozen flip path).
+// 2. ONE JOB PER ROOM. The dispatch is idempotent per room: any lingering
+//    dispatch for this room is deleted before a fresh one is created, so a
+//    refresh REPLACES the room's job instead of stacking another (the agent
+//    entrypoint keeps its ordered-yield guard as the belt to this brace).
+const AGENT_BUSY_KILL_SWITCH = process.env.AGENT_BUSY_KILL_SWITCH === '1';
+// loopback by law (labs never listen beyond loopback) — override via env only
+const AGENT_HTTP = process.env.AGENT_HTTP_URL || 'http://127.0.0.1:8081';
+// refusals above this load — must stay ≥ the agent's AGENT_LOAD_THRESHOLD so
+// a between-updates read can't refuse a job the agent would have accepted
+const BUSY_LOAD = Number(process.env.AGENT_BUSY_LOAD || '0.9');
+
 type ConnectionDetails = {
   serverUrl: string;
   roomName: string;
@@ -65,32 +87,73 @@ export async function POST(req: Request) {
     const participantName = 'user';
     const participantIdentity = `user_${roomName}`;
 
+    // voice-stab: refuse the mint while the agent worker is drowning. A
+    // probe failure (worker mid-restart) is NOT busy — it returns 503 and the
+    // phone retries its backoff; only a live worker over threshold refuses
+    // with 429 voice_busy.
+    const dispatchClient = new AgentDispatchClient(
+      (process.env.LIVEKIT_API_URL || 'http://127.0.0.1:7880').replace(/^ws(s):/, 'http$1:'),
+      API_KEY,
+      API_SECRET
+    );
+    if (!AGENT_BUSY_KILL_SWITCH) {
+      try {
+        const r = await fetch(`${AGENT_HTTP}/worker`, {
+          signal: AbortSignal.timeout(2000),
+          cache: 'no-store',
+        });
+        if (r.ok) {
+          const w = (await r.json()) as { active_jobs?: number; worker_load?: number };
+          const load = Number(w.worker_load ?? 0);
+          const jobs = Number(w.active_jobs ?? 0);
+          if (load >= BUSY_LOAD && jobs > 0) {
+            console.error(
+              `[token] voice_busy: refusing mint for ${roomName} (load=${load.toFixed(2)} jobs=${jobs})`
+            );
+            return NextResponse.json(
+              { error: 'voice_busy', load, activeJobs: jobs },
+              { status: 429, headers: { 'Cache-Control': 'no-store' } }
+            );
+          }
+        }
+        // non-ok / failed probe: fall through — the agent may still be up
+      } catch (probeError) {
+        console.error(`worker probe failed for room ${roomName}:`, probeError);
+      }
+    }
+
+    // voice-stab: the explicit dispatch is now REPLACE, not ADD. LiveKit only
+    // auto-dispatches a job when a room is CREATED, so rejoining a
+    // not-yet-deleted room (fast mode switch, self-heal) used to land in an
+    // agent-less room: hot mic, "listening" UI, nothing transcribed
+    // (2026-09-25 veraldar-org---home). The per-mint dispatch fixed that by
+    // guaranteeing an agent — but it stacked: a refresh while the old job was
+    // draining minted a sibling (and, once jobs piled up, the avalanche).
+    // Delete this room's lingering dispatch(es) first, then create exactly
+    // one. Best-effort throughout: a failed dispatch still returns the token
+    // (voice stays agent-less and the session page surfaces it) — the entry
+    // point's ordered-yield guard is the second line of defense.
+    try {
+      // agent-dispatch ids are only resolvable per room: list, match, delete
+      const existing = await dispatchClient.listDispatch(roomName).catch(() => []);
+      for (const d of existing) {
+        try {
+          await dispatchClient.deleteDispatch(d.id, roomName);
+        } catch (delError) {
+          // already gone / room already deleted — harmless
+          console.error(`dispatch delete failed for room ${roomName}:`, delError);
+        }
+      }
+      await dispatchClient.createDispatch(roomName, AGENT_NAME);
+    } catch (dispatchError) {
+      console.error(`agent dispatch failed for room ${roomName}:`, dispatchError);
+    }
+
     const participantToken = await createParticipantToken(
       { identity: participantIdentity, name: participantName },
       roomName,
       roomConfig
     );
-
-    // Explicit agent dispatch. LiveKit only auto-dispatches a job when a room
-    // is CREATED, so rejoining a not-yet-deleted room (fast mode switch,
-    // self-heal) used to land in an agent-less room: hot mic, "listening"
-    // UI, nothing transcribed (2026-09-25 veraldar-org---home). Dispatching
-    // per mint guarantees an agent for every fresh phone connect. Best-effort:
-    // a failed dispatch still returns the token (voice just stays agent-less
-    // and the session page surfaces it).
-    try {
-      // LIVEKIT_URL is the phone-facing TLS alias (proxied websockets only —
-      // its Twirp path 404s into the PWA); the server API needs the direct
-      // host. Same box, so 127.0.0.1:7880 is the sane default.
-      const apiHost = (process.env.LIVEKIT_API_URL || 'http://127.0.0.1:7880').replace(
-        /^ws(s):/,
-        'http$1:'
-      );
-      const dispatchClient = new AgentDispatchClient(apiHost, API_KEY, API_SECRET);
-      await dispatchClient.createDispatch(roomName, AGENT_NAME);
-    } catch (dispatchError) {
-      console.error(`agent dispatch failed for room ${roomName}:`, dispatchError);
-    }
 
     // Return connection details
     const data: ConnectionDetails = {

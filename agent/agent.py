@@ -24,6 +24,8 @@ from livekit.agents.voice.room_io import RoomOptions
 from livekit.agents.voice.room_io.types import RoomOutputOptions
 from livekit.plugins import openai, silero
 
+import sweeper  # voice-stab: stale-job reaper (boot + periodic)
+
 load_dotenv()
 
 logger = logging.getLogger("opencode-bridge")
@@ -320,16 +322,37 @@ class OpenCodeStream(LLMStream):
 # full capacity, marking as unavailable" with ZERO jobs running and silently
 # dropped room dispatches — phone held PTT 17s, no agent ever joined, no STT
 # event at all (pwa/.diag/stt-*.log empty, journal 18:13-18:14). Dev mode
-# already runs inf; this is a single-tenant personal box, so the garbage
-# metric must never gate availability (inf = never unavailable by load).
+# already runs inf.
+#
+# voice-stab 10-30: the inf pin (a 10-06 lab measure, "the garbage metric
+# must never gate availability") turned out to be the avalanche root: with
+# inf the worker accepts EVERY dispatch under ANY load. Every page
+# refresh / PTT press minted a fresh job; 39+ stale jobs starved 16 cores
+# (load 40-51), VAD fell behind realtime, commits timed out, the phone
+# re-dispatched on every retry — a feedback loop that ended in a dead mic.
+# A real threshold (0.75: one heavy job ~ fills a healthy budget; two =
+# refused, and the refusal is now VISIBLE — see the busy path in the token
+# route) plus the one-job-per-room rule and the sweeper is the fix; a lab
+# pin stays possible via AGENT_LOAD_THRESHOLD (the cgroup metric still
+# flaps on this box, so it is NOT the 0.75 source — see _load_fnc below).
 # host: the worker's HTTP (health) server listened on 0.0.0.0:8081 — the
 # whole LAN could probe it. Loopback unless AGENT_HTTP_HOST says otherwise.
-server = AgentServer(load_threshold=float("inf"), host=os.environ.get("AGENT_HTTP_HOST", "127.0.0.1"))
+server = AgentServer(
+    load_threshold=float(os.environ.get("AGENT_LOAD_THRESHOLD", "0.75")),
+    host=os.environ.get("AGENT_HTTP_HOST", "127.0.0.1"),
+)
 
 _voice_probe_started = False  # one Mac-endpoint probe task per process
 
 
 AGENT_NAME = os.environ.get("AGENT_NAME", "bifrost")
+
+# voice-stab: reap stale agent rooms/dispatches — on boot and every
+# AGENT_SWEEP_INTERVAL_S (default 300s). Without it, jobs whose human never
+# arrived sat immortal and piled up until the box drowned (10-30: 39+ jobs,
+# load 40-51, dead mic on :443). Kill switch: AGENT_DISABLE_SWEEPER=1.
+server.on("worker_started")(lambda: asyncio.ensure_future(sweeper.run_sweeper()))
+
 
 @server.rtc_session(agent_name=AGENT_NAME)
 async def entrypoint(ctx: JobContext) -> None:
@@ -761,9 +784,9 @@ if __name__ == "__main__":
     port = os.environ.get("AGENT_HTTP_PORT")
     if port:
         server._port = int(port)
-    # the cgroup cpu monitor on this box flaps the load metric (impossible
-    # delta warnings) -> brief "unavailable" windows eat dispatches; a lab
-    # pin near 1.0 keeps the worker dispatchable
+    # AGENT_LOAD_THRESHOLD: overrides the 0.75 default in AgentServer(...) —
+    # env-in-server already covers it when the var is set at import time; the
+    # late pin stays for unit files that export it differently.
     lt = os.environ.get("AGENT_LOAD_THRESHOLD")
     if lt:
         server._load_threshold = float(lt)

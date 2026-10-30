@@ -97,6 +97,9 @@ export class RootsLine {
   private nothingT: ReturnType<typeof setTimeout> | null = null;
   private stallT: ReturnType<typeof setTimeout> | null = null;
   private echoT: ReturnType<typeof setTimeout> | null = null;
+  /** voice-stab: the last mint was refused (worker over threshold) — the
+   *  self-heal loop must NOT churn while the box says busy; a new hold clears it */
+  private busy = false;
   private noteT: ReturnType<typeof setTimeout> | null = null;
   private reconnectT: ReturnType<typeof setTimeout> | null = null;
   private reconnectFails = 0;
@@ -152,6 +155,7 @@ export class RootsLine {
       diagEvent('roots', `hold → hands-free with ${slug}`);
     }
     this.set({ free: true, slug, note: '', reply: '', phase: this.live ? 'talk' : 'opening' });
+    this.busy = false; // a deliberate hold is a fresh attempt (voice-stab)
     // barge-in: a hold while the reply speaks stops it (MAIN's pttDown)
     if (getSpeech().phase !== 'idle') {
       stopSpeech();
@@ -302,6 +306,21 @@ export class RootsLine {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ room: slug }),
     });
+    // voice-stab 10-30: 429 voice_busy = the agent worker is at/over its load
+    // threshold and the mint was refused ON PURPOSE. Not a failure to hide,
+    // not a signal to retry-loop into (that loop is how the avalanche grew):
+    // surface it as the busy note and stop. A new hold starts a new attempt.
+    if (r.status === 429) {
+      const w = (await r.json().catch(() => null)) as { activeJobs?: number } | null;
+      this.busy = true;
+      this.exitFree('voice busy');
+      this.set({ phase: 'off' });
+      this.say(
+        `voice busy — every agent slot is taken${w?.activeJobs ? ` (${w.activeJobs} runs)` : ''}; try again in a moment`,
+        10_000
+      );
+      throw new Error('voice_busy');
+    }
     if (!r.ok) throw new Error(`token ${r.status}`);
     const d = await r.json();
     const room = new Room({ adaptiveStream: false });
@@ -368,6 +387,15 @@ export class RootsLine {
   /** one attempt at a time, backing off (MAIN's reconnectVoice) */
   private reconnect() {
     if (this.disposed || this.reconnectT) return;
+    // voice-stab: a refused mint means the worker is drowning — retrying on
+    // a timer would be the avalanche's feedback loop again. Stay quiet until
+    // the holder acts (a new hold clears `busy` and starts a fresh attempt).
+    if (this.busy) {
+      this.exitFree('voice busy');
+      this.endCycle();
+      this.set({ phase: 'off' });
+      return;
+    }
     if (this.reconnectFails >= 4) {
       this.exitFree('voice dropped');
       this.endCycle();
