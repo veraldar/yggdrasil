@@ -36,6 +36,10 @@ export async function middleware(req: NextRequest) {
     req.headers.get('authorization')?.replace(/^Bearer /, '') ||
     req.cookies.get('bifrost_device')?.value ||
     '';
+  // A presented credential must be LIVE — the cookie is only another way of
+  // presenting it (the chat UI fetches carry no headers; the pair/bridge
+  // pages mirror the shown-once token into this cookie). Empty or garbage →
+  // validateToken fails → 401, exactly as with a garbage header.
   if (await validateToken(raw)) {
     return NextResponse.next();
   }

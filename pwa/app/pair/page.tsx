@@ -8,6 +8,7 @@
  */
 import { useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
+import { syncDeviceCookie, consumeAdminFragment } from '@/lib/device-client';
 
 export default function PairPage() {
   const [name, setName] = useState('phone');
@@ -16,11 +17,21 @@ export default function PairPage() {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const shownOnce = useRef(false);
+  const adminOnce = useRef<string | null>(null);
+
+  useEffect(() => {
+    // go-chain Lane B: on a public origin the pairing URL carries the
+    // bootstrap admin token in the FRAGMENT (#admin=…) — shown once in the
+    // receipt, consumed + scrubbed from the address bar here, never stored.
+    adminOnce.current = consumeAdminFragment();
+    syncDeviceCookie();
+  }, []);
 
   useEffect(() => {
     if (!token || shownOnce.current) return;
     shownOnce.current = true;
     localStorage.setItem('bifrost_device', token);
+    syncDeviceCookie();
     // render QR client-side (token payload)
     import('qrcode')
       .then((QR) => QR.toDataURL(token, { margin: 1, width: 220 }))
@@ -34,7 +45,11 @@ export default function PairPage() {
     try {
       const r = await fetch('/api/pair', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          // bootstrap admin credential from the pairing URL (if present)
+          ...(adminOnce.current ? { Authorization: `Bearer ${adminOnce.current}` } : {}),
+        },
         body: JSON.stringify({ name }),
       });
       if (!r.ok) {
@@ -88,6 +103,9 @@ export default function PairPage() {
           <Link
             href="/bridge"
             className="rounded border px-3 py-2 text-center text-sm hover:bg-white/5"
+            // go-chain Lane B: mirror the shown-once token into the cookie on
+            // entry so the whole chat UI (/api/*) authenticates as this device
+            onClick={() => syncDeviceCookie()}
           >
             Open the bridge →
           </Link>

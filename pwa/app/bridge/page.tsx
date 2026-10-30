@@ -13,6 +13,7 @@
  * page (replacing the livekit path by default) is the v1.0 merge.
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { syncDeviceCookie } from '@/lib/device-client';
 
 type Msg = { role?: string; parts?: unknown };
 type ChatLine = { who: 'you' | 'bifrost' | 'sys'; text: string };
@@ -225,6 +226,9 @@ export default function BridgePage() {
   useEffect(() => {
     setToken(localStorage.getItem('bifrost_device') || '');
     setBridgeUrl(localStorage.getItem('bifrost_bridge') || '');
+    // go-chain Lane B: direct entry to /bridge (QR deep link) — mirror the
+    // stored token into the cookie so /api/* authenticates this device too
+    syncDeviceCookie();
   }, []);
 
   return (
