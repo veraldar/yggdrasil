@@ -20,6 +20,7 @@ Env: VSTAB_AGENT_DIR (default /tmp/bifrost-vsim/agent) supplies .env
 """
 
 import asyncio
+import contextlib
 import json
 import os
 import sys
@@ -79,6 +80,29 @@ async def main() -> None:
             if st is not None:
                 total += len(st.jobs)
         print(total)
+    elif cmd == "purge-stubs":
+        # every dispatch row whose state has NO bound job is a stub — the
+        # mint-side fuel of the 10-30 avalanche (a worker restart re-offers
+        # every pending row). Rows with bound jobs are serving: hands off
+        # (deleting one terminates its live agent). Listing is room-scoped
+        # in this SDK, so iterate the rooms.
+        purged = kept = 0
+        rooms = await lkapi.room.list_rooms(lk_api.ListRoomsRequest())
+        for room in rooms.rooms:
+            try:
+                rows = await lkapi.agent_dispatch.list_dispatch(room.name)
+            except Exception:  # noqa: BLE001 — room may vanish mid-pass
+                continue
+            for d in rows:
+                st = getattr(d, "state", None)
+                jobs = list(getattr(st, "jobs", []) or []) if st is not None else []
+                if jobs:
+                    kept += 1
+                    continue
+                with contextlib.suppress(Exception):
+                    await lkapi.agent_dispatch.delete_dispatch(d.id, d.room)
+                    purged += 1
+        print(json.dumps({"purged": purged, "kept_serving": kept}))
     elif cmd == "delete-room":
         await lkapi.room.delete_room(lk_api.DeleteRoomRequest(room=args[1]))
         print("ok")
