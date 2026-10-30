@@ -32,9 +32,11 @@ same pattern as AGENT_BUSY_KILL_SWITCH in the token route).
 
 Env:
   AGENT_DISABLE_SWEEPER   =1 → don't start the sweeper
-  AGENT_SWEEP_INTERVAL_S  seconds between sweeps (default 300, min 30)
+  AGENT_SWEEP_INTERVAL_S  seconds between sweeps (default 120, min 30 — the
+                          10-30 storm regrew interim culls within minutes;
+                          300 was too slow, the escalation asks minutes-scale)
   AGENT_JOB_IDLE_S        agent-alone seconds before a room is reaped
-                          (default 900; must exceed the entrypoint's human-left
+                          (default 120; must exceed the entrypoint's human-left
                           grace ~20s + commit tail 15s + 4s by a wide margin)
 """
 
@@ -48,8 +50,8 @@ from livekit import api as lk_api
 
 logger = logging.getLogger("opencode-bridge.sweeper")
 
-SWEEP_INTERVAL_S = max(30, int(os.environ.get("AGENT_SWEEP_INTERVAL_S", "300")))
-AGENT_JOB_IDLE_S = max(120, int(os.environ.get("AGENT_JOB_IDLE_S", "900")))
+SWEEP_INTERVAL_S = max(30, int(os.environ.get("AGENT_SWEEP_INTERVAL_S", "120")))
+AGENT_JOB_IDLE_S = max(120, int(os.environ.get("AGENT_JOB_IDLE_S", "120")))
 # the agent's participant identity inside a room: livekit-agents mints
 # "agent-<job_id>" (job.py accept(): identity = "agent-" + self.id — observed
 # live 10-30 as agent-AJ_2AnPKPuipHps…). Match by prefix; the phone's own

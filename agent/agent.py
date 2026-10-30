@@ -15,6 +15,7 @@ from livekit.agents import (
     AgentServer,
     AgentSession,
     JobContext,
+    JobRequest,
     RoomInputOptions,
     cli,
     llm,
@@ -337,8 +338,50 @@ class OpenCodeStream(LLMStream):
 # flaps on this box, so it is NOT the 0.75 source — see _load_fnc below).
 # host: the worker's HTTP (health) server listened on 0.0.0.0:8081 — the
 # whole LAN could probe it. Loopback unless AGENT_HTTP_HOST says otherwise.
+
+# voice-stab escalation (MAIN, 10-30 field data): 66 DISTINCT job processes
+# attach to room 'main' per minute; each is a full python proc burning ~30%
+# CPU while idle-attached; interim culls regrow in minutes. Knobs, all
+# env-tunable so the deploy window can retune without a rebuild:
+AGENT_DRAIN_TIMEOUT_S = int(
+    os.environ.get("AGENT_DRAIN_TIMEOUT_S", "120")
+)  # was the SDK's DRAIN_TIMEOUT=3600: a drain held every job for an hour
+AUDIO_IDLE_REAP_S = int(
+    os.environ.get("AGENT_AUDIO_IDLE_REAP_S", "60")
+)  # no agent-side audio activity this long → reap (escalation: 60s sane)
+PER_ROOM_HARD_CAP = 1  # one live job per room — the replace law, accept-time
+
+# The load metric story (voice-stab): the SDK's default load_fnc reads the
+# cpu monitor over the whole USER-SLICE cgroup — every process of the user
+# (brains, proxies, e2e, the storm itself). Live 10-30: it flapped
+# 0.14 → 0.98 within seconds (log line "impossible cgroup cpu usage delta"),
+# which at threshold 0.75 flaps the worker AVAILABLE/UNAVAILABLE — precisely
+# the 10-06 dispatch-eating blackout the old inf pin was guarding against.
+# The mission's 0.75 stands, but the NUMERATOR must be deterministic, so
+# load = this worker's running jobs / AGENT_MAX_JOBS (default 2 — the box's
+# voice workload is one heavy session + one spare). Deterministic gates:
+# the worker refuses past 2 jobs, the token route refuses past 0.9 (in
+# jobs the same gate), and the sweep + caps keep the denominator real.
+# AGENT_LOAD_FNC=cpu reverts to the SDK default (rollback/lab pin).
+from livekit.agents.worker import _DefaultLoadCalc
+
+_MAX_JOBS = float(os.environ.get("AGENT_MAX_JOBS", "2"))
+_load_mode = os.environ.get("AGENT_LOAD_FNC", "jobs").strip().lower()
+
+
+def _jobs_load_fnc(worker=None) -> float:
+    # (no server default: the def runs before AgentServer(...) exists; the
+    # SDK passes the worker positionally anyway — signature inspection)
+    w = server if worker is None else worker
+    if _load_mode == "cpu":
+        return float(_DefaultLoadCalc.get_load(w))
+    return min(1.0, len(w.active_jobs) / _MAX_JOBS)
+
+
 server = AgentServer(
     load_threshold=float(os.environ.get("AGENT_LOAD_THRESHOLD", "0.75")),
+    load_fnc=_jobs_load_fnc,
+    drain_timeout=AGENT_DRAIN_TIMEOUT_S,
     host=os.environ.get("AGENT_HTTP_HOST", "127.0.0.1"),
 )
 
@@ -347,15 +390,66 @@ _voice_probe_started = False  # one Mac-endpoint probe task per process
 
 AGENT_NAME = os.environ.get("AGENT_NAME", "bifrost")
 
-# voice-stab: reap stale agent rooms/dispatches — on boot and every
-# AGENT_SWEEP_INTERVAL_S (default 300s). Without it, jobs whose human never
-# arrived sat immortal and piled up until the box drowned (10-30: 39+ jobs,
-# load 40-51, dead mic on :443). Kill switch: AGENT_DISABLE_SWEEPER=1.
+# ---- voice-stab: the accept-time hard cap (one live job per room) ----
+# MAIN escalation, 10-30: LiveKit re-offers every pending dispatch on each
+# worker restart (lk-agent was crash-looping, NRestarts=8) and every phone
+# reconnect/PTT cycle mints another. The worker accepted each (the old
+# load_threshold=inf accepted everything under any load), so room 'main'
+# grew 66 distinct job processes per minute, ~30% CPU each while
+# idle-attached — and interim culls regrew in minutes. The cap bites HERE,
+# at accept: LiveKit never re-assigns a rejected job to another worker, so a
+# burst of N offers for one room leaves exactly ONE job running.
+# Claim-first: every concurrent request checks the claim synchronously
+# (before any await), so the burst races cannot all win.
+# Release: the SDK has NO session_end event on the worker, and the
+# rtc_session on_session_end hook runs inside the JOB'S CHILD PROCESS
+# (job_proc_lazy_main._shutdown_job) — a discard there would mutate a copy
+# of the set and lock the room out forever. So the PARENT re-derives the
+# truth: a GC task drops any claim whose room has no running job in
+# server.active_jobs (5s grace covers accept→assignment latency). That is
+# parent state, and it catches every end path: clean exits, the human-left
+# grace, drains, crash-loop restarts. AGENT_DISABLE_ROOM_CAP=1 disables the
+# cap (rollback).
+_room_claims: dict[str, float] = {}  # room → claimed_at (loop monotonic)
+
+
+async def _room_cap_on_request(job_req: JobRequest) -> None:
+    if os.environ.get("AGENT_DISABLE_ROOM_CAP") == "1":
+        await job_req.accept()
+        return
+    room = job_req.room.name
+    if room in _room_claims:
+        await job_req.reject(terminate=False)
+        return
+    _room_claims[room] = asyncio.get_running_loop().time()
+    try:
+        await job_req.accept()
+    except BaseException:
+        _room_claims.pop(room, None)
+        raise
+
+
+async def _room_claim_gc() -> None:
+    while True:
+        await asyncio.sleep(1.0)
+        try:
+            live = {j.job.room.name for j in server.active_jobs}
+        except Exception:  # noqa: BLE001 — never let the GC die on the cap
+            continue
+        now = asyncio.get_running_loop().time()
+        for room, claimed_at in list(_room_claims.items()):
+            if room not in live and now - claimed_at > 5.0:
+                _room_claims.pop(room, None)
+
+
 server.on("worker_started")(lambda: asyncio.ensure_future(sweeper.run_sweeper()))
+server.on("worker_started")(lambda: asyncio.ensure_future(_room_claim_gc()))
+
+# (the rtc_session registration with on_request=_room_cap_on_request sits
+# after _entrypoint's definition at the bottom of the file)
 
 
-@server.rtc_session(agent_name=AGENT_NAME)
-async def entrypoint(ctx: JobContext) -> None:
+async def _entrypoint(ctx: JobContext) -> None:
     _api_key = "not-needed"
     # interaction mode published by the phone as participant metadata
     # ('text' | 'free') — req 10-02 mode awareness
@@ -510,6 +604,46 @@ async def entrypoint(ctx: JobContext) -> None:
         asyncio.ensure_future(_human_left_grace())
 
     ctx.room.on("participant_disconnected", _on_participant_disconnected)
+
+    # voice-stab escalation (item 2): reap THIS job after AUDIO_IDLE_REAP_S of
+    # no agent-side audio activity. A 10-30 storm left 66 job processes
+    # attached to room 'main' per minute, each burning ~30% CPU while
+    # idle-attached (drain gave them an hour); interim culls regrew in
+    # minutes. Audio activity resets the clock: any STT final, any VAD segment
+    # end, any frame after (re)input-enable. The human-left grace (which ends
+    # the job on a clean leave) still fires first when it can; this is the
+    # backstop for drains that outlive their room, phone-gone jobs, and every
+    # shape the grace loses to. AGENT_AUDIO_IDLE_REAP_S=0 disables.
+    _last_audio = asyncio.get_running_loop().time()
+
+    def _touch_audio() -> None:
+        nonlocal _last_audio
+        _last_audio = asyncio.get_running_loop().time()
+
+    def _on_transcript_touch(_ev) -> None:
+        _touch_audio()
+
+    session.on("user_input_transcribed", _on_transcript_touch)
+
+    async def _audio_idle_reaper() -> None:
+        if AUDIO_IDLE_REAP_S <= 0:
+            return
+        while True:
+            await asyncio.sleep(min(10, max(1, AUDIO_IDLE_REAP_S // 6)))
+            if ctx.room.remote_participants:
+                _touch_audio()  # a live human is audio activity by definition
+            idle = asyncio.get_running_loop().time() - _last_audio
+            if idle >= AUDIO_IDLE_REAP_S:
+                logger.warning(
+                    "audio idle %.0fs (cap %ss) in room '%s' — reaping this job",
+                    idle,
+                    AUDIO_IDLE_REAP_S,
+                    ctx.room.name,
+                )
+                ctx.shutdown("audio idle timeout")
+                return
+
+    asyncio.ensure_future(_audio_idle_reaper())
 
     async def _ptt_begin_rpc(data) -> str:
         # a PTT hold must be ONE message: VAD endpointing would auto-commit
@@ -776,6 +910,12 @@ async def entrypoint(ctx: JobContext) -> None:
     # (audio output is disabled — the greeting would synthesize into the
     # void; the phone's UI is the greeting now)
     logger.info("room '%s' ready — keyword turn-taking armed", ctx.room.name)
+
+
+# voice-stab: the entrypoint registers here (not a decorator) so the accept-
+# time room cap can sit in on_request — the hard cap evaluates BEFORE any
+# job process spawns (reject = never assigned, never spawned)
+server.rtc_session(_entrypoint, agent_name=AGENT_NAME, on_request=_room_cap_on_request)
 
 
 if __name__ == "__main__":

@@ -122,21 +122,30 @@ export async function POST(req: Request) {
       }
     }
 
-    // voice-stab: the explicit dispatch is now REPLACE, not ADD. LiveKit only
-    // auto-dispatches a job when a room is CREATED, so rejoining a
-    // not-yet-deleted room (fast mode switch, self-heal) used to land in an
-    // agent-less room: hot mic, "listening" UI, nothing transcribed
-    // (2026-09-25 veraldar-org---home). The per-mint dispatch fixed that by
-    // guaranteeing an agent — but it stacked: a refresh while the old job was
-    // draining minted a sibling (and, once jobs piled up, the avalanche).
-    // Delete this room's lingering dispatch(es) first, then create exactly
-    // one. Best-effort throughout: a failed dispatch still returns the token
-    // (voice stays agent-less and the session page surfaces it) — the entry
-    // point's ordered-yield guard is the second line of defense.
+    // voice-stab: the explicit dispatch is now REUSE/REPLACE, not ADD, and
+    // never cannibalizes a serving agent. LiveKit only auto-dispatches a job
+    // when a room is CREATED, so rejoining a not-yet-deleted room (fast mode
+    // switch, self-heal) used to land in an agent-less room: hot mic,
+    // "listening" UI, nothing transcribed (2026-09-25 veraldar-org---home).
+    // The per-mint dispatch fixed that but STACKED jobs (the 10-30 avalanche:
+    // ~46-66 job processes/min on one room, live: 465 offers in 10 min).
+    // A dispatch whose state.jobs is non-empty has a LIVE job — deleting it
+    // kills the serving agent (first gate run proved it: the storm's own
+    // deletes emptied the room). So: rows with bound jobs are REUSED (no new
+    // dispatch at all — the room already has its one job; the phone just
+    // rejoins); stale stubs (no jobs) are REPLACED by one fresh dispatch.
+    // A burst therefore converges: first mint creates, the rest reuse.
+    // Best-effort throughout: a failed dispatch still returns the token
+    // (voice stays agent-less and the session page surfaces it) — the
+    // entrypoint's accept-time room cap is the backstop.
     try {
-      // agent-dispatch ids are only resolvable per room: list, match, delete
       const existing = await dispatchClient.listDispatch(roomName).catch(() => []);
+      let live = false;
       for (const d of existing) {
+        if ((d.state?.jobs?.length ?? 0) > 0) {
+          live = true; // a serving job backs this row — REUSE, hands off
+          continue;
+        }
         try {
           await dispatchClient.deleteDispatch(d.id, roomName);
         } catch (delError) {
@@ -144,7 +153,9 @@ export async function POST(req: Request) {
           console.error(`dispatch delete failed for room ${roomName}:`, delError);
         }
       }
-      await dispatchClient.createDispatch(roomName, AGENT_NAME);
+      if (!live) {
+        await dispatchClient.createDispatch(roomName, AGENT_NAME);
+      }
     } catch (dispatchError) {
       console.error(`agent dispatch failed for room ${roomName}:`, dispatchError);
     }

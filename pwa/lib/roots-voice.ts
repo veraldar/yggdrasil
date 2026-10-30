@@ -174,6 +174,8 @@ export class RootsLine {
       diagEvent('voice-fail', `roots: ${e instanceof Error ? e.message : e}`);
       this.exitFree('connect failed');
       this.set({ phase: 'off' });
+      // a handled busy refusal already said the right thing — keep it
+      if ((e as Error & { handled?: boolean }).handled) return;
       this.say(`voice connect failed — ${e instanceof Error ? e.message : e}`, 8_000);
     }
   }
@@ -315,11 +317,16 @@ export class RootsLine {
       this.busy = true;
       this.exitFree('voice busy');
       this.set({ phase: 'off' });
+      // the busy note is the honest state (never silence, never a retry
+      // loop) — thrown as a MARKED error so holdStart's generic catch keeps
+      // this note instead of overwriting it with "voice connect failed"
       this.say(
         `voice busy — every agent slot is taken${w?.activeJobs ? ` (${w.activeJobs} runs)` : ''}; try again in a moment`,
         10_000
       );
-      throw new Error('voice_busy');
+      const e = new Error('voice_busy');
+      (e as Error & { handled?: boolean }).handled = true;
+      throw e;
     }
     if (!r.ok) throw new Error(`token ${r.status}`);
     const d = await r.json();
