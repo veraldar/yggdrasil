@@ -1,0 +1,17 @@
+{
+  "name": "Bifrost",
+  "short_name": "Bifrost",
+  "description": "Voice & text coding sessions",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#07080e",
+  "theme_color": "#07080e",
+  "icons": [
+    {
+      "src": "/favicon.ico",
+      "sizes": "16x16 32x32",
+      "type": "image/x-icon",
+      "purpose": "any"
+    }
+  ]
+}

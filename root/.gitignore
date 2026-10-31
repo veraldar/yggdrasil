@@ -1,0 +1,41 @@
+# dependencies
+node_modules/
+.venv/
+
+# builds
+.next/
+out/
+*.tsbuildinfo
+
+# secrets — never commit
+.env
+.env.*
+!.env.example
+
+# private infra: real IPs, hostnames, ssh details
+docs/local.md
+deploy/livekit.yaml
+
+# test + diag artifacts
+pwa/test-results/
+pwa/playwright-report/
+.diag/
+
+# python
+__pycache__/
+*.pyc
+edge/.venv/
+
+# edge spike: model weights stay out of git (edge/get_models.sh re-fetches)
+edge/models/
+edge/*.log
+
+# OS / editor
+.DS_Store
+*.swp
+
+# agent-generated artifacts shown on the phone (served via /api/artifact)
+/artifacts/
+
+# playwright output at repo root (watchdog config)
+test-results/

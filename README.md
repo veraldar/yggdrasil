@@ -17,3 +17,10 @@ Release tags on this repo = the binaries deployed on live boxes
 
 The trunk carries your words and never goes public. The branch is where
 you are. The tree does the work.
+
+## Layout (canon 10-30)
+
+- `root/` — the brain (from the frozen v0.7 release tree)
+- `trunk/` — the private line: voice agent + deploy (from the sandbox)
+- `branch/` — the end-user app, bifrost (from `release/v0.7` `pwa/`)
+- `docs/CONSTRUCT.md` — the canon, verbatim. Where any file disagrees, it wins.
