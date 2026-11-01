@@ -359,6 +359,7 @@ test('scenario 5 (SILENT-DEAD): agent removed, room kept — watchdog heals EXAC
     .poll(async () => (await diagLines(page, 'room dead and reconnect already spent')).length, { timeout: 40_000, intervals: [500], message: 'the watchdog spent-guard branch never fired' })
     .toBe(1);
   await page.waitForTimeout(5_000);
+  expect((await diagLines(page, 'room dead and reconnect already spent')).length, 'the spent branch fired twice').toBe(1);
   expect(humanStamp(slug), 'the healed participant must still be in the kept room (no second heal)').toBe(stampAfterHeal);
   await expect(page.getByText('voice connection lost')).toBeVisible();
 });
