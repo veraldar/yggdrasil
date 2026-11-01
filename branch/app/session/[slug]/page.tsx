@@ -38,6 +38,7 @@ import {
   DOOR_KEY,
   FIRST_TURN_KEY,
   type Lang,
+  TEACH_KEY,
   TF_PREFS_KEY,
   isMainSlug,
   isOnboardPrompt,
@@ -55,52 +56,71 @@ import {
 import { ECHO_TAIL_MS, agentInRoom, releaseMicDevice, withTimeout } from '@/lib/voice-room';
 
 type Mode = 'text' | 'free';
-/** the door's last step, in MAIN: mic (ask once) → practice (hold, talk,
- *  let go) → sent → heard (the transcript landed: STT alive) → in */
+/** the door's last step, in MAIN — the walk-through (UX-CALM 10-27: the
+ *  footer teaches nothing, so this does): each of the three ways, done once,
+ *  in order. Per way: mic (ask once, voice ways) → practice (do it) → sent →
+ *  heard (it landed: STT alive) → the reply → the next way … → in */
 type FirstTurn = 'off' | 'mic' | 'practice' | 'sent' | 'heard' | 'in' | 'denied';
+/** type · hold to talk · hands-free with "over". A way done out of order
+ *  still counts (a hold during "type" is the hold); skip moves on. */
+type Way = 'type' | 'hold' | 'free';
+type WayState = 'todo' | 'done' | 'skip';
+type Ways = Record<Way, WayState>;
+const WAYS: Way[] = ['type', 'hold', 'free'];
+const ALL_TODO: Ways = { type: 'todo', hold: 'todo', free: 'todo' };
+/** the first way still to walk, in order — null = all three walked */
+const nextWay = (w: Ways): Way | null => WAYS.find((k) => w[k] === 'todo') ?? null;
 const FT = {
   en: {
     planted: 'ready. this is main — your main conversation.',
     mic: 'the mic: your browser asks once.',
     allow: 'allow the mic',
-    hold: 'hold the mic ↓ say anything · let go to send',
-    type: 'or type it ↓',
+    ways: { type: 'type', hold: 'hold', free: 'hands-free' },
+    type: 'type it ↓',
     typeSub: 'the box below · send',
+    hold: 'hold the mic ↓',
+    holdSub: 'talk at “heard” · let go to send',
+    free: 'tap the mic once ↓',
+    freeSub: 'hands-free: the mic stays open',
+    freeOn: 'talk, then say “over”',
+    freeOnSub: '“over” sends it',
     released: 'released — nothing sent · hold the mic while you talk',
     sent: 'sent · listening for your words…',
     sentTyped: 'sent · on its way to the tree…',
     lost: 'it did not arrive · send it again',
+    // the voice agent drops a turn identical to its last one (agent.py
+    // last_prompt): "again" with the same words never lands
+    lostFree: 'nothing new arrived · say something else, then “over”',
     heard: 'heard',
     got: 'received',
     answering: 'the tree answers…',
-    now: [
-      ['hold the mic', 'talk'],
-      ['tap the mic', 'hands-free · say “over” to send'],
-      ['type below', 'any time'],
-      ['the tree, in the corner of your list', 'back to main'],
-    ],
+    skip: 'skip',
+    close: 'close the walk-through',
     ok: 'ok',
   },
   fr: {
     planted: 'c’est prêt. voici main — votre conversation principale.',
     mic: 'le micro : votre navigateur demande une fois.',
     allow: 'autoriser le micro',
-    hold: 'maintenez le micro ↓ dites quelque chose · relâchez pour envoyer',
-    type: 'ou écrivez-le ↓',
+    ways: { type: 'écrire', hold: 'maintenir', free: 'mains libres' },
+    type: 'écrivez-le ↓',
     typeSub: 'la case en dessous · envoyer',
+    hold: 'maintenez le micro ↓',
+    holdSub: 'parlez dès « heard » · relâchez pour envoyer',
+    free: 'touchez le micro une fois ↓',
+    freeSub: 'mains libres : le micro reste ouvert',
+    freeOn: 'parlez, puis dites « over »',
+    freeOnSub: '« over » l’envoie',
     released: 'relâché — rien envoyé · maintenez le micro pendant que vous parlez',
     sent: 'envoyé · à l’écoute de vos mots…',
     sentTyped: 'envoyé · en route vers l’arbre…',
     lost: 'pas arrivé · renvoyez-le',
+    lostFree: 'rien de nouveau · dites autre chose, puis « over »',
     heard: 'entendu',
     got: 'reçu',
     answering: 'l’arbre répond…',
-    now: [
-      ['maintenez le micro', 'parler'],
-      ['touchez le micro', 'mains libres · dites « over » pour envoyer'],
-      ['tapez en bas', 'à tout moment'],
-      ['l’arbre, dans le coin de votre liste', 'retour à main'],
-    ],
+    skip: 'passer',
+    close: 'fermer le parcours',
     ok: 'ok',
   },
 } as const;
@@ -121,6 +141,31 @@ function fileToDataUrl(f: File): Promise<string> {
     r.onerror = () => reject(r.error);
     r.readAsDataURL(f);
   });
+}
+
+/** An agent-less room that still looks connected: the dispatch dies with
+ *  the first agent job, and a network flap makes the SDK self-reconnect
+ *  into a fresh server-side room WITHOUT re-minting a token — so no
+ *  dispatch exists there and every agentInRoom wait runs out (diag
+ *  2026-10-06 14:35: hands-free then tap-to-send both failed 'voice agent
+ *  missing' while lk-agent was healthy; the next page load healed it by
+ *  minting a fresh dispatch). Recovery: ask the PWA to dispatch the agent
+ *  into the room we are ALREADY in (no re-dial — the link was the flaky
+ *  part) and wait one more window. Returns the agent, or null so the
+ *  caller surfaces the lk-agent error — which is then the true diagnosis. */
+async function rearmAgent(room: Room, ms: number) {
+  diagEvent('voice', `room ${room.name} agent-less — re-arming dispatch`);
+  try {
+    const r = await fetch('/api/dispatch', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ room: room.name }),
+    });
+    if (!r.ok) return null;
+  } catch {
+    return null;
+  }
+  return agentInRoom(room, ms);
 }
 
 /** Live mic equalizer — 5 voice-band bars (100Hz–2kHz) from the published
@@ -221,8 +266,17 @@ export default function SessionView({
   const [firstHint, setFirstHint] = useState('');
   const [firstLang, setFirstLang] = useState<Lang>('en');
   const lineVoice = useVoiceState(); // the first-turn card's own lines
-  // typed: the first turn came from the keyboard (10-23: a first-timer may
-  // prefer to type — same turn, same "you are in"; no STT to prove, no voice)
+  // the walk-through: the way on the card now, and what each way came to
+  const [way, setWay] = useState<Way>('type');
+  const [ways, setWays] = useState<Ways>(ALL_TODO);
+  // mirrors: the permission probe and the reply effect read the CURRENT way
+  const wayRef = useRef<Way>('type');
+  wayRef.current = way;
+  const waysRef = useRef<Ways>(ALL_TODO);
+  waysRef.current = ways;
+  const walkSlugRef = useRef(''); // the session the walk belongs to ('' = none)
+  // typed: the turn came from the keyboard (10-23: a first-timer may prefer
+  // to type — same turn; no STT to prove, no voice). kind: which way it was
   const firstRef = useRef({
     sentAt: 0,
     before: 0,
@@ -231,6 +285,7 @@ export default function SessionView({
     heard: '',
     saidIn: false,
     typed: false,
+    kind: 'type' as Way,
   });
   const [input, setInput] = useState('');
   // swipe-history browser: index of the message on screen, null = closed
@@ -312,6 +367,9 @@ export default function SessionView({
   // replacement and storm LiveKit (seen 2026-09-25: ~5 reconnects/sec)
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const reconnectFailsRef = useRef(0);
+  // mic-norefresh2: one-shot reconnect watchdog state (armed once, never loops)
+  const norefreshOnceRef = useRef(false);
+  const watchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // PTT intent survives an async room connect: if the finger lifted before
   // the room was ready, the mic must not be left hot by connectVoice
   const pttWantRef = useRef(false);
@@ -476,7 +534,7 @@ export default function SessionView({
 
   const histChip =
     histPos !== null && sentHistory.length > 0
-      ? `history ${histPos + 1}/${sentHistory.length} · ↓ back to draft`
+      ? `history ${histPos + 1}/${sentHistory.length}`
       : '';
   // phone: slide on the textarea itself (touch only — a mouse-drag there
   // must stay text selection; PC uses the arrow keys)
@@ -875,6 +933,7 @@ export default function SessionView({
     return () => {
       unmountedRef.current = true;
       if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
+      if (watchTimerRef.current) clearTimeout(watchTimerRef.current);
       clearHoldArm();
       roomRef.current?.disconnect();
       roomRef.current = null;
@@ -979,16 +1038,41 @@ export default function SessionView({
         ensureVoice()
           .then((r) => {
             reconnectFailsRef.current = 0;
+            // NOREFRESH4: do NOT reset norefreshOnceRef here — the guard must
+            // survive the reconnect itself. Only user-driven re-arms (exitFree/
+            // switchMode) reset it; automatic reconnects never do, so QUIET-ALIVE
+            // sessions (room present, agent thinking 30-90s) stop after ONE
+            // self-heal instead of looping teardown+rejoin every 15s forever.
             if (modeRef.current === 'free') return mic(true, r);
             return undefined;
           })
           .catch(() => {
             reconnectFailsRef.current += 1; // next attempt waits longer
-            reconnectVoice();
+            if (!norefreshOnceRef.current) {
+              // mic-norefresh2: the ONE auto retry — a second failure hands
+              // the loss to the user as busy instead of looping forever
+              norefreshOnceRef.current = true;
+              reconnectVoice();
+              return;
+            }
+            // NOREFRESH4 (re-review): the guard stays SPENT here — no
+            // automatic path ever refills it (the old reset made every
+            // third failure re-arm a fresh retry pair)
+            setBusy(true);
+            setError('voice connection lost — reconnect failed. Hold the mic to retry.');
           });
       },
       Math.min(4_000, 250 * 2 ** reconnectFailsRef.current)
     );
+  }
+
+  /** norefresh3: the hands-free silence watchdog (armed inside connectVoice)
+   *  is disarmed the moment hands-free ends — exitFree/switchMode call this,
+   *  so the stale `free` closure can never fire it in text mode
+   *  (e2e/base.spec.ts:74: endless teardown+rejoin loop froze the composer). */
+  function disarmVoiceWatch() {
+    if (watchTimerRef.current) clearTimeout(watchTimerRef.current);
+    watchTimerRef.current = null;
   }
 
   async function connectVoice(): Promise<Room> {
@@ -1014,6 +1098,13 @@ export default function SessionView({
       room.on(RoomEvent.Connected, () => diagEvent('voice', 'room connected'));
       room.on(RoomEvent.Disconnected, () => {
         diagEvent('voice', 'room disconnected');
+        // NOREFRESH4 (re-review): only the CURRENT room's death may act —
+        // every deliberate teardown (silence watchdog, stale-turn recovery,
+        // unmount) nulls roomRef BEFORE disconnecting, so its own event
+        // lands here as not-current and is ignored (no double-spend of the
+        // one-reconnect budget, and a late disconnect of an OLD room can
+        // never drop the NEW room's refs). An organic death still matches.
+        if (roomRef.current !== room) return;
         // the room's join token is stale now — reconnecting with it just 401s
         // ("token is expired"). Drop it so the next connect mints a fresh one.
         roomRef.current = null;
@@ -1027,9 +1118,87 @@ export default function SessionView({
         // (2026-09-25 veraldar-org---home). Explicit reconnectVoice() callers
         // (stale-turn recovery in pttUp) bypass this gate on purpose.
         const wantsVoice = modeRef.current !== 'text' || pttWantRef.current;
-        if (!unmountedRef.current && wantsVoice) reconnectVoice();
+        if (!unmountedRef.current && wantsVoice) {
+          if (!norefreshOnceRef.current) {
+            // NOREFRESH4: the ONE self-heal per armed session — same budget
+            // the silence watchdog spends, never refilled automatically. The
+            // next failure is the user's call (busy below / hold to retry).
+            norefreshOnceRef.current = true;
+            reconnectVoice();
+          } else {
+            setBusy(true);
+            setError('voice connection lost — reconnect failed. Hold the mic to retry.');
+          }
+        }
       });
       room.on(RoomEvent.MediaDevicesError, (e: Error) => diagEvent('voice-fail', String(e)));
+      // mic-norefresh2: a room can die WITHOUT a Disconnected reaching us
+      // (server killed mid-hold, socket wedged) — the pill keeps saying ready
+      // on a corpse. One heartbeat + one armed retry, both only in free mode.
+      // norefresh3 (regression from integ-validate): this timer must be
+      // ONE-SHOT per silence window and FULLY owned by hands-free — re-arming
+      // itself on its own reconnect's events looped teardown+rejoin forever
+      // (e2e/base.spec.ts:74), and the stale `free` closure kept it firing
+      // after the exit click lost the race to the 400ms ghost guard. So: the
+      // timer is nulled when it fires or is cleared, expiry re-checks
+      // `modeRef.current === 'free'` LIVE, exit paths disarm it, retry once.
+      const armWatch = () => {
+        if (watchTimerRef.current) clearTimeout(watchTimerRef.current);
+        watchTimerRef.current = setTimeout(
+          async () => {
+            watchTimerRef.current = null; // one-shot: never re-arms itself
+            if (roomRef.current === room && modeRef.current === 'free') {
+              // NOREFRESH4: QUIET-ALIVE is not a corpse. 15s with no events
+              // is NORMAL hands-free while the brain works a run (30–90s) —
+              // the room is up and the agent is in it. Only a room with no
+              // agent is SILENT-DEAD: wait one grace window for a laggy join
+              // / dispatch, then (and only then) spend the ONE reconnect.
+              // A quiet room with its agent never gets torn down.
+              const alive = await agentInRoom(room, 5_000);
+              // re-review N1: the grace await is a 5s window — the SDK may
+              // have delivered Disconnected (spending the guard there), or
+              // the user may have left hands-free. Only the still-current
+              // hands-free room may act on the probe's verdict.
+              if (roomRef.current !== room || modeRef.current !== 'free') return;
+              if (
+                alive &&
+                roomRef.current === room &&
+                modeRef.current === 'free'
+              ) {
+                diagEvent('voice', 'room quiet 15s but agent present — staying put');
+                return;
+              }
+              if (norefreshOnceRef.current) {
+                // the one reconnect is already spent — no loop, and no lying
+                // pill: surface the loss (re-review: this branch must stay
+                // REACHABLE — it is the honest answer to a second silent death)
+                diagEvent('voice-fail', 'room dead and reconnect already spent');
+                setBusy(true);
+                setError('voice connection lost — reconnect failed. Hold the mic to retry.');
+                return;
+              }
+              norefreshOnceRef.current = true;
+              diagEvent('voice-fail', 'room silent 15s while hands-free — one reconnect');
+              roomRef.current = null;
+              voicePromiseRef.current = null;
+              setVoiceState('off');
+              void room.disconnect();
+              reconnectVoice();
+            }
+          },
+          15_000
+        );
+      };
+      const lastEvt = () => {
+        if (roomRef.current === room && modeRef.current === 'free') armWatch();
+      };
+      room.on(RoomEvent.Connected, lastEvt);
+      room.on(RoomEvent.SignalConnected, lastEvt);
+      room.on(RoomEvent.ParticipantConnected, lastEvt);
+      room.on(RoomEvent.ParticipantDisconnected, lastEvt);
+      room.on(RoomEvent.ActiveSpeakersChanged, lastEvt);
+      room.on(RoomEvent.DataReceived, lastEvt);
+      armWatch();
       diagEvent('voice', 'connecting signal…');
       await withTimeout(room.connect(d.serverUrl, d.participantToken), 12_000, 'signal');
       diagEvent('voice', 'connected, mic stays muted until a mode/handler turns it on');
@@ -1054,6 +1223,7 @@ export default function SessionView({
         if (state === 'processing') {
           setFreeCycle('processing');
           await mic(false);
+          firstFreeRef.current(); // the walk's hands-free way: "over" said
         }
         return 'ok';
       });
@@ -1089,6 +1259,8 @@ export default function SessionView({
     modeRef.current = 'text';
     setMode('text');
     setFreeCycle('listening');
+    disarmVoiceWatch(); // norefresh3: leaving hands-free disarms the watchdog — the stale closure must never fire it in text mode (e2e/base.spec.ts:74)
+    norefreshOnceRef.current = false; // and its one retry is spendable again on the next hands-free arm
     try {
       localStorage.setItem('oz-mode', 'text');
     } catch {
@@ -1107,6 +1279,8 @@ export default function SessionView({
     // asynchronously and the self-heal must already see the new mode, or it
     // reconnects a room the user just left (socket that never closes)
     modeRef.current = next;
+    disarmVoiceWatch(); // norefresh3: any explicit mode switch disarms the hands-free watchdog (its expiry re-checks modeRef live, this just kills the pending timer)
+    if (next === 'free') norefreshOnceRef.current = false; // fresh arm = fresh single retry
     // survive refresh: mode is component state, a reload silently dropped
     // hands-free to keyboard (req 09-29 'it switching from hf to keyboard')
     try {
@@ -1145,12 +1319,16 @@ export default function SessionView({
         // alone — if the voice agent never joined (lk-agent down, dispatch
         // lost), surface it instead of faking it (2026-09-25: the animation
         // ran for minutes with nobody transcribing)
-        window.setTimeout(() => {
+        window.setTimeout(async () => {
           if (unmountedRef.current || modeRef.current !== 'free') return;
-          if (roomRef.current === room && room.remoteParticipants.size === 0) {
-            diagEvent('voice-fail', 'hands-free: no voice agent in the room after 10s');
-            setError('voice agent missing from the room — is lk-agent running? tap the mic button to retry');
-          }
+          if (roomRef.current !== room || room.remoteParticipants.size > 0) return;
+          // the dispatch may have died with the first agent job (network-flap
+          // self-reconnect) — re-arm into this room before blaming lk-agent
+          const agent = await rearmAgent(room, 10_000);
+          if (unmountedRef.current || modeRef.current !== 'free') return;
+          if (agent || roomRef.current !== room || room.remoteParticipants.size > 0) return;
+          diagEvent('voice-fail', 'hands-free: no voice agent in the room after 10s (+re-arm)');
+          setError('voice agent missing from the room — is lk-agent running? tap the mic button to retry');
         }, 10_000);
       }
     } catch {
@@ -1162,6 +1340,7 @@ export default function SessionView({
     // deliberately NOT gated on busy: talking while the agent works queues
     // the turn (opencode serializes per session); stop is the only cancel
     pttWantRef.current = true;
+    holdBeforeRef.current = lastUserTime(); // the walk: a hold's turn is newer than its press
     pttCancelArmRef.current = false;
     setPttCancelArm(false);
     setMicLive(false);
@@ -1328,21 +1507,26 @@ export default function SessionView({
       return;
     }
     if (modeRef.current !== 'free') await mic(false); // hands-free keeps listening
-    firstSent();
+    firstSent('hold');
     stickRef.current = true;
     setBusy(true); // cleared when the run state settles (see poller)
     armRunWatch();
     try {
       // the agent may still be joining (press right after a page reload) —
       // wait it out instead of dropping the commit into an empty room
-      const agent = await agentInRoom(room, 4_000);
+      let agent = await agentInRoom(room, 4_000);
+      if (!agent) {
+        // dispatch may have died with the first agent job (network-flap
+        // self-reconnect) — re-arm into this room before blaming lk-agent
+        agent = await rearmAgent(room, 10_000);
+      }
       if (pttWantRef.current) {
         // a newer hold began while we waited — ITS release owns the commit
         // now; flushing here would cut the new hold's audio mid-sentence
         return;
       }
       if (!agent) {
-        diagEvent('voice-fail', 'commit: no voice agent in the room after 4s');
+        diagEvent('voice-fail', 'commit: no voice agent in the room after 4s (+re-arm)');
         setError('voice agent missing from the room — is lk-agent running? try again in a moment');
         setBusy(false);
         return;
@@ -1675,47 +1859,155 @@ export default function SessionView({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mode, voiceState, busy, freeCycle, lastAssistant, slug]);
 
-  // ── first turn: the door ends on one real voice turn in MAIN ──────────
-  // (the door walked, nothing heard from this device yet) → the card. STT is
-  // proven by the transcript landing in MAIN as your message; the reply is
-  // spoken; then "you are in" + what to do next.
+  // ── first turn: the door ends on the walk-through in MAIN ─────────────
+  // (the door walked, nothing heard from this device yet) → the card: type,
+  // hold, hands-free + "over" — each done once, for real. STT is proven by
+  // the transcript landing as your message; each reply arrives before the
+  // next way; then "you are in". Re-walkable: ?teach=1 (settings → the three
+  // ways), and a walk left halfway resumes here (TEACH_KEY).
   useEffect(() => {
     let on = false;
     let lang: Lang = 'en';
+    let start: Ways = ALL_TODO;
     try {
+      const q = new URLSearchParams(window.location.search);
       // MAIN after the door — or any session a ?first=1 link names (the
-      // door's own link carries it) — while no voice turn came through here
-      const asked = new URLSearchParams(window.location.search).get('first') === '1';
+      // door's own link carries it) — while no turn came through here
+      const asked = q.get('first') === '1';
+      const again = q.get('teach') === '1';
+      const saved = JSON.parse(localStorage.getItem(TEACH_KEY) || 'null') as {
+        slug?: string;
+        ways?: Ways;
+      } | null;
+      const resume = !again && saved?.slug === slug && saved.ways ? saved.ways : null;
       on =
         !!slug &&
-        !localStorage.getItem(FIRST_TURN_KEY) &&
-        ((isMainSlug(slug) && !!localStorage.getItem(DOOR_KEY)) || asked);
+        (again ||
+          !!resume ||
+          (!localStorage.getItem(FIRST_TURN_KEY) &&
+            ((isMainSlug(slug) && !!localStorage.getItem(DOOR_KEY)) || asked)));
+      if (resume) start = { ...ALL_TODO, ...resume };
+      // kept from the first frame: dropping ?teach=1 below re-keys the page
+      // (Next remounts it on a search-param change) — the remount resumes
+      if (on) localStorage.setItem(TEACH_KEY, JSON.stringify({ slug, ways: start }));
+      if (on && again) {
+        // one walk per ask: a reload resumes it (TEACH_KEY), never restarts it.
+        // Only once the slug is here — the first pass runs with slug ''
+        q.delete('teach');
+        const rest = q.toString();
+        window.history.replaceState(
+          null,
+          '',
+          `${window.location.pathname}${rest ? `?${rest}` : ''}`
+        );
+      }
       const p = JSON.parse(localStorage.getItem(TF_PREFS_KEY) || '{}') as { lang?: string };
       lang = p.lang === 'fr' ? 'fr' : 'en';
       setFirstLang(lang);
     } catch {
       on = false;
     }
-    setFirst(on ? 'practice' : 'off');
+    setWays(start);
+    waysRef.current = start;
+    walkSlugRef.current = on ? slug : '';
     setFirstHint('');
-    if (!on) return;
-    diagEvent('voice', 'first-turn: card up');
+    if (!on) {
+      setFirst('off');
+      return;
+    }
+    diagEvent(
+      'voice',
+      `first-turn: card up (${WAYS.filter((k) => start[k] === 'todo').join(' ')})`
+    );
     // the card's lines are in memory before they are needed (no dead air)
     warmLines(['heard', 'not_heard', 'in', 'mic_denied'], lang);
     // the room warms while they read the card (v0.7 repro: a fast walker held
     // the mic <1s after MAIN opened — the agent was still joining and the
     // turn was captured into an empty room, "nothing transcribed")
     void ensureVoice().catch(() => {});
-    // the mic is asked by its own step — never mid-hold, where the prompt
-    // steals the finger and the turn is lost
+    enterWay(nextWay(start));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [slug]);
+
+  // the walk survives leaving the page: its progress is kept until it ends
+  // (ref reads: on a slug change this runs before the stale card state goes)
+  useEffect(() => {
+    if (!slug || first === 'off' || walkSlugRef.current !== slug) return;
+    try {
+      if (first === 'in') localStorage.removeItem(TEACH_KEY);
+      else localStorage.setItem(TEACH_KEY, JSON.stringify({ slug, ways: waysRef.current }));
+    } catch {
+      /* private mode: a reload starts the walk over */
+    }
+  }, [slug, first, ways]);
+
+  // type and hold need the composer: a hands-free carried over from an
+  // earlier visit (oz-mode, restored once the room is up) goes back to the
+  // keyboard for them — the walk reaches hands-free by its own tap
+  useEffect(() => {
+    if ((first === 'practice' || first === 'mic') && way !== 'free' && mode === 'free') {
+      diagEvent('voice', `first-turn: way ${way} needs the keyboard — hands-free off`);
+      toggleHandsFree();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [first, way, mode]);
+
+  /** put one way on the card (null = all three walked → "you are in"). The
+   *  voice ways ask for the mic by their own step — never mid-hold, where the
+   *  prompt steals the finger and the turn is lost */
+  function enterWay(w: Way | null) {
+    setFirstHint('');
+    if (!w) {
+      try {
+        // walked (or skipped) to the end: this device is through the door
+        if (!localStorage.getItem(FIRST_TURN_KEY))
+          localStorage.setItem(FIRST_TURN_KEY, String(Date.now()));
+      } catch {
+        /* private mode */
+      }
+      diagEvent('voice', 'first-turn: walk-through done');
+      setFirst('in');
+      return;
+    }
+    setWay(w);
+    wayRef.current = w;
+    setFirst('practice');
+    diagEvent('voice', `first-turn: way ${w}`);
+    if (w === 'type') return;
     navigator.permissions
       ?.query({ name: 'microphone' as PermissionName })
       .then((p) => {
+        if (wayRef.current !== w) return;
         if (p.state === 'prompt') setFirst((f) => (f === 'practice' ? 'mic' : f));
         if (p.state === 'denied') setFirst((f) => (f === 'practice' ? 'denied' : f));
       })
       .catch(() => {});
-  }, [slug]);
+  }
+
+  /** skip: this way stays unwalked, the next one comes up */
+  function skipWay() {
+    unlockLines();
+    const w: Ways = { ...waysRef.current, [way]: 'skip' };
+    setWays(w);
+    waysRef.current = w;
+    diagEvent('voice', `first-turn: way ${way} skipped`);
+    enterWay(nextWay(w));
+  }
+
+  /** ✕: the walk ends here, wherever it is (it can be walked again) */
+  function closeWalk() {
+    stopLine();
+    try {
+      if (!localStorage.getItem(FIRST_TURN_KEY))
+        localStorage.setItem(FIRST_TURN_KEY, String(Date.now()));
+      localStorage.removeItem(TEACH_KEY);
+    } catch {
+      /* private mode */
+    }
+    diagEvent('voice', `first-turn: walk-through closed at ${way}`);
+    walkSlugRef.current = '';
+    setFirst('off');
+  }
 
   async function allowMic() {
     unlockLines(); // this tap is the gesture the later lines need
@@ -1732,20 +2024,56 @@ export default function SessionView({
     }
   }
 
-  /** pttUp (or a typed send), the turn is going out: from here a message
-   *  must land. A typed turn may start before the mic was ever asked for —
-   *  or after it was refused: typing never needs it */
-  function firstSent(typed = false) {
-    const from: FirstTurn[] = typed ? ['practice', 'mic', 'denied'] : ['practice', 'sent'];
+  /** the newest user turn on screen (server time) — "newer than this" is
+   *  how the walk knows a turn landed */
+  function lastUserTime(): number {
+    return [...msgs].reverse().find((m) => m.role === 'user' && !isOnboardPrompt(m.text))?.time || 0;
+  }
+  // a held turn can land BEFORE its release: the agent also commits on a
+  // spoken "over" mid-hold (keyword turn-taking is armed in every room), and
+  // the release then commits nothing — so a hold counts from its press
+  const holdBeforeRef = useRef(0);
+
+  /** pttUp, a typed send, or a hands-free commit ("over" / the bars): the
+   *  turn is going out, from here a message must land. A typed turn may start
+   *  before the mic was ever asked for — or after it was refused: typing never
+   *  needs it */
+  function firstSent(kind: Way) {
+    const from: FirstTurn[] =
+      kind === 'type'
+        ? ['practice', 'mic', 'denied']
+        : kind === 'free'
+          ? ['practice', 'mic']
+          : ['practice', 'sent'];
     if (!from.includes(first)) return;
-    const before = [...msgs].reverse().find((m) => m.role === 'user' && !isOnboardPrompt(m.text));
-    firstRef.current = { ...firstRef.current, sentAt: Date.now(), before: before?.time || 0, typed };
-    diagEvent('voice', `first-turn: ${typed ? 'typed' : 'voice'} turn sent`);
+    const before = kind === 'hold' ? holdBeforeRef.current : lastUserTime();
+    firstRef.current = {
+      ...firstRef.current,
+      sentAt: Date.now(),
+      before,
+      typed: kind === 'type',
+      kind,
+    };
+    diagEvent('voice', `first-turn: ${kind === 'type' ? 'typed' : 'voice'} turn sent (${kind})`);
     setFirstHint('');
     setFirst('sent');
   }
+  // the hands-free commit arrives in an RPC handler bound at connect time —
+  // it calls the CURRENT card through this ref
+  const firstFreeRef = useRef(() => {});
+  firstFreeRef.current = () => {
+    // hands-free only: the agent also reports an "over" said INSIDE a held
+    // turn (push-to-talk) — that turn is the hold, not this way
+    if (modeRef.current === 'free' && first !== 'off' && first !== 'in') firstSent('free');
+  };
 
-  /** the card's "or type it": the composer takes the turn (keyboard up) */
+  // the hands-free way, once in hands-free, says what to do there — a mic
+  // granted by the tap itself (no separate ask) moves the card on too
+  useEffect(() => {
+    if (first === 'mic' && way === 'free' && mode === 'free') setFirst('practice');
+  }, [first, way, mode]);
+
+  /** the card's "type it": the composer takes the turn (keyboard up) */
   function firstType() {
     unlockLines(); // a tap: the card's later lines may play
     diagEvent('voice', 'first-turn: type chosen');
@@ -1783,6 +2111,9 @@ export default function SessionView({
       } catch {
         /* private mode: the card comes back next time, harmless */
       }
+      const w: Ways = { ...waysRef.current, [f.kind]: 'done' };
+      setWays(w);
+      waysRef.current = w;
       setFirst('heard');
       // "heard." is the STT's proof — typed words were never listened for
       if (!f.typed && getSpeech().phase === 'idle') void say('heard', firstLang);
@@ -1790,10 +2121,14 @@ export default function SessionView({
     }
     const t = setTimeout(
       () => {
-        if (f.typed) {
-          // the send itself failed or stalled: the error line says why
-          diagEvent('voice-fail', 'first-turn: typed turn not in the transcript 15s after send');
-          setFirstHint(FT[firstLang].lost);
+        if (f.kind !== 'hold') {
+          // the send itself failed or stalled (typed), or "over" committed
+          // nothing that landed (hands-free): the error line says why
+          diagEvent(
+            'voice-fail',
+            `first-turn: ${f.kind} turn not in the transcript 15s after send`
+          );
+          setFirstHint(f.kind === 'free' ? FT[firstLang].lostFree : FT[firstLang].lost);
           setFirst('practice');
           return;
         }
@@ -1808,30 +2143,42 @@ export default function SessionView({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [first, msgs]);
 
-  // heard → in: the brain's reply to it, spoken (you talked, it talks back).
+  // heard → the next way: the brain's reply to it (you talked, it talks back).
   // The reply is found by ORDER — the first completed assistant message after
   // the heard one: yggdrasil stamps a prompt and its reply in the same or the
   // next millisecond, so a time comparison can miss it (10-19 referee run)
   useEffect(() => {
     if (first !== 'heard') return;
     const f = firstRef.current;
-    const ui = msgs.findIndex((m) => m.role === 'user' && m.time === f.heardTime && m.text === f.heard);
+    const ui = msgs.findIndex(
+      (m) => m.role === 'user' && m.time === f.heardTime && m.text === f.heard
+    );
     const a =
       ui < 0
         ? undefined
         : [...msgs.slice(ui + 1)].reverse().find((m) => m.role === 'assistant' && m.text.trim());
     if (a && a.done !== false && !busy) {
-      diagEvent('voice', `first-turn: reply ${Date.now() - f.sentAt}ms after ${f.typed ? 'send' : 'release'}`);
-      markHeard(slug, a.time);
-      // you talked, it talks back; you typed, it writes back — the reply is
-      // on screen right above the card (the deck can still speak it)
-      if (!f.typed) startSpeech(a.text, slug);
-      setFirst('in');
+      diagEvent(
+        'voice',
+        `first-turn: reply ${Date.now() - f.sentAt}ms after ${f.typed ? 'send' : 'release'}`
+      );
+      // a held turn: it talks back here. Typed: it writes back (the deck can
+      // still speak it). Hands-free speaks its own replies (the free cycle)
+      if (f.kind === 'hold' && modeRef.current !== 'free') {
+        markHeard(slug, a.time);
+        startSpeech(a.text, slug);
+      } else if (f.kind === 'type') {
+        markHeard(slug, a.time);
+      }
+      enterWay(nextWay(waysRef.current));
       return;
     }
-    // a slow or failed brain: STT is proven anyway, the error channel says
-    // why. Anchored to the heard moment — every poll re-runs this effect
-    const t = setTimeout(() => setFirst('in'), Math.max(0, f.heardAt + 45_000 - Date.now()));
+    // a slow or failed brain: the turn is proven anyway, the error channel
+    // says why. Anchored to the heard moment — every poll re-runs this effect
+    const t = setTimeout(
+      () => enterWay(nextWay(waysRef.current)),
+      Math.max(0, f.heardAt + 45_000 - Date.now())
+    );
     return () => clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [first, msgs, busy]);
@@ -1943,7 +2290,7 @@ export default function SessionView({
       .map((a) => ({ name: a.name, content: a.content }));
     setAttachments([]);
     stickRef.current = true;
-    if (first !== 'off') firstSent(true); // the door's first turn, typed
+    if (first !== 'off') firstSent('type'); // the walk-through's typed turn
     void sendTextAsync(text, images, files);
   }
 
@@ -2017,11 +2364,12 @@ export default function SessionView({
   }
 
   /** a press that was a TAP — released before the arm, or armed and let go
-   *  under 400ms (see pttUp): the hands-free toggle. On the first turn a tap
-   *  is not a turn, and hands-free ("over") is taught after — say what
-   *  happened instead of switching modes. */
+   *  under 400ms (see pttUp): the hands-free toggle. During the walk's type
+   *  and hold ways a tap is not a turn, and hands-free ("over") is the next
+   *  way — say what happened instead of switching modes. The hands-free way
+   *  is walked BY this tap. */
   function pressTap() {
-    if (first === 'practice' || first === 'sent' || first === 'mic') {
+    if ((first === 'practice' || first === 'sent' || first === 'mic') && way !== 'free') {
       clearHoldArm();
       setFirstHint(FT[firstLang].released);
       diagEvent('ptt', 'first-turn: tap — released, nothing sent');
@@ -2041,9 +2389,14 @@ export default function SessionView({
     setBusy(true); // cleared when the run state settles (see poller)
     armRunWatch();
     try {
-      const agent = await agentInRoom(room, 4_000);
+      let agent = await agentInRoom(room, 4_000);
       if (!agent) {
-        diagEvent('voice-fail', 'tap-to-send: no voice agent in the room after 4s');
+        // dispatch may have died with the first agent job (network-flap
+        // self-reconnect) — re-arm into this room before blaming lk-agent
+        agent = await rearmAgent(room, 10_000);
+      }
+      if (!agent) {
+        diagEvent('voice-fail', 'tap-to-send: no voice agent in the room after 4s (+re-arm)');
         setError('voice agent missing from the room — is lk-agent running? try again in a moment');
         setBusy(false);
         return;
@@ -2063,6 +2416,7 @@ export default function SessionView({
       // straight through the whole run, with the reply never spoken.
       setFreeCycle('processing');
       await mic(false);
+      firstFreeRef.current(); // the walk's hands-free way: the bars tapped
       // an empty tap (nothing said — or only the phone's own voice, which the
       // echo gate kept out): no turn lands, no run starts, no idle ever comes,
       // and heartbeats keep re-arming the escape — the strip sat on "working
@@ -2154,30 +2508,27 @@ export default function SessionView({
   //   working  one green signal glides — the box is on it
   //   idle     dim, still — you are not heard
   //   drop     red — release now deletes the hold
+  // The words are STATE only, never teaching (UX-CALM 10-27, the user: "all
+  // those help texts — I want all of them gone"; how to hold / say "over" /
+  // tap the bars lives in the first-turn walk-through). Said once: where the
+  // pill or the deck already says it in words, the line stays empty.
   type VoiceTone = 'idle' | 'heard' | 'working' | 'speaking' | 'drop';
   const [tone, words]: [VoiceTone, string] = holding
     ? voiceState !== 'ready'
-      ? ['idle', 'connecting… keep holding, talk at “heard”']
+      ? ['idle', ''] // the pill says connecting…
       : pttCancelArm
-        ? ['drop', 'release to delete · slide back to keep']
+        ? ['drop', 'delete']
         : !micLive
-          ? ['idle', 'opening the mic… talk at “heard”']
-          : ['heard', 'heard · release to send · slide left to delete']
+          ? ['idle', 'opening the mic…']
+          : ['heard', 'heard'] // the onset cue (214af11): talk from here
     : speech.phase !== 'idle'
-      ? [
-          'speaking',
-          speech.phase === 'loading'
-            ? 'synthesizing the reply…'
-            : mode === 'free'
-              ? 'speaking · mic returns when it ends'
-              : 'speaking · red ■ stops speech and work',
-        ]
+      ? ['speaking', ''] // the deck says synthesizing / speaking
       : mode === 'free'
         ? voiceState !== 'ready'
-          ? ['idle', 'hands-free · connecting…']
+          ? ['idle', 'hands-free']
           : freeCycle === 'processing'
             ? ['working', '']
-            : ['heard', 'hands-free · say “over” or tap the bars to send']
+            : ['heard', 'hands-free']
         : busy
           ? ['working', '']
           : ['idle', ''];
@@ -2315,7 +2666,7 @@ export default function SessionView({
           <div className="pt-10 text-center text-xs text-[var(--oz-dim)]">
             {isOnboardingSlug(slug)
               ? 'setup — your box speaks first, then you answer by voice'
-              : 'empty session — type below'}
+              : 'empty session'}
           </div>
         )}
         {msgs.map((m, i) => (
@@ -2354,8 +2705,15 @@ export default function SessionView({
 
         {/* listen chip — anchored to the last message, in the text flow.
             Only when that message IS the agent's (the chip plays it);
-            hidden while the deck is active (the deck owns the controls). */}
+            hidden while the deck is active (the deck owns the controls).
+            Busy law (UX-CALM 10-27, the user: "as long as you're working, I
+            shouldn't be able to tap the listen button"): no chip while the
+            run is in flight — the working row holds this spot with its
+            cancel, the chip takes it over once the reply is whole. Hands-free
+            waiting on its reply (processing) speaks it by itself: no chip. */}
         {speech.phase === 'idle' &&
+          !busy &&
+          !(mode === 'free' && freeCycle === 'processing') &&
           lastAssistant &&
           msgs.length > 0 &&
           msgs[msgs.length - 1] === lastAssistant && (
@@ -2367,6 +2725,7 @@ export default function SessionView({
                 startSpeech(lastAssistant.text, slug);
               }}
               className="oz-chip"
+              data-testid="listen-chip"
             >
               <LineIcon name="volume" size={13} /> listen
             </button>
@@ -2494,12 +2853,15 @@ export default function SessionView({
         </div>
       )}
 
-      {/* the door's last step: one real voice turn, then "you are in" */}
+      {/* the door's last step: the walk-through — each way done once, then
+          "you are in". One instruction at a time, pointing at the control
+          below it; the three ways above it say where the walk is */}
       {first !== 'off' && (
         <section
           className="oz-ft"
           data-testid="first-turn"
           data-state={first}
+          data-way={first === 'in' ? undefined : way}
           data-voice={lineVoice}
           aria-live="polite"
         >
@@ -2509,94 +2871,101 @@ export default function SessionView({
             data-s={lineVoice === 'loading' ? 'working' : lineVoice === 'speaking' ? 'speaking' : 'idle'}
             aria-hidden="true"
           />
-          {(first === 'mic' || first === 'practice') && (
+          {first !== 'in' && (
+            <button
+              type="button"
+              className="x"
+              data-testid="first-close"
+              aria-label={FT[firstLang].close}
+              onClick={closeWalk}
+            >
+              <LineIcon name="close" size={11} />
+            </button>
+          )}
+          {isMainSlug(slug) && first !== 'in' && WAYS.every((k) => ways[k] === 'todo') && (
+            <p className="t">{FT[firstLang].planted}</p>
+          )}
+          {first !== 'in' && (
+            <ol className="ways3" data-testid="first-ways">
+              {WAYS.map((k) => (
+                <li key={k} data-way={k} data-s={k === way ? 'now' : ways[k]}>
+                  {FT[firstLang].ways[k]}
+                </li>
+              ))}
+            </ol>
+          )}
+          {first === 'practice' && way === 'type' && (
             <>
-              <p className="t">{FT[firstLang].planted}</p>
-              {/* two first-class ways in: the voice, or the keyboard */}
-              {first === 'mic' ? (
-                <>
-                  <p>{FT[firstLang].mic}</p>
-                  <div className="ways">
-                    <button
-                      type="button"
-                      className="go"
-                      data-testid="first-allow-mic"
-                      onClick={() => void allowMic()}
-                    >
-                      {FT[firstLang].allow}
-                    </button>
-                    <button
-                      type="button"
-                      className="ty"
-                      data-testid="first-type"
-                      onClick={firstType}
-                    >
-                      {FT[firstLang].type}
-                      <small>{FT[firstLang].typeSub}</small>
-                    </button>
-                  </div>
-                </>
-              ) : (
-                <>
-                  <p className={firstHint ? 'hint' : ''}>{firstHint || FT[firstLang].hold}</p>
-                  <button
-                    type="button"
-                    className="ty"
-                    data-testid="first-type"
-                    onClick={firstType}
-                  >
-                    {FT[firstLang].type}
-                    <small>{FT[firstLang].typeSub}</small>
-                  </button>
-                </>
-              )}
+              <button type="button" className="ty" data-testid="first-type" onClick={firstType}>
+                {FT[firstLang].type}
+                <small>{FT[firstLang].typeSub}</small>
+              </button>
+              {firstHint && <p className="hint">{firstHint}</p>}
             </>
           )}
+          {first === 'practice' && way === 'hold' && (
+            <>
+              <p className="t">{FT[firstLang].hold}</p>
+              <p className="sub">{FT[firstLang].holdSub}</p>
+              {firstHint && <p className="hint">{firstHint}</p>}
+            </>
+          )}
+          {first === 'practice' && way === 'free' && (
+            <>
+              <p className="t">{mode === 'free' ? FT[firstLang].freeOn : FT[firstLang].free}</p>
+              <p className="sub">
+                {mode === 'free' ? FT[firstLang].freeOnSub : FT[firstLang].freeSub}
+              </p>
+              {firstHint && <p className="hint">{firstHint}</p>}
+            </>
+          )}
+          {first === 'mic' && (
+            <>
+              <p>{FT[firstLang].mic}</p>
+              <button
+                type="button"
+                className="go"
+                data-testid="first-allow-mic"
+                onClick={() => void allowMic()}
+              >
+                {FT[firstLang].allow}
+              </button>
+            </>
+          )}
+          {first === 'denied' && <p className="t">{line('mic_denied', firstLang)}</p>}
           {first === 'sent' && (
             <p>{firstRef.current.typed ? FT[firstLang].sentTyped : FT[firstLang].sent}</p>
           )}
           {first === 'heard' && (
             <>
-              <p className="t">{firstRef.current.typed ? FT[firstLang].got : FT[firstLang].heard}</p>
+              <p className="t">
+                {firstRef.current.typed ? FT[firstLang].got : FT[firstLang].heard}
+              </p>
               <blockquote data-testid="first-heard">“{firstRef.current.heard}”</blockquote>
               <p className="sub">{FT[firstLang].answering}</p>
             </>
+          )}
+          {(first === 'practice' || first === 'mic' || first === 'denied') && (
+            <button type="button" className="sk" data-testid="first-skip" onClick={skipWay}>
+              {FT[firstLang].skip}
+            </button>
           )}
           {first === 'in' && (
             <>
               <p className="t" data-testid="first-in">
                 {line('in', firstLang)}
               </p>
-              <dl>
-                {FT[firstLang].now.map(([k, v]) => (
-                  <div key={k}>
-                    <dt>{k}</dt>
-                    <dd>{v}</dd>
-                  </div>
-                ))}
-              </dl>
-              <button type="button" className="go" data-testid="first-ok" onClick={() => setFirst('off')}>
+              <button
+                type="button"
+                className="go"
+                data-testid="first-ok"
+                onClick={() => {
+                  walkSlugRef.current = '';
+                  setFirst('off');
+                }}
+              >
                 {FT[firstLang].ok}
               </button>
-            </>
-          )}
-          {first === 'denied' && (
-            <>
-              <p className="t">{line('mic_denied', firstLang)}</p>
-              <div className="ways">
-                <button
-                  type="button"
-                  className="ty"
-                  data-testid="first-type"
-                  onClick={firstType}
-                >
-                  {FT[firstLang].type}
-                  <small>{FT[firstLang].typeSub}</small>
-                </button>
-                <button type="button" className="go" onClick={() => setFirst('off')}>
-                  {FT[firstLang].ok}
-                </button>
-              </div>
             </>
           )}
         </section>
@@ -2702,13 +3071,10 @@ export default function SessionView({
                   <span className="oz-breathe">connecting…</span>
                 ) : (
                   <>
-                    {pttCancelArm ? (
-                      <span className="tracking-[0.12em]">release to delete</span>
-                    ) : (
-                      <span aria-label="hold duration" className="tabular-nums">
-                        {Math.floor(pttSecs / 60)}:{String(pttSecs % 60).padStart(2, '0')}
-                      </span>
-                    )}
+                    {/* the drop zone is said by the line ("delete") and the red */}
+                    <span aria-label="hold duration" className="tabular-nums">
+                      {Math.floor(pttSecs / 60)}:{String(pttSecs % 60).padStart(2, '0')}
+                    </span>
                     <span className="oz-bars">
                       {pttLevels.map((l, i) => (
                         <i key={i} style={{ height: `${Math.min(22, Math.max(3, Math.round(l * 22)))}px` }} />
