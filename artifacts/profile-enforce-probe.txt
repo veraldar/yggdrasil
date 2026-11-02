@@ -1,0 +1,24 @@
+ok   T0 registry serves 9 profiles
+ok   T0b default = build (full)
+ok   T1 scout session created
+ok   T2 scout declares read-only surface
+ok   T3 scout CAN read
+ok   T4 scout write DENIED
+ok   T4b file untouched
+ok   T5 scout sed -i DENIED (deploy-class write)
+ok   T6 scout ssh/deploy DENIED
+ok   T7 scout bash read-class ALLOWED
+ok   T8 scout git-log runs (read-only)
+ok   T9 scout git-push DENIED
+ok   T10 steward session created
+ok   T11 steward writes docs/ ledger
+ok   T12 steward deploy DENIED
+ok   T12b nothing deployed
+ok   T13 steward ssh DENIED
+ok   T14 steward build DENIED
+ok   T15 steward write outside docs/ DENIED
+ok   T16 steward reads anywhere
+ok   T17 unknown profile 'root' -> 400 fail-closed
+ok   T18 no profile -> default build (full)
+
+profiles probe: 22 passed, 0 failed
