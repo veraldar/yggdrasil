@@ -1,9 +1,11 @@
-/** Profiles — the root's agent profiles (config/yggdrasil-profiles.json),
- *  read-only. One loader for the visible pages (the phone shows who can do
- *  what); the brain keeps them AI-owned — the PWA renders, never edits.
- *  Schema is yggdrasil's own registry: agent.<id>.permission[] lines of
- *  {permission, pattern, action}; allow-lines name the tools, a leading
- *  `*`/allow is "every tool" (the build profile). */
+/** Profiles — the root's agent profiles, read-only. One loader for the
+ *  visible pages (the phone shows who can do what); the brain keeps them
+ *  AI-owned — the PWA renders, never edits. Source of truth: the brain's
+ *  own registry file (YGG_PROFILES, what :4100 enforces at dispatch);
+ *  the tree's config/ copy is a scratch-build/sim-stack fallback only.
+ *  Schema is opencode's own: agent.<id> = {name, description, mode,
+ *  permission: [{permission, pattern, action}]} (GET /agent element shape,
+ *  last matching rule wins); a leading `*`/allow is "every tool" (build). */
 
 import { readFile } from 'fs/promises';
 import path from 'path';
@@ -38,13 +40,16 @@ export class ProfilesError extends Error {
 }
 
 /**
- * Where the registry lives: `pwa/../config` when served from the tree's pwa/,
- * a worktree's own config/ when served from a scratch build (same walk-up as
- * lib/artifacts' worktree rule). First file that parses wins — the served
- * tree is the truth for the served app.
+ * Where the registry lives. THE registry is the brain's own file — the same
+ * path the root reads via YGG_PROFILES at boot (one source of truth: what
+ * :4100 enforces is exactly what the phone shows). The worktree's
+ * config/yggdrasil-profiles.json is the fallback for scratch builds and
+ * sim-stacks without the live root on the box (same walk-up as lib/artifacts'
+ * worktree rule). First file that reads wins.
  */
 function registryPaths(): string[] {
   const paths: string[] = [];
+  if (process.env.YGG_PROFILES) paths.push(process.env.YGG_PROFILES);
   let dir = process.cwd();
   for (let i = 0; i < 6; i++) {
     paths.push(path.join(dir, 'config', 'yggdrasil-profiles.json'));
