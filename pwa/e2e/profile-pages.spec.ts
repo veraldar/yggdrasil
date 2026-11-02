@@ -70,9 +70,12 @@ test('detail: every profile page renders its granted tools as chips', async ({ p
 });
 
 test('read-only: profile pages offer no edit surface — no forms, no inputs', async ({ page }) => {
-  for (const url of ['/settings/profiles', ...profiles.map((p) => `/settings/profiles/${p.id}`)]) {
-    await page.goto(url);
-    await expect(page.getByRole('heading', { name: /agent profiles|profile|allowed tools/ })).toBeVisible();
+  await page.goto('/settings/profiles');
+  await expect(page.getByRole('heading', { name: 'agent profiles' })).toBeVisible();
+  await expect(page.locator('input, textarea, select')).toHaveCount(0);
+  for (const p of profiles) {
+    await page.goto(`/settings/profiles/${p.id}`);
+    await expect(page.getByRole('heading', { name: 'allowed tools' })).toBeVisible();
     await expect(page.locator('input, textarea, select')).toHaveCount(0);
   }
 });
