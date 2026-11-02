@@ -12,6 +12,7 @@
  *  the session name in the chat header; leaving: system back gesture. */
 
 import { useParams, useRouter } from 'next/navigation';
+import Link from 'next/link';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { slugify } from '@/lib/slug';
 import { isMainSlug } from '@/lib/tree-first';
@@ -37,8 +38,10 @@ type ProviderRow = {
   name: string;
   models: { id: string; name: string; variants: string[] }[];
 };
-type Block = 'name' | 'model' | 'think' | 'agent';
-type Res = 'session' | 'models' | 'agents';
+/** registry shape (/api/profiles), read-only */
+type Profile = { id: string; description: string; tools: string[]; isDefault: boolean };
+type Block = 'name' | 'model' | 'think' | 'agent' | 'profile';
+type Res = 'session' | 'models' | 'agents' | 'profile';
 
 /** One settings resource: its body, or why it didn't come (HTTP status +
  *  the proxy's error, or the network failure) — never a silent miss. */
@@ -74,6 +77,13 @@ export default function SessionSettingsView() {
   // null = not landed yet (loading, or failed — loadErr says which)
   const [providers, setProviders] = useState<ProviderRow[] | null>(null);
   const [agents, setAgents] = useState<string[] | null>(null);
+  // the session's own profile, read-only ({name, tools[]} — profile.ts)
+  const [profile, setProfile] = useState<{
+    name: string;
+    description: string;
+    tools: string[];
+    isDefault: boolean;
+  } | null>(null);
   const [loadErr, setLoadErr] = useState<Partial<Record<Res, string>>>({});
   const [pickOpen, setPickOpen] = useState(false);
   const [filter, setFilter] = useState('');
@@ -102,10 +112,11 @@ export default function SessionSettingsView() {
     // session record itself is fine
     // A failure is kept per resource and SHOWN in its block (10-19: a
     // failed load read as 'no model' / 'no models' / invented agents)
-    const [sr, mr, ar] = await Promise.all([
+    const [sr, mr, ar, pr] = await Promise.all([
       grab(`/api/session/${slug}`),
       grab('/api/models'),
       grab('/api/agents'),
+      grab('/api/profiles'),
     ]);
     if ('data' in sr) {
       setInfo(sr.data);
@@ -115,10 +126,25 @@ export default function SessionSettingsView() {
     }
     if ('data' in mr) setProviders(mr.data);
     if ('data' in ar) setAgents(ar.data.map((a: { name: string }) => a.name));
+    if ('data' in pr) {
+      const sessionAgent = 'data' in sr ? ((sr.data?.agent as string) || '') : '';
+      const hit = (pr.data as Profile[]).find((p) => p.id === sessionAgent);
+      setProfile(
+        hit
+          ? {
+              name: hit.id,
+              description: hit.description,
+              tools: hit.tools,
+              isDefault: hit.isDefault,
+            }
+          : null
+      );
+    }
     setLoadErr({
       ...('err' in sr && { session: sr.err }),
       ...('err' in mr && { models: mr.err }),
       ...('err' in ar && { agents: ar.err }),
+      ...('err' in pr && { profile: pr.err }),
     });
   }, [slug]);
 
@@ -127,8 +153,10 @@ export default function SessionSettingsView() {
   }, [load]);
 
   // a failed load self-heals: keep retrying while any block still lacks its
-  // data (it used to mark itself 'loaded' even on failure — never retried)
-  const missing = !info || !providers || !agents;
+  // data (it used to mark itself 'loaded' even on failure — never retried).
+  // A missing profile is NOT missing data — sessions may run a brain-only
+  // agent (no registry entry); only a failed profiles fetch retries.
+  const missing = !info || !providers || !agents || !!loadErr.profile;
   useEffect(() => {
     if (!missing) return;
     const t = setInterval(() => !document.hidden && void load(), 2000);
@@ -478,6 +506,44 @@ export default function SessionSettingsView() {
           <p className={`note ${agents?.length ? '' : 'pt-3!'}`}>{agentNote}</p>
         )}
         {refused?.block === 'agent' && <Refusal msg={refused.msg} />}
+      </section>
+
+      {/* PROFILE — the session's own profile card, read-only: what this
+          session's agent may do, exactly as the registry grants it. The
+          profiles are the brain's to define (AI-owned); the app shows them. */}
+      <section className="oz-blk" data-testid="profile-card">
+        <h2>profile</h2>
+        {profile ? (
+          <>
+            <ul className="oz-kv">
+              <li>
+                <span>name</span>
+                <span data-testid="profile-card-name">{profile.name}</span>
+                <span />
+              </li>
+            </ul>
+            <div className="oz-chips" data-testid="profile-card-tools">
+              {profile.tools.map((t) => (
+                <span key={t} data-testid="profile-card-tool">
+                  {t === '*' ? '* all tools' : t}
+                </span>
+              ))}
+            </div>
+            {profile.description && <p className="note">{profile.description}</p>}
+          </>
+        ) : (
+          <p className="note pt-3!">
+            {info?.agent
+              ? loadErr.profile
+                ? `couldn't load profiles — ${loadErr.profile} · retrying`
+                : `${info.agent} — defined on the brain, not in the registry`
+              : 'no profile pinned — the brain routes each turn itself'}
+          </p>
+        )}
+        <p className="note">
+          read-only — profiles are set on the box.{' '}
+          <Link href="/settings/profiles">browse all profiles ›</Link>
+        </p>
       </section>
 
       <p className="px-0.5 pb-2.5 text-[10.5px] leading-relaxed text-[var(--oz-dim)]">

@@ -566,6 +566,7 @@
   .oz-mlist button[aria-pressed='true'] { color: var(--oz-success); }
   .oz-mlist button[aria-pressed='true']::after { content: '●'; margin-left: auto; color: var(--oz-success); }
   .oz-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+  .oz-chips span { display: inline-flex; align-items: center; height: 30px; padding: 0 10px; border: 1px solid var(--oz-border); color: var(--oz-dim); font-size: 11px; letter-spacing: .04em; }
   .oz-chips button { height: 30px; padding: 0 10px; border: 1px solid var(--oz-border); color: var(--oz-dim); font-size: 11px; letter-spacing: .04em; }
   .oz-chips button[aria-pressed='true'] {
     color: var(--oz-success); border-color: color-mix(in srgb, var(--oz-success) 45%, transparent);

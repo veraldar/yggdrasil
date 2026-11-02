@@ -175,6 +175,13 @@ export default function SettingsPage() {
             <span />
           </li>
           <li>
+            <span>profiles</span>
+            <span data-testid="profiles-hub-desc">who may do what, on the root</span>
+            <Link href="/settings/profiles" data-testid="profiles-link" className="oz-k sm">
+              browse
+            </Link>
+          </li>
+          <li>
             <span>speech</span>
             <span>your models, on your network</span>
             <span />
