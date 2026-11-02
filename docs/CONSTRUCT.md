@@ -33,6 +33,19 @@ veraldar              the org — holds the products
 > Veraldar is the organization; Yggdrasil is its tree — a root brain, a
 > trunk private line, a branch app — and bifrost is the first branch.
 
+## Release law (canon amendment 11-02)
+
+- **Product versions are `v0.x.y`, minted only at a land event.** Owner-gated:
+  a release exists when the owner says "land it" and the tree is cut,
+  tagged, and serving. Last: **v0.7.0** (frozen live stack). Next mint:
+  **v0.8.0** — validated mic self-heal + voice gates + TURN trunk when landed.
+- **Lanes and builds never use "vN".** A lane iteration is a *name* (what it
+  fixes) + its *commit hash* — e.g. `rootlink-d71f419`, binary
+  `bifrost-net@0e58923`. A hash cannot masquerade as a release; a release is
+  a hash the owner chose to land.
+- **Serving ≠ released.** A deployed binary on a box is *provisional* until
+  minted into a version. The morning report maps serving-hashes → release.
+
 ## Boundaries this settles
 
 - **roots = the network is DEAD.** The 09-30 map that made "the roots" the
