@@ -19,12 +19,18 @@ today → webrtc → wireguard.*
   scans, lands in the branch (layman-qr-1600 GREEN)
 - **frozen live stack** — v0.7.0 cut `a593015a` serving on the tailnet
   omarchy tree; serving == released
+- **multi-root root-link v4c2** — bridge.rs root-link op (HMAC root
+  tokens, ROOTS registry, `{root}` dispatch), health probes + per-root
+  in-flight caps (`4909a2a6`) through the root-dial client
+  (`ec088673`): lane `bifrost@lab/layman-deploy` → `dc9623fa`
+  **serving on the VPS** (11-02 evening); rehearsal trunk armed on the
+  tailnet. Serving ≠ released.
 
 ## in-flight
 
-- **multi-root root-link** — bridge.rs root-link op (HMAC root tokens,
-  ROOTS registry, `{root}` dispatch): v4 build is draft-only, GAP-0
-  open (no committed ws dial / link-token / registry anywhere)
+- **public-wss root-link ingress** — Mac join hit the tailnet ACL wall
+  (11-02); the lane now goes public wss instead of tailnet membership
+  (see `docs/RELEASES.md` evening log)
 - **VPS speech models** — speaches stack on the veraldar VPS; off-LAN
   voice landed via the TURN transport above
 - **infomaniak UDP ticket** — ingress dropped since the 11-01 edge

@@ -23,6 +23,26 @@ one place versions and their hashes meet.*
   `yggdrasil/` prefix keeps the namespaces apart.
 - **Status: landed.** Serving == released for the first time.
 
+## 11-02 evening — trunk-lane landings (deploy/incident log; serving ≠ released)
+
+- **v4c2 trunk deployed to the VPS** — root-link v4c2 lane
+  `bifrost@lab/layman-deploy` → `dc9623fa` (source `4909a2a6`, artifact
+  `bifrost-net-v4c2` sha256 `0262c287…e58729`) — serving on the veraldar
+  VPS. Serving, not minted: no version attached.
+- **rehearsal trunk armed on the tailnet omarchy** — second trunk
+  instance up as the rehearsal mirror of the VPS lane.
+- **Mac join blocked by tailnet ACL → superseded by the public-wss
+  plan** — the ACL wall stands; the plan is public wss ingress instead
+  of pulling the Mac onto the tailnet. Logged as superseded, not fixed.
+- **registry-sync incident (found by the owner)** — served
+  `/api/profiles` showed the stale tree-config copy, not the brain
+  registry; fixed by a brain restart with captured env (`YGG_PROFILES`
+  now one source of truth at boot). One-line law echo: profiles are
+  fixed at boot, never from the API.
+- **profile enforcement proven live** — coordinator promoted to default
+  profile on the brain; MAIN demoted live and the demotion held —
+  enforcement proof, no code changed.
+
 ## next: v0.8.0 — candidates (not minted; canon: "validated mic self-heal + voice gates + TURN trunk when landed")
 
 | # | candidate | repo → hash | status |
@@ -32,7 +52,6 @@ one place versions and their hashes meet.*
 | 3 | TURN seam — PWA reads token-carried, expiry-aware iceServers into the pc config | `bifrost@lab/layman-deploy` → `a048d9d6` | **landed-candidate** (local-only: unpushed); transport proven GREEN via coturn tcp/443, 11-02 |
 | 4 | dispatch-storm guard — no dispatch when agent present, takeover latch | `bifrost@lab/layman-deploy` → `77ef4023` | **landed-candidate** (local-only: unpushed) |
 | 5 | sandbox residue — voice-stab2 replace-semantics (one live job per room) in `agent/agent.py`, `sandbox-up.sh` unit rename, AGENTS.md glossary | `bifrost-sandbox` worktree → uncommitted diff | **provisional-uncommitted** |
-| — | multi-root root-link v4 (HMAC root tokens, ROOTS registry, `{root}` dispatch) | draft only — GAP-0: no ws dial / link-token / registry committed anywhere | *not yet a candidate* |
 
 Mint rule: v0.8.0 exists when the owner says "land it" over candidates 1–4
 (the canon triple) — not before. Until then every build above is a name +
