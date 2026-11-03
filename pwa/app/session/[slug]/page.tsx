@@ -20,6 +20,9 @@ import { ErrorBox } from '@/components/app/error-box';
 import {
   getSpeech,
   getSpeechServer,
+  getBargeInAt,
+  isEchoTranscript,
+  pauseForBargeIn,
   pauseSpeech,
   rateSpeech,
   resumeSpeech,
@@ -727,15 +730,28 @@ export default function SessionView({
           const lastFresh = fresh[fresh.length - 1];
           // hands-free has no local send: the agent commits turns itself, so
           // the poll must arm the working indicator when new user speech
-          // lands — otherwise nothing on screen reacts until a page reload
+          // lands — otherwise nothing on screen reacts until a page reload.
+          // EXCEPT the phone's own echo (pwa-flow-fix 11-03): a prompt that
+          // matches what the deck just said is the mic hearing the speaker —
+          // discarded: no working indicator, no answer treated as ours, and
+          // a barge-in pause undoes itself (playback resumes).
           if (
             modeRef.current === 'free' &&
             !busyRef.current &&
             fresh.length > seenRef.current &&
             lastFresh?.role === 'user'
           ) {
-            setBusy(true);
-            armRunWatch();
+            if (isEchoTranscript(lastFresh.text)) {
+              diagEvent('voice', 'echo discard: prompt matches the spoken reply');
+              echoDiscardedAtRef.current = lastFresh.time;
+              if (getBargeInAt() && getSpeech().phase === 'paused') {
+                resumeSpeech(); // the "interruption" was the phone itself
+                diagEvent('voice', 'echo discard: barge-in undone — playback resumed');
+              }
+            } else {
+              setBusy(true);
+              armRunWatch();
+            }
           }
           if (
             document.hidden &&
@@ -1580,16 +1596,18 @@ export default function SessionView({
   const freeCycleRef = useRef(freeCycle);
   freeCycleRef.current = freeCycle;
   const freeLevels = useMicLevels(mode === 'free' && voiceState === 'ready', roomRef);
+  // the barge-in watcher reads levels inside a 100 ms interval — it needs the
+  // CURRENT bars, not the ones its effect was armed with (busyRef pattern)
+  const freeLevelsRef = useRef(freeLevels);
+  freeLevelsRef.current = freeLevels;
 
-  // ── echo gate (UX-BATCH #4, 10-23): the phone's own voice must never reach
-  // its own mic — replies came back as user turns. While a reply (or a door
-  // line) is audible, the published mic track is PAUSED (LiveKit track mute:
-  // the device stays open, nothing renegotiates, the agent hears silence).
-  // It comes back ECHO_TAIL_MS after the audio ends, and only if the moment
-  // still wants it hot — hands-free listening or a held mic; every mic(true)
-  // inside that window waits for it. ?echogate=0 = off (the replay test's A/B).
-  const audible =
-    speech.phase === 'loading' || speech.phase === 'playing' || lineVoice === 'speaking';
+  // ── echo gate (UX-BATCH #4, 10-23; narrowed pwa-flow-fix 11-03): door
+  // lines (short status speech) still mute the published mic track — nothing
+  // worth interrupting, pure echo risk. The TTS DECK no longer mutes: during
+  // a spoken reply the mic stays hot so the user can BARGE IN (owner law
+  // 11-03) — deck-echo is suppressed by discard instead (isEchoTranscript).
+  // ?echogate=0 = off (the replay test's A/B).
+  const audible = lineVoice === 'speaking';
   const echoGateOffRef = useRef<boolean | null>(null);
   const audibleUntilRef = useRef(0); // epoch ms the mic may be hot again (Infinity: audible now)
   const echoHeldRef = useRef(false); // the gate holds the mic down — reopen at its end
@@ -1712,6 +1730,18 @@ export default function SessionView({
     // (a second startSpeech stops the first one mid-playback)
     if (freeSpokeMsgRef.current === a.time) return;
     freeSpokeMsgRef.current = a.time;
+    // the echo's answer is never spoken (pwa-flow-fix 11-03): the reply to a
+    // discarded echo prompt — the user message right before it — stays
+    // silent; a barge-in pause undoes (playback resumes where it broke off)
+    const ai = msgs.findIndex((m) => m.role === 'assistant' && m.time === a.time);
+    const pre =
+      ai > 0 ? [...msgs.slice(0, ai)].reverse().find((m) => m.role === 'user') : undefined;
+    if (pre && pre.time === echoDiscardedAtRef.current) {
+      diagEvent('voice', 'echo discard: the echo answer stays unspoken');
+      if (getSpeech().phase === 'paused') resumeSpeech();
+      freeMicGiveBack();
+      return;
+    }
     try {
       startSpeech(a.text, slug);
     } catch {
@@ -1731,6 +1761,10 @@ export default function SessionView({
       // real audio went out — this reply counts as heard (req 09-30): a
       // later arrival in this session must not auto-play it again
       if (freeSpokeMsgRef.current) markHeard(slug, freeSpokeMsgRef.current);
+      // barge-in window (pwa-flow-fix 11-03): the mic comes back while the
+      // reply plays — speech over it pauses the deck (the watcher below);
+      // deck-echo is discarded by match, not by mute
+      if (modeRef.current === 'free') void mic(true);
       return;
     }
     // loading/paused keep the mic muted — nothing to hand back yet
@@ -1740,6 +1774,123 @@ export default function SessionView({
     // cycle is over, the mic goes back
     freeMicGiveBack();
   }, [freeCycle, speech.phase]);
+
+  // ── BARGE-IN + ECHO DISCARD (pwa-flow-fix 11-03, owner law): while the
+  // deck plays (hands-free, mic hot), sustained mic speech above threshold
+  // pauses playback and marks a barge-in; ~700 ms of quiet is the
+  // end-of-speech debounce; ONE commit_turn then answers — the agent's whole
+  // buffer goes as ONE merged prompt (interrupted speech is merged, never
+  // dropped, never answered separately). A landed prompt that MATCHES the
+  // spoken text is the phone hearing itself: discarded (the pause undoes,
+  // playback resumes). Levels: the mic FFT the strips already use; e2e
+  // injects window.__ozLevels (same shape) — no new analysis, no new deps.
+  const BARGE_LEVEL = 0.5;
+  const BARGE_SUSTAIN_MS = 400;
+  const BARGE_QUIET_MS = 700;
+  const bargeAboveRef = useRef(0);
+  const bargeQuietRef = useRef(0);
+  const bargeCommittedRef = useRef(false);
+  const echoDiscardedAtRef = useRef(0);
+  useEffect(() => {
+    if (mode !== 'free' || voiceState !== 'ready') return;
+    const iv = setInterval(() => {
+      const w = window as unknown as { __ozLevels?: number[] | null };
+      const levels = w.__ozLevels ?? freeLevelsRef.current;
+      const mean = levels.reduce((s, l) => s + l, 0) / Math.max(1, levels.length);
+      const now = Date.now();
+      const phase = getSpeech().phase;
+      if (phase !== 'playing' && phase !== 'paused') {
+        bargeAboveRef.current = 0;
+        bargeQuietRef.current = 0;
+        return;
+      }
+      if (phase === 'playing') {
+        // loud and sustained → the user is talking over the reply
+        if (mean >= BARGE_LEVEL) {
+          if (!bargeAboveRef.current) bargeAboveRef.current = now;
+          else if (now - bargeAboveRef.current >= BARGE_SUSTAIN_MS) {
+            bargeAboveRef.current = 0;
+            pauseForBargeIn();
+          }
+        } else bargeAboveRef.current = 0;
+        return;
+      }
+      // paused: only a barge-in pause owns this branch (a finger-pause has
+      // no bargeInAt and is never auto-committed)
+      if (!getBargeInAt() || bargeCommittedRef.current) return;
+      if (mean < BARGE_LEVEL * 0.6) {
+        if (!bargeQuietRef.current) bargeQuietRef.current = now;
+        else if (now - bargeQuietRef.current >= BARGE_QUIET_MS) {
+          bargeQuietRef.current = 0;
+          bargeCommittedRef.current = true; // ONE answer per barge-in
+          void commitBargeIn();
+        }
+      } else bargeQuietRef.current = 0; // speech resumed — keep waiting
+    }, 100);
+    return () => clearInterval(iv);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mode, voiceState]);
+
+  /** The barge-in's merged answer: one commit_turn for everything buffered
+   *  while the reply was interrupted (segments the agent heard across the
+   *  whole barge window arrive as ONE prompt). */
+  async function commitBargeIn() {
+    const room = roomRef.current;
+    if (!room || modeRef.current !== 'free') return;
+    // a barge-in owns this commit: the deck must be paused BY the barge
+    // (a finger-pause has no bargeInAt and is never auto-committed)
+    if (!getBargeInAt() || getSpeech().phase !== 'paused') return;
+    diagEvent('voice', 'barge-in: end of speech — one merged commit');
+    stickRef.current = true;
+    setBusy(true); // cleared when the run settles (see poller)
+    armRunWatch();
+    try {
+      let agent = await agentInRoom(room, 4_000);
+      if (!agent) agent = await rearmAgent(room, 10_000);
+      if (!agent) {
+        diagEvent('voice-fail', 'barge-in: no voice agent in the room (+re-arm)');
+        setBusy(false);
+        freeMicGiveBack();
+        return;
+      }
+      await room.localParticipant.performRpc({
+        destinationIdentity: agent.identity,
+        method: 'commit_turn',
+        payload: '{}',
+        responseTimeout: 14_000,
+      });
+      await mic(false); // the speech is captured — stop feeding the agent
+      // nothing-heard guard: committed but nothing lands (all echo, or
+      // silence) — the mic goes back, the cycle ends. The barge state owns
+      // the timer (not freeCycle: a barge can ride a listening cycle).
+      const base = totalRef.current;
+      setTimeout(() => {
+        if (modeRef.current !== 'free' || !getBargeInAt()) return;
+        if (totalRef.current > base || liveRef.current || freeSpokeMsgRef.current) return;
+        diagEvent('voice', 'barge-in: nothing landed — mic back');
+        setBusy(false);
+        freeMicGiveBack();
+      }, 10_000);
+    } catch {
+      setBusy(false);
+      setError('voice session stale — reconnecting…');
+      if (roomRef.current === room) {
+        roomRef.current = null;
+        voicePromiseRef.current = null;
+        setVoiceState('off');
+        void room.disconnect();
+      }
+    }
+  }
+
+  // e2e seam (voice-test opt-in only — lib/voice-test.ts): the barge-in spec
+  // starts the deck directly; levels come through window.__ozLevels in the
+  // watcher. No production surface, no new deps.
+  useEffect(() => {
+    if (!voiceTestOn()) return;
+    (window as unknown as { __ozSpeak?: (t: string) => void }).__ozSpeak = (t: string) =>
+      startSpeech(t, slug);
+  }, [slug]);
 
   // run-completion + failure channel, subscribed for the WHOLE session in
   // every mode (not just hands-free): 'idle' late — after the dead-stream
@@ -2770,13 +2921,15 @@ export default function SessionView({
           <button onClick={stopSpeechAndWork} aria-label="stop" className="oz-k sm red x">
             <StopSquare size={10} />
           </button>
-          <div className="oz-synth">
+          {/* the bare "synthesizing…" label is gone (owner req 11-03, ux-calm:
+              each state said once) — the ticking dots + the deck's presence
+              carry the state; the word stays for screen readers only */}
+          <div className="oz-synth" role="status" aria-label="synthesizing">
             <div className="oz-tdots">
               <i />
               <i />
               <i />
             </div>
-            <div className="text-[11px] tracking-[0.12em] text-[var(--oz-dim)]">synthesizing…</div>
           </div>
         </div>
       )}
@@ -2991,9 +3144,11 @@ export default function SessionView({
           >
             {voiceState !== 'ready' ? (
               <span className="oz-breathe">connecting…</span>
-            ) : freeCycle !== 'listening' ? (
+            ) : freeCycle !== 'listening' && speech.phase !== 'playing' ? (
               <span>working — mic paused</span>
             ) : (
+              /* playback keeps the mic hot (barge-in): the bars live again —
+                 the deck itself says "speaking", the strip stays wordless */
               <span className="oz-bars">
                 {freeLevels.map((l, i) => (
                   <i key={i} style={{ height: `${Math.min(22, Math.max(3, Math.round(l * 22)))}px` }} />

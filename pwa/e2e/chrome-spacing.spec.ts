@@ -181,8 +181,10 @@ test('every voice state keeps the footer box', async ({ page, browserName }) => 
   await page.getByRole('button', { name: 'send', exact: true }).tap();
   await expect(page.getByRole('button', { name: 'listen' })).toBeVisible({ timeout: 90_000 });
   await page.getByRole('button', { name: 'listen' }).tap();
-  // the deck says synthesizing / speaking — the line stays empty (ux-calm: said once)
-  await expect(page.locator('.oz-deck')).toContainText('synthesizing', { timeout: 5_000 });
+  // the deck shows synthesis as dots (the bare label is gone, 11-03) — the
+  // word survives only as the deck's aria-label; the line stays empty
+  const synth = page.locator('.oz-deck .oz-synth[aria-label="synthesizing"]');
+  await expect(synth).toBeVisible({ timeout: 5_000 });
   keep('synthesizing', await record(page, 'voice', 'synthesizing'));
   await expect(page.locator('.oz-deck')).toContainText('speaking', { timeout: 15_000 });
   keep('speaking', await record(page, 'voice', 'speaking'));

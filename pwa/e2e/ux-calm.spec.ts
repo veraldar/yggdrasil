@@ -1,4 +1,5 @@
 import { type Page, expect, test } from '@playwright/test';
+import { diag } from './mainframe-c-lib';
 
 /** UX-CALM (10-27, the user's voice order):
  *   1 · "as long as you're working, I shouldn't be able to tap the listen
@@ -192,7 +193,12 @@ test('zero help text: the footer says state only — text, push-to-talk and hand
   await expect(page.locator('header [aria-label="working"]')).toBeVisible({ timeout: 15_000 });
   await expect(page.getByTestId('listen-chip')).toBeVisible({ timeout: 120_000 });
   await page.getByTestId('listen-chip').tap();
-  await expect(page.locator('.oz-deck')).toContainText('synthesizing', { timeout: 5_000 });
+  // synthesis is the deck's dots now — the bare label is gone (owner 11-03);
+  // the word remains only as the deck's aria-label for screen readers
+  await expect(page.locator('.oz-deck .oz-synth[aria-label="synthesizing"]')).toBeVisible({
+    timeout: 5_000,
+  });
+  await expect(page.locator('.oz-deck')).not.toContainText('synthesizing');
   await expect(page.locator('.oz-deck')).toContainText('speaking', { timeout: 15_000 });
   await shot(page, 'speaking');
   await page.getByRole('button', { name: 'stop speaking' }).tap();
@@ -246,4 +252,83 @@ test('zero help text: the footer says state only — text, push-to-talk and hand
   expect(seen.ptt.some((t) => /oz-phase: ◉ heard/.test(t)), 'ptt: heard').toBe(true);
   expect(seen.ptt.some((t) => /oz-phase: × delete/.test(t)), 'ptt: delete').toBe(true);
   expect(seen['hands-free'].some((t) => /oz-phase: .* hands-free/.test(t)), 'hands-free').toBe(true);
+});
+
+/** BARGE-IN (pwa-flow-fix 11-03, owner law): speech over a playing reply
+ *  pauses it; ~700 ms of quiet is the end-of-speech debounce; ONE merged
+ *  commit answers. The deck + levels come through the voice-test seams
+ *  (window.__ozSpeak / window.__ozLevels) — the mic track itself is Chrome's
+ *  fake device, so real audio can't carry the barge; the LEVELS the watcher
+ *  reads are the exact structure the mic FFT produces. */
+test('barge-in: speech during TTS pauses playback — one merged prompt answers', async ({
+  page,
+}) => {
+  test.setTimeout(240_000);
+  await stubTts(page);
+  await page.addInitScript(() => {
+    try {
+      localStorage.setItem('bifrost-voice-test', '1');
+    } catch {
+      /* private mode */
+    }
+  });
+  await page.goto(await newSession(page, `e2e-uxcalm-b-${Date.now().toString(36)}`));
+  const ta = page.getByPlaceholder('message…');
+  await expect(ta).toBeVisible();
+
+  // hands-free: the room is up (real lk-agent on the stage answers commit_turn)
+  await page.getByTestId('composer-mic').tap();
+  const free = page.getByTestId('free-phase');
+  await expect(free).toBeVisible({ timeout: 10_000 });
+  await expect(page.getByTestId('free-strip')).not.toContainText('connecting', {
+    timeout: 30_000,
+  });
+
+  // the reply is playing (the deck's own path), mic hot for barge-in
+  await page.evaluate(() =>
+    (window as unknown as { __ozSpeak?: (t: string) => void }).__ozSpeak?.(
+      'the reply the phone is speaking out loud right now'
+    )
+  );
+  const deck = page.locator('.oz-deck');
+  await expect(deck).toContainText('speaking', { timeout: 15_000 });
+
+  // sustained speech above threshold → playback pauses, barge-in marked
+  await page.evaluate(() => {
+    (window as unknown as { __ozLevels?: number[] }).__ozLevels = Array(9).fill(0.9);
+  });
+  await expect(deck).toContainText('paused', { timeout: 5_000 });
+  expect(await diag(page), 'barge-in marked').toContain('voice barge-in: speech over playback — deck paused');
+
+  // end of speech: ~700 ms quiet → exactly ONE merged commit (never one per
+  // segment, never dropped) — poll the diag ring for the single commit line
+  await page.evaluate(() => {
+    (window as unknown as { __ozLevels?: number[] }).__ozLevels = Array(9).fill(0);
+  });
+  await expect
+    .poll(
+      async () =>
+        (await diag(page)).filter((l: string) =>
+          l.includes('barge-in: end of speech — one merged commit')
+        ).length,
+      { timeout: 10_000 }
+    )
+    .toBe(1);
+  // the commit resolves exactly once: with an agent in the room the empty
+  // buffer self-heals ("nothing landed"); on an agentless stage room the
+  // agent hunt says so — either way the mic comes back, nothing hangs
+  await expect
+    .poll(async () => (await diag(page)).join('\n'), { timeout: 30_000 })
+    .toMatch(/barge-in: (nothing landed|no voice agent)/);
+
+  // the room survives the barge (mic back, exit works, deck stops clean)
+  await page.evaluate(() => {
+    delete (window as unknown as { __ozLevels?: number[] }).__ozLevels;
+  });
+  await page.getByRole('button', { name: 'resume speech' }).tap();
+  await page.getByRole('button', { name: 'stop speaking' }).tap();
+  await expect(deck).toHaveCount(0, { timeout: 5_000 });
+  await page.waitForTimeout(600); // past the ghost guard
+  await page.getByTestId('free-exit').tap();
+  await expect(ta).toBeVisible();
 });

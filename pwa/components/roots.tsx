@@ -349,7 +349,7 @@ export function Roots({
               : phase === 'talk'
                 ? 'heard · talk · let go to send'
                 : phase === 'listening'
-                  ? 'listening · say “over” to send · ■ ends it'
+                  ? 'listening' // state only — the say-over teaching is gone (owner req 11-03)
                   : phase === 'working'
                     ? 'sent · awaiting answer…'
                     : phase === 'speaking'

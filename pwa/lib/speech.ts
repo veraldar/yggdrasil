@@ -22,6 +22,62 @@ export type SpeechState = {
   rate: number;
 };
 
+/** ECHO LEDGER (pwa-flow-fix, 11-03): the phone's own voice, on record.
+ *  While the deck speaks (hands-free) the mic is hot for barge-in, so the
+ *  agent hears OUR reply too — a transcribed segment that matches the
+ *  spoken text is the phone hearing itself, never the user. startSpeech
+ *  records what goes out; isEchoTranscript() answers the match question. */
+let spokenText = '';
+let spokenAt = 0; // epoch ms the stream STARTED
+let bargeInAt = 0; // epoch ms playback was paused by barge-in (0 = none)
+const ECHO_WINDOW_MS = 20_000; // STT of a long reply can land well after it ended
+
+/** The text currently/recently spoken and when its stream started. */
+export function lastSpoken(): { text: string; at: number } {
+  return { text: spokenText, at: spokenAt };
+}
+
+function echoNorm(s: string): string[] {
+  return s
+    .toLowerCase()
+    .replace(/(over and out|over)\s*$/g, ' ') // the commit keyword rides any buffer
+    .replace(/[^a-zà-öø-ÿœ0-9\s]/gi, ' ')
+    .split(/\s+/)
+    .filter(Boolean);
+}
+
+/** True when `s` looks like a transcription of what the phone itself said:
+ *  token overlap ≥ 0.6 (either direction) against the spoken text, inside
+ *  the echo window. STT is noisy — containment/overlap, never equality. */
+export function isEchoTranscript(s: string): boolean {
+  if (!spokenText || !s) return false;
+  const now = Date.now();
+  if (spokenAt && now - spokenAt > ECHO_WINDOW_MS) return false;
+  const a = echoNorm(s);
+  const b = echoNorm(spokenText);
+  if (!a.length || !b.length) return false;
+  const setB = new Set(b);
+  const hits = a.filter((t) => setB.has(t)).length;
+  const ratio = Math.max(hits / a.length, a.length >= 3 ? hits / b.length : 0);
+  return ratio >= 0.6;
+}
+
+/** BARGE-IN (owner law, 11-03): sustained mic speech while TTS plays pauses
+ *  playback. pauseSpeech() is the user's finger; this is the room's. */
+export function pauseForBargeIn(): void {
+  if (state.phase !== 'playing') return;
+  bargeInAt = Date.now();
+  userPaused = true;
+  els?.[activeEl].pause();
+  setPhase('paused');
+  diagEvent('voice', 'barge-in: speech over playback — deck paused');
+}
+
+/** When (epoch ms) barge-in last paused playback; 0 = no barge-in pending. */
+export function getBargeInAt(): number {
+  return bargeInAt;
+}
+
 const SAMPLE_RATE = 24000;
 const PIECE_SEC = 10; // wav blob length for the playlist
 const SEC_PER_CHAR = 0.075;
@@ -377,6 +433,9 @@ export function startSpeech(text: string, slug = ''): void {
   if (!clean) return;
   stopSpeech();
   curSlug = slug;
+  spokenText = clean; // the echo ledger: what is about to go out loud
+  spokenAt = Date.now();
+  bargeInAt = 0;
   msgLang = detectLang(clean.slice(0, 600)); // ONE language per message
   userPaused = false;
   ensureEls();
@@ -496,6 +555,7 @@ export function stopSpeech(): void {
   pendingSkip = null;
   userPaused = false;
   startedAt = 0;
+  bargeInAt = 0; // a stopped/killed deck ends any pending barge-in
   if (tickTimer) {
     clearInterval(tickTimer);
     tickTimer = null;
