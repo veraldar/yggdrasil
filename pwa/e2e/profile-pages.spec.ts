@@ -115,14 +115,54 @@ test('session settings: a profile-pinned session shows a read-only profile card 
   }
 });
 
-test('session settings: MAIN lands without a profile card lying — no card branch, link present', async ({
+test('session settings: MAIN (no pinned profile) shows the EFFECTIVE default profile', async ({
   page,
 }) => {
-  await page.goto('/session/MAIN/settings');
+  const def = profiles.find((p) => p.isDefault);
+  expect(def, 'the registry must name a default profile').toBeTruthy();
+  // the app's MAIN slug is lowercase ('main' — tree-first.ts MAIN_SLUG);
+  // uppercase never resolves (slugify compares lowercased)
+  await page.goto('/session/main/settings');
   await expect(page.getByTestId('profile-card')).toBeVisible();
-  // MAIN runs the brain's own agent; no registry pin → the honest empty state
-  await expect(page.getByTestId('profile-card-name')).toHaveCount(0);
-  await expect(page.getByTestId('profile-card')).toContainText('no profile pinned');
+  // MAIN's record predates the profile field — no pin — yet it IS enforced
+  // as coordinator (default): the card must show the EFFECTIVE profile,
+  // name + (default) marker + its tools, never an empty state
+  await expect(page.getByTestId('profile-card-name')).toHaveText(`${def!.id} (default)`);
+  await expect(page.getByTestId('profile-card-default')).toContainText('(default)');
+  await expect(page.getByTestId('profile-card-tool')).toHaveCount(def!.tools.length);
+  await expect(page.getByTestId('profile-card')).toContainText(
+    'pinned at birth by the brain — sessions may also run brain-routed with the default profile'
+  );
   // the bridge to the browsed pages is there
   await expect(page.getByRole('link', { name: /browse all profiles/ })).toBeVisible();
+  // read-only: no inputs inside the card
+  await expect(page.getByTestId('profile-card').locator('input, textarea')).toHaveCount(0);
+});
+
+test('session settings: an unpinned session shows the effective default profile too', async ({
+  page,
+}) => {
+  const def = profiles.find((p) => p.isDefault);
+  expect(def, 'the registry must name a default profile').toBeTruthy();
+  const name = `e2e-prof-def-${Date.now().toString(36)}`;
+  const r = await page.request.post('/api/session', { data: { name } });
+  const { id } = (await r.json()) as { id: string };
+  expect(id).toBeTruthy();
+  try {
+    await page.goto(`/session/${name}?id=${id}`);
+    await page.getByRole('link', { name: 'session settings' }).click();
+    await expect(page).toHaveURL(new RegExp(`/session/${name}/settings`));
+    await expect(page.getByTestId('profile-card')).toBeVisible();
+    await expect(page.getByTestId('profile-card-name')).toHaveText(`${def!.id} (default)`);
+    await expect(page.getByTestId('profile-card-tool')).toHaveCount(def!.tools.length);
+    for (const t of def!.tools) {
+      await expect(page.getByTestId('profile-card-tool').filter({ hasText: t === '*' ? '* all tools' : t }).first()).toBeVisible();
+    }
+    await expect(page.getByTestId('profile-card')).toContainText(
+      'pinned at birth by the brain'
+    );
+    await expect(page.getByTestId('profile-card').locator('input, textarea')).toHaveCount(0);
+  } finally {
+    await page.request.delete(`/api/session/${id}`);
+  }
 });

@@ -77,13 +77,17 @@ export default function SessionSettingsView() {
   // null = not landed yet (loading, or failed — loadErr says which)
   const [providers, setProviders] = useState<ProviderRow[] | null>(null);
   const [agents, setAgents] = useState<string[] | null>(null);
-  // the session's own profile, read-only ({name, tools[]} — profile.ts)
+  // the session's EFFECTIVE profile, read-only ({name, tools[]} — profile.ts):
+  // the pinned one, else the registry's default (a record with no pin — MAIN,
+  // anything from before the profile field — still runs the default). viaDefault
+  // says which law chose it — the (default) marker on the card
   const [profile, setProfile] = useState<{
     name: string;
     description: string;
     tools: string[];
     isDefault: boolean;
   } | null>(null);
+  const [viaDefault, setViaDefault] = useState(false);
   const [loadErr, setLoadErr] = useState<Partial<Record<Res, string>>>({});
   const [pickOpen, setPickOpen] = useState(false);
   const [filter, setFilter] = useState('');
@@ -128,14 +132,24 @@ export default function SessionSettingsView() {
     if ('data' in ar) setAgents(ar.data.map((a: { name: string }) => a.name));
     if ('data' in pr) {
       const sessionAgent = 'data' in sr ? ((sr.data?.agent as string) || '') : '';
-      const hit = (pr.data as Profile[]).find((p) => p.id === sessionAgent);
+      const all = pr.data as Profile[];
+      const hit = all.find((p) => p.id === sessionAgent);
+      // effective law: a record with NO pinned agent (MAIN — enforced
+      // coordinator by default, and every record born before the profile
+      // field) runs the registry default — the card shows THAT, never an
+      // empty state. A pin the registry doesn't know keeps its honest note.
+      // Unknown session record (fetch failed) claims nothing either.
+      const unpinned = 'data' in sr && !sessionAgent;
+      const fallback = unpinned ? all.find((p) => p.isDefault) || null : null;
+      setViaDefault(!!fallback);
+      const shown = hit || fallback;
       setProfile(
-        hit
+        shown
           ? {
-              name: hit.id,
-              description: hit.description,
-              tools: hit.tools,
-              isDefault: hit.isDefault,
+              name: shown.id,
+              description: shown.description,
+              tools: shown.tools,
+              isDefault: shown.isDefault,
             }
           : null
       );
@@ -508,9 +522,11 @@ export default function SessionSettingsView() {
         {refused?.block === 'agent' && <Refusal msg={refused.msg} />}
       </section>
 
-      {/* PROFILE — the session's own profile card, read-only: what this
-          session's agent may do, exactly as the registry grants it. The
-          profiles are the brain's to define (AI-owned); the app shows them. */}
+      {/* PROFILE — the session's EFFECTIVE profile card, read-only: what
+          this session's agent may do, exactly as the registry grants it —
+          the pinned profile, or the registry default when nothing is pinned
+          (no pin never meant no profile). The profiles are the brain's to
+          define (AI-owned); the app shows them. */}
       <section className="oz-blk" data-testid="profile-card">
         <h2>profile</h2>
         {profile ? (
@@ -518,7 +534,10 @@ export default function SessionSettingsView() {
             <ul className="oz-kv">
               <li>
                 <span>name</span>
-                <span data-testid="profile-card-name">{profile.name}</span>
+                <span data-testid="profile-card-name">
+                  {profile.name}
+                  {viaDefault && <span data-testid="profile-card-default"> (default)</span>}
+                </span>
                 <span />
               </li>
             </ul>
@@ -530,6 +549,12 @@ export default function SessionSettingsView() {
               ))}
             </div>
             {profile.description && <p className="note">{profile.description}</p>}
+            {viaDefault && (
+              <p className="note">
+                pinned at birth by the brain — sessions may also run brain-routed with the
+                default profile
+              </p>
+            )}
           </>
         ) : (
           <p className="note pt-3!">
