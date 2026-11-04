@@ -83,6 +83,11 @@ export default function ProfilesListPage() {
                 <span className="flex-none">
                   {p.tools.includes('*') ? 'all tools ›' : `${p.tools.length} tools ›`}
                 </span>
+                {p.description && (
+                  <small data-testid="profile-desc" className="block truncate text-[11px] text-[var(--oz-dim)]">
+                    {p.description}
+                  </small>
+                )}
               </Link>
             </li>
           ))}
