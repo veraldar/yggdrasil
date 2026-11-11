@@ -14,7 +14,8 @@
 //!                          `high` (default) | `low` | `off`. Anthropic dialect only: `high` adds
 //!                          `thinking:{type:enabled,budget_tokens:YGG_THINK_HIGH}` to the body, low/off
 //!                          omit it. Resolved once at session create (cache law: constant for the
-//!                          session's life; a model switch keeps it; unstamped legacy sessions = off)
+//!                          session's life; a model switch keeps it; unstamped legacy sessions follow
+//!                          this default, so `off` here is the one-line rollback for them too)
 //!   YGG_THINK_HIGH         thinking budget_tokens for `high` (default 8192; must be < YGG_MAX_TOKENS)
 //!   YGG_UPSTREAM_MODEL     model name (default: gpt-4o-mini)
 //!   YGG_LISTEN             bind address (default: 127.0.0.1:4096)
@@ -373,6 +374,11 @@ fn is_auto_turn(history: &[Value]) -> bool {
         .find(|m| m["info"]["role"] == "user" && !is_compaction(m))
         .is_some_and(|m| m["info"]["meta"]["auto"] == true)
 }
+
+/// Coordinator law (owner 11-11): the `[MAIN]` session answers from its own context and
+/// delegates everything else as ONE detached agi-run lane. MAIN-only system note after the
+/// preamble/voice note. Editing this constant resets [MAIN]'s provider cache once.
+const COORDINATOR_NOTE: &str = "You are the coordinator. If the answer is already in this conversation, answer it directly. Anything else (reading code or files, research, building, editing, testing) you do not do yourself: delegate it in ONE bash call, exactly `cd /home/dweeb_xyz/Work/bifrost && AGI_DETACH=1 bash scripts/agi-run.sh -s <short-name> -m sonnet -a /home/dweeb_xyz/Work/bifrost/.agi-log/artifacts/<short-name>.md -b <minutes> '<self-contained brief>'` (no ; | & $ ` > inside the brief), then reply in one line naming the lane. Never write or edit files yourself.";
 
 const VOICE_PROMPT: &str = "You are answering by voice. Answer in at most two short sentences. One thought per reply. No markdown, no emoji, no lists, no parentheses, no offers of more help. Plain words only.";
 
@@ -818,6 +824,7 @@ async fn post_message(
         }
         s.messages.push(user_msg.clone());
         collapse_stale_station(&mut s.messages);
+        collapse_stale_owner(&mut s.messages);
     });
     if stored.is_none() {
         return not_found(&id);
@@ -902,7 +909,7 @@ fn upstream_history(messages: &[Value]) -> Vec<Value> {
                 continue;
             }
         }
-        if role == "assistant" && skip_reply && m["info"]["meta"]["autoReply"] == true {
+        if role == "assistant" && skip_reply && (m["info"]["meta"]["autoReply"] == true || m["info"]["meta"]["folded"] == true) {
             continue;
         }
         if role != "assistant" {
@@ -958,6 +965,8 @@ fn upstream_history(messages: &[Value]) -> Vec<Value> {
 
 /// Station turns (auto user message + its autoReply) kept verbatim in the upstream view.
 const STATION_KEEP: usize = 3;
+/// Owner exchanges (owner user message + its reply, tool steps included) kept verbatim.
+const OWNER_KEEP: usize = 3;
 
 fn first_line(s: &str, max: usize) -> String {
     let l = s.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or_default();
@@ -995,6 +1004,39 @@ fn collapse_stale_station(messages: &mut [Value]) {
             None => format!("[station turn] {}", first_line(&message_text(&messages[i]), 160)),
         };
         messages[i]["info"]["meta"]["digest"] = json!(line);
+    }
+}
+
+/// p95-fold-r1 (cache law): same mechanism for owner/coordinator exchanges older than the last
+/// `OWNER_KEEP`. The user message gets a frozen `info.meta.digest` line and its reply is marked
+/// `info.meta.folded` (skipped by `upstream_history`; the stored transcript stays whole). Runs at
+/// store time only; a fold is written once and never reversed, so each aging exchange costs one
+/// cache miss, then the prefix is stable again.
+fn collapse_stale_owner(messages: &mut [Value]) {
+    let owners: Vec<usize> = (0..messages.len())
+        .filter(|&i| {
+            messages[i]["info"]["role"] == "user"
+                && messages[i]["info"]["meta"]["auto"] != true
+                && !is_compaction(&messages[i])
+        })
+        .collect();
+    if owners.len() <= OWNER_KEEP {
+        return;
+    }
+    for &i in &owners[..owners.len() - OWNER_KEEP] {
+        if messages[i]["info"]["meta"]["digest"].is_string() {
+            continue;
+        }
+        let Some(r) = messages.get(i + 1).filter(|m| {
+            m["info"]["role"] == "assistant"
+                && m["info"]["meta"]["autoReply"] != true
+                && m["info"]["time"]["completed"].is_number()
+        }) else {
+            continue;
+        };
+        let line = format!("[earlier turn] {} => {}", first_line(&message_text(&messages[i]), 160), first_line(&message_text(r), 160));
+        messages[i]["info"]["meta"]["digest"] = json!(line);
+        messages[i + 1]["info"]["meta"]["folded"] = json!(true);
     }
 }
 
@@ -1046,6 +1088,8 @@ struct Run {
     /// LAT session=<id> queue_ms=<enqueue→run slot> (coordinator ≤5s law)
     session: String,
     queue_ms: u64,
+    /// LAT think=<budget_tokens sent upstream, 0 = no thinking param> (wire proof)
+    think: u64,
 }
 
 impl Run {
@@ -1110,9 +1154,9 @@ impl Run {
             .map(|p| p.iter().filter(|x| x["type"] == "tool").count())
             .unwrap_or(0);
         eprintln!(
-            "LAT phase={} total_ms={} ttfb_ms={} steps={} tool_steps={} msg_parts={} calls={} retries={} first_token={} voice_note={} reasoning_chars={} session={} queue_ms={}",
+            "LAT phase={} total_ms={} ttfb_ms={} steps={} tool_steps={} msg_parts={} calls={} retries={} first_token={} voice_note={} reasoning_chars={} session={} queue_ms={} think={}",
             phase, total, ttfb, steps, tool_steps, steps, self.upstream_calls, self.retries, self.first_token_seen,
-            self.voice_note as u8, self.reasoning_chars, self.session, self.queue_ms
+            self.voice_note as u8, self.reasoning_chars, self.session, self.queue_ms, self.think
         );
         self.msg["info"]["time"]["latency"] = json!({
             "total_ms": total,
@@ -1162,6 +1206,7 @@ async fn run_turn(st: &AppState, id: &str, tx: &mpsc::Sender<Event>, queue_ms: u
         reasoning_chars: 0,
         session: id.to_string(),
         queue_ms,
+        think: 0,
     };
     let outcome = {
         let fut = agent_loop(st, id, history, tx, &mut run);
@@ -1235,7 +1280,11 @@ async fn agent_loop(
     if st.config.voice {
         convo.insert(1, json!({ "role": "system", "content": VOICE_PROMPT }));
     }
-    let max = step_cap(st.config.max_steps, st.config.main_max_steps, session_is_main(st, id));
+    let main = session_is_main(st, id);
+    if main {
+        convo.insert(if st.config.voice { 2 } else { 1 }, json!({ "role": "system", "content": COORDINATOR_NOTE }));
+    }
+    let max = step_cap(st.config.max_steps, st.config.main_max_steps, main);
     for _ in 0..max {
         if st.config.rollup_tokens > 0 {
             let n = rollup::prune(&mut convo, st.config.rollup_tokens);
@@ -1636,9 +1685,10 @@ async fn relay_anthropic(
     let first_delta_ms = &mut run.first_delta_ms;
     let full = &mut run.text;
     let tools = cfg.tools_enabled.then(tools::schemas);
-    // thinking comes from the session's create-time stamp only (unstamped legacy session = none)
+    // thinking: the session's create-time stamp; an unstamped legacy session follows YGG_DEFAULT_VARIANT
     let variant = st.sessions.lock().unwrap().get(session_id).and_then(|s| s.info["model"]["variant"].as_str().map(String::from));
-    let thinking = anthropic::thinking_for(variant.as_deref(), cfg.think_high);
+    let thinking = anthropic::thinking_for(Some(variant.as_deref().unwrap_or(&cfg.default_variant)), cfg.think_high);
+    run.think = thinking.as_ref().and_then(|t| t["budget_tokens"].as_u64()).unwrap_or(0);
     let req = anthropic_request(st, convo, tools.as_ref(), true, thinking.as_ref());
     let t_req = std::time::Instant::now();
     let resp = send_with_retry(&req, &mut run.retries).await?;
@@ -2094,6 +2144,7 @@ mod speed_law_tests {
             reasoning_chars: 0,
             session: "ses_t".into(),
             queue_ms: 42,
+            think: 0,
         }
     }
 
@@ -2203,6 +2254,86 @@ mod law_tests {
         let snap = upstream_history(&msgs);
         collapse_stale_station(&mut msgs);
         assert_eq!(snap, upstream_history(&msgs));
+    }
+
+    fn fold_all(m: &mut [Value]) {
+        collapse_stale_station(m);
+        collapse_stale_owner(m);
+    }
+
+    #[test]
+    fn owner_turns_fold_beyond_last_three_and_last_three_stay_verbatim() {
+        let mut msgs: Vec<Value> = vec![];
+        for n in 0..6 {
+            msgs.extend(pair(n, false));
+        }
+        fold_all(&mut msgs);
+        let h = upstream_history(&msgs);
+        // 3 folded single lines + 3 verbatim pairs
+        assert_eq!(h.len(), 3 + 6);
+        // digest shape: tag, first line of the ask, arrow, first line of the reply
+        assert_eq!(h[0]["content"], json!("[earlier turn] landing 0 => verdict 0"));
+        assert_eq!(h[2]["content"], json!("[earlier turn] landing 2 => verdict 2"));
+        assert_eq!(h[3]["content"], json!("landing 3\nsecond line"));
+        assert_eq!(h[4]["content"], json!("verdict 3"));
+        assert_eq!(h[8]["content"], json!("verdict 5"));
+        // stored transcript (UI) untouched
+        assert_eq!(msgs.len(), 12);
+        assert_eq!(message_text(&msgs[1]), "verdict 0");
+    }
+
+    #[test]
+    fn owner_fold_is_frozen_and_prefix_stable_until_a_turn_ages_in() {
+        let mut msgs: Vec<Value> = vec![];
+        for n in 0..4 {
+            msgs.extend(pair(n, false));
+        }
+        fold_all(&mut msgs);
+        let h = upstream_history(&msgs);
+        assert_eq!(h[0]["content"], json!("[earlier turn] landing 0 => verdict 0"));
+        // idempotent: re-running never changes a byte
+        let snap = h.clone();
+        fold_all(&mut msgs);
+        assert_eq!(snap, upstream_history(&msgs));
+        // next turn ages exactly one more exchange; the earlier prefix is unchanged
+        msgs.extend(pair(4, false));
+        fold_all(&mut msgs);
+        let h2 = upstream_history(&msgs);
+        assert_eq!(h2[0], snap[0]);
+        assert_eq!(h2[1]["content"], json!("[earlier turn] landing 1 => verdict 1"));
+        assert_eq!(h2.len(), 2 + 6);
+    }
+
+    #[test]
+    fn mixed_auto_and_owner_fold_independently() {
+        let mut msgs: Vec<Value> = vec![];
+        for n in 0..5 {
+            msgs.extend(pair(n, false)); // owner 0..4
+            msgs.extend(pair(10 + n, true)); // station 10..14
+        }
+        fold_all(&mut msgs);
+        let h = upstream_history(&msgs);
+        let lines: Vec<&str> = h.iter().filter_map(|m| m["content"].as_str()).collect();
+        assert!(lines.contains(&"[earlier turn] landing 0 => verdict 0"));
+        assert!(lines.contains(&"[earlier turn] landing 1 => verdict 1"));
+        assert!(lines.contains(&"[station turn] landing 10 => verdict 10"));
+        assert!(lines.contains(&"[station turn] landing 11 => verdict 11"));
+        // last 3 of each class stay whole
+        for n in [2, 3, 4, 12, 13, 14] {
+            assert!(lines.contains(&format!("landing {n}\nsecond line").as_str()), "landing {n}");
+            assert!(lines.contains(&format!("verdict {n}").as_str()), "verdict {n}");
+        }
+        assert!(!lines.iter().any(|l| *l == "verdict 0" || *l == "verdict 10"));
+    }
+
+    #[test]
+    fn unanswered_owner_turn_is_not_folded() {
+        let mut msgs: Vec<Value> = vec![];
+        for _ in 0..5 {
+            msgs.push(make_message("s", "user", vec![text_part("queued")]));
+        }
+        fold_all(&mut msgs);
+        assert!(msgs.iter().all(|m| m["info"]["meta"]["digest"].is_null()));
     }
 
     #[test]
@@ -2322,6 +2453,7 @@ mod voice_turn_tests {
             reasoning_chars: 0,
             session: "s".into(),
             queue_ms: 0,
+            think: 0,
         };
         run.lat_log("ok"); // the eprintln row ends voice_note=1; must not panic
     }
