@@ -34,7 +34,7 @@ fi
 systemctl --user stop "$UNIT" 2>/dev/null || true
 systemctl --user reset-failed "$UNIT" 2>/dev/null || true
 systemd-run --user --unit="$UNIT" --collect -q \
-  -p ProtectHome=tmpfs -p "BindPaths=$ROOT" -p "BindReadOnlyPaths=$HOME/.cache/root-sim/_venv" "${HARNESS_PROPS[@]}" \
+  -p ProtectHome=tmpfs -p "BindPaths=$ROOT" -p "BindReadOnlyPaths=$HOME/.cache/root-sim/_venv${SIM_PROFILES:+ $SIM_PROFILES}" "${HARNESS_PROPS[@]}" \
   --setenv=XDG_DATA_HOME="$ROOT/xdg" \
   -p StandardOutput="append:$ROOT/brain.log" -p StandardError="append:$ROOT/brain.log" \
   --setenv=YGG_UPSTREAM_BASE_URL="$YGG_UPSTREAM_BASE_URL" --setenv=YGG_UPSTREAM_API_KEY="$YGG_UPSTREAM_API_KEY" \
