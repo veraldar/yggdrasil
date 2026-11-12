@@ -51,7 +51,7 @@ table{{border-collapse:collapse;width:100%;font-size:13px}} td,th{{border-bottom
 </style></head><body><main>
 <h1>One door, a tree of sessions, several roots</h1>
 <p class=mut>root-coord · built and tested 11-12 night · branch <code>root-coord</code> (brain) + <code>root-coord-pwa</code> (phone)</p>
-<p><span class=big>{passed}/{len(TITLES)}</span> human simulations pass on the final brain · <b>25/25</b> deterministic tree checks · <b>56</b> unit tests · MAIN median reply {statistics.median(lats) if lats else '-'} s</p>
+<p><span class=big>{passed}/{len(TITLES)}</span> human simulations pass on the final brain with the live profile config · <b>25/25</b> deterministic tree checks · <b>56</b> unit tests · the phone flow passes end to end on real models · MAIN median reply {statistics.median(lats) if lats else '-'} s</p>
 
 <h2>What you get</h2>
 <ul>
@@ -67,6 +67,15 @@ table{{border-collapse:collapse;width:100%;font-size:13px}} td,th{{border-bottom
 <table><tr><th>scenario</th><th></th><th>checks</th><th>judge o·d·r·p·h</th><th>MAIN p50 · tree · time</th></tr>{''.join(rows)}</table>
 <p class=mut>Checks run on the files the sessions actually built (pytest in the workspace, grep for your answers, tree shape, nothing internal in MAIN). Tap a scenario for its transcript.</p>
 
+<h2>Also proven tonight</h2>
+<ul>
+<li><b>The phone, end to end</b> (real coordinator, real model): type to MAIN → the <code>→ session</code> tag is a link → MAIN comes back by itself with the verified result → the child opens with its card line → the home tree shows it. <a href='/api/artifact/root-coord-ui-home.png'>home</a> · <a href='/api/artifact/root-coord-ui-child.png'>child</a> · <a href='/api/artifact/root-coord-ui-main-reported.png'>MAIN</a></li>
+<li><b>Across hardware</b>: a root on the Infomaniak VPS (mock model, no key copied) took a session from MAIN at home over an SSH line; its report flowed home and MAIN relayed it. Transport-agnostic: the bifrost-net trunk can carry the same HTTP later.</li>
+<li><b>Harness sessions</b>: Claude Code and opencode each built, resumed their own session on the follow-up, and reported up the tree. Codex is wired, waiting for <code>codex login</code>.</li>
+<li><b>Lite tier</b>: glm-4.5-air marked lite did a task with the lean tool set and short prompt.</li>
+<li><b>Your real data</b>: the new brain loaded a copy of all 569 sessions in 0.65 s, migrated MAIN to the coordinator, <code>/tree</code> in 27 ms.</li>
+</ul>
+
 <h2>Bugs the simulation caught (all fixed)</h2>
 <ul>
 <li>A finished build filed as "routine" → MAIN never told you. Outcomes are never routine now.</li>
@@ -76,6 +85,7 @@ table{{border-collapse:collapse;width:100%;font-size:13px}} td,th{{border-bottom
 <li>MAIN split a project into three sessions itself instead of one lead. One project = one lead.</li>
 <li>MAIN started a second session just to double-check one. It asks the owning session now.</li>
 <li>The tree said "working" for seconds after a run ended. Live status now.</li>
+<li>Inline code in replies was unreadable in dark themes (white chip, light text). Fixed in the app.</li>
 </ul>
 
 <h2>Waiting for you (the auto-mode guard stopped these — your call)</h2>
