@@ -239,6 +239,19 @@ fn in_scope(st: &AppState, sessions: &HashMap<String, Session>, caller: &str, ta
     descendants(sessions, caller).iter().any(|d| d == target)
 }
 
+/// The session a tool call names (`id` = id or exact title) — if the caller may act on it.
+fn target_of(st: &AppState, caller: &str, input: &Value) -> Result<String, Out> {
+    let sessions = st.sessions.lock().unwrap();
+    let t = resolve(&sessions, input["id"].as_str().unwrap_or_default()).ok_or_else(|| err("no such session — use sessions_find".into()))?;
+    if t == caller {
+        return Err(err("that is you".into()));
+    }
+    if !in_scope(st, &sessions, caller, &t) {
+        return Err(err("not in your subtree".into()));
+    }
+    Ok(t)
+}
+
 pub async fn run(st: &AppState, caller: &str, name: &str, input: &Value) -> Out {
     if let Some(o) = run_remote(st, caller, name, input).await {
         return o;
@@ -274,8 +287,8 @@ async fn run_remote(st: &AppState, caller: &str, name: &str, input: &Value) -> O
     }
     let target = resolve(&st.sessions.lock().unwrap(), input["id"].as_str().unwrap_or_default())?;
     let (root, rid) = crate::peers::remote_of(st, &target)?;
-    if !in_scope(st, &st.sessions.lock().unwrap(), caller, &target) {
-        return Some(err("not in your subtree".into()));
+    if let Err(o) = target_of(st, caller, input) {
+        return Some(o);
     }
     Some(match name {
         "session_send" => {
@@ -411,20 +424,12 @@ fn start(st: &AppState, caller: &str, input: &Value) -> Out {
 
 fn send(st: &AppState, caller: &str, input: &Value) -> Out {
     let Some(message) = input["message"].as_str().filter(|m| !m.trim().is_empty()) else { return err("message required".into()) };
-    let (target, title, busy) = {
-        let sessions = st.sessions.lock().unwrap();
-        let Some(t) = resolve(&sessions, input["id"].as_str().unwrap_or_default()) else {
-            return err("no such session — use sessions_find".into());
-        };
-        if t == caller {
-            return err("that is you".into());
-        }
-        if !in_scope(st, &sessions, caller, &t) {
-            return err("not in your subtree".into());
-        }
-        let busy = st.running.lock().unwrap().contains_key(&t);
-        (t.clone(), title_of(&sessions[&t]), busy)
+    let target = match target_of(st, caller, input) {
+        Ok(t) => t,
+        Err(o) => return o,
     };
+    let title = st.sessions.lock().unwrap().get(&target).map(title_of).unwrap_or_default();
+    let busy = st.running.lock().unwrap().contains_key(&target);
     with_session(st, &target, |s| {
         if is_archived(s) {
             s.info["archived"] = json!(false);
@@ -443,14 +448,12 @@ fn send(st: &AppState, caller: &str, input: &Value) -> Out {
 }
 
 fn read(st: &AppState, caller: &str, input: &Value) -> Out {
-    let sessions = st.sessions.lock().unwrap();
-    let Some(t) = resolve(&sessions, input["id"].as_str().unwrap_or_default()) else {
-        return err("no such session — use sessions_find".into());
+    let t = match target_of(st, caller, input) {
+        Ok(t) => t,
+        Err(o) => return o,
     };
-    if !in_scope(st, &sessions, caller, &t) {
-        return err("not in your subtree".into());
-    }
-    let s = &sessions[&t];
+    let sessions = st.sessions.lock().unwrap();
+    let Some(s) = sessions.get(&t) else { return err("gone".into()) };
     let busy = st.running.lock().unwrap().contains_key(&t);
     let card = &s.info["card"];
     let last_user = s.messages.iter().rev().find(|m| m["info"]["role"] == "user").map(message_text).unwrap_or_default();
@@ -489,22 +492,14 @@ fn read(st: &AppState, caller: &str, input: &Value) -> Out {
 }
 
 fn close(st: &AppState, caller: &str, input: &Value) -> Out {
-    let (target, family, title) = {
-        let sessions = st.sessions.lock().unwrap();
-        let Some(t) = resolve(&sessions, input["id"].as_str().unwrap_or_default()) else {
-            return err("no such session — use sessions_find".into());
-        };
-        if t == caller || crate::is_main_title(&title_of(&sessions[&t])) {
-            return err("cannot close yourself or the coordinator".into());
-        }
-        if !in_scope(st, &sessions, caller, &t) {
-            return err("not in your subtree".into());
-        }
-        let mut fam = descendants(&sessions, &t);
-        fam.insert(0, t.clone());
-        (t.clone(), fam, title_of(&sessions[&t]))
+    let target = match target_of(st, caller, input) {
+        Ok(t) => t,
+        Err(o) => return o,
     };
-    let _ = family;
+    let title = st.sessions.lock().unwrap().get(&target).map(title_of).unwrap_or_default();
+    if crate::is_main_title(&title) {
+        return err("cannot close the coordinator".into());
+    }
     let n = archive_family(st, &target, input["reason"].as_str().unwrap_or("closed")).unwrap_or(1);
     ok(format!("closed \"{title}\"{}", if n > 1 { format!(" and {} sub-session(s)", n - 1) } else { String::new() }))
 }

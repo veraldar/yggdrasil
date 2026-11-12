@@ -82,11 +82,29 @@ def plan(body):
         head = next((l for l in tr.splitlines() if l.startswith("USER: ")), "")
         return {"kind": "summary", "text": f"MOCK-SUMMARY: {head} | {len(tr)} chars"}
     users = [i for i, m in enumerate(msgs) if m["role"] == "user"]
+    # root-coord: scripted prompts (tool:/reply with exactly:) still work behind the brain's
+    # framing — the clock header line(s) before, the [roots]/[tree] view after
+    scripted = False
+    if users:
+        core = str(msgs[users[-1]]["content"])
+        lines = core.split("\n")
+        while lines and lines[0].startswith("[clock"):
+            lines.pop(0)
+        if lines and lines[0].startswith("[inbox since"):  # frozen report lines ride first
+            lines.pop(0)
+            while lines and lines[0].startswith("- "):
+                lines.pop(0)
+        core = "\n".join(lines)
+        for marker in ("\n\n[roots]", "\n\n[tree]"):
+            core = core.split(marker)[0]
+        if core.startswith("tool:") or re.search(r"reply with exactly:", core, re.I):
+            msgs[users[-1]] = dict(msgs[users[-1]], content=core)
+            scripted = True
     # TIME-AWARENESS sim, cache-law edition: the header rides INSIDE the
     # LAST user turn (users[-1]; static system preamble sits at position 0). Same gap
     # logic as before: >4h → acknowledge + refresh; ≤60m → no preamble.
     hdr = None
-    if users and str(msgs[users[-1]]["content"]).startswith("[clock "):
+    if users and not scripted and str(msgs[users[-1]]["content"]).startswith("[clock "):
         hdr = str(msgs[users[-1]]["content"])  # CURRENT turn's header (last user slice)
     if hdr:
         m = re.search(r"\[gap since last user turn ([^]]+)\]", hdr)
