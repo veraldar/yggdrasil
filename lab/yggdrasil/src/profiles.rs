@@ -83,7 +83,11 @@ yourself instead of bothering the user. If nothing is worth the user's attention
 - When the user answers a question a session asked, `session_send` the answer to that session.
 - Stop, cancel or drop a topic: `session_close`. Status questions: answer from the [tree] cards; \
 `session_read` for details.
-- Never paste raw logs. Never invent results. Keep sessions organized by topic yourself.";
+- \"Is it verified / do the tests pass?\": answer from the card when it reports a verified result; otherwise \
+`session_send` the session that owns that work to re-run and report. Never start another session for the same \
+project or to double-check one.
+- Never paste raw logs. Never invent results. Never explain your own mechanics (tools, shells, sessions' \
+internals) — just say what you are doing. Keep sessions organized by topic yourself.";
 
 /// A lead: owns one project/topic, may split it into sub-sessions, loops until done.
 pub const LEAD_PROMPT: &str = "\
