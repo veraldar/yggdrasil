@@ -280,7 +280,7 @@ async fn run_remote(st: &AppState, caller: &str, name: &str, input: &Value) -> O
         return Some(match crate::peers::start(st, caller, root, &title, profile, brief, input["model"].as_str(), input["variant"].as_str()).await {
             Ok(pid) => {
                 publish(st, "tree.updated", json!({ "sessionID": pid, "parentID": caller }));
-                ok(format!("started id={pid} \"{title}\" as {profile} on root {root}. It reports back to you when it is done — do not wait for it."))
+                ok(format!("STARTED, NOT DONE YET: id={pid} \"{title}\" ({profile}) on root {root} reports back when finished. Tell the user it is on its way (→ {title}); never say it is done."))
             }
             Err(e) => err(format!("could not start on {root}: {e}")),
         });
@@ -295,7 +295,7 @@ async fn run_remote(st: &AppState, caller: &str, name: &str, input: &Value) -> O
             let msg = input["message"].as_str().unwrap_or_default();
             with_session(st, &target, |s| s.info["card"]["status"] = json!("working"));
             match crate::peers::send(st, &root, &rid, msg).await {
-                Ok(()) => ok(format!("sent to id={target} on root {root}. It reports back when done — do not wait for it.")),
+                Ok(()) => ok(format!("SENT, NOT DONE YET: id={target} on root {root} reports back when finished. Tell the user it is on its way; never say it is done.")),
                 Err(e) => err(e),
             }
         }
@@ -419,7 +419,7 @@ fn start(st: &AppState, caller: &str, input: &Value) -> Out {
         return err(format!("created {sid} but could not post the brief ({:?})", e.status()));
     }
     publish(st, "tree.updated", json!({ "sessionID": sid, "parentID": caller }));
-    ok(format!("started id={sid} \"{title}\" as {profile}. It works in the background and reports back to you when it is done — do not wait for it."))
+    ok(format!("STARTED, NOT DONE YET: id={sid} \"{title}\" ({profile}) is starting on it and reports back when finished. Tell the user it is on its way (→ {title}); never say it is done."))
 }
 
 fn send(st: &AppState, caller: &str, input: &Value) -> Out {
@@ -440,7 +440,7 @@ fn send(st: &AppState, caller: &str, input: &Value) -> Out {
     let turn = Turn { parts: vec![text_part(message)], modality: None, auto_turn: false, internal: false, origin: Some(caller.to_string()), completes: None };
     match crate::submit(st, &target, turn) {
         Ok(_) => ok(format!(
-            "sent to \"{title}\" (id={target}){}. It reports back when done — do not wait for it.",
+            "SENT, NOT DONE YET: \"{title}\" (id={target}){} has your instruction and reports back when finished. Tell the user it is on its way (→ {title}); never say it is done.",
             if busy { ", queued behind its current work" } else { "" }
         )),
         Err(e) => err(format!("send failed ({:?})", e.status())),

@@ -87,7 +87,7 @@ def main():
         # 1. start → report → wake
         r = say(tool([["session_start", {"title": "alpha", "profile": "build", "brief": "Reply with exactly: ALPHA-DONE"}]]))
         out = [p for p in r["parts"] if p["type"] == "tool"][0]["state"]["output"]
-        check("session_start answers at once", out.startswith("started id="), out)
+        check("session_start answers at once", out.startswith("STARTED"), out)
         t = tree(HOME_PORT)
         check("child under MAIN with its profile", t.get("alpha", {}).get("parentID") == main_id and t["alpha"]["agent"] == "build", t.get("alpha"))
         done = wait(lambda: (tree(HOME_PORT)["alpha"].get("card") or {}).get("status") == "done", 20)
@@ -117,7 +117,7 @@ def main():
         # 3. follow-up to the same session
         r = say(tool([["session_send", {"id": "alpha", "message": "Reply with exactly: ALPHA-AGAIN"}]]))
         sent = [p for p in r["parts"] if p["type"] == "tool"]
-        check("session_send accepted", sent and sent[0]["state"]["output"].startswith("sent to"), sent)
+        check("session_send accepted", sent and sent[0]["state"]["output"].startswith("SENT"), sent)
         again = wait(lambda: "ALPHA-AGAIN" in ((tree(HOME_PORT)["alpha"].get("card") or {}).get("headline") or ""), 20)
         check("session_send continues the same session", bool(again), tree(HOME_PORT)["alpha"].get("card"))
         check("no duplicate session for the follow-up", sum(1 for k in tree(HOME_PORT) if k.startswith("alpha")) == 1)
