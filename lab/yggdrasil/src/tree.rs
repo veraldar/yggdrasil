@@ -308,7 +308,9 @@ async fn run_remote(st: &AppState, caller: &str, name: &str, input: &Value) -> O
 
 fn card_line(st: &AppState, id: &str, s: &Session, indent: usize) -> String {
     let card = &s.info["card"];
-    let status = card["status"].as_str().unwrap_or(if is_archived(s) { "archived" } else { "idle" });
+    // live truth first: a run in flight is `running` whatever the last card said
+    let running = st.running.lock().unwrap().contains_key(id);
+    let status = if running { "running" } else { card["status"].as_str().unwrap_or(if is_archived(s) { "archived" } else { "idle" }) };
     let head = card["headline"].as_str().or(card["summary"].as_str()).or(card["brief"].as_str()).unwrap_or_default();
     let needs = card["needs"].as_str().filter(|n| !n.is_empty()).map(|n| format!(" NEEDS: {}", one_line(n, 160))).unwrap_or_default();
     let on = s.info["remote"]["root"].as_str().map(|r| format!(" on {r}")).unwrap_or_default();
@@ -675,18 +677,22 @@ fn extract_json(s: &str) -> Option<Value> {
     (a < b).then(|| serde_json::from_str::<Value>(&s[a..=b]).ok()).flatten()
 }
 
+/// What the facts alone say about a finished turn (the digest may refine a clean `done`).
+fn fact_status(f: &Facts) -> &'static str {
+    match f.outcome {
+        "failed" => "failed",
+        "aborted" => "aborted",
+        _ if f.reply.contains("QUESTION:") => "blocked",
+        _ if f.running_kids > 0 => "working",
+        _ => "done",
+    }
+}
+
 /// The card + event for one finished turn. Deterministic facts override the model:
 /// a failed run is failed, `QUESTION:` is blocked, running sub-sessions mean working.
 async fn digest(st: &AppState, sid: &str, f: &Facts) -> Value {
     let question = f.reply.find("QUESTION:").map(|i| one_line(&f.reply[i + 9..], 300));
-    let mut status = match f.outcome {
-        "failed" => "failed",
-        "aborted" => "aborted",
-        _ if question.is_some() => "blocked",
-        _ if f.running_kids > 0 => "working",
-        _ => "done",
-    }
-    .to_string();
+    let mut status = fact_status(f).to_string();
     let first = f.reply.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("(no reply)");
     let mut headline = one_line(first, 140);
     let mut summary = one_line(&f.reply, 450);
@@ -848,6 +854,12 @@ pub fn on_turn_end(st: &AppState, sid: &str, target: Target, result: Result<Valu
     let (st, sid) = (st.clone(), sid.to_string());
     tokio::spawn(async move {
         let Some(f) = gather(&st, &sid, &result) else { return };
+        // the card stops saying `working` the moment the run ends; the digest refines it
+        with_session(&st, &sid, |s| {
+            if s.info["card"].is_object() {
+                s.info["card"]["status"] = json!(fact_status(&f));
+            }
+        });
         let ev = digest(&st, &sid, &f).await;
         write_card(&st, &sid, &ev);
         let parent = match &target {
