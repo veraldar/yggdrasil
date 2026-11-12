@@ -5,7 +5,7 @@ transcript to artifacts/root-coord-sim-<scenario>.md so the phone can open it.""
 import glob, html, json, os, shutil, statistics
 
 ART = os.path.expanduser("~/Work/bifrost/artifacts")
-FINAL = os.path.join(ART, "root-sim", "final")
+FINAL = os.path.join(ART, "root-sim", "final-pass")
 runs = {}
 for f in sorted(glob.glob(os.path.join(FINAL, "*", "report.json"))):
     r = json.load(open(f))
@@ -51,7 +51,7 @@ table{{border-collapse:collapse;width:100%;font-size:13px}} td,th{{border-bottom
 </style></head><body><main>
 <h1>One door, a tree of sessions, several roots</h1>
 <p class=mut>root-coord · built and tested 11-12 night · branch <code>root-coord</code> (brain) + <code>root-coord-pwa</code> (phone)</p>
-<p><span class=big>{passed}/{len(TITLES)}</span> human simulations pass on the final brain with the live profile config · <b>25/25</b> deterministic tree checks · <b>56</b> unit tests · the phone flow passes end to end on real models · MAIN median reply {statistics.median(lats) if lats else '-'} s</p>
+<p><span class=big>{passed}/{len(TITLES)}</span> human simulations pass on the final brain with the live profile config · <b>27/27</b> deterministic tree checks · <b>56</b> unit tests · the phone flow passes end to end on real models · MAIN median reply {statistics.median(lats) if lats else '-'} s</p>
 
 <h2>What you get</h2>
 <ul>
@@ -86,6 +86,8 @@ table{{border-collapse:collapse;width:100%;font-size:13px}} td,th{{border-bottom
 <li>MAIN started a second session just to double-check one. It asks the owning session now.</li>
 <li>The tree said "working" for seconds after a run ended. Live status now.</li>
 <li>Inline code in replies was unreadable in dark themes (white chip, light text). Fixed in the app.</li>
+<li>MAIN said "Done — it now handles 3d6+2" right after only forwarding the request. Dispatch now reads STARTED/SENT, NOT DONE YET, and "done" words are reserved for confirmed reports.</li>
+<li>MAIN closed a still-running session "to tidy the tree", killing the work it then called done. Closing running work now needs an explicit cancel; tidying is forbidden.</li>
 </ul>
 
 <h2>Waiting for you (the auto-mode guard stopped these — your call)</h2>
