@@ -56,12 +56,13 @@ import sys, re
 p = sys.argv[1]; s = open(p).read()
 def put(k, v):
     global s
-    line = f"{k}={v}"
+    # quoted when it has spaces: systemd strips the quotes, and bash scripts `source` this file
+    line = f'{k}="{v}"' if any(c in v for c in " '()") else f"{k}={v}"
     s = re.sub(rf"(?m)^{k}=.*$", line, s) if re.search(rf"(?m)^{k}=", s) else s.rstrip("\n") + f"\n{line}\n"
 s += "" if "# root-coord" in s else "# root-coord (11-12): the coordinator door, profiles with models, roots, harness sessions\n"
 put("YGG_MODELS", "glm-5.3-flash,glm-5.3,glm-5.2")
 put("YGG_ROOT_NAME", "omarchy")
-put("YGG_ROOT_NOTE", "the user's main computer (omarchy): 16 cpu / 30 GB, holds ~/Work and every project")
+put("YGG_ROOT_NOTE", "the main computer (omarchy): 16 cpu / 30 GB, holds ~/Work and every project")
 put("YGG_MAX_INFLIGHT", "5")
 open(p, "w").write(s)
 PY
