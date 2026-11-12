@@ -1543,6 +1543,8 @@ struct Run {
     queue_ms: u64,
     /// LAT think=<budget_tokens sent upstream, 0 = no thinking param> (wire proof)
     think: u64,
+    /// root-coord: this run's steps go out with thinking off (the empty-step retry)
+    think_off: bool,
 }
 
 impl Run {
@@ -1660,6 +1662,7 @@ async fn run_turn(st: &AppState, id: &str, tx: &mpsc::Sender<Event>, queue_ms: u
         session: id.to_string(),
         queue_ms,
         think: 0,
+        think_off: false,
     };
     let harness = session_profile(st, id).harness.as_deref().and_then(harness::Kind::parse);
     let outcome = {
@@ -1840,6 +1843,15 @@ async fn agent_loop(
             }
         }
         let calls = relay(st, id, &convo, tx, run).await?;
+        // root-coord: a step that came back with nothing (GLM can spend the whole token cap
+        // thinking: sim research-build 11-12, 273 s, 60k reasoning chars, no text, no tools)
+        // is retried ONCE with thinking off and a one-line nudge to act
+        if calls.is_empty() && run.text.trim().is_empty() && !run.think_off {
+            run.think_off = true;
+            eprintln!("LAT-EMPTY session={id} step came back empty (reasoning_chars={}) — retrying once with thinking off", run.reasoning_chars);
+            convo.push(json!({ "role": "user", "content": "(Your previous response came back empty — the thinking ran out of room. Do not deliberate further: act now with your tools, or answer.)" }));
+            continue;
+        }
         if run.first_delta_ms.is_none() && calls.is_empty() {
             // SPEED LAW, loud: the final upstream step returned ZERO content
             // tokens — the exact shape that once hid a slow fallback behind
@@ -2336,6 +2348,7 @@ async fn relay_anthropic(
     let full = &mut run.text;
     // model, thinking and tools: the session's stamps and profile (session_upstream)
     let (model, variant, tools) = session_upstream(st, session_id);
+    let variant = if run.think_off { "off".to_string() } else { variant };
     let thinking = anthropic::thinking_for(Some(&variant), cfg.think_high);
     run.think = thinking.as_ref().and_then(|t| t["budget_tokens"].as_u64()).unwrap_or(0);
     let req = anthropic_request(st, &model, convo, tools.as_ref(), true, thinking.as_ref());
@@ -2600,6 +2613,19 @@ async fn main() {
     let mut sessions = load_sessions(&data_dir);
     eprintln!("loaded {} session(s) from {}", sessions.len(), data_dir.display());
     let interrupted = close_interrupted(&mut sessions, &data_dir);
+    // root-coord migration: MAIN carries its profile explicitly (the phone shows the registry
+    // default for unpinned sessions, and that default is `build` again)
+    let door_model = config.profiles.get("coordinator").and_then(|p| p.model.clone()).filter(|m| config.models.contains(m));
+    for (id, s) in sessions.iter_mut() {
+        if is_main_title(s.info["title"].as_str().unwrap_or_default()) && s.info["agent"].is_null() {
+            s.info["agent"] = json!("coordinator");
+            // its old stamp was only the brain-wide default: it takes the door's model
+            if let Some(m) = &door_model {
+                s.info["model"]["id"] = json!(m);
+            }
+            persist(&data_dir, id, s);
+        }
+    }
     let max_inflight = env_num("YGG_MAX_INFLIGHT", 6).max(1) as usize;
 
     let state = AppState {
@@ -2861,6 +2887,7 @@ mod speed_law_tests {
             session: "ses_t".into(),
             queue_ms: 42,
             think: 0,
+            think_off: false,
         }
     }
 
@@ -3276,6 +3303,7 @@ mod voice_turn_tests {
             session: "s".into(),
             queue_ms: 0,
             think: 0,
+            think_off: false,
         };
         run.lat_log("ok"); // the eprintln row ends voice_note=1; must not panic
     }
