@@ -1690,6 +1690,10 @@ async fn run_turn(st: &AppState, id: &str, tx: &mpsc::Sender<Event>, queue_ms: u
             run.lat_log("ok");
             if auto_turn {
                 run.msg["info"]["meta"] = json!({ "autoReply": true });
+                // a woken manager with nothing worth saying stays out of the transcript
+                if message_text(&run.msg).trim().trim_matches(|c: char| c == '.' || c == '*').eq_ignore_ascii_case("(quiet)") {
+                    run.msg["info"]["meta"]["internal"] = json!(true);
+                }
             }
             replace_message(st, id, &run.msg);
             publish(st, "message.updated", json!({ "info": run.msg["info"] }));

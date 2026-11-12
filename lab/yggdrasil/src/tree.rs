@@ -813,6 +813,11 @@ pub fn accept_report(st: &AppState, proxy: &str, mut ev: Value) -> bool {
     ev["delivered"] = json!(false);
     write_card(st, proxy, &ev);
     eprintln!("TREE peer report for {proxy}: {} / {}", ev["status"].as_str().unwrap_or("?"), ev["relevance"].as_str().unwrap_or("?"));
+    if let Some((root, _)) = crate::peers::remote_of(st, proxy) {
+        if let Some(e) = st.config.peers.seen.lock().unwrap().get_mut(&root) {
+            e.0 = crate::now_ms();
+        }
+    }
     if let Some(p) = parent {
         if !(ev["status"] == "working" && ev["relevance"] == "routine") {
             deliver(st, &p, ev);

@@ -77,6 +77,10 @@ pub async fn call(st: &AppState, root: &str, method: &str, path: &str, body: Opt
         req = req.json(&b);
     }
     let resp = req.send().await.map_err(|e| format!("root {root} unreachable: {e}"))?;
+    // any answer proves the line is up: keep the [roots] view fresh between polls
+    if let Some(e) = p.seen.lock().unwrap().get_mut(root) {
+        e.0 = now_ms();
+    }
     let status = resp.status();
     let text = resp.text().await.map_err(|e| e.to_string())?;
     if !status.is_success() {
@@ -148,7 +152,8 @@ pub fn roots_view(st: &AppState) -> String {
     out
 }
 
-/// Polls every peer's `/root` once a minute (the view never waits on the network).
+/// Polls every peer's `/root` — every 15 s until all have answered, then once a minute (the
+/// view never waits on the network).
 pub fn spawn_watch(st: &AppState) {
     if st.config.peers.list.is_empty() {
         return;
@@ -164,7 +169,8 @@ pub fn spawn_watch(st: &AppState) {
                     Err(e) => eprintln!("peer {e}"),
                 }
             }
-            tokio::time::sleep(Duration::from_secs(60)).await;
+            let all_seen = st.config.peers.list.iter().all(|(n, _)| st.config.peers.seen.lock().unwrap().contains_key(n));
+            tokio::time::sleep(Duration::from_secs(if all_seen { 60 } else { 15 })).await;
         }
     });
 }

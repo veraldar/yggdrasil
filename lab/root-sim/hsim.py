@@ -159,7 +159,10 @@ def run_checks(sc, work, tree, main_id, visible):
         name = c.get("name", kind)
         try:
             if kind == "cmd":
-                p = subprocess.run(["bash", "-lc", c["cmd"]], cwd=work, capture_output=True, text=True, timeout=c.get("timeout", 180))
+                venv = os.path.expanduser("~/.cache/root-sim/_venv/bin")
+                env = dict(os.environ, PATH=f"{venv}:{os.environ.get('PATH', '')}")
+                cwd = os.path.expanduser(f"~/.cache/root-sim/{c['root_sim']}/work") if c.get("root_sim") else work
+                p = subprocess.run(["bash", "-c", c["cmd"]], cwd=cwd, capture_output=True, text=True, timeout=c.get("timeout", 180), env=env)
                 ok = p.returncode == c.get("exit", 0)
                 if ok and c.get("expect"):
                     ok = re.search(c["expect"], p.stdout + p.stderr, re.I | re.M) is not None
@@ -173,6 +176,13 @@ def run_checks(sc, work, tree, main_id, visible):
             elif kind == "archived_match":
                 hit = [r for r in tree if r.get("archived") and re.search(c["title"], r["title"], re.I)]
                 res.append({"name": name, "ok": bool(hit), "detail": ", ".join(r["title"] for r in hit) or "nothing archived matching"})
+            elif kind == "main_says":
+                said = "\n".join(m["text"] for m in visible if m["role"] == "assistant")
+                hit = re.search(c["regex"], said, re.I | re.S)
+                res.append({"name": name, "ok": bool(hit), "detail": hit.group(0)[:200] if hit else "not said"})
+            elif kind == "proxy_on":
+                hit = [r for r in tree if re.search(c["title"], r["title"], re.I) and (r.get("card") or {}).get("root") == c["root"]]
+                res.append({"name": name, "ok": bool(hit), "detail": ", ".join(f"{r['title']} → {r['card'].get('root')} ({r['card'].get('status')})" for r in hit) or "no proxy on that root"})
             elif kind == "proactive_report":
                 # main spoke at least N times without being asked (an assistant message right after another assistant message)
                 n, prev = 0, None
@@ -207,6 +217,30 @@ def main():
         shutil.rmtree(root)
     env = dict(os.environ, **{k: str(v) for k, v in sc.get("brain_env", {}).items()})
     env.setdefault("SIM_PROFILES", os.path.join(HERE, "profiles.sim.json"))
+    # peer roots: each its own sandboxed brain on port+1.., all knowing each other by name
+    roots = [{"name": sc.get("root_name", "home"), "port": a.port, "sim": name, "note": sc.get("root_note", "")}]
+    for i, pr in enumerate(sc.get("peers", []), 1):
+        roots.append({"name": pr["name"], "port": a.port + i, "sim": f"{name}-{pr['name']}", "note": pr.get("note", ""), "seed": pr.get("seed", {})})
+    if len(roots) > 1:
+        token = os.urandom(12).hex()
+        for r in roots:
+            rdir = os.path.expanduser(f"~/.cache/root-sim/{r['sim']}")
+            if a.fresh and r is not roots[0] and os.path.isdir(rdir):
+                subprocess.run([f"{HERE}/brain-up.sh", r["sim"], "down"])
+                shutil.rmtree(rdir)
+            for path, content in r.get("seed", {}).items():
+                fp = os.path.join(rdir, "work", path)
+                os.makedirs(os.path.dirname(fp), exist_ok=True)
+                open(fp, "w").write(content)
+            r["env"] = dict(env, YGG_ROOT_NAME=r["name"], YGG_PEER_TOKEN=token, YGG_ROOT_NOTE=r["note"],
+                            YGG_PEERS=",".join(f"{o['name']}=http://127.0.0.1:{o['port']}" for o in roots if o is not r))
+        env = roots[0]["env"]
+        for r in roots[1:]:
+            upp = subprocess.run([f"{HERE}/brain-up.sh", r["sim"], str(r["port"])], env=r["env"], capture_output=True, text=True)
+            if upp.returncode != 0:
+                print(upp.stdout, upp.stderr)
+                sys.exit(3)
+            log(upp.stdout.strip())
     up = subprocess.run([f"{HERE}/brain-up.sh", name, str(a.port)], env=env, capture_output=True, text=True)
     if up.returncode != 0:
         print(up.stdout, up.stderr)
@@ -340,6 +374,8 @@ def main():
     log(f"RESULT {'PASS' if passed else 'FAIL'} — judge {judgement.get('scores')} pass={judgement.get('pass')} checks_ok={checks_ok} persona={persona_ok} p50={lat['p50']}s → {outdir}")
     if not a.keep:
         subprocess.run([f"{HERE}/brain-up.sh", name, "down"])
+        for r in roots[1:]:
+            subprocess.run([f"{HERE}/brain-up.sh", r["sim"], "down"])
     sys.exit(0 if passed else 1)
 
 
