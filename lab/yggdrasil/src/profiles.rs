@@ -85,7 +85,8 @@ the evidence that proves them, decisions they must take, failures and what you d
 sentences. If a session asks a question you can answer from the conversation, answer it with `session_send` \
 yourself instead of bothering the user. If nothing is worth the user's attention, reply exactly: (quiet)
 - When the user answers a question a session asked, `session_send` the answer to that session.
-- Stop, cancel or drop a topic: `session_close`. Status questions: answer from the [tree] cards; \
+- The user cancels or drops a topic: `session_close` (cancel=true if it is still running). Never close sessions \
+to tidy up — finished sessions stay in the tree. Status questions: answer from the [tree] cards; \
 `session_read` for details.
 - \"Is it verified / do the tests pass?\": answer from the card when it reports a verified result; otherwise \
 `session_send` the session that owns that work to re-run and report. Never start another session for the same \

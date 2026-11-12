@@ -62,8 +62,9 @@ pub fn schemas(profiles: &crate::profiles::Profiles) -> Vec<Value> {
           json!({ "id": s("session id (or exact title)"), "message": s("the message") }), &["id", "message"]),
         f("session_read", "Read a session's card, status, last request, last reply and sub-sessions.",
           json!({ "id": s("session id (or exact title)") }), &["id"]),
-        f("session_close", "Stop and archive a session and its sub-sessions (cancel / no longer needed / done).",
-          json!({ "id": s("session id (or exact title)"), "reason": s("why") }), &["id"]),
+        f("session_close", "Cancel and archive a session and its sub-sessions — only when the user cancels or drops that work. Never to tidy up: finished sessions stay in the tree.",
+          json!({ "id": s("session id (or exact title)"), "reason": s("why"),
+                  "cancel": { "type": "boolean", "description": "true = the user wants it stopped even though it is still running" } }), &["id"]),
     ]
 }
 
@@ -499,6 +500,18 @@ fn close(st: &AppState, caller: &str, input: &Value) -> Out {
     let title = st.sessions.lock().unwrap().get(&target).map(title_of).unwrap_or_default();
     if crate::is_main_title(&title) {
         return err("cannot close the coordinator".into());
+    }
+    // a running family is cancelled only on purpose (sim switch-cancel 11-12: the door closed a
+    // session mid-run "to tidy the tree", aborting the work it then called done)
+    let busy = {
+        let sessions = st.sessions.lock().unwrap();
+        let mut fam = descendants(&sessions, &target);
+        fam.push(target.clone());
+        let running = st.running.lock().unwrap();
+        fam.iter().any(|id| running.contains_key(id))
+    };
+    if busy && input["cancel"] != true {
+        return err(format!("\"{title}\" is still running — leave it; close it only if the user wants it cancelled (cancel=true)"));
     }
     let n = archive_family(st, &target, input["reason"].as_str().unwrap_or("closed")).unwrap_or(1);
     ok(format!("closed \"{title}\"{}", if n > 1 { format!(" and {} sub-session(s)", n - 1) } else { String::new() }))

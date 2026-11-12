@@ -21,8 +21,8 @@
  "checks": [
   {
    "name": "slugify tests pass",
-   "cmd": "cd slugify && python3 -m pytest -q 2>&1 | tail -3",
-   "expect": "passed"
+   "cmd": "cd slugify && python3 -m pytest -q >/tmp/pytest.$$.out 2>&1 && echo PYTEST-OK || tail -5 /tmp/pytest.$$.out",
+   "expect": "PYTEST-OK"
   },
   {
    "name": "max-length implemented",

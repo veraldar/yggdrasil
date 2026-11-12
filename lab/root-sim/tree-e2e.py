@@ -127,6 +127,15 @@ def main():
         t = tree(HOME_PORT)
         check("session_close archives the family", t["beta"]["archived"] and t["beta-1"]["archived"], (t["beta"]["archived"], t["beta-1"]["archived"]))
 
+        # 4b. a running session is not closed to tidy up — only cancelled on purpose
+        say(tool([["session_start", {"title": "slow", "profile": "build", "brief": "sleep 8 then Reply with exactly: SLOW-DONE"}]]))
+        wait(lambda: tree(HOME_PORT)["slow"]["busy"], 10)
+        r = say(tool([["session_close", {"id": "slow", "reason": "tidy"}]]))
+        out = [p for p in r["parts"] if p["type"] == "tool"][0]["state"]["output"]
+        check("closing a running session without cancel is refused", "still running" in out and not tree(HOME_PORT)["slow"]["archived"], out)
+        r = say(tool([["session_close", {"id": "slow", "reason": "user cancelled", "cancel": True}]]))
+        check("cancel=true stops and archives it", tree(HOME_PORT)["slow"]["archived"], tree(HOME_PORT)["slow"])
+
         # 5. the door cannot run bash
         r = say(tool([["bash", {"command": "echo pwned > /tmp/tree-e2e-pwned"}]]))
         out = [p for p in r["parts"] if p["type"] == "tool"][0]["state"]["output"]
