@@ -48,7 +48,7 @@
 //! slice-1 per-request SSE relay.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     convert::Infallible,
     path::PathBuf,
     sync::{Arc, Mutex},
@@ -73,8 +73,10 @@ use tokio_stream::wrappers::{BroadcastStream, ReceiverStream};
 
 mod anthropic;
 mod gate;
+mod profiles;
 mod rollup;
 mod tools;
+mod tree;
 
 // ── TIME-AWARENESS (owner ADD to the 200k context-cap slice, 11-05) ─────────
 // Every turn carries a compact clock header to the upstream model: current
@@ -284,7 +286,9 @@ fn clock_now_ms() -> i64 {
 ///    on the record (`info.time.meanwhile`; old sessions lack it and render
 ///    none). The private fields are stripped before send.
 /// Editing this constant resets every session's provider cache once.
-const SYSTEM_PREAMBLE: &str = "You are the brain of a personal assistant stack. Answer in the fewest words the question allows — short and direct unless the question itself is broad. Keep the user's language. Applies to prose replies, not to tool arguments, code, or file contents.";
+/// root-coord (11-12): the 11-09 "fewest words" preamble made every session stop at the first
+/// obstacle; brevity is for prose, never for the work.
+const SYSTEM_PREAMBLE: &str = "You are part of yggdrasil: the user's own AI, running on their own computer and reached from their phone. Be direct and concrete, and keep prose replies short unless the user asks for depth — but never cut the work short: investigate with your tools until you actually know, verify before you claim, and do not give up at the first obstacle. Keep the user's language.";
 
 /// Prepends the static preamble, then the derived header to every user message
 /// carrying `_ts` (compaction asks carry none), then strips every `_`-prefixed
@@ -326,12 +330,16 @@ struct Config {
     dialect: Dialect,
     max_tokens: u64,
     api_key: Option<String>,
+    /// the default upstream model; a session may run any model in `models`
     model: String,
+    models: Vec<String>,
     catalog: Value,
     max_steps: usize,
-    /// [MAIN]-titled sessions (the coordinator) get a hard leash: bash timeout cap + step cap.
-    main_bash_timeout_ms: u64,
-    main_max_steps: usize,
+    /// root-coord: what each session is (role prompt, tools, model, steps, fold)
+    profiles: profiles::Profiles,
+    tree: tree::TreeCfg,
+    /// OG-ctx (10-27, restored 11-12): the AGENTS.md chain, re-read every run
+    context_files: Vec<PathBuf>,
     tools_enabled: bool,
     rollup_tokens: usize,
     rollup_keep_tokens: usize,
@@ -375,12 +383,61 @@ fn is_auto_turn(history: &[Value]) -> bool {
         .is_some_and(|m| m["info"]["meta"]["auto"] == true)
 }
 
-/// Coordinator law (owner 11-11): the `[MAIN]` session answers from its own context and
-/// delegates everything else as ONE detached agi-run lane. MAIN-only system note after the
-/// preamble/voice note. Editing this constant resets [MAIN]'s provider cache once.
-const COORDINATOR_NOTE: &str = "You are the coordinator. If the answer is already in this conversation, answer it directly. Anything else (reading code or files, research, building, editing, testing) you do not do yourself: delegate it in ONE bash call, exactly `cd /home/dweeb_xyz/Work/bifrost && AGI_DETACH=1 bash scripts/agi-run.sh -s <short-name> -m sonnet -a /home/dweeb_xyz/Work/bifrost/.agi-log/artifacts/<short-name>.md -b <minutes> '<self-contained brief>'` (no ; | & $ ` > inside the brief), then reply in one line naming the lane. Never write or edit files yourself.";
+/// OG-ctx (opencode parity, 10-27; lost in the 11-10 merge, restored by root-coord): the layered
+/// AGENTS.md chain as a system message, so a fresh session knows where it is without exploring.
+/// Re-read every run (an edited file lands on the next turn); each file capped at 64 KiB;
+/// missing or empty files are skipped.
+fn context_prompt(files: &[PathBuf]) -> Option<String> {
+    const CAP: usize = 64 * 1024;
+    let parts: Vec<String> = files
+        .iter()
+        .filter_map(|f| {
+            let mut text = std::fs::read_to_string(f).ok()?;
+            if text.len() > CAP {
+                let mut cut = CAP;
+                while !text.is_char_boundary(cut) {
+                    cut -= 1;
+                }
+                text.truncate(cut);
+            }
+            let text = text.trim();
+            (!text.is_empty()).then(|| format!("Instructions from: {}\n{text}", f.display()))
+        })
+        .collect();
+    (!parts.is_empty()).then(|| parts.join("\n\n"))
+}
 
-const VOICE_PROMPT: &str = "You are answering by voice. Answer in at most two short sentences. One thought per reply. No markdown, no emoji, no lists, no parentheses, no offers of more help. Plain words only.";
+/// A session's profile name: its stamped agent if known, `coordinator` for [MAIN], else the
+/// default (legacy sessions carry no agent).
+fn profile_name_of(st: &AppState, info: &Value) -> String {
+    if let Some(a) = info["agent"].as_str().filter(|a| st.config.profiles.get(a).is_some()) {
+        return a.to_string();
+    }
+    if is_main_title(info["title"].as_str().unwrap_or_default()) {
+        return "coordinator".into();
+    }
+    st.config.profiles.default_agent.clone()
+}
+
+fn session_profile(st: &AppState, id: &str) -> profiles::Profile {
+    let name = st.sessions.lock().unwrap().get(id).map(|s| profile_name_of(st, &s.info)).unwrap_or_else(|| st.config.profiles.default_agent.clone());
+    st.config.profiles.get(&name).or_else(|| st.config.profiles.get("build")).cloned().expect("build profile")
+}
+
+/// The phone resolves sessions by title slug (pwa lib/slug.ts): lowercase, whitespace → `-`,
+/// only `[a-z0-9_-]`, 60 chars.
+fn slug(title: &str) -> String {
+    let s: String = title
+        .to_lowercase()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join("-")
+        .chars()
+        .filter(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == '_' || *c == '-')
+        .collect();
+    let s: String = s.chars().take(60).collect();
+    if s.is_empty() { "session".into() } else { s }
+}
 
 /// Voice mode: shape model text for SPEECH — strip markdown, emoji and
 /// typographic dashes, drop "if you want more — just ask" offer sentences,
@@ -452,6 +509,9 @@ struct Session {
     /// Last `todowrite` list (opencode's `GET /session/:id/todo`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     todo: Vec<Value>,
+    /// root-coord: reports from the sessions this one manages (tree.rs) — never transcript turns.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    inbox: Vec<Value>,
 }
 
 #[derive(Clone)]
@@ -468,6 +528,10 @@ struct AppState {
     config: Arc<Config>,
     http: reqwest::Client,
     tools: Arc<tools::ToolEnv>,
+    /// root-coord: upstream calls in flight across the whole tree (YGG_MAX_INFLIGHT)
+    upstream: Arc<tokio::sync::Semaphore>,
+    /// sessions with a tree wake pending (one at a time each)
+    wakes: Arc<Mutex<HashSet<String>>>,
 }
 
 #[derive(Deserialize)]
@@ -621,27 +685,74 @@ fn bad_request(msg: &str) -> Response {
     (StatusCode::BAD_REQUEST, Json(json!({ "error": msg }))).into_response()
 }
 
-/// `POST /session` — body `{title?, parentID?}` (opencode accepts an empty body too).
-async fn create_session(State(st): State<AppState>, body: Option<Json<Value>>) -> Json<Value> {
-    let body = body.map(|Json(b)| b).unwrap_or(Value::Null);
+/// Creates + stores a session. Profile (`agent`), model and thinking variant are stamped ONCE
+/// here (cache law): explicit args win, then the profile's defaults, then the brain's.
+fn new_session(st: &AppState, title: &str, parent: Option<&str>, agent: Option<&str>, model: Option<&str>, variant: Option<&str>) -> Value {
     let id = new_id("ses");
     let now = now_ms();
-    let title = body["title"].as_str().filter(|t| !t.is_empty()).unwrap_or("New session");
     let mut info = json!({ "id": id, "title": title, "time": { "created": now, "updated": now } });
-    // variant stamp: resolved ONCE here, never per turn (cache law)
+    if let Some(a) = agent.filter(|a| st.config.profiles.get(a).is_some()) {
+        info["agent"] = json!(a);
+    }
+    let pname = profile_name_of(st, &info);
+    let prof = st.config.profiles.get(&pname);
+    let model = model
+        .filter(|m| st.config.models.iter().any(|x| x == m))
+        .or(prof.and_then(|p| p.model.as_deref()).filter(|m| st.config.models.iter().any(|x| x == m)))
+        .unwrap_or(&st.config.model);
+    let variant = variant
+        .and_then(|v| resolve_variant(v).ok())
+        .or(prof.and_then(|p| p.variant.clone()))
+        .unwrap_or_else(|| st.config.default_variant.clone());
     let provider = st.config.catalog["default"].as_object().and_then(|d| d.keys().next().cloned()).unwrap_or_else(|| "yggdrasil".into());
-    info["model"] = json!({ "id": st.config.model, "providerID": provider, "variant": st.config.default_variant });
-    if let Some(parent) = body["parentID"].as_str() {
+    info["model"] = json!({ "id": model, "providerID": provider, "variant": variant });
+    if let Some(parent) = parent {
         info["parentID"] = json!(parent);
     }
-    let session = Session { info: info.clone(), messages: Vec::new(), todo: Vec::new() };
+    let session = Session { info: info.clone(), messages: Vec::new(), todo: Vec::new(), inbox: Vec::new() };
     {
         let mut sessions = st.sessions.lock().unwrap();
         persist(&st.data_dir, &id, &session);
         sessions.insert(id, session);
     }
-    publish(&st, "session.created", json!({ "info": info }));
-    Json(info)
+    publish(st, "session.created", json!({ "info": info }));
+    info
+}
+
+/// `POST /session` — body `{title?, parentID?, agent?, model?, variant?}` (opencode accepts an
+/// empty body too; `model` may be a string or `{id}`).
+async fn create_session(State(st): State<AppState>, body: Option<Json<Value>>) -> Json<Value> {
+    let body = body.map(|Json(b)| b).unwrap_or(Value::Null);
+    let title = body["title"].as_str().filter(|t| !t.is_empty()).unwrap_or("New session");
+    let model = body["model"].as_str().or(body["model"]["id"].as_str());
+    Json(new_session(&st, title, body["parentID"].as_str(), body["agent"].as_str(), model, body["variant"].as_str()))
+}
+
+/// `GET /tree` — every session's tree fields (id, title, parentID, agent, model, card, archived,
+/// busy, depth), parents first; the phone draws the nested list from it.
+async fn get_tree(State(st): State<AppState>) -> Json<Value> {
+    let sessions = st.sessions.lock().unwrap();
+    let running = st.running.lock().unwrap();
+    let mut rows: Vec<Value> = sessions
+        .iter()
+        .map(|(id, s)| {
+            json!({ "id": id, "title": s.info["title"], "parentID": s.info["parentID"], "agent": profile_name_of(&st, &s.info),
+                "model": s.info["model"], "card": s.info["card"], "archived": s.info["archived"] == true,
+                "busy": running.contains_key(id), "depth": tree::depth(&sessions, id),
+                "inbox": s.inbox.iter().filter(|e| e["delivered"] != true).count(),
+                "updated": s.info["time"]["updated"] })
+        })
+        .collect();
+    rows.sort_by_key(|r| (r["depth"].as_u64().unwrap_or(0), std::cmp::Reverse(r["updated"].as_u64().unwrap_or(0))));
+    Json(Value::Array(rows))
+}
+
+/// `GET /session/:id/inbox` — the reports filed with this session (newest last).
+async fn get_inbox(State(st): State<AppState>, Path(id): Path<String>) -> Response {
+    match st.sessions.lock().unwrap().get(&id) {
+        Some(s) => Json(Value::Array(s.inbox.clone())).into_response(),
+        None => not_found(&id),
+    }
 }
 
 /// `GET /session` — newest-updated first, like opencode.
@@ -744,9 +855,9 @@ async fn config_providers(State(st): State<AppState>) -> Json<Value> {
     Json(json!({ "providers": c["providers"], "default": c.get("default").cloned().unwrap_or(json!({})) }))
 }
 
-/// `GET /agent` — `[{name, mode, description}]` from the catalog.
+/// `GET /agent` — `[{name, mode, description, ...}]`: the profiles (root-coord).
 async fn list_agents(State(st): State<AppState>) -> Json<Value> {
-    Json(st.config.catalog["agents"].clone())
+    Json(st.config.profiles.catalog())
 }
 
 /// `POST /api/session/:id/model` — v2 switch, `{model:{id, providerID}}` → 204.
@@ -764,11 +875,21 @@ async fn switch_model(State(st): State<AppState>, Path(id): Path<String>, Json(b
     if !known {
         return bad_request(&format!("unknown model {pid}/{mid}"));
     }
+    // the phone's think picker sends a derived id `<model>-think-<level>`: a level is a variant
+    let (mid, level) = match mid.rsplit_once("-think-") {
+        Some((base, lvl)) if resolve_variant(lvl).is_ok() => (base, Some(lvl.to_string())),
+        _ => (mid, None),
+    };
     let mut model = json!({ "id": mid, "providerID": pid });
     match with_session(&st, &id, |s| {
-        // the variant stamp survives a model switch (thinking stays constant per session)
-        if let Some(v) = s.info["model"].get("variant").cloned() {
-            model["variant"] = v;
+        // an explicit level re-stamps thinking; otherwise the stamp survives the model switch
+        match &level {
+            Some(l) => model["variant"] = json!(l),
+            None => {
+                if let Some(v) = s.info["model"].get("variant").cloned() {
+                    model["variant"] = v;
+                }
+            }
         }
         s.info["model"] = model
     }) {
@@ -780,8 +901,7 @@ async fn switch_model(State(st): State<AppState>, Path(id): Path<String>, Json(b
 /// `POST /api/session/:id/agent` — v2 switch, `{agent}` → 204. Must be a catalog agent.
 async fn switch_agent(State(st): State<AppState>, Path(id): Path<String>, Json(body): Json<Value>) -> Response {
     let Some(name) = body["agent"].as_str() else { return bad_request("agent required") };
-    let known = st.config.catalog["agents"].as_array().into_iter().flatten().any(|a| a["name"] == name);
-    if !known {
+    if st.config.profiles.get(name).is_none() {
         return bad_request(&format!("unknown agent {name}"));
     }
     match with_session(&st, &id, |s| s.info["agent"] = json!(name)) {
@@ -831,6 +951,32 @@ async fn post_message(
     let internal = body.internal
         || body.meta.as_ref().is_some_and(|m| m["internal"] == true)
         || body.parts.iter().any(|p| p["internal"] == true);
+    // root-coord: automation posting to the door (watcher landings, lane verdict requests)
+    // becomes an inbox report, digested like a session's turn — not a turn in MAIN's
+    // transcript. The POST answers at once with the stored (internal) record.
+    let door = st.sessions.lock().unwrap().get(&id).map(|s| profile_name_of(&st, &s.info)).as_deref() == Some("coordinator");
+    if door && auto_turn && !is_async {
+        let text = body.parts.iter().filter(|p| p["type"] == "text").filter_map(|p| p["text"].as_str()).collect::<Vec<_>>().join("\n");
+        if text.trim().is_empty() {
+            return bad_request("no text parts");
+        }
+        let mut rec = make_message(&id, "user", vec![json!({ "type": "text", "text": text, "internal": true })]);
+        rec["info"]["meta"] = json!({ "auto": true, "internal": true, "inbox": true });
+        // stored for the audit trail only: folded so it never reaches the coordinator's context
+        let mut stub = make_message(&id, "assistant", vec![text_part("(filed in the inbox)")]);
+        stub["info"]["meta"] = json!({ "autoReply": true, "internal": true, "folded": true });
+        stub["info"]["time"]["completed"] = json!(now_ms());
+        if with_session(&st, &id, |s| {
+            s.messages.push(rec.clone());
+            s.messages.push(stub.clone());
+        })
+        .is_none()
+        {
+            return not_found(&id);
+        }
+        tree::external_report(&st, &id, &text);
+        return Json(stub).into_response();
+    }
     let turn = Turn { parts: body.parts, modality: body.modality, auto_turn, internal, origin: origin.clone(), completes: None };
     let (user_msg, rx, done_rx) = match submit(&st, &id, turn) {
         Ok(t) => t,
@@ -921,6 +1067,15 @@ fn submit(st: &AppState, id: &str, turn: Turn) -> Result<Submitted, Response> {
     if let Some(c) = completes {
         user_msg["info"]["meta"]["async"] = c;
     }
+    let prof = session_profile(st, id);
+    // root-coord: the door's owner turn carries every undelivered report, frozen on the
+    // message at creation (rendered as `[inbox since your last turn]` — cache law)
+    if prof.name == "coordinator" && !auto_turn && !internal {
+        let lines = tree::owner_inbox_lines(st, id);
+        if !lines.is_empty() {
+            user_msg["info"]["meta"]["inbox_lines"] = json!(lines);
+        }
+    }
     let stored = with_session(st, id, |s| {
         // Freeze the meanwhile lines at creation (same moment as `created`).
         let prev = s
@@ -934,8 +1089,12 @@ fn submit(st: &AppState, id: &str, turn: Turn) -> Result<Submitted, Response> {
             user_msg["info"]["time"]["meanwhile"] = json!(mw);
         }
         s.messages.push(user_msg.clone());
-        collapse_stale_station(&mut s.messages);
-        collapse_stale_owner(&mut s.messages);
+        // folding is a profile choice (the door's speed law), never a brain-wide one: a
+        // working session keeps its whole history (roll-up summarizes it when it is long)
+        if prof.fold {
+            collapse_stale_station(&mut s.messages);
+            collapse_stale_owner(&mut s.messages);
+        }
     });
     if stored.is_none() {
         return Err(not_found(id));
@@ -968,8 +1127,15 @@ fn submit(st: &AppState, id: &str, turn: Turn) -> Result<Submitted, Response> {
             }
         };
         drop(ticket);
-        if let Some(origin) = origin {
-            post_completion(&st, &origin, &id, &turn_id, &result);
+        // root-coord: a session under a manager reports into its inbox (digest + card + wake);
+        // a plain async origin outside the tree keeps the 11-12 completion turn
+        match tree::report_target(&st, &id, origin.as_deref()) {
+            Some(parent) => tree::on_turn_end(&st, &id, &parent, result),
+            None => {
+                if let Some(origin) = origin {
+                    post_completion(&st, &origin, &id, &turn_id, &result);
+                }
+            }
         }
     });
     Ok((user_msg, rx, done_rx))
@@ -1024,6 +1190,26 @@ fn post_completion(st: &AppState, origin: &str, target: &str, turn_id: &str, res
     }
 }
 
+/// A restart kills every run in flight: their placeholders (assistant, never completed) are
+/// closed as errors so the transcript and the tree stop waiting on them. Returns their sessions.
+fn close_interrupted(sessions: &mut HashMap<String, Session>, data_dir: &std::path::Path) -> Vec<String> {
+    let mut out = Vec::new();
+    for (id, s) in sessions.iter_mut() {
+        let Some(last) = s.messages.last_mut() else { continue };
+        if last["info"]["role"] != "assistant" || last["info"]["time"]["completed"].is_number() {
+            continue;
+        }
+        last["info"]["time"]["completed"] = json!(now_ms());
+        last["info"]["error"] = json!({ "name": "UnknownError", "data": { "message": "interrupted by a brain restart" } });
+        if s.info["card"].is_object() {
+            s.info["card"]["status"] = json!("failed");
+        }
+        persist(data_dir, id, s);
+        out.push(id.clone());
+    }
+    out
+}
+
 /// Rebuilds the upstream conversation from stored messages. Assistant messages replay
 /// their steps: text, then the step's tool calls, then one `tool` message per result —
 /// a tool part closes a step, the next text part opens a new one. Unfinished tool parts
@@ -1059,6 +1245,10 @@ fn upstream_history(messages: &[Value]) -> Vec<Value> {
         if i < start {
             continue;
         }
+        // root-coord: automation records filed in the inbox never reach a model
+        if m["info"]["meta"]["inbox"] == true {
+            continue;
+        }
         if role == "user" && !compaction {
             skip_reply = false;
             if let Some(d) = m["info"]["meta"]["digest"].as_str() {
@@ -1073,6 +1263,16 @@ fn upstream_history(messages: &[Value]) -> Vec<Value> {
         }
         if role != "assistant" {
             let mut text = if compaction { rollup::COMPACTION_ASK.to_string() } else { message_text(m) };
+            if role == "user" && !compaction {
+                if let Some(lines) = m["info"]["meta"]["inbox_lines"].as_array().filter(|l| !l.is_empty()) {
+                    // frozen at creation (tree::owner_inbox_lines): byte-stable every turn
+                    let mut pre = String::from("[inbox since your last turn]\n");
+                    for l in lines.iter().filter_map(|l| l.as_str()) {
+                        pre.push_str(&format!("- {l}\n"));
+                    }
+                    text = format!("{pre}{text}");
+                }
+            }
             if role == "user" && !compaction && !text.is_empty() && is_voice_turn(m) {
                 // last text block of the stored voice turn; a pure function of
                 // stored history, so earlier bytes never change (cache law)
@@ -1452,15 +1652,32 @@ async fn agent_loop(
     // turn carries a header derived purely from stored created timestamps
     // (this turn's message was stamped ≈ now), so history is byte-stable.
     // Private `_` fields are stripped here, before ANY dialect sends.
+    let prof = session_profile(st, id);
+    if prof.fold {
+        cap_digest_lines(&mut convo);
+    }
+    // root-coord: a managing session's newest turn carries the live [tree] view (only the
+    // newest — earlier turns keep their bytes, so the cached prefix holds)
+    if prof.sessions {
+        if let Some(last) = convo.iter_mut().rev().find(|m| m["role"] == "user" && m["content"].is_string()) {
+            let view = tree::snapshot(st, id);
+            let c = last["content"].as_str().unwrap_or_default().to_string();
+            last["content"] = json!(format!("{c}\n\n{view}"));
+        }
+    }
     apply_clock_headers(&mut convo);
-    if st.config.voice {
-        convo.insert(1, json!({ "role": "system", "content": VOICE_PROMPT }));
+    // static system block (cache law, all three are constant for the session's life):
+    // preamble · the AGENTS.md chain (OG-ctx) · the profile's role. The 10-04 brain-wide voice
+    // prompt is gone: voice brevity rides only the voice turns (VOICE_TURN_NOTE).
+    let mut at = 1;
+    if let Some(ctx) = context_prompt(&st.config.context_files) {
+        convo.insert(at, json!({ "role": "system", "content": ctx }));
+        at += 1;
     }
-    let main = session_is_main(st, id);
-    if main {
-        convo.insert(if st.config.voice { 2 } else { 1 }, json!({ "role": "system", "content": COORDINATOR_NOTE }));
+    if !prof.prompt.trim().is_empty() {
+        convo.insert(at, json!({ "role": "system", "content": format!("[profile: {}]\n{}", prof.name, prof.prompt) }));
     }
-    let max = step_cap(st.config.max_steps, st.config.main_max_steps, main);
+    let max = prof.steps.unwrap_or(st.config.max_steps).min(st.config.max_steps).max(1);
     for _ in 0..max {
         if st.config.rollup_tokens > 0 {
             let n = rollup::prune(&mut convo, st.config.rollup_tokens);
@@ -1481,7 +1698,8 @@ async fn agent_loop(
             );
         }
         let text = run.text.clone();
-        run.flush_text(Some((st.config.voice, st.config.voice_max_words)));
+        // speech shaping only when this reply will be spoken (a voice turn), never brain-wide
+        run.flush_text(Some((st.config.voice && run.voice_note, st.config.voice_max_words)));
         if calls.is_empty() {
             return Ok(());
         }
@@ -1513,21 +1731,27 @@ fn is_main_title(title: &str) -> bool {
     title.trim() == "[MAIN]"
 }
 
-fn session_is_main(st: &AppState, id: &str) -> bool {
-    st.sessions.lock().unwrap().get(id).is_some_and(|s| is_main_title(s.info["title"].as_str().unwrap_or_default()))
-}
-
-/// Upstream-call cap for a run: the MAIN cap never raises the global one.
-fn step_cap(global: usize, main_cap: usize, main: bool) -> usize {
-    if main { main_cap.min(global) } else { global }
-}
-
-/// Clamp a bash call's timeout to `cap_ms` (an absent timeout means the tool default).
-fn cap_bash_input(input: &mut Value, cap_ms: u64, default_ms: u64) {
-    let want = input["timeout"].as_u64().unwrap_or(default_ms);
-    if let Some(o) = input.as_object_mut() {
-        o.insert("timeout".into(), json!(want.min(cap_ms)));
+/// The door's context keeps between 12 and 23 one-line digests of older exchanges; the cut
+/// moves every 12 turns, so the cached prefix changes once per 12 turns, not every turn.
+fn cap_digest_lines(convo: &mut Vec<Value>) {
+    const KEEP: usize = 12;
+    let idx: Vec<usize> = convo
+        .iter()
+        .enumerate()
+        .filter(|(_, m)| m["role"] == "user" && m["content"].as_str().is_some_and(|c| c.starts_with("[earlier turn]") || c.starts_with("[station turn]")))
+        .map(|(i, _)| i)
+        .collect();
+    if idx.len() < 2 * KEEP {
+        return;
     }
+    let keep = KEEP + (idx.len() - KEEP) % KEEP;
+    let drop: HashSet<usize> = idx[..idx.len() - keep].iter().copied().collect();
+    let mut i = 0;
+    convo.retain(|_| {
+        let k = !drop.contains(&i);
+        i += 1;
+        k
+    });
 }
 
 /// Roll-up moved out of the turn (item 2): the reply is already delivered, so the
@@ -1653,11 +1877,16 @@ async fn run_tool(st: &AppState, id: &str, tx: &mpsc::Sender<Event>, run: &mut R
     emit(st, tx, "message.part.updated", json!({ "sessionID": id, "part": part })).await;
 
     let res = match parsed {
-        Ok(mut input) => {
-            if call.name == "bash" && session_is_main(st, id) {
-                cap_bash_input(&mut input, st.config.main_bash_timeout_ms, st.tools.bash_timeout.as_millis() as u64);
+        Ok(input) => {
+            // root-coord: the session's profile decides, at dispatch (opencode ruleset)
+            match session_profile(st, id).check(&call.name, &input) {
+                Err(refusal) => tools::ToolResult { ok: false, title: call.name.clone(), output: refusal, metadata: json!({ "denied": true }) },
+                Ok(()) if tree::is_tree_tool(&call.name) => {
+                    let o = tree::run(st, id, &call.name, &input).await;
+                    tools::ToolResult { ok: o.ok, title: call.name.clone(), output: o.output, metadata: o.metadata }
+                }
+                Ok(()) => tools::run(&st.tools, &call.name, &input).await,
             }
-            tools::run(&st.tools, &call.name, &input).await
         }
         Err(e) => tools::ToolResult { ok: false, title: call.name.clone(), output: e, metadata: json!({}) },
     };
@@ -1708,6 +1937,77 @@ async fn send_with_retry(req: &reqwest::RequestBuilder, retries: &mut u32) -> Re
     Ok(resp)
 }
 
+/// What one session sends upstream: its model (any the upstream serves; else the default),
+/// its thinking variant (create-time stamp, else its profile's, else the brain default) and
+/// the tools its profile may call (+ the tree tools for managing profiles).
+fn session_upstream(st: &AppState, id: &str) -> (String, String, Option<Value>) {
+    let prof = session_profile(st, id);
+    let (model, stamp) = st
+        .sessions
+        .lock()
+        .unwrap()
+        .get(id)
+        .map(|s| (s.info["model"]["id"].as_str().map(String::from), s.info["model"]["variant"].as_str().map(String::from)))
+        .unwrap_or((None, None));
+    let model = model.filter(|m| st.config.models.iter().any(|x| x == m)).unwrap_or_else(|| st.config.model.clone());
+    let variant = stamp.or(prof.variant.clone()).unwrap_or_else(|| st.config.default_variant.clone());
+    let tools = st.config.tools_enabled.then(|| {
+        let allowed = prof.declared_tools();
+        let mut list: Vec<Value> = tools::schemas()
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|t| t["function"]["name"].as_str().is_some_and(|n| allowed.contains(&n)))
+            .cloned()
+            .collect();
+        if prof.sessions {
+            list.extend(tree::schemas());
+        }
+        Value::Array(list)
+    });
+    (model, variant, tools.filter(|t| t.as_array().is_some_and(|a| !a.is_empty())))
+}
+
+/// One non-streamed, tool-less upstream call (the tree's digest): `system` + one user message,
+/// thinking off, behind the same in-flight cap as every run.
+async fn upstream_once(st: &AppState, model: &str, system: &str, user: &str, max_tokens: u64) -> Result<String, String> {
+    let _permit = st.upstream.acquire().await.map_err(|e| e.to_string())?;
+    let cfg = &st.config;
+    let convo = [json!({ "role": "system", "content": system }), json!({ "role": "user", "content": user })];
+    if cfg.dialect == Dialect::Anthropic {
+        let off = anthropic::thinking_for(Some("off"), cfg.think_high);
+        let mut body = anthropic::body(model, max_tokens.min(cfg.max_tokens), &convo, None, false, off.as_ref());
+        body["stream"] = json!(false);
+        let mut req = st.http.post(anthropic::messages_url(&cfg.base_url)).json(&body).header("anthropic-version", anthropic::VERSION);
+        if let Some(key) = &cfg.api_key {
+            req = req.header("x-api-key", key).bearer_auth(key);
+        }
+        let mut retries = 0;
+        let resp = send_with_retry(&req, &mut retries).await?;
+        let status = resp.status();
+        let body = resp.text().await.map_err(|e| format!("read failed: {e}"))?;
+        if !status.is_success() {
+            return Err(format!("upstream {status}: {}", body.chars().take(300).collect::<String>()));
+        }
+        let v: Value = serde_json::from_str(&body).map_err(|e| format!("bad json: {e}"))?;
+        return Ok(anthropic::parse_message(&v).0);
+    }
+    let url = format!("{}/chat/completions", cfg.base_url.trim_end_matches('/'));
+    let mut req = st.http.post(&url).json(&json!({ "model": model, "messages": convo, "stream": false, "max_tokens": max_tokens }));
+    if let Some(key) = &cfg.api_key {
+        req = req.bearer_auth(key);
+    }
+    let mut retries = 0;
+    let resp = send_with_retry(&req, &mut retries).await?;
+    let status = resp.status();
+    let body = resp.text().await.map_err(|e| format!("read failed: {e}"))?;
+    if !status.is_success() {
+        return Err(format!("upstream {status}: {}", body.chars().take(300).collect::<String>()));
+    }
+    let v: Value = serde_json::from_str(&body).map_err(|e| format!("bad json: {e}"))?;
+    Ok(v["choices"][0]["message"]["content"].as_str().unwrap_or_default().to_string())
+}
+
 /// One upstream call with `stream: true` (and the tool set): forwards each content delta
 /// as an SSE event, accumulating it into `full` (an abort keeps the partial text), and
 /// assembles streamed `tool_calls` fragments by index. Also accepts a non-streaming
@@ -1727,10 +2027,12 @@ async fn relay(
         return relay_anthropic(st, session_id, convo, tx, run).await;
     }
     let url = format!("{}/chat/completions", cfg.base_url.trim_end_matches('/'));
-    let mut body = json!({ "model": cfg.model, "messages": convo, "stream": true });
-    if cfg.tools_enabled {
-        body["tools"] = tools::schemas();
+    let (model, _variant, tools) = session_upstream(st, session_id);
+    let mut body = json!({ "model": model, "messages": convo, "stream": true });
+    if let Some(t) = tools {
+        body["tools"] = t;
     }
+    let _permit = st.upstream.acquire().await.map_err(|e| e.to_string())?;
     let mut req = st.http.post(&url).json(&body);
     if let Some(key) = &cfg.api_key {
         req = req.bearer_auth(key);
@@ -1831,13 +2133,14 @@ async fn relay(
 /// `x-api-key` and bearer (providers differ), `anthropic-version`.
 fn anthropic_request(
     st: &AppState,
+    model: &str,
     convo: &[Value],
     tools: Option<&Value>,
     stream: bool,
     thinking: Option<&Value>,
 ) -> reqwest::RequestBuilder {
     let cfg = &st.config;
-    let body = anthropic::body(&cfg.model, cfg.max_tokens, convo, tools, stream, thinking);
+    let body = anthropic::body(model, cfg.max_tokens, convo, tools, stream, thinking);
     let mut req = st.http.post(anthropic::messages_url(&cfg.base_url)).json(&body).header("anthropic-version", anthropic::VERSION);
     if let Some(key) = &cfg.api_key {
         req = req.header("x-api-key", key).bearer_auth(key);
@@ -1860,12 +2163,12 @@ async fn relay_anthropic(
     let started = run.started;
     let first_delta_ms = &mut run.first_delta_ms;
     let full = &mut run.text;
-    let tools = cfg.tools_enabled.then(tools::schemas);
-    // thinking: the session's create-time stamp; an unstamped legacy session follows YGG_DEFAULT_VARIANT
-    let variant = st.sessions.lock().unwrap().get(session_id).and_then(|s| s.info["model"]["variant"].as_str().map(String::from));
-    let thinking = anthropic::thinking_for(Some(variant.as_deref().unwrap_or(&cfg.default_variant)), cfg.think_high);
+    // model, thinking and tools: the session's stamps and profile (session_upstream)
+    let (model, variant, tools) = session_upstream(st, session_id);
+    let thinking = anthropic::thinking_for(Some(&variant), cfg.think_high);
     run.think = thinking.as_ref().and_then(|t| t["budget_tokens"].as_u64()).unwrap_or(0);
-    let req = anthropic_request(st, convo, tools.as_ref(), true, thinking.as_ref());
+    let req = anthropic_request(st, &model, convo, tools.as_ref(), true, thinking.as_ref());
+    let _permit = st.upstream.acquire().await.map_err(|e| e.to_string())?;
     let t_req = std::time::Instant::now();
     let resp = send_with_retry(&req, &mut run.retries).await?;
     run.upstream_calls += 1;
@@ -1940,7 +2243,9 @@ async fn relay_anthropic(
 /// The roll-up call in the anthropic dialect: the summarizer prompt rides in `system`.
 async fn summarize_anthropic(st: &AppState, messages: &Value) -> Result<String, String> {
     let convo = messages.as_array().cloned().unwrap_or_default();
-    let resp = anthropic_request(st, &convo, None, false, None).send().await.map_err(|e| format!("request failed: {e}"))?;
+    let off = anthropic::thinking_for(Some("off"), st.config.think_high);
+    let _permit = st.upstream.acquire().await.map_err(|e| e.to_string())?;
+    let resp = anthropic_request(st, &st.config.model, &convo, None, false, off.as_ref()).send().await.map_err(|e| format!("request failed: {e}"))?;
     let status = resp.status();
     let body = resp.text().await.map_err(|e| format!("read failed: {e}"))?;
     if !status.is_success() {
@@ -1968,6 +2273,23 @@ async fn send_delta(st: &AppState, session_id: &str, tx: &mpsc::Sender<Event>, t
         return;
     }
     emit(st, tx, "message.part.delta", json!({ "sessionID": session_id, "text": text })).await;
+}
+
+/// The single-provider catalog over every model this upstream serves, plus the phone's derived
+/// think ids (`<model>-think-<level>`) so its level picker can switch a session's variant.
+fn models_catalog(default: &str, models: &[String]) -> Value {
+    let mut ms = serde_json::Map::new();
+    for m in models {
+        ms.insert(m.clone(), json!({ "id": m, "name": m, "providerID": "yggdrasil" }));
+        for l in ["high", "low", "off"] {
+            let d = format!("{m}-think-{l}");
+            ms.insert(d.clone(), json!({ "id": d, "name": format!("{m} (think {l})"), "providerID": "yggdrasil" }));
+        }
+    }
+    json!({
+        "providers": [{ "id": "yggdrasil", "name": "yggdrasil", "models": ms }],
+        "default": { "yggdrasil": default },
+    })
 }
 
 fn load_catalog(model: &str) -> Value {
@@ -2037,6 +2359,23 @@ async fn main() {
         eprintln!("YGG_THINK_HIGH ({think_high}) must be < YGG_MAX_TOKENS ({max_tokens})");
         std::process::exit(2);
     }
+    // root-coord: every model this upstream serves (YGG_MODELS, comma list; the default first)
+    let mut models: Vec<String> = vec![model.clone()];
+    for m in std::env::var("YGG_MODELS").unwrap_or_default().split(',').map(str::trim).filter(|m| !m.is_empty()) {
+        if !models.iter().any(|x| x == m) {
+            models.push(m.to_string());
+        }
+    }
+    let profiles = profiles::Profiles::load(std::env::var("YGG_PROFILES").ok().as_deref());
+    eprintln!("profiles: {} (default {})", profiles.by_name.keys().cloned().collect::<Vec<_>>().join(", "), profiles.default_agent);
+    let catalog = if std::env::var("YGG_CATALOG").is_ok() { load_catalog(&model) } else { models_catalog(&model, &models) };
+    let tree_cfg = tree::TreeCfg {
+        max_depth: env_num("YGG_TREE_MAX_DEPTH", 12).max(1) as usize,
+        max_children: env_num("YGG_TREE_MAX_CHILDREN", 24).max(1) as usize,
+        digest_model: std::env::var("YGG_DIGEST_MODEL").ok().filter(|m| !m.is_empty()),
+        wake_debounce_ms: env_num("YGG_WAKE_DEBOUNCE_MS", 4000),
+        max_wakes: env_num("YGG_TREE_MAX_WAKES", 60).max(1),
+    };
     let config = Config {
         default_variant,
         think_high,
@@ -2044,11 +2383,13 @@ async fn main() {
         dialect,
         max_tokens,
         api_key: std::env::var("YGG_UPSTREAM_API_KEY").ok().filter(|k| !k.is_empty()),
-        catalog: load_catalog(&model),
+        catalog,
         model,
+        models,
+        profiles,
+        tree: tree_cfg,
+        context_files: Vec::new(),
         max_steps: env_num("YGG_MAX_STEPS", 100).max(1) as usize,
-        main_bash_timeout_ms: env_num("YGG_MAIN_BASH_TIMEOUT_MS", 15_000).max(1) as u64,
-        main_max_steps: env_num("YGG_MAIN_MAX_STEPS", 6).max(1) as usize,
         tools_enabled: std::env::var("YGG_TOOLS").map_or(true, |v| v != "0"),
         voice: std::env::var("YGG_VOICE").map_or(false, |v| v == "1"),
         voice_max_words: env_num("YGG_VOICE_MAX_WORDS", 60).max(5) as usize,
@@ -2070,11 +2411,19 @@ async fn main() {
         http: http.clone(),
     };
     eprintln!("tools {} in {}", if config.tools_enabled { "on" } else { "off" }, tool_env.project_dir.display());
+    let mut config = config;
+    config.context_files = match std::env::var("YGG_CONTEXT_FILES") {
+        Ok(v) if !v.is_empty() => v.split(':').filter(|f| !f.is_empty()).map(PathBuf::from).collect(),
+        _ => vec![tool_env.project_dir.join("AGENTS.md")],
+    };
+    eprintln!("context: {}", config.context_files.iter().map(|f| f.display().to_string()).collect::<Vec<_>>().join(":"));
     let listen = std::env::var("YGG_LISTEN").unwrap_or_else(|_| "127.0.0.1:4096".into());
     let data_dir = PathBuf::from(std::env::var("YGG_DATA_DIR").unwrap_or_else(|_| "./data".into()));
     std::fs::create_dir_all(data_dir.join("session")).expect("create YGG_DATA_DIR");
-    let sessions = load_sessions(&data_dir);
+    let mut sessions = load_sessions(&data_dir);
     eprintln!("loaded {} session(s) from {}", sessions.len(), data_dir.display());
+    let interrupted = close_interrupted(&mut sessions, &data_dir);
+    let max_inflight = env_num("YGG_MAX_INFLIGHT", 6).max(1) as usize;
 
     let state = AppState {
         sessions: Arc::new(Mutex::new(sessions)),
@@ -2085,7 +2434,12 @@ async fn main() {
         config: Arc::new(config),
         http,
         tools: Arc::new(tool_env),
+        upstream: Arc::new(tokio::sync::Semaphore::new(max_inflight)),
+        wakes: Arc::default(),
     };
+    if !interrupted.is_empty() {
+        eprintln!("restart: closed {} run(s) the previous process left open", interrupted.len());
+    }
     let app = Router::new()
         .route("/session", get(list_sessions).post(create_session))
         .route("/session/status", get(session_status))
@@ -2098,7 +2452,10 @@ async fn main() {
         .route("/config/providers", get(config_providers))
         .route("/agent", get(list_agents))
         .route("/event", get(events))
-        .with_state(state);
+        .route("/tree", get(get_tree))
+        .route("/session/{id}/inbox", get(get_inbox))
+        .with_state(state.clone());
+    tree::recover(&state, interrupted);
 
     let listener = tokio::net::TcpListener::bind(&listen).await.expect("bind");
     eprintln!("yggdrasil listening on {listen}");
@@ -2378,18 +2735,6 @@ mod law_tests {
         assert!(is_main_title("[MAIN]"));
         assert!(is_main_title(" [MAIN] "));
         assert!(!is_main_title("[FIX] lane"));
-        assert_eq!(step_cap(100, 6, true), 6);
-        assert_eq!(step_cap(100, 6, false), 100);
-        assert_eq!(step_cap(4, 6, true), 4); // never raises the global cap
-        let mut a = json!({ "command": "sleep 600", "timeout": 600000 });
-        cap_bash_input(&mut a, 15000, 120000);
-        assert_eq!(a["timeout"], json!(15000));
-        let mut b = json!({ "command": "ls" }); // absent = tool default 120s, still capped
-        cap_bash_input(&mut b, 15000, 120000);
-        assert_eq!(b["timeout"], json!(15000));
-        let mut c = json!({ "command": "ls", "timeout": 2000 });
-        cap_bash_input(&mut c, 15000, 120000);
-        assert_eq!(c["timeout"], json!(2000)); // shorter requests untouched
     }
 
     fn pair(n: usize, auto: bool) -> [Value; 2] {

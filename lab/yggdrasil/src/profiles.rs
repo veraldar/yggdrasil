@@ -1,0 +1,479 @@
+//! Profiles (root-coord, 11-12): what a session IS — its role prompt, the tools it may call,
+//! its default model + thinking, its step cap, whether its old exchanges fold, and whether it
+//! manages other sessions. opencode's agent shape, extended:
+//!
+//! ```json
+//! { "default_agent": "build",
+//!   "agent": { "<name>": { "description": "...", "mode": "primary",
+//!       "prompt": "role text (or {file:/abs/path})", "model": "glm-5.3-flash", "variant": "high",
+//!       "steps": 60, "fold": false, "sessions": true,
+//!       "permission": [ {"permission": "*", "pattern": "*", "action": "allow"} ] } } }
+//! ```
+//!
+//! Permission rules: opencode's ruleset — evaluated in order, the LAST matching rule wins,
+//! a tool no rule matches is denied (the brain has nobody to ask). The pattern is matched
+//! against the call's subject: the bash command, a file tool's `filePath`, webfetch's `url`,
+//! glob/grep's `pattern`; tools without a subject match against `*`. A bash command is split
+//! into its simple commands (`;` `&&` `||` `|` `&` newlines) and EVERY one must be allowed;
+//! substitutions (`$(`, backticks, `<(`, `>(`) fail closed unless a `*` rule allows bash.
+//!
+//! The built-in set (coordinator · lead · build · research · plan) is always present; a
+//! `YGG_PROFILES` file overrides fields of built-ins and adds profiles of its own.
+
+use std::collections::BTreeMap;
+
+use serde_json::{Value, json};
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Rule {
+    pub permission: String,
+    pub pattern: String,
+    pub allow: bool,
+}
+
+#[derive(Clone, Debug)]
+pub struct Profile {
+    pub name: String,
+    pub description: String,
+    pub mode: String,
+    pub prompt: String,
+    pub model: Option<String>,
+    pub variant: Option<String>,
+    pub steps: Option<usize>,
+    pub fold: bool,
+    pub sessions: bool,
+    pub rules: Vec<Rule>,
+}
+
+pub struct Profiles {
+    pub by_name: BTreeMap<String, Profile>,
+    pub default_agent: String,
+}
+
+const ALL: &[&str] = &["bash", "read", "write", "edit", "glob", "grep", "webfetch", "todowrite"];
+
+/// The coordinator: the user's one door. Fast, routes work, comes back with what matters.
+pub const COORDINATOR_PROMPT: &str = "\
+You are the coordinator: the user's single door into yggdrasil, their own AI working on their own computer. \
+The user talks only to you. Behind you is a tree of sessions you create and manage; the user should never have \
+to organize sessions, topics or projects themselves.
+
+How you work:
+- Conversation, opinions, plans, and anything already answered by this conversation, the [tree] cards or the \
+[inbox] lines: answer directly, briefly, in the user's language.
+- A quick fact you can check yourself in at most three reads/greps/globs: look, then answer.
+- Real work (building, editing, testing, research, long investigation, anything multi-step): route it. First \
+`sessions_find` for an existing session on that topic or project; if one fits, `session_send` the new instruction \
+there (its context is kept). Otherwise `session_start` a new one with the right profile: `lead` for a project or \
+anything that splits into parts or needs iterate-until-done loops, `build` for one concrete task, `research` for \
+reading/comparing/answering with sources, `plan` for analysis without changes. Write the brief self-contained: \
+goal, constraints, where (paths), what done means, and any facts from other sessions it needs.
+- Then answer in one or two sentences saying where it went, as `→ <session title>`. Never claim work is done \
+before its report arrives.
+- When an [inbox] turn arrives, sessions reported back: tell the user only what matters to them — results with \
+the evidence that proves them, decisions they must take, failures and what you did about them. One to four \
+sentences. If a session asks a question you can answer from the conversation, answer it with `session_send` \
+yourself instead of bothering the user. If nothing is worth the user's attention, reply exactly: (quiet)
+- When the user answers a question a session asked, `session_send` the answer to that session.
+- Stop, cancel or drop a topic: `session_close`. Status questions: answer from the [tree] cards; \
+`session_read` for details.
+- Never paste raw logs. Never invent results. Keep sessions organized by topic yourself.";
+
+/// A lead: owns one project/topic, may split it into sub-sessions, loops until done.
+pub const LEAD_PROMPT: &str = "\
+You are a lead session: you own one project or topic end to end, given to you by your parent session. \
+Plan the work. Do small parts yourself with your tools. When parts are independent or large, start sub-sessions \
+(`session_start` with profile `build` or `research`, or `lead` for a big sub-project) with self-contained briefs, \
+and let them run in parallel. Their reports come back to you as [inbox] turns: read them, verify the claims \
+(run the tests yourself), send fixes back with `session_send`, and iterate until the whole goal is met. \
+While sub-sessions are still running, end your turn with a one-line status; you will be woken when they report. \
+When everything is done, end with a final report: what exists now (paths), how it was verified (commands and \
+their result), and anything the user must decide. If you are blocked on a decision only the user can take, \
+say exactly what you need, starting with QUESTION:.";
+
+/// A build session: does one concrete task fully.
+pub const BUILD_PROMPT: &str = "\
+You are a build session: do the task you were given completely, with your tools — read the code, make the \
+changes, run it, test it, fix what fails, and repeat until it works. Do not stop at the first obstacle; \
+investigate. End with a short report: what changed (paths), how you verified it (commands and their result), \
+and anything left open. If you are blocked on a decision only the user can take, say exactly what you need, \
+starting with QUESTION:.";
+
+pub const RESEARCH_PROMPT: &str = "\
+You are a research session: answer the question you were given thoroughly — read the relevant files, fetch \
+sources, compare options, and check claims against evidence. Write longer findings to a markdown file when \
+asked or when they are long. End with a short report: the answer, the key evidence, and the recommendation.";
+
+pub const PLAN_PROMPT: &str = "\
+You are a planning session: analyze and plan without changing anything. Read what you need, then answer \
+with a concrete plan: steps, files, risks, and how to verify.";
+
+fn rule(permission: &str, pattern: &str, allow: bool) -> Rule {
+    Rule { permission: permission.into(), pattern: pattern.into(), allow }
+}
+
+fn allow_all() -> Vec<Rule> {
+    vec![rule("*", "*", true)]
+}
+
+fn allow_only(tools: &[&str]) -> Vec<Rule> {
+    let mut r = vec![rule("*", "*", false)];
+    r.extend(tools.iter().map(|t| rule(t, "*", true)));
+    r
+}
+
+pub fn builtins() -> Vec<Profile> {
+    let p = |name: &str, description: &str, prompt: &str, steps: usize, fold: bool, sessions: bool, rules: Vec<Rule>| Profile {
+        name: name.into(),
+        description: description.into(),
+        mode: "primary".into(),
+        prompt: prompt.into(),
+        model: None,
+        variant: None,
+        steps: Some(steps),
+        fold,
+        sessions,
+        rules,
+    };
+    let mut coordinator = p(
+        "coordinator",
+        "the user's door: talks with you, routes work to sessions it manages, reports back what matters",
+        COORDINATOR_PROMPT,
+        12,
+        true,
+        true,
+        allow_only(&["read", "glob", "grep", "webfetch", "todowrite"]),
+    );
+    coordinator.variant = Some("off".into());
+    vec![
+        coordinator,
+        p("lead", "owns a project end to end: plans, splits into sub-sessions, iterates until done", LEAD_PROMPT, 80, false, true, allow_all()),
+        p("build", "does one concrete task fully: code, run, test, fix", BUILD_PROMPT, 100, false, false, allow_all()),
+        p("research", "reads, fetches and compares; answers with evidence", RESEARCH_PROMPT, 60, false, false, allow_all()),
+        p("plan", "analysis and plans, changes nothing", PLAN_PROMPT, 40, false, false, allow_only(&["read", "glob", "grep", "webfetch", "todowrite"])),
+    ]
+}
+
+fn parse_rules(v: &Value) -> Option<Vec<Rule>> {
+    let arr = v.as_array()?;
+    Some(
+        arr.iter()
+            .filter_map(|r| {
+                let permission = r["permission"].as_str()?.to_string();
+                let pattern = r["pattern"].as_str().unwrap_or("*").to_string();
+                let allow = r["action"].as_str() == Some("allow");
+                Some(Rule { permission, pattern, allow })
+            })
+            .collect(),
+    )
+}
+
+/// `{file:/abs/path}` prompts are read once at load.
+fn resolve_prompt(raw: &str) -> String {
+    match raw.trim().strip_prefix("{file:").and_then(|s| s.strip_suffix('}')) {
+        Some(path) => std::fs::read_to_string(path.trim()).unwrap_or_else(|e| {
+            eprintln!("profile prompt {path}: {e}");
+            String::new()
+        }),
+        None => raw.to_string(),
+    }
+}
+
+impl Profiles {
+    /// Built-ins, overlaid with the file (if any). Unknown fields are ignored; a malformed
+    /// file is reported and the built-ins stand alone.
+    pub fn load(path: Option<&str>) -> Profiles {
+        let mut by_name: BTreeMap<String, Profile> = builtins().into_iter().map(|p| (p.name.clone(), p)).collect();
+        let mut default_agent = "build".to_string();
+        if let Some(path) = path.filter(|p| !p.is_empty()) {
+            match std::fs::read(path).map_err(|e| e.to_string()).and_then(|b| serde_json::from_slice::<Value>(&b).map_err(|e| e.to_string())) {
+                Ok(v) => {
+                    Self::overlay(&mut by_name, &v);
+                    if let Some(d) = v["default_agent"].as_str() {
+                        // The coordinator is MAIN's profile, never a session default.
+                        if d != "coordinator" {
+                            default_agent = d.to_string();
+                        }
+                    }
+                }
+                Err(e) => eprintln!("YGG_PROFILES {path}: {e} — built-in profiles only"),
+            }
+        }
+        if !by_name.contains_key(&default_agent) {
+            default_agent = "build".into();
+        }
+        Profiles { by_name, default_agent }
+    }
+
+    fn overlay(by_name: &mut BTreeMap<String, Profile>, v: &Value) {
+        let Some(agents) = v["agent"].as_object() else { return };
+        for (name, a) in agents {
+            let base = by_name.get(name).cloned().unwrap_or_else(|| Profile {
+                name: name.clone(),
+                description: String::new(),
+                mode: "primary".into(),
+                prompt: BUILD_PROMPT.into(),
+                model: None,
+                variant: None,
+                steps: None,
+                fold: false,
+                sessions: false,
+                rules: Vec::new(),
+            });
+            let mut p = base;
+            if let Some(d) = a["description"].as_str() {
+                p.description = d.into();
+            }
+            if let Some(m) = a["mode"].as_str() {
+                p.mode = m.into();
+            }
+            if let Some(t) = a["prompt"].as_str() {
+                p.prompt = resolve_prompt(t);
+            }
+            if let Some(m) = a["model"].as_str().filter(|m| !m.is_empty()) {
+                p.model = Some(m.into());
+            }
+            if let Some(m) = a["variant"].as_str().filter(|m| !m.is_empty()) {
+                p.variant = Some(m.into());
+            }
+            if let Some(n) = a["steps"].as_u64() {
+                p.steps = Some(n.max(1) as usize);
+            }
+            if let Some(b) = a["fold"].as_bool() {
+                p.fold = b;
+            }
+            if let Some(b) = a["sessions"].as_bool() {
+                p.sessions = b;
+            }
+            // The coordinator's tool scope is the brain's contract (it routes, it does not
+            // write); a file entry may describe it but not widen it.
+            if name != "coordinator" {
+                if let Some(r) = parse_rules(&a["permission"]) {
+                    p.rules = r;
+                }
+            }
+            by_name.insert(name.clone(), p);
+        }
+    }
+
+    pub fn get(&self, name: &str) -> Option<&Profile> {
+        self.by_name.get(name)
+    }
+
+    /// `GET /agent` shape (opencode): `[{name, mode, description}]`, plus our extras.
+    pub fn catalog(&self) -> Value {
+        Value::Array(
+            self.by_name
+                .values()
+                .map(|p| {
+                    json!({ "name": p.name, "mode": p.mode, "description": p.description,
+                        "model": p.model, "variant": p.variant, "steps": p.steps, "sessions": p.sessions })
+                })
+                .collect(),
+        )
+    }
+}
+
+/// Glob match: `*` any run of chars (incl. none), `?` one char, everything else literal.
+pub fn wildcard(pattern: &str, s: &str) -> bool {
+    let (p, t): (Vec<char>, Vec<char>) = (pattern.chars().collect(), s.chars().collect());
+    let (mut pi, mut ti, mut star, mut mark) = (0usize, 0usize, None::<usize>, 0usize);
+    while ti < t.len() {
+        if pi < p.len() && (p[pi] == '?' || p[pi] == t[ti]) {
+            pi += 1;
+            ti += 1;
+        } else if pi < p.len() && p[pi] == '*' {
+            star = Some(pi);
+            mark = ti;
+            pi += 1;
+        } else if let Some(s) = star {
+            pi = s + 1;
+            mark += 1;
+            ti = mark;
+        } else {
+            return false;
+        }
+    }
+    while pi < p.len() && p[pi] == '*' {
+        pi += 1;
+    }
+    pi == p.len()
+}
+
+/// The string a rule's pattern is matched against.
+fn subject(tool: &str, input: &Value) -> String {
+    let key = match tool {
+        "bash" => "command",
+        "read" | "write" | "edit" => "filePath",
+        "webfetch" => "url",
+        "glob" | "grep" => "pattern",
+        _ => return "*".into(),
+    };
+    input[key].as_str().unwrap_or_default().trim().to_string()
+}
+
+/// Last matching rule for (tool, subject); `None` = no rule matches.
+fn decide(rules: &[Rule], tool: &str, subj: &str) -> Option<bool> {
+    rules
+        .iter()
+        .rev()
+        .find(|r| (r.permission == "*" || r.permission == tool) && (r.pattern == "*" || wildcard(&r.pattern, subj)))
+        .map(|r| r.allow)
+}
+
+/// Splits a bash command into simple commands. `None` = a construct we refuse to reason
+/// about (substitution, process substitution) — the caller fails closed.
+pub fn simple_commands(cmd: &str) -> Option<Vec<String>> {
+    if cmd.contains("$(") || cmd.contains('`') || cmd.contains("<(") || cmd.contains(">(") {
+        return None;
+    }
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut chars = cmd.chars().peekable();
+    let (mut sq, mut dq) = (false, false);
+    while let Some(c) = chars.next() {
+        match c {
+            '\'' if !dq => {
+                sq = !sq;
+                cur.push(c);
+            }
+            '"' if !sq => {
+                dq = !dq;
+                cur.push(c);
+            }
+            ';' | '\n' | '|' | '&' if !sq && !dq => {
+                if (c == '|' || c == '&') && chars.peek() == Some(&c) {
+                    chars.next();
+                }
+                let t = cur.trim().to_string();
+                if !t.is_empty() {
+                    out.push(t);
+                }
+                cur.clear();
+            }
+            _ => cur.push(c),
+        }
+    }
+    if sq || dq {
+        return None;
+    }
+    let t = cur.trim().to_string();
+    if !t.is_empty() {
+        out.push(t);
+    }
+    Some(out)
+}
+
+impl Profile {
+    /// May this profile call `tool` with `input`? `Err` carries the refusal the model reads.
+    pub fn check(&self, tool: &str, input: &Value) -> Result<(), String> {
+        if tool.starts_with("session") || tool == "inbox" {
+            return if self.sessions { Ok(()) } else { Err(format!("the {} profile does not manage sessions", self.name)) };
+        }
+        let deny = || Err(format!("permission denied: the {} profile may not run {tool} here", self.name));
+        if tool == "bash" {
+            if self.blanket_bash() {
+                return Ok(());
+            }
+            let cmd = subject("bash", input);
+            let Some(parts) = simple_commands(&cmd) else { return deny() };
+            if parts.is_empty() {
+                return deny();
+            }
+            for part in parts {
+                if decide(&self.rules, "bash", &part) != Some(true) {
+                    return Err(format!("permission denied: the {} profile may not run `{part}`", self.name));
+                }
+            }
+            return Ok(());
+        }
+        match decide(&self.rules, tool, &subject(tool, input)) {
+            Some(true) => Ok(()),
+            _ => deny(),
+        }
+    }
+
+    /// A `*`-pattern allow for bash with no narrower deny after it: any command runs,
+    /// substitutions included, without the per-command walk.
+    fn blanket_bash(&self) -> bool {
+        let applies = |r: &Rule| r.permission == "*" || r.permission == "bash";
+        let Some(i) = self.rules.iter().rposition(|r| applies(r) && r.pattern == "*") else { return false };
+        self.rules[i].allow && self.rules[i + 1..].iter().all(|r| !applies(r) || r.allow)
+    }
+
+    /// Tools worth declaring upstream: the ones some rule could allow.
+    pub fn declared_tools(&self) -> Vec<&'static str> {
+        ALL.iter()
+            .copied()
+            .filter(|t| self.rules.iter().any(|r| r.allow && (r.permission == "*" || r.permission == *t)))
+            .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn prof(rules: Vec<Rule>) -> Profile {
+        Profile { name: "t".into(), description: String::new(), mode: "primary".into(), prompt: String::new(), model: None,
+            variant: None, steps: None, fold: false, sessions: false, rules }
+    }
+
+    #[test]
+    fn wildcard_basics() {
+        assert!(wildcard("*", ""));
+        assert!(wildcard("curl *127.0.0.1:*", "curl -s http://127.0.0.1:4100/session"));
+        assert!(!wildcard("curl *127.0.0.1:*", "curl -s http://evil.example/127"));
+        assert!(wildcard("git ?og*", "git log --oneline"));
+        assert!(!wildcard("ls", "ls -la"));
+    }
+
+    #[test]
+    fn last_match_wins_and_unlisted_denies() {
+        let p = prof(vec![rule("*", "*", false), rule("read", "*", true), rule("read", "/etc/*", false)]);
+        assert!(p.check("read", &json!({"filePath": "/home/x"})).is_ok());
+        assert!(p.check("read", &json!({"filePath": "/etc/shadow"})).is_err());
+        assert!(p.check("write", &json!({"filePath": "/home/x"})).is_err());
+        assert!(prof(vec![]).check("read", &json!({"filePath": "a"})).is_err());
+    }
+
+    #[test]
+    fn bash_every_simple_command_must_pass() {
+        let p = prof(vec![rule("*", "*", false), rule("bash", "ls *", true), rule("bash", "grep *", true)]);
+        assert!(p.check("bash", &json!({"command": "ls -la | grep foo"})).is_ok());
+        assert!(p.check("bash", &json!({"command": "ls -la; rm -rf /"})).is_err());
+        assert!(p.check("bash", &json!({"command": "ls && curl x"})).is_err());
+        assert!(p.check("bash", &json!({"command": "ls $(rm -rf /)"})).is_err());
+        assert!(p.check("bash", &json!({"command": "grep 'a;b' file"})).is_ok());
+        assert!(prof(allow_all()).check("bash", &json!({"command": "echo $(date) `id`"})).is_ok());
+    }
+
+    #[test]
+    fn builtins_and_overlay() {
+        let ps = Profiles::load(None);
+        assert_eq!(ps.default_agent, "build");
+        let c = ps.get("coordinator").unwrap();
+        assert!(c.sessions && c.fold);
+        assert!(c.check("write", &json!({"filePath": "/tmp/x"})).is_err());
+        assert!(c.check("bash", &json!({"command": "ls"})).is_err());
+        assert!(c.check("read", &json!({"filePath": "/tmp/x"})).is_ok());
+        assert!(c.check("session_start", &json!({})).is_ok());
+        assert!(ps.get("build").unwrap().check("session_start", &json!({})).is_err());
+        assert!(c.declared_tools().contains(&"read") && !c.declared_tools().contains(&"bash"));
+
+        let dir = std::env::temp_dir().join(format!("ygg-prof-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("p.json");
+        std::fs::write(&f, r#"{"default_agent":"coordinator","agent":{
+            "coordinator":{"permission":[{"permission":"*","pattern":"*","action":"allow"}],"model":"glm-5.2"},
+            "scout":{"description":"looks","permission":[{"permission":"read","pattern":"*","action":"allow"}],"steps":5}}}"#).unwrap();
+        let ps = Profiles::load(f.to_str());
+        assert_eq!(ps.default_agent, "build", "coordinator is never a default");
+        let c = ps.get("coordinator").unwrap();
+        assert!(c.check("write", &json!({"filePath": "x"})).is_err(), "file cannot widen the coordinator");
+        assert_eq!(c.model.as_deref(), Some("glm-5.2"));
+        let s = ps.get("scout").unwrap();
+        assert_eq!(s.steps, Some(5));
+        assert!(s.check("read", &json!({"filePath": "x"})).is_ok() && s.check("bash", &json!({"command": "ls"})).is_err());
+    }
+}

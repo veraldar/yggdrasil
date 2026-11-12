@@ -55,10 +55,17 @@ pub fn body(model: &str, max_tokens: u64, convo: &[Value], tools: Option<&Value>
     b
 }
 
-/// Session variant → the `thinking` body param. Only `high` asks for thinking; the value
-/// is a pure function of the session stamp + env, so it is byte-identical every turn.
+/// Session variant → the `thinking` body param, a pure function of the session stamp + env
+/// (byte-identical every turn). root-coord: `off` is sent EXPLICITLY as disabled — GLM thinks
+/// by default when the param is absent (measured 11-12: 6.8 s vs 1.5 s for one sentence);
+/// `low` is the API's minimum budget; unknown/None = no param (the provider's default).
 pub fn thinking_for(variant: Option<&str>, budget: u64) -> Option<Value> {
-    (variant == Some("high")).then(|| json!({ "type": "enabled", "budget_tokens": budget }))
+    match variant {
+        Some("high") => Some(json!({ "type": "enabled", "budget_tokens": budget })),
+        Some("low") => Some(json!({ "type": "enabled", "budget_tokens": budget.min(1024) })),
+        Some("off") => Some(json!({ "type": "disabled" })),
+        _ => None,
+    }
 }
 
 /// Characters of `thinking` blocks in a non-streamed message.
@@ -348,15 +355,17 @@ mod tests {
     }
 
     #[test]
-    fn thinking_in_body_only_for_high() {
+    fn thinking_param_per_variant() {
         let convo = [json!({"role":"user","content":"a"})];
         let t = thinking_for(Some("high"), 8192);
         let b = body("m", 16384, &convo, None, true, t.as_ref());
         assert_eq!(b["thinking"], json!({"type":"enabled","budget_tokens":8192}));
-        for v in [Some("low"), Some("off"), None] {
-            let b = body("m", 16384, &convo, None, true, thinking_for(v, 8192).as_ref());
-            assert!(b.get("thinking").is_none(), "{v:?}");
-        }
+        let b = body("m", 16384, &convo, None, true, thinking_for(Some("low"), 8192).as_ref());
+        assert_eq!(b["thinking"], json!({"type":"enabled","budget_tokens":1024}));
+        // off is EXPLICIT: GLM thinks by default when the param is absent
+        let b = body("m", 16384, &convo, None, true, thinking_for(Some("off"), 8192).as_ref());
+        assert_eq!(b["thinking"], json!({"type":"disabled"}));
+        assert!(body("m", 16384, &convo, None, true, thinking_for(None, 8192).as_ref()).get("thinking").is_none());
         // constant across turns: identical bytes for identical stamp
         assert_eq!(thinking_for(Some("high"), 8192), thinking_for(Some("high"), 8192));
     }
