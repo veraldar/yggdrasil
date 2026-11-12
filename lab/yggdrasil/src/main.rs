@@ -1122,10 +1122,12 @@ fn upstream_history(messages: &[Value]) -> Vec<Value> {
     out
 }
 
-/// Station turns (auto user message + its autoReply) kept verbatim in the upstream view.
-const STATION_KEEP: usize = 3;
+/// Station turns (auto user message + its reply) kept verbatim in the upstream view.
+/// fold-tighten-r1: 3 -> 2 (upstream prefill dominated MAIN's p95).
+const STATION_KEEP: usize = 2;
 /// Owner exchanges (owner user message + its reply, tool steps included) kept verbatim.
-const OWNER_KEEP: usize = 3;
+/// fold-tighten-r1: 3 -> 2.
+const OWNER_KEEP: usize = 2;
 
 fn first_line(s: &str, max: usize) -> String {
     let l = s.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or_default();
@@ -1157,12 +1159,21 @@ fn collapse_stale_station(messages: &mut [Value]) {
         if !answered {
             continue;
         }
-        let reply = messages.get(i + 1).filter(|m| m["info"]["meta"]["autoReply"] == true && m["info"]["time"]["completed"].is_number());
-        let line = match reply {
-            Some(r) => format!("[station turn] {} => {}", first_line(&message_text(&messages[i]), 160), first_line(&message_text(r), 160)),
+        // fold-tighten-r1 hard fold: every reply up to the next user turn (autoReply or not,
+        // tool steps included) goes into the one digest line and is marked folded.
+        let end = (i + 1..messages.len())
+            .find(|&j| messages[j]["info"]["role"] == "user" && !is_compaction(&messages[j]))
+            .unwrap_or(messages.len());
+        let replies: Vec<usize> = (i + 1..end).filter(|&j| messages[j]["info"]["role"] == "assistant").collect();
+        let first_done = replies.iter().copied().find(|&j| messages[j]["info"]["time"]["completed"].is_number());
+        let line = match first_done {
+            Some(j) => format!("[station turn] {} => {}", first_line(&message_text(&messages[i]), 160), first_line(&message_text(&messages[j]), 160)),
             None => format!("[station turn] {}", first_line(&message_text(&messages[i]), 160)),
         };
         messages[i]["info"]["meta"]["digest"] = json!(line);
+        for j in replies {
+            messages[j]["info"]["meta"]["folded"] = json!(true);
+        }
     }
 }
 
@@ -2394,7 +2405,7 @@ mod law_tests {
     }
 
     #[test]
-    fn station_history_collapses_beyond_last_three_and_is_frozen() {
+    fn station_history_collapses_beyond_last_two_and_is_frozen() {
         let mut msgs: Vec<Value> = vec![];
         msgs.extend(pair(0, false)); // owner turn: verbatim forever
         for n in 1..=5 {
@@ -2402,19 +2413,20 @@ mod law_tests {
         }
         collapse_stale_station(&mut msgs);
         let h = upstream_history(&msgs);
-        // owner pair (2) + 2 collapsed single lines + 3 verbatim pairs (6)
-        assert_eq!(h.len(), 2 + 2 + 6);
+        // owner pair (2) + 3 collapsed single lines + 2 verbatim pairs (4)
+        assert_eq!(h.len(), 2 + 3 + 4);
         assert_eq!(h[2]["content"], json!("[station turn] landing 1 => verdict 1"));
         assert_eq!(h[3]["content"], json!("[station turn] landing 2 => verdict 2"));
+        assert_eq!(h[4]["content"], json!("[station turn] landing 3 => verdict 3"));
         assert_eq!(h[0]["content"], json!("landing 0\nsecond line"));
-        assert!(h[4]["content"].as_str().unwrap().contains("landing 3"));
+        assert!(h[5]["content"].as_str().unwrap().contains("landing 4"));
         // append-only: another station turn only changes the digest of the one aging out
-        let before = h[..4].to_vec();
+        let before = h[..5].to_vec();
         msgs.extend(pair(6, true));
         collapse_stale_station(&mut msgs);
         let h2 = upstream_history(&msgs);
-        assert_eq!(&h2[..4], &before[..]);
-        assert_eq!(h2[4]["content"], json!("[station turn] landing 3 => verdict 3"));
+        assert_eq!(&h2[..5], &before[..]);
+        assert_eq!(h2[5]["content"], json!("[station turn] landing 4 => verdict 4"));
         // idempotent
         let snap = upstream_history(&msgs);
         collapse_stale_station(&mut msgs);
@@ -2427,21 +2439,21 @@ mod law_tests {
     }
 
     #[test]
-    fn owner_turns_fold_beyond_last_three_and_last_three_stay_verbatim() {
+    fn owner_turns_fold_beyond_last_two_and_last_two_stay_verbatim() {
         let mut msgs: Vec<Value> = vec![];
         for n in 0..6 {
             msgs.extend(pair(n, false));
         }
         fold_all(&mut msgs);
         let h = upstream_history(&msgs);
-        // 3 folded single lines + 3 verbatim pairs
-        assert_eq!(h.len(), 3 + 6);
+        // 4 folded single lines + 2 verbatim pairs
+        assert_eq!(h.len(), 4 + 4);
         // digest shape: tag, first line of the ask, arrow, first line of the reply
         assert_eq!(h[0]["content"], json!("[earlier turn] landing 0 => verdict 0"));
-        assert_eq!(h[2]["content"], json!("[earlier turn] landing 2 => verdict 2"));
-        assert_eq!(h[3]["content"], json!("landing 3\nsecond line"));
-        assert_eq!(h[4]["content"], json!("verdict 3"));
-        assert_eq!(h[8]["content"], json!("verdict 5"));
+        assert_eq!(h[3]["content"], json!("[earlier turn] landing 3 => verdict 3"));
+        assert_eq!(h[4]["content"], json!("landing 4\nsecond line"));
+        assert_eq!(h[5]["content"], json!("verdict 4"));
+        assert_eq!(h[7]["content"], json!("verdict 5"));
         // stored transcript (UI) untouched
         assert_eq!(msgs.len(), 12);
         assert_eq!(message_text(&msgs[1]), "verdict 0");
@@ -2456,6 +2468,7 @@ mod law_tests {
         fold_all(&mut msgs);
         let h = upstream_history(&msgs);
         assert_eq!(h[0]["content"], json!("[earlier turn] landing 0 => verdict 0"));
+        assert_eq!(h[1]["content"], json!("[earlier turn] landing 1 => verdict 1"));
         // idempotent: re-running never changes a byte
         let snap = h.clone();
         fold_all(&mut msgs);
@@ -2464,9 +2477,9 @@ mod law_tests {
         msgs.extend(pair(4, false));
         fold_all(&mut msgs);
         let h2 = upstream_history(&msgs);
-        assert_eq!(h2[0], snap[0]);
-        assert_eq!(h2[1]["content"], json!("[earlier turn] landing 1 => verdict 1"));
-        assert_eq!(h2.len(), 2 + 6);
+        assert_eq!(&h2[..2], &snap[..2]);
+        assert_eq!(h2[2]["content"], json!("[earlier turn] landing 2 => verdict 2"));
+        assert_eq!(h2.len(), 3 + 4);
     }
 
     #[test]
@@ -2482,13 +2495,15 @@ mod law_tests {
         assert!(lines.contains(&"[earlier turn] landing 0 => verdict 0"));
         assert!(lines.contains(&"[earlier turn] landing 1 => verdict 1"));
         assert!(lines.contains(&"[station turn] landing 10 => verdict 10"));
+        assert!(lines.contains(&"[earlier turn] landing 2 => verdict 2"));
         assert!(lines.contains(&"[station turn] landing 11 => verdict 11"));
-        // last 3 of each class stay whole
-        for n in [2, 3, 4, 12, 13, 14] {
+        assert!(lines.contains(&"[station turn] landing 12 => verdict 12"));
+        // last 2 of each class stay whole
+        for n in [3, 4, 13, 14] {
             assert!(lines.contains(&format!("landing {n}\nsecond line").as_str()), "landing {n}");
             assert!(lines.contains(&format!("verdict {n}").as_str()), "verdict {n}");
         }
-        assert!(!lines.iter().any(|l| *l == "verdict 0" || *l == "verdict 10"));
+        assert!(!lines.iter().any(|l| ["verdict 0", "verdict 2", "verdict 10", "verdict 12"].contains(l)));
     }
 
     #[test]
@@ -2501,9 +2516,9 @@ mod law_tests {
         let h = upstream_history(&msgs);
         assert_eq!(h.len(), 5);
         assert_eq!(h[0]["content"], json!("[earlier turn] queued 0 => (no reply recorded)"));
-        assert_eq!(h[1]["content"], json!("[earlier turn] queued 1 => (no reply recorded)"));
-        assert_eq!(h[2]["content"], json!("queued 2"));
-        assert!(msgs[2]["info"]["meta"]["digest"].is_null());
+        assert_eq!(h[2]["content"], json!("[earlier turn] queued 2 => (no reply recorded)"));
+        assert_eq!(h[3]["content"], json!("queued 3"));
+        assert!(msgs[3]["info"]["meta"]["digest"].is_null());
     }
 
     #[test]
@@ -2518,7 +2533,7 @@ mod law_tests {
         msgs.push(make_message("s", "user", vec![text_part("interrupted ask")]));
         msgs.push(make_message("s", "assistant", vec![text_part("half done")])); // never completed
         for n in 7..10 {
-            msgs.extend(pair(n, false)); // tail 3
+            msgs.extend(pair(n, false)); // 7 ages out, tail = 8, 9
         }
         fold_all(&mut msgs);
         let h = upstream_history(&msgs);
@@ -2531,8 +2546,9 @@ mod law_tests {
         ]);
         assert!(!lines.contains(&"fat orphan reply"));
         assert!(!lines.contains(&"half done"));
-        assert_eq!(h.len(), 4 + 6);
-        assert_eq!(lines[4], "landing 7\nsecond line");
+        assert_eq!(lines[4], "[earlier turn] landing 7 => verdict 7");
+        assert_eq!(h.len(), 5 + 4);
+        assert_eq!(lines[5], "landing 8\nsecond line");
         let snap = h.clone();
         fold_all(&mut msgs);
         assert_eq!(snap, upstream_history(&msgs));
@@ -2553,8 +2569,63 @@ mod law_tests {
         }
         collapse_stale_station(&mut only);
         assert!(only.iter().all(|m| m["info"]["meta"]["digest"].is_null()));
+        // window 2: answered autos 1..3 + 3 pending -> 4 aged, only the 3 answered fold; the
+        // aged pending one (and both in the window) stay verbatim
+        for _ in 0..3 {
+            msgs.push(pending.clone());
+        }
         collapse_stale_station(&mut msgs);
-        assert!(msgs.iter().all(|m| m["info"]["meta"]["digest"].is_null()));
+        let digested: Vec<usize> = (0..msgs.len()).filter(|&i| msgs[i]["info"]["meta"]["digest"].is_string()).collect();
+        assert_eq!(digested, vec![0, 2, 4]);
+        assert!(msgs[6..].iter().all(|m| m["info"]["meta"]["digest"].is_null() && m["info"]["meta"]["folded"].is_null()));
+        let h = upstream_history(&msgs);
+        assert_eq!(h.iter().filter(|m| m["content"] == json!("queued")).count(), 3);
+    }
+
+    #[test]
+    fn station_hard_fold_takes_the_whole_exchange_autoreply_or_not() {
+        let mut msgs: Vec<Value> = vec![];
+        let mut u = make_message("s", "user", vec![text_part("landing 0")]);
+        u["info"]["meta"] = json!({ "auto": true });
+        msgs.push(u);
+        // a full (non-autoReply) reply with a tool step, then a second step message
+        let mut step = make_message("s", "assistant", vec![text_part("checking"), json!({ "type": "tool", "tool": "bash", "callID": "c1",
+            "state": { "status": "completed", "input": { "command": "ls" }, "output": "big tool output" } })]);
+        step["info"]["time"]["completed"] = json!(2000);
+        let mut fin = make_message("s", "assistant", vec![text_part("long verdict body")]);
+        fin["info"]["time"]["completed"] = json!(2001);
+        msgs.push(step);
+        msgs.push(fin);
+        for n in 1..=2 {
+            msgs.extend(pair(n, true));
+        }
+        collapse_stale_station(&mut msgs);
+        assert!(msgs[1]["info"]["meta"]["folded"] == true && msgs[2]["info"]["meta"]["folded"] == true);
+        let h = upstream_history(&msgs);
+        assert_eq!(h[0]["content"], json!("[station turn] landing 0 => checking"));
+        let all = serde_json::to_string(&h).unwrap();
+        assert!(!all.contains("big tool output") && !all.contains("long verdict body"));
+        assert_eq!(h.len(), 1 + 4);
+        // stored transcript (UI) untouched
+        assert_eq!(msgs.len(), 7);
+        assert_eq!(message_text(&msgs[2]), "long verdict body");
+    }
+
+    #[test]
+    fn fold_counts_window_two_for_any_length() {
+        for n in 0..9usize {
+            let mut owners: Vec<Value> = vec![];
+            let mut autos: Vec<Value> = vec![];
+            for k in 0..n {
+                owners.extend(pair(k, false));
+                autos.extend(pair(k, true));
+            }
+            fold_all(&mut owners);
+            fold_all(&mut autos);
+            let want = n.min(2) * 2 + n.saturating_sub(2);
+            assert_eq!(upstream_history(&owners).len(), want, "owner n={n}");
+            assert_eq!(upstream_history(&autos).len(), want, "station n={n}");
+        }
     }
 }
 

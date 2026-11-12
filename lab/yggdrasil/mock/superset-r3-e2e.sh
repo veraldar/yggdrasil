@@ -45,8 +45,8 @@ for k in ("A-NORMAL","B1-BURST","B2-BURST","C-NOREPLY"):
     chk(f"{k} digested", any(x.startswith("[earlier turn] "+k) for x in t))
 chk("C digest marks no reply", any("C-NOREPLY ask => (no reply recorded)" in x for x in t))
 chk("no fat older reply leaked", not any(r in x and "filler filler" in x for r in ("A-REPLY","B-REPLY") for x in t))
-chk("A pair + B pair + C + TAIL1 fold to 5 lines", sum(x.startswith("[earlier turn]") for x in t)==5)
-chk("tail-3 (TAIL2, TAIL3, TRIGGER) verbatim", all(any(f"TAIL{i} ask" in x and "filler filler" in x for x in t) and any(f"TAIL{i}-REPLY" in x and "filler filler" in x for x in t) for i in (2,3)) and any(x.startswith("TRIGGER ask") or "TRIGGER ask" in x and not x.startswith("[earlier") for x in t))
+chk("A pair + B pair + C + TAIL1-2 fold to 6 lines (fold-tighten-r1 window 2)", sum(x.startswith("[earlier turn]") for x in t)==6)
+chk("tail-2 (TAIL3, TRIGGER) verbatim", all(any(f"TAIL{i} ask" in x and "filler filler" in x for x in t) and any(f"TAIL{i}-REPLY" in x and "filler filler" in x for x in t) for i in (3,)) and any(x.startswith("TRIGGER ask") or "TRIGGER ask" in x and not x.startswith("[earlier") for x in t))
 chk("size shrank (<60% of unfolded history)", size < 0.6*(unfolded+7*len("filler "*300)))
 sys.exit(1 if fail else 0)
 PY

@@ -41,8 +41,8 @@ sizes=[len(json.dumps(body(k))) for k in range(1,n+1)]
 print("upstream body bytes per turn:",sizes)
 last=body(n); t=[txt(m) for m in last]
 chk("digest lines present (earlier turn + station turn)", any(x.startswith("[earlier turn] OWNER1 ask") for x in t) and any(x.startswith("[station turn] AUTO1 landing") for x in t))
-chk("last 3 owner turns verbatim (OWNER6-8 full text)", all(any(f"OWNER{i} ask" in x and "filler filler" in x for x in t) for i in (6,7,8)))
-chk("owner 1-5 not verbatim", not any(f"OWNER{i} ask\nfiller" in x for i in range(1,6) for x in t))
+chk("last 2 owner turns verbatim (OWNER7-8 full text; fold-tighten-r1 window 2)", all(any(f"OWNER{i} ask" in x and "filler filler" in x for x in t) for i in (7,8)))
+chk("owner 1-6 not verbatim", not any(f"OWNER{i} ask\nfiller" in x for i in range(1,7) for x in t))
 chk("body bounded: last turn smaller than 2x the 7th-pair size, not linear", sizes[-1] < sizes[7]*1.3)
 # a fully-linear history would have ~ n*2*2100 bytes; folded must be far under
 chk("shrink vs unfolded estimate", sizes[-1] < 0.6*(n*2*len(json.dumps("filler "*300))))
