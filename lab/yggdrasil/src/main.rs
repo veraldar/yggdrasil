@@ -73,6 +73,7 @@ use tokio_stream::wrappers::{BroadcastStream, ReceiverStream};
 
 mod anthropic;
 mod gate;
+mod harness;
 mod profiles;
 mod rollup;
 mod tools;
@@ -532,6 +533,8 @@ struct AppState {
     upstream: Arc<tokio::sync::Semaphore>,
     /// sessions with a tree wake pending (one at a time each)
     wakes: Arc<Mutex<HashSet<String>>>,
+    /// harness processes (claude/opencode/codex) running at once (YGG_MAX_HARNESS)
+    harness_slots: Arc<tokio::sync::Semaphore>,
 }
 
 #[derive(Deserialize)]
@@ -688,6 +691,7 @@ fn bad_request(msg: &str) -> Response {
 /// Creates + stores a session. Profile (`agent`), model and thinking variant are stamped ONCE
 /// here (cache law): explicit args win, then the profile's defaults, then the brain's.
 fn new_session(st: &AppState, title: &str, parent: Option<&str>, agent: Option<&str>, model: Option<&str>, variant: Option<&str>) -> Value {
+    let explicit_model = model;
     let id = new_id("ses");
     let now = now_ms();
     let mut info = json!({ "id": id, "title": title, "time": { "created": now, "updated": now } });
@@ -706,6 +710,12 @@ fn new_session(st: &AppState, title: &str, parent: Option<&str>, agent: Option<&
         .unwrap_or_else(|| st.config.default_variant.clone());
     let provider = st.config.catalog["default"].as_object().and_then(|d| d.keys().next().cloned()).unwrap_or_else(|| "yggdrasil".into());
     info["model"] = json!({ "id": model, "providerID": provider, "variant": variant });
+    // a harness session's model belongs to that harness (any id it accepts; none = its default)
+    if let Some(h) = prof.and_then(|p| p.harness.clone()) {
+        let hm = explicit_model.or(prof.and_then(|p| p.model.as_deref()));
+        info["model"] = json!({ "id": hm.unwrap_or("default"), "providerID": h });
+        info["harness"] = json!({ "kind": h });
+    }
     if let Some(parent) = parent {
         info["parentID"] = json!(parent);
     }
@@ -1584,8 +1594,14 @@ async fn run_turn(st: &AppState, id: &str, tx: &mpsc::Sender<Event>, queue_ms: u
         queue_ms,
         think: 0,
     };
+    let harness = session_profile(st, id).harness.as_deref().and_then(harness::Kind::parse);
     let outcome = {
-        let fut = agent_loop(st, id, history, tx, &mut run);
+        let fut = async {
+            match harness {
+                Some(kind) => harness_loop(st, id, history, tx, &mut run, kind).await,
+                None => agent_loop(st, id, history, tx, &mut run).await,
+            }
+        };
         tokio::select! {
             r = fut => Some(r),
             _ = cancel.notified() => None,
@@ -1635,6 +1651,66 @@ async fn run_turn(st: &AppState, id: &str, tx: &mpsc::Sender<Event>, queue_ms: u
     };
     publish(st, "session.idle", json!({ "sessionID": id }));
     result
+}
+
+/// A harness session's turn: the newest user message goes to the harness, which resumes its own
+/// session (`info.harness.id`). Its text streams as deltas, its tool calls land as completed tool
+/// parts, its final answer is the reply; the harness session id is kept for the next turn.
+async fn harness_loop(st: &AppState, id: &str, history: Vec<Value>, tx: &mpsc::Sender<Event>, run: &mut Run, kind: harness::Kind) -> Result<(), String> {
+    let prompt = history.iter().rev().find(|m| m["info"]["role"] == "user" && !is_compaction(m)).map(message_text).unwrap_or_default();
+    if prompt.trim().is_empty() {
+        return Err("nothing to send".into());
+    }
+    let (model, resume, cwd) = {
+        let sessions = st.sessions.lock().unwrap();
+        let info = sessions.get(id).map(|s| s.info.clone()).unwrap_or_default();
+        let model = info["model"]["id"].as_str().filter(|m| *m != "default").map(String::from);
+        let cwd = info["cwd"].as_str().map(PathBuf::from).filter(|p| p.is_dir()).unwrap_or_else(|| st.tools.project_dir.clone());
+        (model, info["harness"]["id"].as_str().map(String::from), cwd)
+    };
+    let _slot = st.harness_slots.acquire().await.map_err(|e| e.to_string())?;
+    let (etx, mut erx) = mpsc::unbounded_channel::<harness::Ev>();
+    let fut = harness::run(kind, model.as_deref(), resume.as_deref(), &cwd, &prompt, move |ev| {
+        let _ = etx.send(ev.clone());
+    });
+    tokio::pin!(fut);
+    let result = loop {
+        tokio::select! {
+            r = &mut fut => break r,
+            Some(ev) = erx.recv() => harness_event(st, id, tx, run, ev).await,
+        }
+    };
+    while let Ok(ev) = erx.try_recv() {
+        harness_event(st, id, tx, run, ev).await;
+    }
+    let out = result?;
+    if let Some(sid) = &out.session {
+        with_session(st, id, |s| s.info["harness"] = json!({ "kind": kind.name(), "id": sid }));
+    }
+    run.text = out.text;
+    run.flush_text(None);
+    Ok(())
+}
+
+async fn harness_event(st: &AppState, id: &str, tx: &mpsc::Sender<Event>, run: &mut Run, ev: harness::Ev) {
+    match ev {
+        harness::Ev::Text(t) => {
+            if run.first_delta_ms.is_none() {
+                run.first_delta_ms = Some(run.started.elapsed().as_millis() as u64);
+                run.first_token_seen = true;
+            }
+            send_delta(st, id, tx, &format!("{t}\n\n")).await;
+        }
+        harness::Ev::Tool { name, input, output } => {
+            let now = now_ms();
+            let idx = run.push_part(json!({ "type": "tool", "callID": new_id("call"), "tool": name,
+                "state": { "status": "completed", "input": input, "output": output, "title": name, "time": { "start": now, "end": now } } }));
+            let part = run.msg["parts"][idx].clone();
+            replace_message(st, id, &run.msg);
+            emit(st, tx, "message.part.updated", json!({ "sessionID": id, "part": part })).await;
+        }
+        _ => {}
+    }
 }
 
 /// The agent loop: call upstream; no tool calls → done; else execute each call
@@ -1961,7 +2037,7 @@ fn session_upstream(st: &AppState, id: &str) -> (String, String, Option<Value>) 
             .cloned()
             .collect();
         if prof.sessions {
-            list.extend(tree::schemas());
+            list.extend(tree::schemas(&st.config.profiles));
         }
         Value::Array(list)
     });
@@ -2436,6 +2512,7 @@ async fn main() {
         tools: Arc::new(tool_env),
         upstream: Arc::new(tokio::sync::Semaphore::new(max_inflight)),
         wakes: Arc::default(),
+        harness_slots: Arc::new(tokio::sync::Semaphore::new(env_num("YGG_MAX_HARNESS", 3).max(1) as usize)),
     };
     if !interrupted.is_empty() {
         eprintln!("restart: closed {} run(s) the previous process left open", interrupted.len());

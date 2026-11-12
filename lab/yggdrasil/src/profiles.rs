@@ -43,6 +43,8 @@ pub struct Profile {
     pub fold: bool,
     pub sessions: bool,
     pub rules: Vec<Rule>,
+    /// another agent harness runs this session's turns (`claude` | `opencode` | `codex`)
+    pub harness: Option<String>,
 }
 
 pub struct Profiles {
@@ -134,6 +136,7 @@ pub fn builtins() -> Vec<Profile> {
         fold,
         sessions,
         rules,
+        harness: None,
     };
     let mut coordinator = p(
         "coordinator",
@@ -151,7 +154,27 @@ pub fn builtins() -> Vec<Profile> {
         p("build", "does one concrete task fully: code, run, test, fix", BUILD_PROMPT, 100, false, false, allow_all()),
         p("research", "reads, fetches and compares; answers with evidence", RESEARCH_PROMPT, 60, false, false, allow_all()),
         p("plan", "analysis and plans, changes nothing", PLAN_PROMPT, 40, false, false, allow_only(&["read", "glob", "grep", "webfetch", "todowrite"])),
+        harness_profile("claude-code", "claude", Some("sonnet"), "Claude Code itself as a session (Anthropic's coding agent: strongest for hard code)"),
+        harness_profile("opencode", "opencode", None, "opencode as a session (its own config, models and tools)"),
+        harness_profile("codex", "codex", None, "OpenAI Codex CLI as a session (needs `codex login` on this root)"),
     ]
+}
+
+/// A session driven by another harness: it brings its own prompt, tools and context.
+fn harness_profile(name: &str, kind: &str, model: Option<&str>, description: &str) -> Profile {
+    Profile {
+        name: name.into(),
+        description: description.into(),
+        mode: "primary".into(),
+        prompt: String::new(),
+        model: model.map(String::from),
+        variant: None,
+        steps: None,
+        fold: false,
+        sessions: false,
+        rules: allow_all(),
+        harness: Some(kind.into()),
+    }
 }
 
 fn parse_rules(v: &Value) -> Option<Vec<Rule>> {
@@ -219,6 +242,7 @@ impl Profiles {
                 fold: false,
                 sessions: false,
                 rules: Vec::new(),
+                harness: None,
             });
             let mut p = base;
             if let Some(d) = a["description"].as_str() {
@@ -245,6 +269,9 @@ impl Profiles {
             if let Some(b) = a["sessions"].as_bool() {
                 p.sessions = b;
             }
+            if let Some(h) = a["harness"].as_str() {
+                p.harness = Some(h.into()).filter(|h: &String| !h.is_empty());
+            }
             // The coordinator's tool scope is the brain's contract (it routes, it does not
             // write); a file entry may describe it but not widen it.
             if name != "coordinator" {
@@ -267,7 +294,7 @@ impl Profiles {
                 .values()
                 .map(|p| {
                     json!({ "name": p.name, "mode": p.mode, "description": p.description,
-                        "model": p.model, "variant": p.variant, "steps": p.steps, "sessions": p.sessions })
+                        "model": p.model, "variant": p.variant, "steps": p.steps, "sessions": p.sessions, "harness": p.harness })
                 })
                 .collect(),
         )
@@ -416,7 +443,7 @@ mod tests {
 
     fn prof(rules: Vec<Rule>) -> Profile {
         Profile { name: "t".into(), description: String::new(), mode: "primary".into(), prompt: String::new(), model: None,
-            variant: None, steps: None, fold: false, sessions: false, rules }
+            variant: None, steps: None, fold: false, sessions: false, rules, harness: None }
     }
 
     #[test]

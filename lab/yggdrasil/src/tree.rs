@@ -33,7 +33,15 @@ pub struct TreeCfg {
 
 const INBOX_CAP: usize = 300;
 
-pub fn schemas() -> Vec<Value> {
+/// The tree tools; `session_start` lists the profiles this root offers (built at startup from
+/// the profile set, so the bytes are constant for the process — cache law).
+pub fn schemas(profiles: &crate::profiles::Profiles) -> Vec<Value> {
+    let offer: Vec<String> = profiles
+        .by_name
+        .values()
+        .filter(|p| p.name != "coordinator")
+        .map(|p| format!("{}: {}", p.name, p.description))
+        .collect();
     fn f(name: &str, description: &str, properties: Value, required: &[&str]) -> Value {
         json!({ "type": "function", "function": {
             "name": name, "description": description,
@@ -46,8 +54,9 @@ pub fn schemas() -> Vec<Value> {
           json!({ "query": s("words describing the topic, project or task"), "limit": { "type": "integer", "description": "max results (default 8)" },
                   "archived": { "type": "boolean", "description": "include closed sessions" } }), &["query"]),
         f("session_start", "Start a new session under you with a self-contained brief. It works in the background and reports back to you; do not wait for it.",
-          json!({ "title": s("short topic title, 2-6 words, unique"), "profile": s("lead | build | research | plan"),
+          json!({ "title": s("short topic title, 2-6 words, unique"), "profile": s(&format!("one of — {}", offer.join(" · "))),
                   "brief": s("self-contained instructions: goal, constraints, paths, what done means, needed facts"),
+                  "root": s("optional: another root (machine) to run it on — see the roots line of the [tree] view"),
                   "model": s("optional model id"), "variant": s("optional thinking: high | low | off") }), &["title", "profile", "brief"]),
         f("session_send", "Send a message or follow-up instruction to an existing session (its context is kept). It reports back when done.",
           json!({ "id": s("session id (or exact title)"), "message": s("the message") }), &["id", "message"]),
