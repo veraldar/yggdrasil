@@ -34,11 +34,11 @@ PY
 log "waiting for SWAP-DONE $NAME"
 for _ in $(seq 1440); do   # up to 12 h, 30 s polls
   grep -qE "SWAP-DONE $NAME" "$STATUS" 2>/dev/null && break
-  grep -qE "SWAP-ESCALATE $NAME" "$STATUS" 2>/dev/null && { verdict "RED fold-tighten-r1 NOT-SETTLED $(date -Iseconds) — swap escalated, $NAME never went live$NEXT"; exit 1; }
+  grep -qE "SWAP-ESCALATE $NAME" "$STATUS" 2>/dev/null && { verdict "# fold-tighten-r1 — VERDICT: PARTIAL NOT-SETTLED $(date -Iseconds) — swap escalated, $NAME never went live$NEXT"; exit 1; }
   sleep "$POLL"
 done
 ROW=$(grep -E "SWAP-DONE $NAME" "$STATUS" 2>/dev/null | tail -1)
-[ -n "$ROW" ] || { verdict "RED fold-tighten-r1 NOT-SETTLED $(date -Iseconds) — no SWAP-DONE in 12 h (MAIN never idle with no lane)$NEXT"; exit 1; }
+[ -n "$ROW" ] || { verdict "# fold-tighten-r1 — VERDICT: PARTIAL NOT-SETTLED $(date -Iseconds) — no SWAP-DONE in 12 h (MAIN never idle with no lane)$NEXT"; exit 1; }
 T=$(date -d "$(cut -f1 <<<"$ROW")" +%s); log "swap at @$T: $ROW"
 seen=$(stat -c %Y "$TSV" 2>/dev/null || echo 0); [ "$seen" -lt "$T" ] && seen=$T
 clean=0; wins=0; hist=""
@@ -54,9 +54,9 @@ for _ in $(seq 1440); do
   wins=$((wins + 1)); hist="$hist ${p}/${pp}"
   if [ "$p" -lt "$LIMIT" ] && [ "$pp" -lt "$LIMIT" ]; then clean=$((clean + 1)); else clean=0; fi
   if [ "$clean" -ge 2 ]; then
-    verdict "GREEN fold-tighten-r1 SETTLED $(date -Iseconds) — 2 clean lat-p95 windows <${LIMIT}ms on $NAME (hour/post-swap p95 ms:$hist)"
+    verdict "# fold-tighten-r1 — VERDICT: GREEN SETTLED $(date -Iseconds) — 2 clean lat-p95 windows <${LIMIT}ms on $NAME (hour/post-swap p95 ms:$hist)"
     exit 0
   fi
 done
-verdict "RED fold-tighten-r1 NOT-SETTLED $(date -Iseconds) — 12 h after swap, no 2 consecutive clean windows (${wins} windows, hour/post-swap p95 ms:${hist:- none})$NEXT"
+verdict "# fold-tighten-r1 — VERDICT: PARTIAL NOT-SETTLED $(date -Iseconds) — 12 h after swap, no 2 consecutive clean windows (${wins} windows, hour/post-swap p95 ms:${hist:- none})$NEXT"
 exit 1
