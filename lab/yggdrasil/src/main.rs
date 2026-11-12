@@ -74,6 +74,7 @@ use tokio_stream::wrappers::{BroadcastStream, ReceiverStream};
 mod anthropic;
 mod gate;
 mod harness;
+mod peers;
 mod profiles;
 mod rollup;
 mod tools;
@@ -341,6 +342,10 @@ struct Config {
     tree: tree::TreeCfg,
     /// OG-ctx (10-27, restored 11-12): the AGENTS.md chain, re-read every run
     context_files: Vec<PathBuf>,
+    /// root-coord: the other roots this one works with (peers.rs)
+    peers: peers::Peers,
+    /// models whose tier is `lite` (YGG_MODELS `id:lite`): short prompts, lean tool set
+    lite: HashSet<String>,
     tools_enabled: bool,
     rollup_tokens: usize,
     rollup_keep_tokens: usize,
@@ -735,7 +740,18 @@ async fn create_session(State(st): State<AppState>, body: Option<Json<Value>>) -
     let body = body.map(|Json(b)| b).unwrap_or(Value::Null);
     let title = body["title"].as_str().filter(|t| !t.is_empty()).unwrap_or("New session");
     let model = body["model"].as_str().or(body["model"]["id"].as_str());
-    Json(new_session(&st, title, body["parentID"].as_str(), body["agent"].as_str(), model, body["variant"].as_str()))
+    let info = new_session(&st, title, body["parentID"].as_str(), body["agent"].as_str(), model, body["variant"].as_str());
+    // a peer root asked for this session: its turns report home (peers.rs)
+    if body["report_to"]["root"].is_string() && body["report_to"]["session"].is_string() {
+        let id = info["id"].as_str().unwrap_or_default().to_string();
+        if let Some(i) = with_session(&st, &id, |s| {
+            s.info["report_to"] = body["report_to"].clone();
+            s.info.clone()
+        }) {
+            return Json(i);
+        }
+    }
+    Json(info)
 }
 
 /// `GET /tree` — every session's tree fields (id, title, parentID, agent, model, card, archived,
@@ -755,6 +771,40 @@ async fn get_tree(State(st): State<AppState>) -> Json<Value> {
         .collect();
     rows.sort_by_key(|r| (r["depth"].as_u64().unwrap_or(0), std::cmp::Reverse(r["updated"].as_u64().unwrap_or(0))));
     Json(Value::Array(rows))
+}
+
+/// `GET /root` — what this root is (peers.rs).
+async fn get_root(State(st): State<AppState>) -> Json<Value> {
+    Json(peers::describe(&st))
+}
+
+/// `POST /tree/report` — a peer root reports a turn of a session this root asked it to run.
+async fn tree_report(State(st): State<AppState>, headers: HeaderMap, Json(body): Json<Value>) -> Response {
+    if !st.config.peers.authorized(&headers) {
+        return (StatusCode::UNAUTHORIZED, Json(json!({ "error": "peer token" }))).into_response();
+    }
+    let Some(proxy) = body["proxy"].as_str() else { return bad_request("proxy required") };
+    if tree::accept_report(&st, proxy, body["event"].clone()) { Json(true).into_response() } else { not_found(proxy) }
+}
+
+/// `POST /session/:id/close` — archive a session and its sub-sessions, aborting their runs.
+async fn close_session(State(st): State<AppState>, Path(id): Path<String>, body: Option<Json<Value>>) -> Response {
+    let reason = body.as_ref().and_then(|b| b["reason"].as_str()).unwrap_or("closed").to_string();
+    match tree::archive_family(&st, &id, &reason) {
+        Some(n) => Json(json!({ "closed": n })).into_response(),
+        None => not_found(&id),
+    }
+}
+
+/// `full` | `lite` for a model id (YGG_MODELS `id:lite`).
+fn model_tier(st: &AppState, model: &str) -> &'static str {
+    if st.config.lite.contains(model) { "lite" } else { "full" }
+}
+
+/// Forgets a session (record + file) — a proxy whose peer refused the create.
+fn drop_session(st: &AppState, id: &str) {
+    st.sessions.lock().unwrap().remove(id);
+    let _ = std::fs::remove_file(session_path(&st.data_dir, id));
 }
 
 /// `GET /session/:id/inbox` — the reports filed with this session (newest last).
@@ -838,6 +888,13 @@ async fn list_messages(
     Query(q): Query<HashMap<String, String>>,
 ) -> Response {
     let with_internal = q.get("internal").is_some_and(|v| v == "1" || v == "true");
+    // a proxy reads its peer: the phone opens a session on another root through this one
+    if let Some((root, rid)) = peers::remote_of(&st, &id) {
+        return match peers::call(&st, &root, "GET", &format!("/session/{rid}/message"), None, 20).await {
+            Ok(v) => Json(v).into_response(),
+            Err(e) => (StatusCode::BAD_GATEWAY, Json(json!({ "error": e }))).into_response(),
+        };
+    }
     match st.sessions.lock().unwrap().get(&id) {
         Some(s) => Json(Value::Array(transcript(&s.messages, with_internal))).into_response(),
         None => not_found(&id),
@@ -945,6 +1002,16 @@ async fn post_message(
     Json(body): Json<PostMessage>,
 ) -> Response {
     let is_async = q.get("async").is_some_and(|v| v == "1" || v == "true");
+    // a proxy forwards to its peer (the peer reports the turn home by itself)
+    if let Some((root, rid)) = peers::remote_of(&st, &id) {
+        let body = json!({ "parts": body.parts, "modality": body.modality });
+        let path = if is_async { format!("/session/{rid}/message?async=1&origin=none") } else { format!("/session/{rid}/message") };
+        with_session(&st, &id, |s| s.info["card"]["status"] = json!("working"));
+        return match peers::call(&st, &root, "POST", &path, Some(body), 900).await {
+            Ok(v) => Json(v).into_response(),
+            Err(e) => (StatusCode::BAD_GATEWAY, Json(json!({ "error": e }))).into_response(),
+        };
+    }
     let origin = if is_async {
         match resolve_origin(&st, &id, q.get("origin").or(body.origin.as_ref()).map(String::as_str)) {
             Ok(o) => o,
@@ -1140,7 +1207,7 @@ fn submit(st: &AppState, id: &str, turn: Turn) -> Result<Submitted, Response> {
         // root-coord: a session under a manager reports into its inbox (digest + card + wake);
         // a plain async origin outside the tree keeps the 11-12 completion turn
         match tree::report_target(&st, &id, origin.as_deref()) {
-            Some(parent) => tree::on_turn_end(&st, &id, &parent, result),
+            Some(target) => tree::on_turn_end(&st, &id, target, result),
             None => {
                 if let Some(origin) = origin {
                     post_completion(&st, &origin, &id, &turn_id, &result);
@@ -1750,8 +1817,15 @@ async fn agent_loop(
         convo.insert(at, json!({ "role": "system", "content": ctx }));
         at += 1;
     }
-    if !prof.prompt.trim().is_empty() {
-        convo.insert(at, json!({ "role": "system", "content": format!("[profile: {}]\n{}", prof.name, prof.prompt) }));
+    // the role text fits the model: a lite model reads the short version (cache law: the
+    // model is stamped per session, so the bytes stay constant)
+    let (model, _, _) = session_upstream(st, id);
+    let role = match (model_tier(st, &model), &prof.prompt_lite) {
+        ("lite", Some(short)) => short.clone(),
+        _ => prof.prompt.clone(),
+    };
+    if !role.trim().is_empty() {
+        convo.insert(at, json!({ "role": "system", "content": format!("[profile: {}]\n{}", prof.name, role) }));
     }
     let max = prof.steps.unwrap_or(st.config.max_steps).min(st.config.max_steps).max(1);
     for _ in 0..max {
@@ -1992,25 +2066,40 @@ async fn run_tool(st: &AppState, id: &str, tx: &mpsc::Sender<Event>, run: &mut R
 /// (529 overloaded / 503 unavailable). 429 balance and 401 fail immediately —
 /// a real account problem must not hide behind a retry.
 async fn send_with_retry(req: &reqwest::RequestBuilder, retries: &mut u32) -> Result<reqwest::Response, String> {
-    let resp = req
-        .try_clone()
-        .ok_or("request not cloneable")?
-        .send()
-        .await
-        .map_err(|e| format!("request failed: {e}"))?;
-    let code = resp.status().as_u16();
-    if code == 529 || code == 503 {
-        *retries += 1;
-        tokio::time::sleep(std::time::Duration::from_millis(1800)).await;
-        eprintln!("LAT-RETRY upstream {code} — transient, retrying once after 1.8s (retry #{retries})");
-        return req
+    // root-coord: a RATE limit (429 rate_limit_error — a busy tree on one key) backs off and
+    // retries (3, 8, 20, 45 s); a balance/quota 429 and a 401 still fail at once
+    const BACKOFF_MS: [u64; 4] = [3000, 8000, 20_000, 45_000];
+    let mut attempt = 0usize;
+    loop {
+        let resp = req
             .try_clone()
             .ok_or("request not cloneable")?
             .send()
             .await
-            .map_err(|e| format!("request failed: {e}"));
+            .map_err(|e| format!("request failed: {e}"))?;
+        let code = resp.status().as_u16();
+        let transient = code == 529 || code == 503;
+        if code == 429 {
+            let body = resp.text().await.unwrap_or_default();
+            let low = body.to_lowercase();
+            let quota = ["balance", "quota", "insufficient", "billing", "exceeded your"].iter().any(|k| low.contains(k));
+            if quota || attempt >= BACKOFF_MS.len() {
+                return Err(format!("upstream 429 Too Many Requests: {body}"));
+            }
+            eprintln!("LAT-RETRY upstream 429 rate limit — backing off {} ms (retry #{})", BACKOFF_MS[attempt], attempt + 1);
+        } else if transient && attempt < 1 {
+            eprintln!("LAT-RETRY upstream {code} — transient, retrying once after 1.8s (retry #{})", *retries + 1);
+            tokio::time::sleep(std::time::Duration::from_millis(1800)).await;
+            *retries += 1;
+            attempt += 1;
+            continue;
+        } else {
+            return Ok(resp);
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(BACKOFF_MS[attempt])).await;
+        *retries += 1;
+        attempt += 1;
     }
-    Ok(resp)
 }
 
 /// What one session sends upstream: its model (any the upstream serves; else the default),
@@ -2027,8 +2116,10 @@ fn session_upstream(st: &AppState, id: &str) -> (String, String, Option<Value>) 
         .unwrap_or((None, None));
     let model = model.filter(|m| st.config.models.iter().any(|x| x == m)).unwrap_or_else(|| st.config.model.clone());
     let variant = stamp.or(prof.variant.clone()).unwrap_or_else(|| st.config.default_variant.clone());
+    let lite = model_tier(st, &model) == "lite";
     let tools = st.config.tools_enabled.then(|| {
-        let allowed = prof.declared_tools();
+        // a lite model gets the lean set: shell + files (and the tree tools if it manages)
+        let allowed: Vec<&str> = prof.declared_tools().into_iter().filter(|t| !lite || matches!(*t, "bash" | "read" | "write" | "edit")).collect();
         let mut list: Vec<Value> = tools::schemas()
             .as_array()
             .into_iter()
@@ -2436,8 +2527,12 @@ async fn main() {
         std::process::exit(2);
     }
     // root-coord: every model this upstream serves (YGG_MODELS, comma list; the default first)
-    let mut models: Vec<String> = vec![model.clone()];
-    for m in std::env::var("YGG_MODELS").unwrap_or_default().split(',').map(str::trim).filter(|m| !m.is_empty()) {
+    let (mut models, mut lite): (Vec<String>, HashSet<String>) = (vec![model.clone()], HashSet::new());
+    for entry in std::env::var("YGG_MODELS").unwrap_or_default().split(',').map(str::trim).filter(|m| !m.is_empty()) {
+        let (m, tier) = entry.split_once(':').unwrap_or((entry, "full"));
+        if tier == "lite" {
+            lite.insert(m.to_string());
+        }
         if !models.iter().any(|x| x == m) {
             models.push(m.to_string());
         }
@@ -2465,6 +2560,8 @@ async fn main() {
         profiles,
         tree: tree_cfg,
         context_files: Vec::new(),
+        peers: peers::Peers::load(),
+        lite,
         max_steps: env_num("YGG_MAX_STEPS", 100).max(1) as usize,
         tools_enabled: std::env::var("YGG_TOOLS").map_or(true, |v| v != "0"),
         voice: std::env::var("YGG_VOICE").map_or(false, |v| v == "1"),
@@ -2530,9 +2627,14 @@ async fn main() {
         .route("/agent", get(list_agents))
         .route("/event", get(events))
         .route("/tree", get(get_tree))
+        .route("/tree/report", post(tree_report))
+        .route("/root", get(get_root))
         .route("/session/{id}/inbox", get(get_inbox))
+        .route("/session/{id}/close", post(close_session))
         .with_state(state.clone());
     tree::recover(&state, interrupted);
+    peers::spawn_watch(&state);
+    eprintln!("root {} · peers: {}", state.config.peers.me, state.config.peers.list.iter().map(|(n, u)| format!("{n}={u}")).collect::<Vec<_>>().join(", "));
 
     let listener = tokio::net::TcpListener::bind(&listen).await.expect("bind");
     eprintln!("yggdrasil listening on {listen}");

@@ -45,6 +45,8 @@ pub struct Profile {
     pub rules: Vec<Rule>,
     /// another agent harness runs this session's turns (`claude` | `opencode` | `codex`)
     pub harness: Option<String>,
+    /// the role text for lite-tier models (short, few rules); `None` = the full prompt
+    pub prompt_lite: Option<String>,
 }
 
 pub struct Profiles {
@@ -106,6 +108,11 @@ You are a research session: answer the question you were given thoroughly — re
 sources, compare options, and check claims against evidence. Write longer findings to a markdown file when \
 asked or when they are long. End with a short report: the answer, the key evidence, and the recommendation.";
 
+/// Lite-tier roles: what a small model can hold — one paragraph, few rules.
+pub const COORDINATOR_LITE: &str = "You are the coordinator, the user's only contact. Answer simple things directly. For real work: sessions_find; then session_send to a matching session or session_start a new one (profile build for one task, lead for a project, research for questions) with a complete brief; then say `→ <title>` in one sentence. When an [inbox] message arrives, tell the user the results that matter in one to three sentences, or reply exactly (quiet).";
+pub const LEAD_LITE: &str = "You own one project. Do it yourself with bash/read/write/edit, or split independent parts into sessions with session_start. Check results by running the tests. When all is done, report what exists and the test result. If you need the user's decision, start your reply with QUESTION:.";
+pub const BUILD_LITE: &str = "Do the task completely with bash/read/write/edit. Run it, test it, fix failures. Reply with what you changed and the test result. If you need the user's decision, start your reply with QUESTION:.";
+
 pub const PLAN_PROMPT: &str = "\
 You are a planning session: analyze and plan without changing anything. Read what you need, then answer \
 with a concrete plan: steps, files, risks, and how to verify.";
@@ -137,6 +144,7 @@ pub fn builtins() -> Vec<Profile> {
         sessions,
         rules,
         harness: None,
+        prompt_lite: None,
     };
     let mut coordinator = p(
         "coordinator",
@@ -148,10 +156,15 @@ pub fn builtins() -> Vec<Profile> {
         allow_only(&["read", "glob", "grep", "webfetch", "todowrite"]),
     );
     coordinator.variant = Some("off".into());
+    coordinator.prompt_lite = Some(COORDINATOR_LITE.into());
+    let mut lead = p("lead", "owns a project end to end: plans, splits into sub-sessions, iterates until done", LEAD_PROMPT, 80, false, true, allow_all());
+    lead.prompt_lite = Some(LEAD_LITE.into());
+    let mut build = p("build", "does one concrete task fully: code, run, test, fix", BUILD_PROMPT, 100, false, false, allow_all());
+    build.prompt_lite = Some(BUILD_LITE.into());
     vec![
         coordinator,
-        p("lead", "owns a project end to end: plans, splits into sub-sessions, iterates until done", LEAD_PROMPT, 80, false, true, allow_all()),
-        p("build", "does one concrete task fully: code, run, test, fix", BUILD_PROMPT, 100, false, false, allow_all()),
+        lead,
+        build,
         p("research", "reads, fetches and compares; answers with evidence", RESEARCH_PROMPT, 60, false, false, allow_all()),
         p("plan", "analysis and plans, changes nothing", PLAN_PROMPT, 40, false, false, allow_only(&["read", "glob", "grep", "webfetch", "todowrite"])),
         harness_profile("claude-code", "claude", Some("sonnet"), "Claude Code itself as a session (Anthropic's coding agent: strongest for hard code)"),
@@ -174,6 +187,7 @@ fn harness_profile(name: &str, kind: &str, model: Option<&str>, description: &st
         sessions: false,
         rules: allow_all(),
         harness: Some(kind.into()),
+        prompt_lite: None,
     }
 }
 
@@ -243,6 +257,7 @@ impl Profiles {
                 sessions: false,
                 rules: Vec::new(),
                 harness: None,
+                prompt_lite: None,
             });
             let mut p = base;
             if let Some(d) = a["description"].as_str() {
@@ -253,6 +268,9 @@ impl Profiles {
             }
             if let Some(t) = a["prompt"].as_str() {
                 p.prompt = resolve_prompt(t);
+            }
+            if let Some(t) = a["prompt_lite"].as_str() {
+                p.prompt_lite = Some(resolve_prompt(t));
             }
             if let Some(m) = a["model"].as_str().filter(|m| !m.is_empty()) {
                 p.model = Some(m.into());
@@ -443,7 +461,7 @@ mod tests {
 
     fn prof(rules: Vec<Rule>) -> Profile {
         Profile { name: "t".into(), description: String::new(), mode: "primary".into(), prompt: String::new(), model: None,
-            variant: None, steps: None, fold: false, sessions: false, rules, harness: None }
+            variant: None, steps: None, fold: false, sessions: false, rules, harness: None, prompt_lite: None }
     }
 
     #[test]

@@ -240,6 +240,9 @@ fn in_scope(st: &AppState, sessions: &HashMap<String, Session>, caller: &str, ta
 }
 
 pub async fn run(st: &AppState, caller: &str, name: &str, input: &Value) -> Out {
+    if let Some(o) = run_remote(st, caller, name, input).await {
+        return o;
+    }
     match name {
         "sessions_find" => find(st, caller, input),
         "session_start" => start(st, caller, input),
@@ -250,13 +253,67 @@ pub async fn run(st: &AppState, caller: &str, name: &str, input: &Value) -> Out 
     }
 }
 
+/// The tree tools on another root: start there, or act on a proxy (peers.rs). `None` = local.
+async fn run_remote(st: &AppState, caller: &str, name: &str, input: &Value) -> Option<Out> {
+    let me = st.config.peers.me.clone();
+    if name == "session_start" {
+        let root = input["root"].as_str().filter(|r| !r.is_empty() && *r != me)?;
+        let (title, brief) = (input["title"].as_str().unwrap_or("work"), input["brief"].as_str().unwrap_or_default());
+        let profile = input["profile"].as_str().unwrap_or("build");
+        if brief.trim().is_empty() {
+            return Some(err("brief required".into()));
+        }
+        let title = unique_title(&st.sessions.lock().unwrap(), title);
+        return Some(match crate::peers::start(st, caller, root, &title, profile, brief, input["model"].as_str(), input["variant"].as_str()).await {
+            Ok(pid) => {
+                publish(st, "tree.updated", json!({ "sessionID": pid, "parentID": caller }));
+                ok(format!("started id={pid} \"{title}\" as {profile} on root {root}. It reports back to you when it is done — do not wait for it."))
+            }
+            Err(e) => err(format!("could not start on {root}: {e}")),
+        });
+    }
+    let target = resolve(&st.sessions.lock().unwrap(), input["id"].as_str().unwrap_or_default())?;
+    let (root, rid) = crate::peers::remote_of(st, &target)?;
+    if !in_scope(st, &st.sessions.lock().unwrap(), caller, &target) {
+        return Some(err("not in your subtree".into()));
+    }
+    Some(match name {
+        "session_send" => {
+            let msg = input["message"].as_str().unwrap_or_default();
+            with_session(st, &target, |s| s.info["card"]["status"] = json!("working"));
+            match crate::peers::send(st, &root, &rid, msg).await {
+                Ok(()) => ok(format!("sent to id={target} on root {root}. It reports back when done — do not wait for it.")),
+                Err(e) => err(e),
+            }
+        }
+        "session_read" => {
+            let local = read(st, caller, input).output;
+            match crate::peers::call(st, &root, "GET", &format!("/session/{rid}/message"), None, 20).await {
+                Ok(v) => {
+                    let last = v.as_array().into_iter().flatten().rev().find(|m| m["info"]["role"] == "assistant").map(message_text).unwrap_or_default();
+                    ok(format!("{local}(runs on root {root})\nlast reply there:\n{}", clip(&last, 3000)))
+                }
+                Err(e) => ok(format!("{local}(runs on root {root}, unreachable now: {e})")),
+            }
+        }
+        "session_close" => {
+            let reason = input["reason"].as_str().unwrap_or("closed");
+            let _ = crate::peers::call(st, &root, "POST", &format!("/session/{rid}/close"), Some(json!({ "reason": reason })), 15).await;
+            archive_family(st, &target, reason);
+            ok(format!("closed id={target} (on root {root})"))
+        }
+        _ => return None,
+    })
+}
+
 fn card_line(st: &AppState, id: &str, s: &Session, indent: usize) -> String {
     let card = &s.info["card"];
     let status = card["status"].as_str().unwrap_or(if is_archived(s) { "archived" } else { "idle" });
     let head = card["headline"].as_str().or(card["summary"].as_str()).or(card["brief"].as_str()).unwrap_or_default();
     let needs = card["needs"].as_str().filter(|n| !n.is_empty()).map(|n| format!(" NEEDS: {}", one_line(n, 160))).unwrap_or_default();
+    let on = s.info["remote"]["root"].as_str().map(|r| format!(" on {r}")).unwrap_or_default();
     format!(
-        "{}- \"{}\" [{}, {}, {} ago] {}{} (id={id})",
+        "{}- \"{}\" [{}{on}, {}, {} ago] {}{} (id={id})",
         "  ".repeat(indent),
         title_of(s),
         crate::profile_name_of(st, &s.info),
@@ -445,20 +502,38 @@ fn close(st: &AppState, caller: &str, input: &Value) -> Out {
         fam.insert(0, t.clone());
         (t.clone(), fam, title_of(&sessions[&t]))
     };
-    let reason = input["reason"].as_str().unwrap_or("closed");
-    for id in &family {
-        if let Some(n) = st.running.lock().unwrap().get(id).cloned() {
+    let _ = family;
+    let n = archive_family(st, &target, input["reason"].as_str().unwrap_or("closed")).unwrap_or(1);
+    ok(format!("closed \"{title}\"{}", if n > 1 { format!(" and {} sub-session(s)", n - 1) } else { String::new() }))
+}
+
+/// Archives `id` and everything under it, aborting their runs. Returns how many closed.
+pub fn archive_family(st: &AppState, id: &str, reason: &str) -> Option<usize> {
+    let family = {
+        let sessions = st.sessions.lock().unwrap();
+        if !sessions.contains_key(id) {
+            return None;
+        }
+        let mut fam = descendants(&sessions, id);
+        fam.insert(0, id.to_string());
+        fam
+    };
+    for sid in &family {
+        if let Some(n) = st.running.lock().unwrap().get(sid).cloned() {
             n.notify_one();
         }
-        with_session(st, id, |s| {
+        with_session(st, sid, |s| {
             s.info["archived"] = json!(true);
             s.info["time"]["archived"] = json!(now_ms());
+            if !s.info["card"].is_object() {
+                s.info["card"] = json!({});
+            }
             s.info["card"]["status"] = json!("archived");
             s.info["card"]["headline"] = json!(clip(&format!("closed: {reason}"), 160));
         });
     }
-    publish(st, "tree.updated", json!({ "sessionID": target, "archived": true }));
-    ok(format!("closed \"{title}\"{}", if family.len() > 1 { format!(" and {} sub-session(s)", family.len() - 1) } else { String::new() }))
+    publish(st, "tree.updated", json!({ "sessionID": id, "archived": true }));
+    Some(family.len())
 }
 
 // ── the [tree] view ──────────────────────────────────────────────────────────
@@ -511,7 +586,9 @@ pub fn snapshot(st: &AppState, caller: &str) -> String {
             }
         }
     }
-    let mut out = String::from("[tree] your sessions now:\n");
+    drop(sessions);
+    let roots = if door { crate::peers::roots_view(st) } else { String::new() };
+    let mut out = format!("{roots}[tree] your sessions now:\n");
     if lines.is_empty() {
         out.push_str("(none yet)\n");
     } else {
@@ -662,14 +739,15 @@ async fn digest(st: &AppState, sid: &str, f: &Facts) -> Value {
         Ok(Err(e)) => eprintln!("digest {sid}: {e}; deterministic card"),
         Err(_) => eprintln!("digest {sid}: timeout; deterministic card"),
     }
+    // facts over the model's taste: an outcome (done/failed/aborted) is never noise — the
+    // person asked for that work (sim away-back 11-12: two finished builds filed as routine,
+    // the door never woke); only in-progress turns may be routine
     if status == "blocked" || !needs.is_empty() {
         relevance = "needs_you".into();
-    }
-    if status == "failed" && relevance == "routine" {
-        relevance = "worth_knowing".into();
-    }
-    if status == "working" && relevance == "worth_knowing" && needs.is_empty() {
+    } else if status == "working" {
         relevance = "routine".into();
+    } else if relevance == "routine" {
+        relevance = "worth_knowing".into();
     }
     if status != "blocked" && question.is_none() && relevance == "needs_you" && needs.is_empty() {
         relevance = "worth_knowing".into();
@@ -699,20 +777,52 @@ fn write_card(st: &AppState, sid: &str, ev: &Value) {
     }
 }
 
-/// Where a finished turn of `sid` reports: its managing parent (a session whose profile
-/// manages sessions), else the turn's origin when that one manages sessions.
-pub fn report_target(st: &AppState, sid: &str, origin: Option<&str>) -> Option<String> {
+/// Where a finished turn reports.
+pub enum Target {
+    /// a managing session on this root
+    Local(String),
+    /// the proxy of this session on the root that asked for it
+    Peer { root: String, proxy: String },
+}
+
+/// Its managing parent, else the root that asked for it (`info.report_to`), else the turn's
+/// origin when that one manages sessions.
+pub fn report_target(st: &AppState, sid: &str, origin: Option<&str>) -> Option<Target> {
     let sessions = st.sessions.lock().unwrap();
     let manages = |id: &str| sessions.get(id).is_some_and(|s| st.config.profiles.get(&crate::profile_name_of(st, &s.info)).is_some_and(|p| p.sessions));
-    let parent = sessions.get(sid).and_then(parent_of);
-    if let Some(p) = parent.filter(|p| manages(p)) {
-        return Some(p);
+    let s = sessions.get(sid)?;
+    if let Some(p) = parent_of(s).filter(|p| manages(p)) {
+        return Some(Target::Local(p));
     }
-    origin.filter(|o| manages(o)).map(String::from)
+    if let (Some(root), Some(proxy)) = (s.info["report_to"]["root"].as_str(), s.info["report_to"]["session"].as_str()) {
+        return Some(Target::Peer { root: root.into(), proxy: proxy.into() });
+    }
+    origin.filter(|o| manages(o)).map(|o| Target::Local(o.into()))
+}
+
+/// A peer root reported a turn of the session behind proxy `proxy`: card the proxy, then
+/// deliver to its parent exactly like a local report. `false` = no such proxy here.
+pub fn accept_report(st: &AppState, proxy: &str, mut ev: Value) -> bool {
+    let (parent, title) = {
+        let sessions = st.sessions.lock().unwrap();
+        let Some(s) = sessions.get(proxy).filter(|s| s.info["remote"].is_object()) else { return false };
+        (parent_of(s), title_of(s))
+    };
+    ev["from"] = json!(proxy);
+    ev["title"] = json!(title);
+    ev["delivered"] = json!(false);
+    write_card(st, proxy, &ev);
+    eprintln!("TREE peer report for {proxy}: {} / {}", ev["status"].as_str().unwrap_or("?"), ev["relevance"].as_str().unwrap_or("?"));
+    if let Some(p) = parent {
+        if !(ev["status"] == "working" && ev["relevance"] == "routine") {
+            deliver(st, &p, ev);
+        }
+    }
+    true
 }
 
 /// A turn of `sid` ended: digest it, card it, file the event with `parent`, wake per policy.
-pub fn on_turn_end(st: &AppState, sid: &str, parent: &str, result: Result<Value, String>) {
+pub fn on_turn_end(st: &AppState, sid: &str, target: Target, result: Result<Value, String>) {
     // coalesced auto turns share one result: report each finished reply once
     if let Ok(m) = &result {
         let mid = m["info"]["id"].clone();
@@ -730,11 +840,15 @@ pub fn on_turn_end(st: &AppState, sid: &str, parent: &str, result: Result<Value,
             return;
         }
     }
-    let (st, sid, parent) = (st.clone(), sid.to_string(), parent.to_string());
+    let (st, sid) = (st.clone(), sid.to_string());
     tokio::spawn(async move {
         let Some(f) = gather(&st, &sid, &result) else { return };
         let ev = digest(&st, &sid, &f).await;
         write_card(&st, &sid, &ev);
+        let parent = match &target {
+            Target::Local(p) => p.clone(),
+            Target::Peer { root, proxy } => format!("{root}/{proxy}"),
+        };
         eprintln!(
             "TREE {} -> {}: {} / {} — {}",
             sid,
@@ -748,7 +862,10 @@ pub fn on_turn_end(st: &AppState, sid: &str, parent: &str, result: Result<Value,
             publish(&st, "tree.updated", json!({ "sessionID": sid }));
             return;
         }
-        deliver(&st, &parent, ev);
+        match target {
+            Target::Local(p) => deliver(&st, &p, ev),
+            Target::Peer { root, proxy } => crate::peers::report(&st, &root, &proxy, ev).await,
+        }
     });
 }
 
@@ -911,8 +1028,8 @@ pub fn external_report(st: &AppState, door: &str, text: &str) {
 /// A brain restart killed these runs: their cards say so and their parents hear it.
 pub fn recover(st: &AppState, interrupted: Vec<String>) {
     for sid in interrupted {
-        if let Some(parent) = report_target(st, &sid, None) {
-            on_turn_end(st, &sid, &parent, Err("interrupted by a brain restart — send it again to resume".into()));
+        if let Some(target) = report_target(st, &sid, None) {
+            on_turn_end(st, &sid, target, Err("interrupted by a brain restart — send it again to resume".into()));
         }
     }
 }
