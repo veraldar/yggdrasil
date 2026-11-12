@@ -48,6 +48,15 @@ door's alone. Thinking `off` is sent explicitly (GLM thinks by default). Rate-li
 off instead of killing a run; an empty step (thinking ate the token cap) retries once with
 thinking off.
 
+## Behaviour notes
+
+- Dispatch answers `STARTED/SENT, NOT DONE YET`; the door reserves "done" for confirmed reports and never
+  contradicts the live `[tree]` (`running` = still working).
+- `session_close` refuses a running family unless `cancel=true`; the door never closes to tidy up.
+- The door has no bash: it no longer launches `agi-run` lanes itself. Heavy coding goes to a `claude-code`
+  session (the visible, reporting successor of a sonnet lane) or a `lead`. Lanes started elsewhere still
+  land in MAIN's inbox through the watcher.
+
 ## Env
 
 `YGG_MODELS` (`id[:lite]`, comma list) · `YGG_PROFILES` · `YGG_CONTEXT_FILES` · `YGG_ROOT_NAME` ·
