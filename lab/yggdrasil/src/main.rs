@@ -942,7 +942,7 @@ fn upstream_history(messages: &[Value]) -> Vec<Value> {
                 continue;
             }
         }
-        if role == "assistant" && skip_reply && (m["info"]["meta"]["autoReply"] == true || m["info"]["meta"]["folded"] == true) {
+        if role == "assistant" && ((skip_reply && m["info"]["meta"]["autoReply"] == true) || m["info"]["meta"]["folded"] == true) {
             continue;
         }
         if role != "assistant" {
@@ -1056,20 +1056,26 @@ fn collapse_stale_owner(messages: &mut [Value]) {
     if owners.len() <= OWNER_KEEP {
         return;
     }
-    for &i in &owners[..owners.len() - OWNER_KEEP] {
+    let aged = owners.len() - OWNER_KEEP;
+    for k in 0..aged {
+        let i = owners[k];
         if messages[i]["info"]["meta"]["digest"].is_string() {
             continue;
         }
-        let Some(r) = messages.get(i + 1).filter(|m| {
-            m["info"]["role"] == "assistant"
-                && m["info"]["meta"]["autoReply"] != true
-                && m["info"]["time"]["completed"].is_number()
-        }) else {
-            continue;
+        // everything this owner turn caused: up to (not including) the next owner turn
+        let end = owners[k + 1];
+        let replies: Vec<usize> = (i + 1..end)
+            .filter(|&j| messages[j]["info"]["role"] == "assistant" && messages[j]["info"]["meta"]["autoReply"] != true)
+            .collect();
+        let first_done = replies.iter().copied().find(|&j| messages[j]["info"]["time"]["completed"].is_number());
+        let line = match first_done {
+            Some(j) => format!("[earlier turn] {} => {}", first_line(&message_text(&messages[i]), 160), first_line(&message_text(&messages[j]), 160)),
+            None => format!("[earlier turn] {} => (no reply recorded)", first_line(&message_text(&messages[i]), 160)),
         };
-        let line = format!("[earlier turn] {} => {}", first_line(&message_text(&messages[i]), 160), first_line(&message_text(r), 160));
         messages[i]["info"]["meta"]["digest"] = json!(line);
-        messages[i + 1]["info"]["meta"]["folded"] = json!(true);
+        for j in replies {
+            messages[j]["info"]["meta"]["folded"] = json!(true);
+        }
     }
 }
 
@@ -2360,13 +2366,50 @@ mod law_tests {
     }
 
     #[test]
-    fn unanswered_owner_turn_is_not_folded() {
+    fn reply_less_owner_turns_fold_with_marker_but_tail_stays() {
         let mut msgs: Vec<Value> = vec![];
-        for _ in 0..5 {
-            msgs.push(make_message("s", "user", vec![text_part("queued")]));
+        for n in 0..5 {
+            msgs.push(make_message("s", "user", vec![text_part(&format!("queued {n}"))]));
         }
         fold_all(&mut msgs);
-        assert!(msgs.iter().all(|m| m["info"]["meta"]["digest"].is_null()));
+        let h = upstream_history(&msgs);
+        assert_eq!(h.len(), 5);
+        assert_eq!(h[0]["content"], json!("[earlier turn] queued 0 => (no reply recorded)"));
+        assert_eq!(h[1]["content"], json!("[earlier turn] queued 1 => (no reply recorded)"));
+        assert_eq!(h[2]["content"], json!("queued 2"));
+        assert!(msgs[2]["info"]["meta"]["digest"].is_null());
+    }
+
+    #[test]
+    fn interrupted_and_burst_exchanges_fold_and_orphan_reply_is_folded() {
+        let mut msgs: Vec<Value> = vec![];
+        msgs.extend(pair(0, false)); // normal
+        msgs.push(make_message("s", "user", vec![text_part("burst a")])); // user, user, assistant
+        msgs.push(make_message("s", "user", vec![text_part("burst b")]));
+        let mut a = make_message("s", "assistant", vec![text_part("fat orphan reply")]);
+        a["info"]["time"]["completed"] = json!(5000);
+        msgs.push(a);
+        msgs.push(make_message("s", "user", vec![text_part("interrupted ask")]));
+        msgs.push(make_message("s", "assistant", vec![text_part("half done")])); // never completed
+        for n in 7..10 {
+            msgs.extend(pair(n, false)); // tail 3
+        }
+        fold_all(&mut msgs);
+        let h = upstream_history(&msgs);
+        let lines: Vec<&str> = h.iter().filter_map(|m| m["content"].as_str()).collect();
+        assert_eq!(&lines[..4], &[
+            "[earlier turn] landing 0 => verdict 0",
+            "[earlier turn] burst a => (no reply recorded)",
+            "[earlier turn] burst b => fat orphan reply",
+            "[earlier turn] interrupted ask => (no reply recorded)",
+        ]);
+        assert!(!lines.contains(&"fat orphan reply"));
+        assert!(!lines.contains(&"half done"));
+        assert_eq!(h.len(), 4 + 6);
+        assert_eq!(lines[4], "landing 7\nsecond line");
+        let snap = h.clone();
+        fold_all(&mut msgs);
+        assert_eq!(snap, upstream_history(&msgs));
     }
 
     #[test]
