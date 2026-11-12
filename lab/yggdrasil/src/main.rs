@@ -487,6 +487,9 @@ struct PostMessage {
     /// Also accepted as `meta.internal` or `internal:true` on any part.
     #[serde(default)]
     internal: bool,
+    /// ASYNC-DISPATCH: the requester session to call back (also `?origin=`); see `post_message`.
+    #[serde(default)]
+    origin: Option<String>,
 }
 
 fn now_ms() -> u64 {
@@ -798,33 +801,104 @@ async fn events(State(st): State<AppState>) -> Response {
     Sse::new(stream).keep_alive(KeepAlive::default()).into_response()
 }
 
+/// ASYNC-DISPATCH (owner law 11-12: post it, it posts back on done). `?async=1` answers at once
+/// with `{turn_id, origin, sessionID, status:"queued"}` (turn_id = the stored user message id)
+/// instead of holding the POST until the run ends. When that turn finishes, the brain posts a
+/// completion auto-turn to the ORIGIN session (`meta.auto` → its reply is stamped autoReply,
+/// QUIET-ASSESS law) carrying the turn id + terminal status. Origin = `?origin=<sid>` or body
+/// `origin`; absent = the `[MAIN]` coordinator (same rule as watch-landings); `none` = no callback.
 async fn post_message(
     State(st): State<AppState>,
     Path(id): Path<String>,
+    Query(q): Query<HashMap<String, String>>,
     headers: HeaderMap,
     Json(body): Json<PostMessage>,
 ) -> Response {
-    let modality = body.modality.clone();
-    let auto_turn = body.meta.as_ref().is_some_and(|m| m["auto"] == true);
-    let internal = body.internal
-        || body.meta.as_ref().is_some_and(|m| m["internal"] == true)
-        || body.parts.iter().any(|p| p["internal"] == true);
-    // Text parts go upstream; file parts (data: URLs) are stored so the transcript keeps them.
-    let parts: Vec<Value> = body
-        .parts
-        .into_iter()
-        .filter(|p| (p["type"] == "text" && p["text"].is_string()) || (p["type"] == "file" && p["url"].is_string()))
-        .collect();
-    if parts.is_empty() {
-        return bad_request("no text or file parts");
-    }
+    let is_async = q.get("async").is_some_and(|v| v == "1" || v == "true");
+    let origin = if is_async {
+        match resolve_origin(&st, &id, q.get("origin").or(body.origin.as_ref()).map(String::as_str)) {
+            Ok(o) => o,
+            Err(r) => return r,
+        }
+    } else {
+        None
+    };
     let want_sse = headers
         .get(header::ACCEPT)
         .and_then(|v| v.to_str().ok())
         .is_some_and(|a| a.contains("text/event-stream"));
+    let auto_turn = body.meta.as_ref().is_some_and(|m| m["auto"] == true);
+    let internal = body.internal
+        || body.meta.as_ref().is_some_and(|m| m["internal"] == true)
+        || body.parts.iter().any(|p| p["internal"] == true);
+    let turn = Turn { parts: body.parts, modality: body.modality, auto_turn, internal, origin: origin.clone(), completes: None };
+    let (user_msg, rx, done_rx) = match submit(&st, &id, turn) {
+        Ok(t) => t,
+        Err(r) => return r,
+    };
+    if is_async {
+        return Json(json!({ "turn_id": user_msg["info"]["id"], "origin": origin, "sessionID": id, "status": "queued" }))
+            .into_response();
+    }
+    if want_sse {
+        return Sse::new(ReceiverStream::new(rx).map(Ok::<_, Infallible>)).into_response();
+    }
+    // opencode shape: the POST resolves when the run ends, with the assistant message.
+    drop(rx);
+    match done_rx.await {
+        Ok(Ok(msg)) => Json(msg).into_response(),
+        Ok(Err(e)) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e }))).into_response(),
+        Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": "run task died" }))).into_response(),
+    }
+}
+
+/// The async callback target: an explicit origin must exist and differ from the target;
+/// absent = the newest `[MAIN]` (unless it is the target); `none`/empty = no callback.
+fn resolve_origin(st: &AppState, target: &str, asked: Option<&str>) -> Result<Option<String>, Response> {
+    let sessions = st.sessions.lock().unwrap();
+    match asked {
+        Some("") | Some("none") => Ok(None),
+        Some(o) if o == target => Err(bad_request("origin is the target session (a turn cannot call itself back)")),
+        Some(o) if !sessions.contains_key(o) => Err(bad_request(&format!("unknown origin session {o}"))),
+        Some(o) => Ok(Some(o.to_string())),
+        None => Ok(sessions
+            .values()
+            .filter(|s| is_main_title(s.info["title"].as_str().unwrap_or_default()))
+            .max_by_key(|s| s.info["time"]["updated"].as_u64().unwrap_or(0))
+            .and_then(|s| s.info["id"].as_str().map(String::from))
+            .filter(|m| m != target)),
+    }
+}
+
+/// One posted turn, as `submit` takes it (HTTP POST or a brain-made completion turn).
+struct Turn {
+    parts: Vec<Value>,
+    modality: Option<String>,
+    auto_turn: bool,
+    internal: bool,
+    /// ASYNC-DISPATCH: post the completion auto-turn here when this turn ends.
+    origin: Option<String>,
+    /// ASYNC-DISPATCH: this turn IS a completion — stored as `meta.async`.
+    completes: Option<Value>,
+}
+
+type Submitted = (Value, mpsc::Receiver<Event>, oneshot::Receiver<Result<Value, String>>);
+
+/// Stores the user message at once, takes a gate ticket, spawns the run. Returns the stored
+/// user message, the per-request event stream, and the run's result.
+fn submit(st: &AppState, id: &str, turn: Turn) -> Result<Submitted, Response> {
+    let Turn { parts, modality, auto_turn, internal, origin, completes } = turn;
+    // Text parts go upstream; file parts (data: URLs) are stored so the transcript keeps them.
+    let parts: Vec<Value> = parts
+        .into_iter()
+        .filter(|p| (p["type"] == "text" && p["text"].is_string()) || (p["type"] == "file" && p["url"].is_string()))
+        .collect();
+    if parts.is_empty() {
+        return Err(bad_request("no text or file parts"));
+    }
 
     // The user message lands at once (a stacked prompt is visible while it waits its turn).
-    let mut user_msg = make_message(&id, "user", parts);
+    let mut user_msg = make_message(id, "user", parts);
     if internal {
         for p in user_msg["parts"].as_array_mut().unwrap() {
             p["internal"] = json!(true);
@@ -841,7 +915,13 @@ async fn post_message(
     if internal {
         user_msg["info"]["meta"]["internal"] = json!(true);
     }
-    let stored = with_session(&st, &id, |s| {
+    if let Some(o) = &origin {
+        user_msg["info"]["meta"]["origin"] = json!(o);
+    }
+    if let Some(c) = completes {
+        user_msg["info"]["meta"]["async"] = c;
+    }
+    let stored = with_session(st, id, |s| {
         // Freeze the meanwhile lines at creation (same moment as `created`).
         let prev = s
             .messages
@@ -858,43 +938,89 @@ async fn post_message(
         collapse_stale_owner(&mut s.messages);
     });
     if stored.is_none() {
-        return not_found(&id);
+        return Err(not_found(id));
     }
     if !internal {
-        publish(&st, "message.updated", json!({ "info": user_msg["info"] }));
+        publish(st, "message.updated", json!({ "info": user_msg["info"] }));
     }
 
     let enqueued = std::time::Instant::now(); // LAT queue_ms: enqueue → run slot
-    let gate = st.run_locks.lock().unwrap().entry(id.clone()).or_default().clone();
+    let gate = st.run_locks.lock().unwrap().entry(id.to_string()).or_default().clone();
     let ticket = gate.ticket(auto_turn);
     let (tx, rx) = mpsc::channel::<Event>(64);
     let (done_tx, done_rx) = oneshot::channel::<Result<Value, String>>();
+    let (st, id, turn_id) = (st.clone(), id.to_string(), user_msg["info"]["id"].as_str().unwrap_or_default().to_string());
     tokio::spawn(async move {
-        match gate.admit(&ticket).await {
+        let result = match gate.admit(&ticket).await {
             gate::Admit::Go(mut permit) => {
                 let queue_ms = enqueued.elapsed().as_millis() as u64;
                 let result = run_turn(&st, &id, &tx, queue_ms, auto_turn).await;
                 permit.finish(&result);
-                let _ = done_tx.send(result);
+                let _ = done_tx.send(result.clone());
                 // roll-up runs AFTER the reply, still inside the run slot (item 2)
                 rollup_after_reply(&st, &id, &tx).await;
+                result
             }
             gate::Admit::Coalesced(rx) => {
-                let _ = done_tx.send(rx.await.unwrap_or_else(|_| Err("coalesced auto turn dropped".into())));
+                let result = rx.await.unwrap_or_else(|_| Err("coalesced auto turn dropped".into()));
+                let _ = done_tx.send(result.clone());
+                result
             }
-        }
+        };
         drop(ticket);
+        if let Some(origin) = origin {
+            post_completion(&st, &origin, &id, &turn_id, &result);
+        }
     });
+    Ok((user_msg, rx, done_rx))
+}
 
-    if want_sse {
-        return Sse::new(ReceiverStream::new(rx).map(Ok::<_, Infallible>)).into_response();
+/// Terminal status of a finished turn: `completed` | `error` | `aborted` | `failed` (no reply).
+fn async_status(result: &Result<Value, String>) -> &'static str {
+    match result {
+        Err(_) => "failed",
+        Ok(m) if m["info"]["error"]["name"] == "MessageAbortedError" => "aborted",
+        Ok(m) if !m["info"]["error"].is_null() => "error",
+        Ok(_) => "completed",
     }
-    // opencode shape: the POST resolves when the run ends, with the assistant message.
-    drop(rx);
-    match done_rx.await {
-        Ok(Ok(msg)) => Json(msg).into_response(),
-        Ok(Err(e)) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e }))).into_response(),
-        Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": "run task died" }))).into_response(),
+}
+
+/// The completion auto-turn's text part: one header line the coordinator reads, then the
+/// reply's head (or the failure) so it can assess without a fetch.
+fn completion_text(target: &str, title: &str, turn_id: &str, result: &Result<Value, String>) -> String {
+    let status = async_status(result);
+    let (reply_id, body) = match result {
+        Ok(m) => {
+            let err = m["info"]["error"]["data"]["message"].as_str().map(|e| format!("error: {e}\n")).unwrap_or_default();
+            (m["info"]["id"].as_str().unwrap_or("-").to_string(), format!("{err}{}", message_text(m)))
+        }
+        Err(e) => ("-".to_string(), format!("error: {e}")),
+    };
+    let mut body: String = body.trim().chars().take(600).collect();
+    if body.is_empty() {
+        body = "(no reply text)".into();
+    }
+    format!("ASYNC-DONE turn={turn_id} session={target} title={title:?} status={status} reply={reply_id}\n{body}")
+}
+
+/// Posts the completion auto-turn to the origin (`meta.auto` + `meta.async` = {turn_id,
+/// sessionID, status, replyID}); the origin runs it as an auto-class turn (gate: behind owner
+/// turns, coalesced with other pending autos), its reply stamped autoReply. Never async itself.
+fn post_completion(st: &AppState, origin: &str, target: &str, turn_id: &str, result: &Result<Value, String>) {
+    let title = st.sessions.lock().unwrap().get(target).and_then(|s| s.info["title"].as_str().map(String::from)).unwrap_or_default();
+    let status = async_status(result);
+    let reply_id = result.as_ref().ok().and_then(|m| m["info"]["id"].as_str()).unwrap_or_default().to_string();
+    let text = completion_text(target, &title, turn_id, result);
+    let done = json!({ "turn_id": turn_id, "sessionID": target, "status": status, "replyID": reply_id });
+    let turn = Turn { parts: vec![text_part(&text)], modality: None, auto_turn: true, internal: false, origin: None,
+        completes: Some(done.clone()) };
+    match submit(st, origin, turn) {
+        Ok((msg, _, _)) => {
+            let cid = msg["info"]["id"].clone();
+            eprintln!("async {turn_id}: {target} {status} -> completion {} posted to {origin}", cid.as_str().unwrap_or_default());
+            publish(st, "async.completed", json!({ "origin": origin, "completionID": cid, "async": done }));
+        }
+        Err(_) => eprintln!("async {turn_id}: {target} {status} -> origin {origin} gone, completion dropped"),
     }
 }
 
@@ -2554,4 +2680,23 @@ mod voice_turn_tests {
         };
         run.lat_log("ok"); // the eprintln row ends voice_note=1; must not panic
     }
+
+    #[test]
+    fn async_completion_status_and_text() {
+        let mut ok = make_message("t", "assistant", vec![text_part("lane landed GREEN")]);
+        assert_eq!(async_status(&Ok(ok.clone())), "completed");
+        let t = completion_text("ses_t", "[LANE] x", "msg_u", &Ok(ok.clone()));
+        assert!(t.starts_with("ASYNC-DONE turn=msg_u session=ses_t title=\"[LANE] x\" status=completed reply=msg_"));
+        assert!(t.ends_with("\nlane landed GREEN"));
+        ok["info"]["error"] = json!({ "name": "MessageAbortedError", "data": { "message": "aborted" } });
+        assert_eq!(async_status(&Ok(ok.clone())), "aborted");
+        ok["info"]["error"] = json!({ "name": "UnknownError", "data": { "message": "upstream 500" } });
+        assert_eq!(async_status(&Ok(ok.clone())), "error");
+        assert!(completion_text("s", "", "u", &Ok(ok)).contains("status=error"));
+        let f = completion_text("s", "", "u", &Err("session s not found".into()));
+        assert!(f.contains("status=failed reply=-\nerror: session s not found"));
+        let long = make_message("t", "assistant", vec![text_part(&"x".repeat(5000))]);
+        assert!(completion_text("s", "", "u", &Ok(long)).len() < 800);
+    }
+
 }
