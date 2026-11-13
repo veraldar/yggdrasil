@@ -14,7 +14,7 @@
   "Then get two of the bugs it finds fixed: the crash on an empty stock and the off-by-one in last_items, with tests proving it.",
   "A quick research answer: for this inventory, sqlite or a json file? a short answer with sources.",
   "A small CLI inv.py in the inventory folder: add, list, export csv, with tests.",
-  "A bigger project: a small web dashboard plus a JSON API for the inventory, standard library only, in a folder named inventory-web, with tests, iterated until everything passes.",
+  "A bigger project in a folder named inventory-web, standard library only, with three independent parts: a JSON API server, a dashboard page that uses it, and a CSV import job \u2014 run the parts in parallel if possible, with tests, iterated until everything passes.",
   "AGI (Claude Code) writes a short README.md in the inventory folder explaining the CLI \u2014 you ask for AGI by name.",
   "After all that, you want a review of everything that happened in the past few minutes \u2014 what each session did and whether it worked \u2014 as a report.",
   "In the end you want to know that everything is done and tested."
@@ -24,7 +24,7 @@
   "When the review comes back, ask in a few words to fix the empty stock crash and the off by one.",
   "Without waiting for the fix, send the research question in one short message.",
   "Then, still without waiting, ask for the inv.py cli (add, list, export csv, with tests).",
-  "Then ask for the bigger inventory-web project in one message (dashboard + json api, stdlib only, tests, keep going until green).",
+  "Then ask for the bigger inventory-web project in one message: three parts (json api server, dashboard page, csv import job), stdlib only, tests, run the parts in parallel, keep going until green.",
   "Then ask to use agi for a short README for inventory explaining the cli.",
   "When most results are in, ask exactly: 'review everything happened in past 5m'",
   "Wait for results to come back. If something is unclear, ask main. At the end ask in a few words whether everything is done and tested, then finish."
@@ -106,7 +106,7 @@
   },
   {
    "name": "README explains the cli",
-   "cmd": "grep -ciE 'inv\\.py|inv ' inventory/README.md",
+   "cmd": "f=$(ls inventory | grep -i '^readme\\.md$' | head -1) && grep -ciE 'inv\\.py|inv ' \"inventory/$f\"",
    "expect": "[1-9]"
   },
   {
