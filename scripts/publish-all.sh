@@ -20,6 +20,12 @@
 #   BIF_DIR        the bifrost repo (default ~/Work/bifrost)
 set -u
 
+# OBSOLETE since 2026-11-13: veraldar/yggdrasil is now the WHOLE tree (renamed from veraldar/bifrost,
+# matching veraldar.org); the old brain-only split is archived as yggdrasil-brain-split-2026-10.
+# Re-deriving a split and pushing it to veraldar/yggdrasil would mix two histories — refuse.
+echo "publish-all: obsolete — veraldar/yggdrasil is the whole repo now; push branches with scripts/push-all.sh" >&2
+exit 2
+
 BIF_BRANCH="${BIF_BRANCH:-wave/root-provider-toolscope}"
 YGG_DIR="${YGG_DIR:-$HOME/Work/yggdrasil}"
 BIF_DIR="${BIF_DIR:-$HOME/Work/bifrost}"
