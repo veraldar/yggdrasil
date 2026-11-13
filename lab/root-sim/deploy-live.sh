@@ -60,7 +60,7 @@ def put(k, v):
     line = f'{k}="{v}"' if any(c in v for c in " '()") else f"{k}={v}"
     s = re.sub(rf"(?m)^{k}=.*$", line, s) if re.search(rf"(?m)^{k}=", s) else s.rstrip("\n") + f"\n{line}\n"
 s += "" if "# root-coord" in s else "# root-coord (11-12): the coordinator door, profiles with models, roots, harness sessions\n"
-put("YGG_MODELS", "glm-5.3-flash,glm-5.3,glm-5.2")
+put("YGG_MODELS", "glm-5.3-flash,glm-5.3:smart,glm-5.2")
 put("YGG_ROOT_NAME", "omarchy")
 put("YGG_ROOT_NOTE", "the main computer (omarchy): 16 cpu / 30 GB, holds ~/Work and every project")
 put("YGG_MAX_INFLIGHT", "5")

@@ -361,8 +361,9 @@ struct Config {
     context_files: Vec<PathBuf>,
     /// root-coord: the other roots this one works with (peers.rs)
     peers: peers::Peers,
-    /// models whose tier is `lite` (YGG_MODELS `id:lite`): short prompts, lean tool set
-    lite: HashSet<String>,
+    /// model tiers other than `full` (YGG_MODELS `id:lite` | `id:smart`): lite = short prompts + lean
+    /// tool set, smart = the full prompt + INTENT_NOTE (re-reads what the user means)
+    tiers: HashMap<String, &'static str>,
     /// models that can see images (YGG_VISION_MODELS): a turn carrying an image runs on the first
     /// of them when the session's own model cannot (the door's glm-5.3 cannot; glm-5.3-flash can)
     vision: Vec<String>,
@@ -742,6 +743,8 @@ fn new_session(st: &AppState, title: &str, parent: Option<&str>, agent: Option<&
         info["agent"] = json!("coordinator"); // the door is stamped, so the phone shows it right
     }
     let pname = profile_name_of(st, &info);
+    // every session names its agent from birth (the default one included): the list's [TAG]
+    info["agent"] = json!(pname);
     let prof = crate::agent(st, &pname);
     let prof = prof.as_ref();
     let model = model
@@ -835,9 +838,28 @@ async fn close_session(State(st): State<AppState>, Path(id): Path<String>, body:
     }
 }
 
-/// `full` | `lite` for a model id (YGG_MODELS `id:lite`).
+/// A woken manager's "nothing worth saying" reply.
+fn is_quiet(text: &str) -> bool {
+    text.trim().trim_matches(|c: char| c == '.' || c == '*').eq_ignore_ascii_case("(quiet)")
+}
+
+/// Does the newest user turn of an upstream conversation contain `needle`?
+fn last_user_has(convo: &[Value], needle: &str) -> bool {
+    convo.iter().rev().find(|m| m["role"] == "user").is_some_and(|m| match &m["content"] {
+        Value::String(s) => s.contains(needle),
+        parts => parts.as_array().into_iter().flatten().any(|p| p["text"].as_str().is_some_and(|t| t.contains(needle))),
+    })
+}
+
+/// The agent's system block as a model of `tier` reads it (`None` = nothing to say).
+fn role_block(prof: &profiles::Profile, tier: &str) -> Option<String> {
+    let role = prof.role_for(tier);
+    (!role.trim().is_empty()).then(|| format!("[agent: {}]\n{role}", prof.name))
+}
+
+/// `lite` | `full` | `smart` for a model id (YGG_MODELS `id:tier`; unmarked = full).
 fn model_tier(st: &AppState, model: &str) -> &'static str {
-    if st.config.lite.contains(model) { "lite" } else { "full" }
+    st.config.tiers.get(model).copied().unwrap_or("full")
 }
 
 /// Forgets a session (record + file) — a proxy whose peer refused the create.
@@ -856,15 +878,26 @@ async fn get_inbox(State(st): State<AppState>, Path(id): Path<String>) -> Respon
 
 /// `GET /session` — newest-updated first, like opencode.
 async fn list_sessions(State(st): State<AppState>) -> Json<Value> {
-    let sessions = st.sessions.lock().unwrap();
-    let mut infos: Vec<Value> = sessions.values().map(|s| s.info.clone()).collect();
+    let mut infos: Vec<Value> = st.sessions.lock().unwrap().values().map(|s| s.info.clone()).collect();
     infos.sort_by_key(|i| std::cmp::Reverse(i["time"]["updated"].as_u64().unwrap_or(0)));
+    infos.iter_mut().for_each(|i| with_agent(&st, i));
     Json(Value::Array(infos))
 }
 
+/// A session made before agents were stamped at birth names the agent it actually runs.
+fn with_agent(st: &AppState, info: &mut Value) {
+    if info["agent"].is_null() {
+        info["agent"] = json!(profile_name_of(st, info));
+    }
+}
+
 async fn get_session(State(st): State<AppState>, Path(id): Path<String>) -> Response {
-    match st.sessions.lock().unwrap().get(&id) {
-        Some(s) => Json(s.info.clone()).into_response(),
+    let info = st.sessions.lock().unwrap().get(&id).map(|s| s.info.clone());
+    match info {
+        Some(mut i) => {
+            with_agent(&st, &mut i);
+            Json(i).into_response()
+        }
         None => not_found(&id),
     }
 }
@@ -1077,6 +1110,25 @@ async fn get_agent(State(st): State<AppState>, Path(name): Path<String>) -> Resp
     let detail = st.config.profiles.read().unwrap().detail(&name);
     match detail {
         Some(mut d) => {
+            // everything the model reads before the conversation (read-only in the editor), per
+            // tier the root serves: the preamble, the AGENTS.md chain, then the role as that tier reads it
+            let prof = agent(&st, &name).expect("detail implies the agent");
+            d["system"] = json!(match &prof.harness {
+                None => ["smart", "full", "lite"]
+                    .iter()
+                    .filter_map(|t| {
+                        let models: Vec<&String> = st.config.models.iter().filter(|m| model_tier(&st, m) == *t).collect();
+                        let mut parts = vec![SYSTEM_PREAMBLE.to_string()];
+                        parts.extend(context_prompt(&st.config.context_files));
+                        parts.extend(role_block(&prof, t));
+                        (!models.is_empty()).then(|| json!({ "tier": t, "models": models, "text": parts.join("\n\n") }))
+                    })
+                    .collect::<Vec<_>>(),
+                Some(h) => vec![json!({ "tier": h, "models": [], "text": format!(
+                    "{h} brings its own system prompt; this agent adds:\n\n{}",
+                    if prof.prompt.trim().is_empty() { "(nothing)" } else { &prof.prompt }
+                ) })],
+            });
             // the models this agent can pick from: the upstream's for a root agent, else its harness's
             d["models"] = json!(models_for(&st, d["harness"].as_str().unwrap_or("root")));
             // every harness's list, so the editor's picker follows a harness change before saving
@@ -1923,7 +1975,7 @@ async fn run_turn(st: &AppState, id: &str, tx: &mpsc::Sender<Event>, queue_ms: u
             if auto_turn {
                 run.msg["info"]["meta"] = json!({ "autoReply": true });
                 // a woken manager with nothing worth saying stays out of the transcript
-                if message_text(&run.msg).trim().trim_matches(|c: char| c == '.' || c == '*').eq_ignore_ascii_case("(quiet)") {
+                if is_quiet(&message_text(&run.msg)) {
                     run.msg["info"]["meta"]["internal"] = json!(true);
                 }
             }
@@ -2052,17 +2104,14 @@ async fn agent_loop(
         convo.insert(at, json!({ "role": "system", "content": ctx }));
         at += 1;
     }
-    // the role text fits the model: a lite model reads the short version (cache law: the
-    // model is stamped per session, so the bytes stay constant)
+    // the role text fits the model's tier (cache law: the model is stamped per session, so the
+    // bytes stay constant)
     let (model, _, _) = session_upstream(st, id);
-    let role = match (model_tier(st, &model), &prof.prompt_lite) {
-        ("lite", Some(short)) => short.clone(),
-        _ => prof.prompt.clone(),
-    };
-    if !role.trim().is_empty() {
-        convo.insert(at, json!({ "role": "system", "content": format!("[agent: {}]\n{}", prof.name, role) }));
+    if let Some(role) = role_block(&prof, model_tier(st, &model)) {
+        convo.insert(at, json!({ "role": "system", "content": role }));
     }
     let max = prof.steps.unwrap_or(st.config.max_steps).min(st.config.max_steps).max(1);
+    let mut quiet_nudged = false;
     for _ in 0..max {
         if st.config.rollup_tokens > 0 {
             let n = rollup::prune(&mut convo, st.config.rollup_tokens);
@@ -2078,6 +2127,17 @@ async fn agent_loop(
             run.think_off = true;
             eprintln!("LAT-EMPTY session={id} step came back empty (reasoning_chars={}) — retrying once with thinking off", run.reasoning_chars);
             convo.push(json!({ "role": "user", "content": "(Your previous response came back empty — the thinking ran out of room. Do not deliberate further: act now with your tools, or answer.)" }));
+            continue;
+        }
+        // root-coord: a door answering an outcome wake with (quiet) is retried ONCE — the user is
+        // waiting for that result (11-13: a MAIN whose history held a run of quiet replies kept
+        // drifting into it even when the wake no longer offered it)
+        if calls.is_empty() && !quiet_nudged && is_quiet(&run.text) && last_user_has(&convo, tree::OUTCOME_ASK) {
+            quiet_nudged = true;
+            eprintln!("TREE quiet-on-outcome session={id} — retrying once");
+            run.text.clear();
+            convo.push(json!({ "role": "assistant", "content": "(quiet)" }));
+            convo.push(json!({ "role": "user", "content": "(quiet) is not an option here: the report above is a result the user is waiting for. Tell them now — the result and its evidence, in one to four sentences." }));
             continue;
         }
         if run.first_delta_ms.is_none() && calls.is_empty() {
@@ -2700,10 +2760,12 @@ async fn send_delta(st: &AppState, session_id: &str, tx: &mpsc::Sender<Event>, t
 
 /// The single-provider catalog over every model this upstream serves, plus the phone's derived
 /// think ids (`<model>-think-<level>`) so its level picker can switch a session's variant.
-fn models_catalog(default: &str, models: &[String]) -> Value {
+fn models_catalog(default: &str, models: &[String], tiers: &HashMap<String, &'static str>) -> Value {
     let mut ms = serde_json::Map::new();
     for m in models {
-        ms.insert(m.clone(), json!({ "id": m, "name": m, "providerID": "yggdrasil" }));
+        // the tier rides the name, so the session's model picker says which prompt a model gets
+        let name = tiers.get(m).map_or(m.clone(), |t| format!("{m} · {t}"));
+        ms.insert(m.clone(), json!({ "id": m, "name": name, "providerID": "yggdrasil" }));
         for l in ["high", "low", "off"] {
             let d = format!("{m}-think-{l}");
             ms.insert(d.clone(), json!({ "id": d, "name": format!("{m} (think {l})"), "providerID": "yggdrasil" }));
@@ -2783,11 +2845,14 @@ async fn main() {
         std::process::exit(2);
     }
     // root-coord: every model this upstream serves (YGG_MODELS, comma list; the default first)
-    let (mut models, mut lite): (Vec<String>, HashSet<String>) = (vec![model.clone()], HashSet::new());
+    let (mut models, mut tiers): (Vec<String>, HashMap<String, &'static str>) = (vec![model.clone()], HashMap::new());
     for entry in std::env::var("YGG_MODELS").unwrap_or_default().split(',').map(str::trim).filter(|m| !m.is_empty()) {
         let (m, tier) = entry.split_once(':').unwrap_or((entry, "full"));
-        if tier == "lite" {
-            lite.insert(m.to_string());
+        match tier {
+            "lite" => drop(tiers.insert(m.to_string(), "lite")),
+            "smart" => drop(tiers.insert(m.to_string(), "smart")),
+            "full" => {}
+            other => eprintln!("YGG_MODELS {entry}: unknown tier {other} (lite | full | smart) — read as full"),
         }
         if !models.iter().any(|x| x == m) {
             models.push(m.to_string());
@@ -2795,7 +2860,7 @@ async fn main() {
     }
     let profiles = profiles::Profiles::load(std::env::var("YGG_PROFILES").ok().as_deref());
     eprintln!("profiles: {} (default {})", profiles.by_name.keys().cloned().collect::<Vec<_>>().join(", "), profiles.default_agent);
-    let catalog = if std::env::var("YGG_CATALOG").is_ok() { load_catalog(&model) } else { models_catalog(&model, &models) };
+    let catalog = if std::env::var("YGG_CATALOG").is_ok() { load_catalog(&model) } else { models_catalog(&model, &models, &tiers) };
     let tree_cfg = tree::TreeCfg {
         max_depth: env_num("YGG_TREE_MAX_DEPTH", 12).max(1) as usize,
         max_children: env_num("YGG_TREE_MAX_CHILDREN", 24).max(1) as usize,
@@ -2817,7 +2882,7 @@ async fn main() {
         tree: tree_cfg,
         context_files: Vec::new(),
         peers: peers::Peers::load(),
-        lite,
+        tiers,
         vision: std::env::var("YGG_VISION_MODELS").unwrap_or_default().split(',').map(str::trim).filter(|m| !m.is_empty()).map(String::from).collect(),
         max_steps: env_num("YGG_MAX_STEPS", 100).max(1) as usize,
         tools_enabled: std::env::var("YGG_TOOLS").map_or(true, |v| v != "0"),
@@ -3603,6 +3668,16 @@ mod image_tests {
 
     fn reply(text: &str, at: i64) -> Value {
         json!({ "info": { "role": "assistant", "time": { "created": at, "completed": at } }, "parts": [{ "type": "text", "text": text }] })
+    }
+
+    #[test]
+    fn a_quiet_answer_to_an_outcome_is_recognised() {
+        assert!(is_quiet(" (quiet). ") && is_quiet("**(Quiet)**") && !is_quiet("(quiet) but done"));
+        let wake = format!("[inbox] ... (done) ...\n{}", crate::tree::OUTCOME_ASK);
+        let parts = vec![json!({"role": "user", "content": [{"type": "text", "text": wake}]}), json!({"role": "assistant", "content": "(quiet)"})];
+        assert!(last_user_has(&parts, crate::tree::OUTCOME_ASK));
+        let routine = vec![json!({"role": "user", "content": "[inbox] ... or reply exactly (quiet)."})];
+        assert!(!last_user_has(&routine, crate::tree::OUTCOME_ASK));
     }
 
     #[test]

@@ -41,7 +41,7 @@ systemd-run --user --unit="$UNIT" --collect -q \
   -p StandardOutput="append:$ROOT/brain.log" -p StandardError="append:$ROOT/brain.log" \
   --setenv=YGG_UPSTREAM_BASE_URL="$YGG_UPSTREAM_BASE_URL" --setenv=YGG_UPSTREAM_API_KEY="$YGG_UPSTREAM_API_KEY" \
   --setenv=YGG_UPSTREAM_STYLE="${YGG_UPSTREAM_STYLE:-anthropic}" --setenv=YGG_UPSTREAM_MODEL="${SIM_MODEL:-glm-5.3-flash}" \
-  --setenv=YGG_MODELS="${SIM_MODELS:-glm-5.3-flash,glm-5.3,glm-5.2}" --setenv=YGG_VISION_MODELS="${SIM_VISION:-glm-5.3-flash}" --setenv=YGG_ARTIFACTS_DIR="$ROOT/work/artifacts" \
+  --setenv=YGG_MODELS="${SIM_MODELS:-glm-5.3-flash,glm-5.3:smart,glm-5.2}" --setenv=YGG_VISION_MODELS="${SIM_VISION:-glm-5.3-flash}" --setenv=YGG_ARTIFACTS_DIR="$ROOT/work/artifacts" \
   --setenv=YGG_MAX_TOKENS="${YGG_MAX_TOKENS:-16384}" --setenv=YGG_THINK_HIGH="${YGG_THINK_HIGH:-8192}" \
   --setenv=YGG_DEFAULT_VARIANT="${SIM_VARIANT:-high}" --setenv=YGG_VOICE=1 \
   --setenv=YGG_LISTEN="127.0.0.1:$PORT" --setenv=YGG_DATA_DIR="$ROOT/data" --setenv=YGG_PROJECT_DIR="$ROOT/work" \

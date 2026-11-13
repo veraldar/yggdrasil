@@ -977,6 +977,10 @@ fn wake(st: &AppState, parent: &str) {
     }
 }
 
+/// How a door wake that carries an outcome ends — no (quiet) offered; the run loop retries a
+/// (quiet) answer to it once.
+pub const OUTCOME_ASK: &str = "Finished, failed or blocked work above is what the user is waiting for: tell them now — the result and its evidence, in one to four sentences.";
+
 fn door_wake_text(events: &[Value]) -> String {
     let mut t = String::from("[inbox] Reports from your sessions since the user last heard from you:\n");
     for e in events {
@@ -992,7 +996,13 @@ fn door_wake_text(events: &[Value]) -> String {
             t.push_str(&format!("  state: {s}\n"));
         }
     }
-    t.push_str("Tell the user what matters to them now, or reply exactly (quiet).");
+    // facts override the model: an outcome is what the user waits for, so (quiet) is not offered
+    // (11-13: a MAIN whose history held a run of quiet replies kept answering a finished build with it)
+    if events.iter().any(|e| matches!(e["status"].as_str(), Some("done" | "failed" | "blocked"))) {
+        t.push_str(OUTCOME_ASK);
+    } else {
+        t.push_str("Tell the user what matters to them now, or reply exactly (quiet).");
+    }
     t
 }
 
@@ -1063,6 +1073,15 @@ pub fn recover(st: &AppState, interrupted: Vec<String>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_outcome_wake_offers_no_quiet() {
+        let done = json!({"title": "hi", "status": "done", "headline": "built, 1 passed", "from": "ses_1"});
+        let moving = json!({"title": "hi", "status": "working", "headline": "half way", "from": "ses_1"});
+        assert!(!door_wake_text(&[done.clone()]).contains("(quiet)"));
+        assert!(door_wake_text(&[moving.clone()]).contains("(quiet)"));
+        assert!(!door_wake_text(&[moving, done]).contains("(quiet)"), "one outcome is enough");
+    }
 
     fn sess(id: &str, title: &str, parent: Option<&str>, card: Value) -> (String, Session) {
         let mut info = json!({ "id": id, "title": title, "time": { "created": now_ms(), "updated": now_ms() }, "card": card });

@@ -17,11 +17,16 @@ you ⇄ [MAIN] coordinator            the transcript you read: only you + MAIN
           └─ build "sales" on lab     a session on another root (proxy here, real there)
 ```
 
-- **Profile = what a session is**: role prompt (+ a short one for lite models), tool permissions
+- **Agent = what a session is**: role prompt (+ a short one for lite models), tool permissions
   (opencode ruleset, enforced at dispatch), model, thinking level, step cap, fold, `sessions`
-  (manages others), `harness`. Built in: coordinator · lead · build · research · plan ·
-  claude-code · opencode · codex. `YGG_PROFILES` overlays fields and adds profiles. Model and
-  thinking: the profile's default, the session's explicit choice wins, stamped at creation.
+  (manages others), `harness`. Built in: coordinator · lead · build · fix · research · review · AGI.
+  `YGG_PROFILES` overlays fields and adds agents. Model and thinking: the agent's default, the
+  session's explicit choice wins, stamped at creation (the agent too — the list shows `[BUI]`, `[FIX]`…).
+- **The prompt follows the model** (`YGG_MODELS id:lite | id:smart`, unmarked = full): lite → the
+  short role + the lean tool set; full → the role as written; smart (glm-5.3 and up) → the role +
+  `INTENT_NOTE` (work out what the user means — typos, voice slips, the goal behind the words —
+  before acting; not for [inbox] reports). `GET /agent/:name` returns `system`: everything the
+  model reads, per tier.
 - **Card** (`info.card`): topic, brief, status, headline, summary, needs. Rewritten after every
   turn by a one-shot **digest** call (no session, no history); facts override the model (a failed
   run is failed, `QUESTION:` is blocked, running sub-sessions mean working, an outcome is never
@@ -53,13 +58,18 @@ thinking off.
 - Dispatch answers `STARTED/SENT, NOT DONE YET`; the door reserves "done" for confirmed reports and never
   contradicts the live `[tree]` (`running` = still working).
 - `session_close` refuses a running family unless `cancel=true`; the door never closes to tidy up.
+- A door wake that carries an outcome (done / failed / blocked) does not offer `(quiet)`, and a `(quiet)`
+  answer to one is retried once (11-13: a MAIN with a run of quiet replies in its history drifted into it).
+- Bugs go to `fix` (reproduce → root cause → smallest fix → a test that catches it; never weaken a test);
+  the phone's "fix this" starts a `fix` session. Reports for the user land in `YGG_ARTIFACTS_DIR` and
+  reach the phone as `[name](/api/artifact/<name>)`.
 - The door has no bash: it no longer launches `agi-run` lanes itself. Heavy coding goes to a `claude-code`
   session (the visible, reporting successor of a sonnet lane) or a `lead`. Lanes started elsewhere still
   land in MAIN's inbox through the watcher.
 
 ## Env
 
-`YGG_MODELS` (`id[:lite]`, comma list) · `YGG_PROFILES` · `YGG_CONTEXT_FILES` · `YGG_ROOT_NAME` ·
+`YGG_MODELS` (`id[:lite|:smart]`, comma list) · `YGG_VISION_MODELS` · `YGG_ARTIFACTS_DIR` (review's only write) · `YGG_PROFILES` · `YGG_CONTEXT_FILES` · `YGG_ROOT_NAME` ·
 `YGG_ROOT_NOTE` · `YGG_PEERS` · `YGG_PEER_TOKEN` · `YGG_MAX_INFLIGHT` (upstream calls in flight, 6)
 · `YGG_MAX_HARNESS` (3) · `YGG_DIGEST_MODEL` · `YGG_WAKE_DEBOUNCE_MS` (4000) ·
 `YGG_TREE_MAX_DEPTH` / `_CHILDREN` / `_WAKES`.
@@ -69,8 +79,8 @@ thinking off.
 What used to be "profiles" is one concept, **agents**. Every agent runs on a harness: `root` (this brain:
 model, thinking, system prompt, tools, steps, manages-sessions are all customizable) or `claude` /
 `opencode` / `codex` (description + model; Claude Code also takes extra instructions via
-`--append-system-prompt`). Built in: coordinator (MAIN's alone, tools locked), lead, build, research,
-plan, claude-code, opencode, codex, **AGI** (Claude Code on Opus). `GET /agent/:name` is the editor's
+`--append-system-prompt`). Built in: coordinator (MAIN's alone, tools locked), lead, build, fix, research,
+review (read-only; writes only its report), **AGI** (Claude Code on Opus). `GET /agent/:name` is the editor's
 detail (incl. `customizable`, `locked`, `models`); `PUT /agent/:name` creates or edits (partial body,
 persisted to `YGG_PROFILES`, live at once); `DELETE` removes agents you made. Switching a session's agent
 stamps the agent's model + thinking (+ harness); the model can be changed afterwards.

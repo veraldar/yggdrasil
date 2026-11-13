@@ -34,7 +34,7 @@
   {
    "name": "main gives the report link",
    "kind": "main_says",
-   "regex": "/api/artifact/[\\\\w.-]+\\\\.md"
+   "regex": "/api/artifact/[\\w.-]+\\.md"
   }
  ]
 }

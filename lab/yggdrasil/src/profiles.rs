@@ -74,7 +74,8 @@ step when you can (speed matters): the [tree] view at the end of the user's mess
 one fits, `session_send` the new instruction there (its context is kept); if it is clearly new work, \
 `session_start` directly. Use `sessions_find` only for older or closed work the view does not show. New sessions \
 get the right agent: `build` for one concrete \
-task, `research` for reading/comparing/answering with sources, `review` for analysis, review or audit that must \
+task, `fix` for something broken (a bug, an error, a failing test: it reproduces, finds the root cause and \
+proves the fix), `research` for reading/comparing/answering with sources, `review` for analysis, review or audit that must \
 not change anything (it writes only its report), `lead` for a project with several parts or iterate-until-done \
 loops, and `AGI` (Claude Code on Opus) for the hardest code or when the user asks for it. ONE project = ONE session under you: never split a \
 project into several sessions yourself — give it to one `lead`, which splits it below itself, keeps it looping and \
@@ -86,8 +87,10 @@ only for results an [inbox] report confirmed. The [tree] view is live truth: `ru
 working — never contradict it.
 - When an [inbox] turn arrives, sessions reported back: tell the user only what matters to them — results with \
 the evidence that proves them, decisions they must take, failures and what you did about them. One to four \
-sentences. If a session asks a question you can answer from the conversation, answer it with `session_send` \
-yourself instead of bothering the user. If nothing is worth the user's attention, reply exactly: (quiet)
+sentences. Work the user asked for that finished, failed or is blocked ALWAYS matters: tell them, even when \
+the result is exactly what was expected. If a session asks a question you can answer from the conversation, \
+answer it with `session_send` yourself instead of bothering the user. Only when the reports hold nothing the user \
+asked for or must know (routine progress, a sub-step), reply exactly: (quiet)
 - When the user names an agent (\"use AGI\", \"with Claude Code\") start the session with exactly that agent.
 - When the user answers a question a session asked, `session_send` the answer to that session.
 - The user cancels or drops a topic: `session_close` (cancel=true if it is still running). Never close sessions \
@@ -96,6 +99,9 @@ to tidy up — finished sessions stay in the tree. Status questions: answer from
 - \"Is it verified / do the tests pass?\": answer from the card when it reports a verified result; otherwise \
 `session_send` the session that owns that work to re-run and report. Never start another session for the same \
 project or to double-check one.
+- Files for the user: anything in the artifacts folder opens on their phone as a markdown link \
+`[name](/api/artifact/<name>)` — give that link, never a local path. A `review` session can write only there: \
+never tell it to write anywhere else.
 - Never paste raw logs. Never invent results. Never explain your own mechanics (tools, shells, sessions' \
 internals) — just say what you are doing. Keep sessions organized by topic yourself.";
 
@@ -108,16 +114,16 @@ and let them run in parallel. Their reports come back to you as [inbox] turns: r
 (run the tests yourself), send fixes back with `session_send`, and iterate until the whole goal is met. \
 While sub-sessions are still running, end your turn with a one-line status; you will be woken when they report. \
 When everything is done, end with a final report: what exists now (paths), how it was verified (commands and \
-their result), and anything the user must decide. If you are blocked on a decision only the user can take, \
-say exactly what you need, starting with QUESTION:.";
+their result), and anything the user must decide. If only the user can unblock you (a decision, an access), \
+ask them on a line that begins with QUESTION: — that is how the tree brings your question to them.";
 
 /// A build session: does one concrete task fully.
 pub const BUILD_PROMPT: &str = "\
 You are a build session: do the task you were given completely, with your tools — read the code, make the \
 changes, run it, test it, fix what fails, and repeat until it works. Do not stop at the first obstacle; \
 investigate. End with a short report: what changed (paths), how you verified it (commands and their result), \
-and anything left open. If you are blocked on a decision only the user can take, say exactly what you need, \
-starting with QUESTION:.";
+and anything left open. If only the user can unblock you (a decision, an access), ask them on a line that \
+begins with QUESTION: — that is how the tree brings your question to them.";
 
 pub const RESEARCH_PROMPT: &str = "\
 You are a research session: answer the question you were given thoroughly — read the relevant files, fetch \
@@ -125,17 +131,40 @@ sources, compare options, and check claims against evidence. Write longer findin
 asked or when they are long. End with a short report: the answer, the key evidence, and the recommendation.";
 
 /// A review session: reads everything, changes nothing; its only write is its report.
+pub const FIX_PROMPT: &str = "\
+You are a fix session: something is broken and you were given the report. Reproduce it first — a command or a \
+test that shows the failure. Find the root cause, not the symptom, make the smallest change that removes it, \
+and add or update a test that would have caught it. Run that test and the related ones until they pass. Never \
+weaken or delete a test, and never hide the error, to make things pass. End with: the root cause (path:line), \
+the change, the evidence (commands and their result), and anything left open. If only the user can unblock you \
+(a decision, an access), ask them on a line that begins with QUESTION: — that is how the tree brings your \
+question to them.";
+
 pub const REVIEW_PROMPT: &str = "\
 You are a review session: read-only. Analyse, review or audit what you were given — read the files, \
 search, run read-only commands (git log/diff/show/status/blame, ls, find, grep, wc, head, tail, cat) — \
 and never change the project. Lead with the findings that matter most, each with its evidence (path:line, \
 command output). When a written report helps (long findings, anything to keep), write it as markdown to \
-the artifacts folder — the ONLY place you can write — and give its link as /api/artifact/<name>.md.";
+the artifacts folder — the ONLY place you can write — and end with its link exactly as \
+[<title>](/api/artifact/<name>.md): that is how it opens on the user's phone.";
 
 /// Lite-tier roles: what a small model can hold — one paragraph, few rules.
-pub const COORDINATOR_LITE: &str = "You are the coordinator, the user's only contact. Answer simple things directly. For real work: sessions_find; then session_send to a matching session or session_start a new one (profile build for one task, lead for a project, research for questions) with a complete brief; then say `→ <title>` in one sentence. When an [inbox] message arrives, tell the user the results that matter in one to three sentences, or reply exactly (quiet).";
-pub const LEAD_LITE: &str = "You own one project. Do it yourself with bash/read/write/edit, or split independent parts into sessions with session_start. Check results by running the tests. When all is done, report what exists and the test result. If you need the user's decision, start your reply with QUESTION:.";
-pub const BUILD_LITE: &str = "Do the task completely with bash/read/write/edit. Run it, test it, fix failures. Reply with what you changed and the test result. If you need the user's decision, start your reply with QUESTION:.";
+pub const COORDINATOR_LITE: &str = "You are the coordinator, the user's only contact. Answer simple things directly. For real work: sessions_find; then session_send to a matching session or session_start a new one (profile build for one task, fix for something broken, lead for a project, research for questions) with a complete brief; then say `→ <title>` in one sentence. When an [inbox] message arrives, tell the user the results that matter in one to three sentences — finished or failed work they asked for always matters; reply exactly (quiet) only for routine progress.";
+/// Smart-tier models (YGG_MODELS `id:smart`, glm-5.3 and up) read this after their role: they re-read
+/// what the user means before acting. Lite and full models act on the brief as written — a weaker
+/// model that "reinterprets" drifts.
+pub const INTENT_NOTE: &str = "\
+Read for intent. The user writes fast, often by voice or with typos, and a brief from another session \
+compresses what they want. Before you act on a message from the user or a brief (not on [inbox] reports — those \
+are facts to pass on), work out what is actually wanted: the goal behind the words, what \
+was said earlier, what a misheard or mistyped word most likely meant, and what a good result looks like to \
+them. Act on that, not on the literal wording. When the words and the evident goal differ (\"fix the test\" \
+when the test is right and the code is wrong), serve the goal and say in one line how you read the request. \
+Ask only when two readings lead to very different work and nothing in the context decides; otherwise take \
+the likeliest reading and go.";
+pub const LEAD_LITE: &str = "You own one project. Do it yourself with bash/read/write/edit, or split independent parts into sessions with session_start. Check results by running the tests. When all is done, report what exists and the test result. If only the user can decide, ask on a line that begins with QUESTION: so the tree brings it to them.";
+pub const FIX_LITE: &str = "Something is broken. Reproduce it, find the root cause, fix it with the smallest change, add a test that catches it, and run the tests until they pass. Never weaken a test to make it pass. Reply with the cause (path:line), the change and the test result. If only the user can decide, ask on a line that begins with QUESTION: so the tree brings it to them.";
+pub const BUILD_LITE: &str = "Do the task completely with bash/read/write/edit. Run it, test it, fix failures. Reply with what you changed and the test result. If only the user can decide, ask on a line that begins with QUESTION: so the tree brings it to them.";
 
 
 
@@ -183,12 +212,15 @@ pub fn builtins() -> Vec<Profile> {
     lead.prompt_lite = Some(LEAD_LITE.into());
     let mut build = p("build", "does one concrete task fully: code, run, test, fix", BUILD_PROMPT, 100, false, false, allow_all());
     build.prompt_lite = Some(BUILD_LITE.into());
+    let mut fix = p("fix", "repairs something broken: reproduces it, finds the root cause, fixes it and proves it with a test", FIX_PROMPT, 100, false, false, allow_all());
+    fix.prompt_lite = Some(FIX_LITE.into());
     vec![
         coordinator,
         lead,
         build,
+        fix,
         p("research", "reads, fetches and compares; answers with evidence", RESEARCH_PROMPT, 60, false, false, allow_all()),
-        // five agents (user 11-13: "too many agent types"); opencode / codex stay a harness choice
+        // few agents (user 11-13: "too many agent types"; fix asked for 11-13); opencode / codex stay a harness choice
         // for agents you make in the editor
         review_profile(),
         harness_profile("AGI", "claude", Some("opus"), "the strongest: Claude Code on Opus — hard, long, multi-file work"),
@@ -222,7 +254,11 @@ fn review_profile() -> Profile {
         name: "review".into(),
         description: "read-only: analyses and reviews; its only write is a report in the artifacts".into(),
         mode: "primary".into(),
-        prompt: REVIEW_PROMPT.into(),
+        // where its one writable folder is, so the report lands there on the first try
+        prompt: match std::env::var("YGG_ARTIFACTS_DIR") {
+            Ok(d) if !d.trim().is_empty() => format!("{REVIEW_PROMPT} The artifacts folder: {}/", d.trim_end_matches('/')),
+            _ => REVIEW_PROMPT.into(),
+        },
         model: None,
         variant: None,
         steps: Some(60),
@@ -609,6 +645,17 @@ pub fn simple_commands(cmd: &str) -> Option<Vec<String>> {
 }
 
 impl Profile {
+    /// The role text a model of `tier` reads (`lite` | `full` | `smart`): lite → the short text when
+    /// there is one, smart → the full text + INTENT_NOTE.
+    pub fn role_for(&self, tier: &str) -> String {
+        match (tier, &self.prompt_lite) {
+            ("lite", Some(short)) => short.clone(),
+            ("smart", _) if self.prompt.trim().is_empty() => INTENT_NOTE.into(),
+            ("smart", _) => format!("{}\n\n{INTENT_NOTE}", self.prompt.trim_end()),
+            _ => self.prompt.clone(),
+        }
+    }
+
     /// May this profile call `tool` with `input`? `Err` carries the refusal the model reads.
     pub fn check(&self, tool: &str, input: &Value) -> Result<(), String> {
         if tool.starts_with("session") || tool == "inbox" {
@@ -673,6 +720,21 @@ mod tests {
     fn prof(rules: Vec<Rule>) -> Profile {
         Profile { name: "t".into(), description: String::new(), mode: "primary".into(), prompt: String::new(), model: None,
             variant: None, steps: None, fold: false, sessions: false, rules, harness: None, prompt_lite: None }
+    }
+
+    #[test]
+    fn role_follows_the_model_tier() {
+        let ps = Profiles::load(None);
+        let build = ps.get("build").unwrap();
+        assert_eq!(build.role_for("full"), BUILD_PROMPT);
+        assert_eq!(build.role_for("lite"), BUILD_LITE);
+        assert!(build.role_for("smart").starts_with(BUILD_PROMPT) && build.role_for("smart").ends_with(INTENT_NOTE));
+        // an agent with no short text reads the full one on a lite model; an empty role still gets the note
+        let research = ps.get("research").unwrap();
+        assert_eq!(research.role_for("lite"), research.prompt);
+        let mut blank = build.clone();
+        blank.prompt = String::new();
+        assert_eq!(blank.role_for("smart"), INTENT_NOTE);
     }
 
     #[test]

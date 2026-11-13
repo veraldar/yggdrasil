@@ -117,7 +117,7 @@ fn summary(r: &Value) -> String {
         .as_array()
         .into_iter()
         .flatten()
-        .map(|m| format!("{}{}", m["id"].as_str().unwrap_or("?"), if m["tier"] == "lite" { " (lite)" } else { "" }))
+        .map(|m| format!("{}{}", m["id"].as_str().unwrap_or("?"), match m["tier"].as_str() { Some(t @ ("lite" | "smart")) => format!(" ({t})"), _ => String::new() }))
         .collect();
     let harness: Vec<&str> = r["profiles"].as_array().into_iter().flatten().filter_map(|p| p["harness"].as_str().and(p["name"].as_str())).collect();
     let hw = &r["hardware"];
