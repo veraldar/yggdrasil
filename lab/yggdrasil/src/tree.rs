@@ -747,6 +747,12 @@ async fn digest(st: &AppState, sid: &str, f: &Facts) -> Value {
                         status = m.into();
                     }
                 }
+                // ...but a run that ENDED with nothing running under it is not working: it said it
+                // would carry on and stopped — stalled (11-13: an AGI session "waiting for inv.py"
+                // sat as `working` for 15 min, nobody woke it)
+                if status == "working" && f.running_kids == 0 {
+                    status = "stalled".into();
+                }
                 if let Some(r) = v["relevance"].as_str().filter(|r| matches!(*r, "needs_you" | "worth_knowing" | "routine")) {
                     relevance = r.into();
                 }
@@ -981,7 +987,7 @@ fn wake(st: &AppState, parent: &str) {
 
 /// How a door wake that carries an outcome ends — no (quiet) offered; the run loop retries a
 /// (quiet) answer to it once.
-pub const OUTCOME_ASK: &str = "Finished, failed or blocked work above is what the user is waiting for: tell them now — the result and its evidence, in one to four sentences.";
+pub const OUTCOME_ASK: &str = "Finished, failed, blocked or stalled work above is what the user is waiting for: tell them now — the result and its evidence, in one to four sentences (a stalled session: first send it what it waits for, or ask it to finish).";
 
 fn door_wake_text(events: &[Value]) -> String {
     let mut t = String::from("[inbox] Reports from your sessions since the user last heard from you:\n");
@@ -1000,7 +1006,7 @@ fn door_wake_text(events: &[Value]) -> String {
     }
     // facts override the model: an outcome is what the user waits for, so (quiet) is not offered
     // (11-13: a MAIN whose history held a run of quiet replies kept answering a finished build with it)
-    if events.iter().any(|e| matches!(e["status"].as_str(), Some("done" | "failed" | "blocked"))) {
+    if events.iter().any(|e| matches!(e["status"].as_str(), Some("done" | "failed" | "blocked" | "stalled"))) {
         t.push_str(OUTCOME_ASK);
     } else {
         t.push_str("Tell the user what matters to them now, or reply exactly (quiet).");
@@ -1083,6 +1089,8 @@ mod tests {
         assert!(!door_wake_text(&[done.clone()]).contains("(quiet)"));
         assert!(door_wake_text(&[moving.clone()]).contains("(quiet)"));
         assert!(!door_wake_text(&[moving, done]).contains("(quiet)"), "one outcome is enough");
+        let stalled = json!({"title": "readme", "status": "stalled", "headline": "waiting for inv.py", "from": "ses_2"});
+        assert!(!door_wake_text(&[stalled]).contains("(quiet)"), "a stalled session is an outcome");
     }
 
     fn sess(id: &str, title: &str, parent: Option<&str>, card: Value) -> (String, Session) {
