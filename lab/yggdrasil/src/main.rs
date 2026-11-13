@@ -311,6 +311,16 @@ fn apply_clock_headers(convo: &mut Vec<Value>, shared: &str) {
     strip_private(convo);
 }
 
+/// "[context ≈ 43k tokens · rolls up at 200k]" — what a session knows of its own size each turn.
+fn context_line(tokens: usize, limit: usize) -> String {
+    let k = |n: usize| if n >= 1000 { format!("{}k", (n + 500) / 1000) } else { n.to_string() };
+    if limit == 0 {
+        format!("[context ≈ {} tokens]", k(tokens))
+    } else {
+        format!("[context ≈ {} tokens · rolls up at {}]", k(tokens), k(limit))
+    }
+}
+
 /// Puts `pre` + newline in front of a message's text (string content, or its first text part).
 fn prefix_text(m: &mut Value, pre: &str) {
     if let Some(c) = m["content"].as_str() {
@@ -2140,6 +2150,12 @@ async fn agent_loop(
     if let Some(role) = role_block(&prof, model_tier(st, &model)) {
         convo.insert(at, json!({ "role": "system", "content": role }));
     }
+    // awareness (owner 11-13): the newest turn also says how big this session's context is, next to
+    // the clock header's gap since the last user turn (only the newest: earlier turns keep their bytes)
+    let tokens = rollup::est_tokens(&convo);
+    if let Some(last) = convo.iter_mut().rev().find(|m| m["role"] == "user") {
+        prefix_text(last, &context_line(tokens, st.config.rollup_tokens));
+    }
     let max = prof.steps.unwrap_or(st.config.max_steps).min(st.config.max_steps).max(1);
     let mut quiet_nudged = false;
     for _ in 0..max {
@@ -3709,6 +3725,12 @@ mod image_tests {
 
     fn reply(text: &str, at: i64) -> Value {
         json!({ "info": { "role": "assistant", "time": { "created": at, "completed": at } }, "parts": [{ "type": "text", "text": text }] })
+    }
+
+    #[test]
+    fn a_session_knows_its_size() {
+        assert_eq!(context_line(43_210, 200_000), "[context ≈ 43k tokens · rolls up at 200k]");
+        assert_eq!(context_line(800, 0), "[context ≈ 800 tokens]");
     }
 
     #[test]

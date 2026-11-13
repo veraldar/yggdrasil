@@ -86,6 +86,10 @@ def plan(body):
     # framing — the clock header line(s) before, the [roots]/[tree] view after
     scripted = False
     if users:
+        # the newest turn opens with the session's own size (awareness line, 11-13): not part of the script
+        c0 = str(msgs[users[-1]]["content"])
+        if c0.startswith("[context "):
+            msgs[users[-1]] = dict(msgs[users[-1]], content=c0.split("\n", 1)[1] if "\n" in c0 else "")
         core = str(msgs[users[-1]]["content"])
         lines = core.split("\n")
         while lines and lines[0].startswith("[clock"):
