@@ -19,6 +19,8 @@ library (python3 here is a venv with pytest: run tests with \`python3 -m pytest\
 the commands you ran and what they printed.
 MD
 set -a; . "$HOME/.config/yggdrasil/yggdrasil.env"; set +a
+# an agents file inside the root stays writable (the agent editor saves there); outside it, read-only
+RO_PROFILES=""; case "${SIM_PROFILES:-}" in "") ;; "$ROOT"/*) ;; *) RO_PROFILES=" $SIM_PROFILES" ;; esac
 # SIM_HARNESS=1: harness sessions (claude/opencode/codex) need their logins + binaries inside the
 # sandbox; opencode gets its own data dir (never the live opencode.db), auth copied in.
 HARNESS_PROPS=(); HPATH=""; SIMHOME="$ROOT/work"
@@ -34,7 +36,7 @@ fi
 systemctl --user stop "$UNIT" 2>/dev/null || true
 systemctl --user reset-failed "$UNIT" 2>/dev/null || true
 systemd-run --user --unit="$UNIT" --collect -q \
-  -p ProtectHome=tmpfs -p "BindPaths=$ROOT" -p "BindReadOnlyPaths=$HOME/.cache/root-sim/_venv${SIM_PROFILES:+ $SIM_PROFILES}" "${HARNESS_PROPS[@]}" \
+  -p ProtectHome=tmpfs -p "BindPaths=$ROOT" -p "BindReadOnlyPaths=$HOME/.cache/root-sim/_venv$RO_PROFILES" "${HARNESS_PROPS[@]}" \
   --setenv=XDG_DATA_HOME="$ROOT/xdg" \
   -p StandardOutput="append:$ROOT/brain.log" -p StandardError="append:$ROOT/brain.log" \
   --setenv=YGG_UPSTREAM_BASE_URL="$YGG_UPSTREAM_BASE_URL" --setenv=YGG_UPSTREAM_API_KEY="$YGG_UPSTREAM_API_KEY" \

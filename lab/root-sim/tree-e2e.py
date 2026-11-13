@@ -83,6 +83,11 @@ def main():
         check("brains up", wait(lambda: req(HOME_PORT, "GET", "/root") and req(LAB_PORT, "GET", "/root"), 10))
         main_id = req(HOME_PORT, "POST", "/session", {"title": "[MAIN]"})["id"]
         check("a new MAIN is stamped coordinator", req(HOME_PORT, "GET", f"/session/{main_id}").get("agent") == "coordinator")
+        try:
+            req(HOME_PORT, "POST", f"/api/session/{main_id}/agent", {"agent": "build"})
+            check("MAIN cannot be switched off the coordinator", False, "accepted")
+        except urllib.error.HTTPError as e:
+            check("MAIN cannot be switched off the coordinator", e.code == 400, e.code)
         fix = req(HOME_PORT, "POST", "/session", {"title": "fix-main-1", "agent": "coordinator"})
         check("no second coordinator at creation", fix.get("agent") != "coordinator", fix.get("agent"))
         try:

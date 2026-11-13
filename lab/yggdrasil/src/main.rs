@@ -989,6 +989,9 @@ async fn switch_agent(State(st): State<AppState>, Path(id): Path<String>, Json(b
     if name == "coordinator" && !main {
         return bad_request("the coordinator is MAIN's alone — pick build, lead, research, plan or a harness");
     }
+    if main && name != "coordinator" {
+        return bad_request("MAIN is the coordinator — it routes work to sessions; give the work to a session with this agent instead");
+    }
     let Some(target) = agent(&st, name) else {
         return bad_request(&format!("unknown agent {name}"));
     };
@@ -2713,7 +2716,7 @@ async fn main() {
     // default for unpinned sessions, and that default is `build` again)
     let door_model = config.profiles.read().unwrap().get("coordinator").and_then(|p| p.model.clone()).filter(|m| config.models.contains(m));
     for (id, s) in sessions.iter_mut() {
-        if is_main_title(s.info["title"].as_str().unwrap_or_default()) && s.info["agent"].is_null() {
+        if is_main_title(s.info["title"].as_str().unwrap_or_default()) && s.info["agent"] != "coordinator" {
             s.info["agent"] = json!("coordinator");
             // its old stamp was only the brain-wide default: it takes the door's model
             if let Some(m) = &door_model {
