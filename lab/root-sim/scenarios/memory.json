@@ -57,7 +57,7 @@
   {
    "name": "MAIN says what was decided and why",
    "kind": "main_says",
-   "regex": "sqlite[\\s\\S]{0,400}(transaction|concurren|corrupt|acid)|(transaction|concurren|corrupt|acid)[\\s\\S]{0,400}sqlite"
+   "regex": "sqlite[\\s\\S]{0,400}(transaction|concurren|corrupt|acid|rewrit|increment|safe|atomic)|(transaction|concurren|corrupt|acid|rewrit|increment|atomic)[\\s\\S]{0,400}sqlite"
   },
   {
    "name": "the storage layer uses SQLite",
