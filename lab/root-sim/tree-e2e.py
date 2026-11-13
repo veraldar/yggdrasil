@@ -82,6 +82,14 @@ def main():
                  YGG_PROJECT_DIR=os.path.join(d, "work"), YGG_ROOT_NAME=name, YGG_PEERS=f"{other}=http://127.0.0.1:{oport}"))
         check("brains up", wait(lambda: req(HOME_PORT, "GET", "/root") and req(LAB_PORT, "GET", "/root"), 10))
         main_id = req(HOME_PORT, "POST", "/session", {"title": "[MAIN]"})["id"]
+        check("a new MAIN is stamped coordinator", req(HOME_PORT, "GET", f"/session/{main_id}").get("agent") == "coordinator")
+        fix = req(HOME_PORT, "POST", "/session", {"title": "fix-main-1", "agent": "coordinator"})
+        check("no second coordinator at creation", fix.get("agent") != "coordinator", fix.get("agent"))
+        try:
+            req(HOME_PORT, "POST", f"/api/session/{fix['id']}/agent", {"agent": "coordinator"})
+            check("no switch to coordinator for a non-MAIN session", False, "accepted")
+        except urllib.error.HTTPError as e:
+            check("no switch to coordinator for a non-MAIN session", e.code == 400, e.code)
         say = lambda text: req(HOME_PORT, "POST", f"/session/{main_id}/message", {"parts": [{"type": "text", "text": text}]}, 60)
 
         # 1. start → report → wake

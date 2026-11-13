@@ -700,6 +700,9 @@ fn new_session(st: &AppState, title: &str, parent: Option<&str>, agent: Option<&
     let id = new_id("ses");
     let now = now_ms();
     let mut info = json!({ "id": id, "title": title, "time": { "created": now, "updated": now } });
+    // the coordinator is the door: MAIN's profile and no one else's (a "fix this" session started
+    // from MAIN once inherited it — read-only, it could fix nothing)
+    let agent = agent.filter(|a| *a != "coordinator" || is_main_title(title));
     if let Some(a) = agent.filter(|a| st.config.profiles.get(a).is_some()) {
         info["agent"] = json!(a);
     } else if is_main_title(title) {
@@ -970,6 +973,10 @@ async fn switch_model(State(st): State<AppState>, Path(id): Path<String>, Json(b
 /// `POST /api/session/:id/agent` — v2 switch, `{agent}` → 204. Must be a catalog agent.
 async fn switch_agent(State(st): State<AppState>, Path(id): Path<String>, Json(body): Json<Value>) -> Response {
     let Some(name) = body["agent"].as_str() else { return bad_request("agent required") };
+    let main = st.sessions.lock().unwrap().get(&id).is_some_and(|s| is_main_title(s.info["title"].as_str().unwrap_or_default()));
+    if name == "coordinator" && !main {
+        return bad_request("the coordinator is MAIN's alone — pick build, lead, research, plan or a harness");
+    }
     if st.config.profiles.get(name).is_none() {
         return bad_request(&format!("unknown agent {name}"));
     }
