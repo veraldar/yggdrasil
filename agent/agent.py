@@ -555,6 +555,7 @@ async def entrypoint(ctx: JobContext) -> None:
 
     # ---- voice commands (owner 11-13): while a reply plays, a whole utterance that is only a
     # command drives the phone's deck exactly like its buttons — it is never buffered as text.
+    # Sound alone never touches the reply (owner 11-13 r2): only a decoded keyword acts.
     _COMMANDS = {
         _norm(w): cmd
         for cmd, words in {
@@ -562,6 +563,8 @@ async def entrypoint(ctx: JobContext) -> None:
                      "silence", "arrête", "arrête toi", "tais toi"],
             "faster": ["faster", "go faster", "speed up", "quicker", "plus vite", "accélère"],
             "slower": ["slower", "go slower", "slow down", "moins vite", "ralentis"],
+            "pause": ["pause", "hold on", "wait"],
+            "resume": ["continue", "resume", "go on", "play", "reprends", "continue s'il te plaît"],
         }.items()
         for w in words
     }
