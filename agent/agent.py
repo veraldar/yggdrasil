@@ -48,6 +48,34 @@ CTX_TAG = (
     "aloud — keep it short, conversational, spoken-style]"
 )
 
+def _norm_words(text: str) -> str:
+    # punctuation → space so "over." / "over!" match
+    return re.sub(r"[^a-z0-9\u4e00-\u9fff]+", " ", text.lower()).strip()
+
+
+# ---- voice commands (owner 11-13): while a reply plays, a whole utterance that is only a command
+# drives the phone's deck exactly like its buttons — it is never part of a message.
+VOICE_COMMANDS = {
+    _norm_words(w): cmd
+    for cmd, words in {
+        "stop": ["stop", "stop it", "stop talking", "stop stop", "quiet", "be quiet", "enough", "shut up",
+                 "silence", "arrête", "arrête toi", "tais toi"],
+        "faster": ["faster", "go faster", "speed up", "quicker", "plus vite", "accélère"],
+        "slower": ["slower", "go slower", "slow down", "moins vite", "ralentis"],
+        "pause": ["pause", "hold on", "wait"],
+        "resume": ["continue", "resume", "go on", "play", "reprends", "continue s'il te plaît"],
+    }.items()
+    for w in words
+}
+
+
+def strip_commands(text: str) -> str:
+    """Drops every sentence of a buffered turn that is only a voice command (the STT may have
+    merged an earlier command into the turn buffer)."""
+    parts = re.split(r"(?<=[.!?])\s+", text)
+    return " ".join(p for p in parts if _norm_words(p) not in VOICE_COMMANDS).strip()
+
+
 # whisper-small hallucinates on silence/room tone — these strings as an ENTIRE
 # turn are noise, not speech (seen live: "you" and "呃" committed after a
 # quiet stretch). Matched lowercase, punctuation stripped.
@@ -281,6 +309,7 @@ class OpenCodeStream(LLMStream):
         # keyword turn-taking: the commit phrase is protocol, not content —
         # never ship "over"/"over and out" to opencode
         send = re.sub(r"\s*over(?:\s+and\s+out)?[\s.!?]*$", "", send, flags=re.I).strip()
+        send = strip_commands(send)
         if not send:
             logger.info("opencode bridge: turn was only the keyword, skipping")
             return
@@ -542,6 +571,15 @@ async def entrypoint(ctx: JobContext) -> None:
                 pass
         return "ok"
 
+    async def _deck_state_rpc(data) -> str:
+        # the phone says when its deck speaks a reply (keywords-only window) and when it stops
+        try:
+            mode_state["speaking"] = bool(json.loads(data.payload).get("speaking"))
+        except Exception:  # noqa: BLE001
+            return "bad-payload"
+        return "ok"
+
+    ctx.room.local_participant.register_rpc_method("deck_state", _deck_state_rpc)
     ctx.room.local_participant.register_rpc_method("ptt_begin", _ptt_begin_rpc)
     ctx.room.local_participant.register_rpc_method("ptt_abort", _ptt_abort_rpc)
     ctx.room.local_participant.register_rpc_method("commit_turn", _commit_turn_rpc)
@@ -574,22 +612,6 @@ async def entrypoint(ctx: JobContext) -> None:
         # punctuation → space so "over." / "over!" match
         return re.sub(r"[^a-z0-9\u4e00-\u9fff]+", " ", text.lower()).strip()
 
-    # ---- voice commands (owner 11-13): while a reply plays, a whole utterance that is only a
-    # command drives the phone's deck exactly like its buttons — it is never buffered as text.
-    # Sound alone never touches the reply (owner 11-13 r2): only a decoded keyword acts.
-    _COMMANDS = {
-        _norm(w): cmd
-        for cmd, words in {
-            "stop": ["stop", "stop it", "stop talking", "stop stop", "quiet", "be quiet", "enough", "shut up",
-                     "silence", "arrête", "arrête toi", "tais toi"],
-            "faster": ["faster", "go faster", "speed up", "quicker", "plus vite", "accélère"],
-            "slower": ["slower", "go slower", "slow down", "moins vite", "ralentis"],
-            "pause": ["pause", "hold on", "wait"],
-            "resume": ["continue", "resume", "go on", "play", "reprends", "continue s'il te plaît"],
-        }.items()
-        for w in words
-    }
-
     def _rpc_phone(method: str, payload: str) -> None:
         async def _send() -> None:
             try:
@@ -606,7 +628,7 @@ async def entrypoint(ctx: JobContext) -> None:
         nonlocal turn_text, keyword_busy
         if not ev.is_final:
             return
-        cmd = _COMMANDS.get(_norm(ev.transcript))
+        cmd = VOICE_COMMANDS.get(_norm(ev.transcript))
         if cmd and mode_state["mode"] == "free":
             # the command was the whole utterance: if nothing else is buffered, the session's
             # user turn holds only it — clear it so the next "over" never carries it
@@ -617,6 +639,16 @@ async def entrypoint(ctx: JobContext) -> None:
                     logger.warning("voice command clear: %s", e)
             logger.info("voice command (%s)", cmd)
             _rpc_phone("voice_command", '{"cmd":"%s"}' % cmd)
+            return
+        # while the phone speaks a reply only keywords count (owner 11-13 r2): speech that is
+        # neither a command nor ends in "over" is room noise or the reply's own echo — dropped
+        if mode_state.get("speaking") and not _norm(ev.transcript).endswith("over"):
+            if not turn_text.strip():
+                try:
+                    session.clear_user_turn()
+                except Exception as e:  # noqa: BLE001
+                    logger.warning("speaking discard: %s", e)
+            logger.info("heard over a playing reply, not a keyword — dropped")
             return
         turn_text = f"{turn_text} {ev.transcript}".strip()
         if keyword_busy:
