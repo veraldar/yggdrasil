@@ -222,6 +222,10 @@ def main():
     env.setdefault("SIM_PROFILES", os.path.join(HERE, "profiles.sim.json"))
     # peer roots: each its own sandboxed brain on port+1.., all knowing each other by name
     roots = [{"name": sc.get("root_name", "home"), "port": a.port, "sim": name, "note": sc.get("root_note", "")}]
+    for path, content in sc.get("seed", {}).items():   # files the person already has on this root
+        fp = os.path.join(root, "work", path)
+        os.makedirs(os.path.dirname(fp), exist_ok=True)
+        open(fp, "w").write(content)
     for i, pr in enumerate(sc.get("peers", []), 1):
         roots.append({"name": pr["name"], "port": a.port + i, "sim": f"{name}-{pr['name']}", "note": pr.get("note", ""), "seed": pr.get("seed", {})})
     if len(roots) > 1:

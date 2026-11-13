@@ -17,7 +17,7 @@
 //! into its simple commands (`;` `&&` `||` `|` `&` newlines) and EVERY one must be allowed;
 //! substitutions (`$(`, backticks, `<(`, `>(`) fail closed unless a `*` rule allows bash.
 //!
-//! The built-in agents (coordinator · lead · build · research · AGI) are always present; a
+//! The built-in agents (coordinator · lead · build · research · review · AGI) are always present; a
 //! `YGG_PROFILES` file overrides fields of built-ins and adds profiles of its own.
 
 use std::collections::BTreeMap;
@@ -74,8 +74,9 @@ step when you can (speed matters): the [tree] view at the end of the user's mess
 one fits, `session_send` the new instruction there (its context is kept); if it is clearly new work, \
 `session_start` directly. Use `sessions_find` only for older or closed work the view does not show. New sessions \
 get the right agent: `build` for one concrete \
-task, `research` for reading/comparing/answering with sources or analysis, `lead` for a project with several parts \
-or iterate-until-done loops, and `AGI` (Claude Code on Opus) for the hardest code or when the user asks for it. ONE project = ONE session under you: never split a \
+task, `research` for reading/comparing/answering with sources, `review` for analysis, review or audit that must \
+not change anything (it writes only its report), `lead` for a project with several parts or iterate-until-done \
+loops, and `AGI` (Claude Code on Opus) for the hardest code or when the user asks for it. ONE project = ONE session under you: never split a \
 project into several sessions yourself — give it to one `lead`, which splits it below itself, keeps it looping and \
 reports the whole. You stay light and fast; projects are managed one level down. Write the brief self-contained: \
 goal, constraints, where (paths), what done means, and any facts from other sessions it needs.
@@ -122,6 +123,14 @@ pub const RESEARCH_PROMPT: &str = "\
 You are a research session: answer the question you were given thoroughly — read the relevant files, fetch \
 sources, compare options, and check claims against evidence. Write longer findings to a markdown file when \
 asked or when they are long. End with a short report: the answer, the key evidence, and the recommendation.";
+
+/// A review session: reads everything, changes nothing; its only write is its report.
+pub const REVIEW_PROMPT: &str = "\
+You are a review session: read-only. Analyse, review or audit what you were given — read the files, \
+search, run read-only commands (git log/diff/show/status/blame, ls, find, grep, wc, head, tail, cat) — \
+and never change the project. Lead with the findings that matter most, each with its evidence (path:line, \
+command output). When a written report helps (long findings, anything to keep), write it as markdown to \
+the artifacts folder — the ONLY place you can write — and give its link as /api/artifact/<name>.md.";
 
 /// Lite-tier roles: what a small model can hold — one paragraph, few rules.
 pub const COORDINATOR_LITE: &str = "You are the coordinator, the user's only contact. Answer simple things directly. For real work: sessions_find; then session_send to a matching session or session_start a new one (profile build for one task, lead for a project, research for questions) with a complete brief; then say `→ <title>` in one sentence. When an [inbox] message arrives, tell the user the results that matter in one to three sentences, or reply exactly (quiet).";
@@ -181,8 +190,48 @@ pub fn builtins() -> Vec<Profile> {
         p("research", "reads, fetches and compares; answers with evidence", RESEARCH_PROMPT, 60, false, false, allow_all()),
         // five agents (user 11-13: "too many agent types"); opencode / codex stay a harness choice
         // for agents you make in the editor
+        review_profile(),
         harness_profile("AGI", "claude", Some("opus"), "the strongest: Claude Code on Opus — hard, long, multi-file work"),
     ]
+}
+
+/// The read-only agent: every read tool, a read-only shell allowlist, and writes only into the
+/// artifacts folder (YGG_ARTIFACTS_DIR — the folder the phone's /api/artifact serves).
+fn review_profile() -> Profile {
+    let mut rules = vec![rule("*", "*", false)];
+    for t in ["read", "glob", "grep", "webfetch", "todowrite"] {
+        rules.push(rule(t, "*", true));
+    }
+    for cmd in ["git log*", "git diff*", "git show*", "git status*", "git blame*", "git ls-files*", "git branch*",
+        "ls*", "find *", "wc *", "head *", "tail *", "grep *", "rg *", "cat *", "tree*", "stat *", "file *", "du *",
+        "pwd", "sort *", "uniq *", "cut *", "jq *", "python3 -m json.tool*"] {
+        rules.push(rule("bash", cmd, true));
+    }
+    // read-only commands that can still write: never
+    for cmd in ["* -delete*", "* -exec*", "* -execdir*", "* -fprint*", "* -fls *", "*--output*", "sort * -o*", "sort -o*"] {
+        rules.push(rule("bash", cmd, false));
+    }
+    if let Ok(dir) = std::env::var("YGG_ARTIFACTS_DIR") {
+        let dir = dir.trim_end_matches('/');
+        if !dir.is_empty() {
+            rules.push(rule("write", &format!("{dir}/*"), true));
+            rules.push(rule("edit", &format!("{dir}/*"), true));
+        }
+    }
+    Profile {
+        name: "review".into(),
+        description: "read-only: analyses and reviews; its only write is a report in the artifacts".into(),
+        mode: "primary".into(),
+        prompt: REVIEW_PROMPT.into(),
+        model: None,
+        variant: None,
+        steps: Some(60),
+        fold: false,
+        sessions: false,
+        rules,
+        harness: None,
+        prompt_lite: None,
+    }
 }
 
 /// A session driven by another harness: it brings its own prompt, tools and context.
@@ -534,6 +583,8 @@ pub fn simple_commands(cmd: &str) -> Option<Vec<String>> {
                 dq = !dq;
                 cur.push(c);
             }
+            // an output redirection writes a file whatever the command is: fail closed
+            '>' if !sq && !dq => return None,
             ';' | '\n' | '|' | '&' if !sq && !dq => {
                 if (c == '|' || c == '&') && chars.peek() == Some(&c) {
                     chars.next();
@@ -580,10 +631,22 @@ impl Profile {
             }
             return Ok(());
         }
-        match decide(&self.rules, tool, &subject(tool, input)) {
+        let subj = subject(tool, input);
+        // a path climbing out of an allowed folder never passes a pattern rule
+        if matches!(tool, "write" | "edit") && (subj.contains("/../") || subj.starts_with("../")) && !self.blanket(tool) {
+            return deny();
+        }
+        match decide(&self.rules, tool, &subj) {
             Some(true) => Ok(()),
             _ => deny(),
         }
+    }
+
+    /// A `*`-pattern allow for `tool` with nothing narrower after it.
+    fn blanket(&self, tool: &str) -> bool {
+        let applies = |r: &Rule| r.permission == "*" || r.permission == tool;
+        let Some(i) = self.rules.iter().rposition(|r| applies(r) && r.pattern == "*") else { return false };
+        self.rules[i].allow && self.rules[i + 1..].iter().all(|r| !applies(r) || r.allow)
     }
 
     /// A `*`-pattern allow for bash with no narrower deny after it: any command runs,
@@ -639,6 +702,32 @@ mod tests {
         assert!(p.check("bash", &json!({"command": "ls $(rm -rf /)"})).is_err());
         assert!(p.check("bash", &json!({"command": "grep 'a;b' file"})).is_ok());
         assert!(prof(allow_all()).check("bash", &json!({"command": "echo $(date) `id`"})).is_ok());
+    }
+
+    #[test]
+    fn review_reads_everything_and_writes_only_its_reports() {
+        // SAFETY: test-only; no other test reads YGG_ARTIFACTS_DIR concurrently in a way it could race on
+        unsafe { std::env::set_var("YGG_ARTIFACTS_DIR", "/home/u/Work/bifrost/artifacts") };
+        let r = review_profile();
+        let ok = |t: &str, i: Value| r.check(t, &i).is_ok();
+        assert!(ok("read", json!({"filePath": "/home/u/Work/x.py"})));
+        assert!(ok("bash", json!({"command": "git log --oneline -5 | head -3"})));
+        assert!(ok("write", json!({"filePath": "/home/u/Work/bifrost/artifacts/review.md"})));
+        assert!(!ok("write", json!({"filePath": "/home/u/Work/x.py"})), "the project is read-only");
+        assert!(!ok("write", json!({"filePath": "/home/u/Work/bifrost/artifacts/../src/x.py"})), "no climbing out");
+        assert!(!ok("edit", json!({"filePath": "/home/u/Work/x.py"})));
+        for cmd in ["cat a > b", "rm x", "find . -delete", "find . -exec rm {} ;", "git diff --output=x", "sort a -o b", "echo hi", "ls; rm x"] {
+            assert!(!ok("bash", json!({ "command": cmd })), "{cmd} must be refused");
+        }
+    }
+
+    #[test]
+    fn redirection_fails_closed_for_allowlists() {
+        let p = prof(vec![rule("*", "*", false), rule("bash", "cat *", true)]);
+        assert!(p.check("bash", &json!({"command": "cat a"})).is_ok());
+        assert!(p.check("bash", &json!({"command": "cat a > b"})).is_err());
+        assert!(p.check("bash", &json!({"command": "cat 'a>b'"})).is_ok(), "a quoted > is text");
+        assert!(prof(allow_all()).check("bash", &json!({"command": "echo x > y"})).is_ok(), "blanket bash is untouched");
     }
 
     #[test]

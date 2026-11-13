@@ -8,7 +8,7 @@ NAME=${1:?name}; PORT=${2:?port|down}
 ROOT="$HOME/.cache/root-sim/$NAME"; UNIT="rootsim-$NAME"
 if [ "$PORT" = down ]; then systemctl --user stop "$UNIT" 2>/dev/null || true; exit 0; fi
 BIN=${3:-$HOME/Work/root-coord/lab/yggdrasil/target/release/yggdrasil}
-mkdir -p "$ROOT/data/session" "$ROOT/work" "$ROOT/bin"
+mkdir -p "$ROOT/data/session" "$ROOT/work/artifacts" "$ROOT/bin"
 cp -f "$BIN" "$ROOT/bin/yggdrasil"           # frozen copy: a rebuild never swaps a running sim
 [ -f "$ROOT/work/AGENTS.md" ] || cat > "$ROOT/work/AGENTS.md" <<MD
 # Workspace
@@ -41,7 +41,7 @@ systemd-run --user --unit="$UNIT" --collect -q \
   -p StandardOutput="append:$ROOT/brain.log" -p StandardError="append:$ROOT/brain.log" \
   --setenv=YGG_UPSTREAM_BASE_URL="$YGG_UPSTREAM_BASE_URL" --setenv=YGG_UPSTREAM_API_KEY="$YGG_UPSTREAM_API_KEY" \
   --setenv=YGG_UPSTREAM_STYLE="${YGG_UPSTREAM_STYLE:-anthropic}" --setenv=YGG_UPSTREAM_MODEL="${SIM_MODEL:-glm-5.3-flash}" \
-  --setenv=YGG_MODELS="${SIM_MODELS:-glm-5.3-flash,glm-5.3,glm-5.2}" --setenv=YGG_VISION_MODELS="${SIM_VISION:-glm-5.3-flash}" \
+  --setenv=YGG_MODELS="${SIM_MODELS:-glm-5.3-flash,glm-5.3,glm-5.2}" --setenv=YGG_VISION_MODELS="${SIM_VISION:-glm-5.3-flash}" --setenv=YGG_ARTIFACTS_DIR="$ROOT/work/artifacts" \
   --setenv=YGG_MAX_TOKENS="${YGG_MAX_TOKENS:-16384}" --setenv=YGG_THINK_HIGH="${YGG_THINK_HIGH:-8192}" \
   --setenv=YGG_DEFAULT_VARIANT="${SIM_VARIANT:-high}" --setenv=YGG_VOICE=1 \
   --setenv=YGG_LISTEN="127.0.0.1:$PORT" --setenv=YGG_DATA_DIR="$ROOT/data" --setenv=YGG_PROJECT_DIR="$ROOT/work" \

@@ -52,7 +52,7 @@ apply)
   echo "backups → $BK (previous binary $OLD)"
   # env: the models this root serves + its name; everything else unchanged
   python3 - "$ENV" <<'PY'
-import sys, re
+import sys, re, os
 p = sys.argv[1]; s = open(p).read()
 def put(k, v):
     global s
@@ -65,6 +65,7 @@ put("YGG_ROOT_NAME", "omarchy")
 put("YGG_ROOT_NOTE", "the main computer (omarchy): 16 cpu / 30 GB, holds ~/Work and every project")
 put("YGG_MAX_INFLIGHT", "5")
 put("YGG_VISION_MODELS", "glm-5.3-flash")  # the one z.ai model here that reads images (probed 11-13)
+put("YGG_ARTIFACTS_DIR", os.path.expanduser("~/Work/bifrost/artifacts"))  # the review agent's only write
 open(p, "w").write(s)
 PY
   install -m600 "$STAGED_PROFILES" "$PROFILES"
