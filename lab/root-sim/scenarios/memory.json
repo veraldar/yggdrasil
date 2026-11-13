@@ -65,8 +65,8 @@
    "expect": "\\.py"
   },
   {
-   "name": "inventory tests pass",
-   "cmd": "cd inventory && python3 -m pytest -q >/tmp/pytest.$$.out 2>&1 && echo PYTEST-OK || tail -5 /tmp/pytest.$$.out",
+   "name": "the inventory tests pass (from the workspace: package + tests/ layouts both count)",
+   "cmd": "python3 -m pytest -q -p no:cacheprovider >/tmp/pytest.$$.out 2>&1 && echo PYTEST-OK || tail -5 /tmp/pytest.$$.out",
    "expect": "PYTEST-OK"
   },
   {
