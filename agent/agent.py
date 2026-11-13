@@ -15,13 +15,11 @@ from livekit.agents import (
     AgentServer,
     AgentSession,
     JobContext,
-    RoomInputOptions,
     cli,
     llm,
 )
 from livekit.agents.llm import ChatContext, LLMStream
 from livekit.agents.voice.room_io import RoomOptions
-from livekit.agents.voice.room_io.types import RoomOutputOptions
 from livekit.plugins import openai, silero
 
 load_dotenv()
@@ -419,11 +417,13 @@ async def entrypoint(ctx: JobContext) -> None:
         # "closing agent session due to participant disconnect" + "skipping
         # user input, speech scheduling is paused" on each hold). We end the
         # job ourselves on human-left with a commit grace window instead.
-        room_input_options=RoomInputOptions(text_enabled=True, close_on_disconnect=False),
-        # the agent never speaks over the room: the phone speaks replies
-        # itself through its own TTS (the "listen" voice) and drives the
-        # mic on/off cycle — one voice path, no double synthesis
-        room_options=RoomOptions(audio_output=RoomOutputOptions(audio_enabled=False)),
+        # ONE options object: livekit-agents 1.8 ignores room_input_options whenever room_options
+        # is given — close_on_disconnect=False was silently dropped, every phone disconnect closed
+        # the session, and a job closed while it waited for a sibling stayed in the room deaf;
+        # every later dispatch then yielded to it (owner 11-13: "nothing goes through")
+        # audio_output=False: the agent never speaks over the room — the phone speaks replies
+        # itself through its own TTS and drives the mic on/off cycle (one voice path)
+        room_options=RoomOptions(text_input=True, audio_output=False, close_on_disconnect=False),
         agent=Agent(instructions=INSTRUCTIONS),
     )
 
@@ -435,6 +435,18 @@ async def entrypoint(ctx: JobContext) -> None:
     # remote_participants is empty any earlier (verified live: the check at
     # entrypoint start never saw the sibling).
     human_identity = f"user_{ctx.room.name}"
+
+    def _end_job_with_session(_ev) -> None:
+        # start() returns immediately, so the job would otherwise outlive its
+        # session: a zombie agent keeps answering room RPCs with "not-running"
+        # and traps the phone in a reconnect loop. End the job with the
+        # session — the next join dispatches a fresh one. Registered BEFORE the
+        # sibling wait below: a session that closes during that wait ends the job too.
+        ctx.shutdown("session closed")
+
+    session.on("close", _end_job_with_session)
+    commit_in_flight = False
+
     # A page refresh re-dispatches a job while the previous one is still
     # draining (its session survives the disconnect through the commit
     # grace). Yielding instantly strands the room agentless: the phone
@@ -482,22 +494,11 @@ async def entrypoint(ctx: JobContext) -> None:
     ctx.room.on("participant_metadata_changed", _on_metadata_changed)
     mode_state["mode"] = _phone_mode()
 
-    def _end_job_with_session(_ev) -> None:
-        # start() returns immediately, so the job would otherwise outlive its
-        # session: a zombie agent keeps answering room RPCs with "not-running"
-        # and traps the phone in a reconnect loop. End the job with the
-        # session — the next join dispatches a fresh one.
-        ctx.shutdown("session closed")
-
-    session.on("close", _end_job_with_session)
-
     # Commit grace: a PTT release disconnects the human BEFORE the commit's
     # opencode handoff is done (flush silence 1.5s + slow STT final + POST).
     # With close_on_disconnect=False the session survives; this task ends the
     # job once the last commit has settled — and stays alive through
     # back-to-back holds that race the tail.
-    commit_in_flight = False
-
     async def _human_left_grace() -> None:
         def _human_present() -> bool:
             return human_identity in {p.identity for p in ctx.room.remote_participants.values()}
