@@ -702,6 +702,8 @@ fn new_session(st: &AppState, title: &str, parent: Option<&str>, agent: Option<&
     let mut info = json!({ "id": id, "title": title, "time": { "created": now, "updated": now } });
     if let Some(a) = agent.filter(|a| st.config.profiles.get(a).is_some()) {
         info["agent"] = json!(a);
+    } else if is_main_title(title) {
+        info["agent"] = json!("coordinator"); // the door is stamped, so the phone shows it right
     }
     let pname = profile_name_of(st, &info);
     let prof = st.config.profiles.get(&pname);
