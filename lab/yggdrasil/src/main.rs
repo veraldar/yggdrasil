@@ -170,11 +170,16 @@ fn civil_days(y: i64, m: u32, d: u32) -> i64 {
     era * 146_097 + doe - 719_468
 }
 
-/// Newest-first artifact names (files in ~/Work/bifrost/artifacts, capped at
-/// `capped_at`); the names alone carry the lane story for a meanwhile summary.
+/// Newest-first artifact names (files in the artifacts folder — YGG_ARTIFACTS_DIR, else
+/// ~/Work/bifrost/artifacts — newer than `capped_at`); the names alone carry the lane story
+/// for a meanwhile summary.
 fn artifact_names(capped_at: i64, max: usize) -> Vec<String> {
     let mut out: Vec<(i64, String)> = Vec::new();
-    if let Ok(rd) = std::fs::read_dir("/home/dweeb_xyz/Work/bifrost/artifacts") {
+    let dir = std::env::var("YGG_ARTIFACTS_DIR")
+        .ok()
+        .filter(|d| !d.trim().is_empty())
+        .unwrap_or_else(|| format!("{}/Work/bifrost/artifacts", std::env::var("HOME").unwrap_or_default()));
+    if let Ok(rd) = std::fs::read_dir(dir) {
         for e in rd.flatten() {
             if let Ok(md) = e.metadata() {
                 if let Ok(t) = md.modified() {
