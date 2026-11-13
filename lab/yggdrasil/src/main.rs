@@ -28,7 +28,7 @@
 //!   YGG_MAX_STEPS          upstream calls per run before the loop gives up (default: 100)
 //!   YGG_BASH_TIMEOUT_MS    default bash tool timeout (default: 120000)
 //!   YGG_TOOLS              `0` = don't declare tools (plain relay, for tool-less upstreams)
-//!   YGG_ROLLUP_TOKENS      slice 6b: estimated-token limit for the upstream history (default 100000,
+//!   YGG_ROLLUP_TOKENS      slice 6b: estimated-token limit for the upstream history (default 200000,
 //!                          `0` = off); over it, older history is summarized (`rollup.rs`)
 //!   YGG_ROLLUP_KEEP_TOKENS recent history kept verbatim at a roll-up (default: limit / 4)
 //!
@@ -288,15 +288,16 @@ fn clock_now_ms() -> i64 {
 ///    on the record (`info.time.meanwhile`; old sessions lack it and render
 ///    none). The private fields are stripped before send.
 /// Editing this constant resets every session's provider cache once.
-/// root-coord (11-12): the 11-09 "fewest words" preamble made every session stop at the first
-/// obstacle; brevity is for prose, never for the work.
-const SYSTEM_PREAMBLE: &str = "You are part of yggdrasil: the user's own AI, running on their own computer and reached from their phone. Be direct and concrete, and keep prose replies short unless the user asks for depth — but never cut the work short: investigate with your tools until you actually know, verify before you claim, and do not give up at the first obstacle. Keep the user's language.";
+/// root-coord (11-13): the preamble is the opening of the SHARED prompt (profiles::default_shared,
+/// editable once for every agent); tests use the bare preamble.
+#[cfg(test)]
+const SYSTEM_PREAMBLE: &str = profiles::PREAMBLE;
 
-/// Prepends the static preamble, then the derived header to every user message
-/// carrying `_ts` (compaction asks carry none), then strips every `_`-prefixed
-/// key so nothing private rides upstream (either dialect).
-fn apply_clock_headers(convo: &mut Vec<Value>) {
-    convo.insert(0, json!({ "role": "system", "content": SYSTEM_PREAMBLE }));
+/// Prepends the shared prompt (static for the session's life), then the derived header to every
+/// user message carrying `_ts` (compaction asks carry none), then strips every `_`-prefixed key so
+/// nothing private rides upstream (either dialect).
+fn apply_clock_headers(convo: &mut Vec<Value>, shared: &str) {
+    convo.insert(0, json!({ "role": "system", "content": shared }));
     for m in convo.iter_mut() {
         if m["role"] != "user" { continue; }
         let Some(ts) = m["_ts"].as_i64() else { continue };
@@ -361,8 +362,7 @@ struct Config {
     context_files: Vec<PathBuf>,
     /// root-coord: the other roots this one works with (peers.rs)
     peers: peers::Peers,
-    /// model tiers other than `full` (YGG_MODELS `id:lite` | `id:smart`): lite = short prompts + lean
-    /// tool set, smart = the full prompt + INTENT_NOTE (re-reads what the user means)
+    /// lite models (YGG_MODELS `id:lite`): the short role + the lean tool set; unmarked = full
     tiers: HashMap<String, &'static str>,
     /// models that can see images (YGG_VISION_MODELS): a turn carrying an image runs on the first
     /// of them when the session's own model cannot (the door's glm-5.3 cannot; glm-5.3-flash can)
@@ -857,7 +857,7 @@ fn role_block(prof: &profiles::Profile, tier: &str) -> Option<String> {
     (!role.trim().is_empty()).then(|| format!("[agent: {}]\n{role}", prof.name))
 }
 
-/// `lite` | `full` | `smart` for a model id (YGG_MODELS `id:tier`; unmarked = full).
+/// `lite` | `full` for a model id (YGG_MODELS `id:lite`; unmarked = full).
 fn model_tier(st: &AppState, model: &str) -> &'static str {
     st.config.tiers.get(model).copied().unwrap_or("full")
 }
@@ -1105,29 +1105,57 @@ fn agent_model_stamp(st: &AppState, a: &profiles::Profile) -> Value {
     }
 }
 
+/// What a Claude Code agent appends to Claude Code's own prompt: the shared prompt, then its role.
+fn harness_system(shared: &str, prof: &profiles::Profile) -> String {
+    let role = prof.role_for("full");
+    if role.trim().is_empty() { shared.to_string() } else { format!("{shared}\n\n{role}") }
+}
+
+/// `GET /shared-prompt` — what every agent reads first; `custom` = edited by the owner.
+async fn get_shared(State(st): State<AppState>) -> Json<Value> {
+    let shared = st.config.profiles.read().unwrap().shared.clone();
+    let default = profiles::default_shared();
+    Json(json!({ "prompt": shared, "default": default, "custom": shared != default }))
+}
+
+/// `PUT /shared-prompt` `{prompt}` — edit it for every agent at once (empty = the default).
+async fn put_shared(State(st): State<AppState>, Json(body): Json<Value>) -> Response {
+    let res = st.config.profiles.write().unwrap().set_shared(body["prompt"].as_str().unwrap_or_default());
+    match res {
+        Ok(()) => {
+            publish(&st, "agent.updated", json!({ "name": "*" }));
+            get_shared(State(st)).await.into_response()
+        }
+        Err(e) => bad_request(&e),
+    }
+}
+
 /// `GET /agent/:name` — everything the agent editor shows (+ what it may change).
 async fn get_agent(State(st): State<AppState>, Path(name): Path<String>) -> Response {
     let detail = st.config.profiles.read().unwrap().detail(&name);
     match detail {
         Some(mut d) => {
-            // everything the model reads before the conversation (read-only in the editor), per
-            // tier the root serves: the preamble, the AGENTS.md chain, then the role as that tier reads it
+            // everything the model reads before the conversation (read-only in the editor): the
+            // preamble, the AGENTS.md chain, then the role (+ the intent section); a lite model, if
+            // this root serves one, reads the short role
             let prof = agent(&st, &name).expect("detail implies the agent");
+            let shared = st.config.profiles.read().unwrap().shared.clone();
             d["system"] = json!(match &prof.harness {
-                None => ["smart", "full", "lite"]
+                None => ["full", "lite"]
                     .iter()
                     .filter_map(|t| {
                         let models: Vec<&String> = st.config.models.iter().filter(|m| model_tier(&st, m) == *t).collect();
-                        let mut parts = vec![SYSTEM_PREAMBLE.to_string()];
+                        let mut parts = vec![shared.clone()];
                         parts.extend(context_prompt(&st.config.context_files));
                         parts.extend(role_block(&prof, t));
                         (!models.is_empty()).then(|| json!({ "tier": t, "models": models, "text": parts.join("\n\n") }))
                     })
                     .collect::<Vec<_>>(),
-                Some(h) => vec![json!({ "tier": h, "models": [], "text": format!(
-                    "{h} brings its own system prompt; this agent adds:\n\n{}",
-                    if prof.prompt.trim().is_empty() { "(nothing)" } else { &prof.prompt }
-                ) })],
+                Some(h) => vec![json!({ "tier": h, "models": [], "text": if h == "claude" {
+                    format!("Claude Code brings its own system prompt; this agent adds:\n\n{}", harness_system(&shared, &prof))
+                } else {
+                    format!("{h} brings its own system prompt (it takes no extra instructions)")
+                } })],
             });
             // the models this agent can pick from: the upstream's for a root agent, else its harness's
             d["models"] = json!(models_for(&st, d["harness"].as_str().unwrap_or("root")));
@@ -2023,7 +2051,8 @@ async fn harness_loop(st: &AppState, id: &str, history: Vec<Value>, tx: &mpsc::S
         let cwd = info["cwd"].as_str().map(PathBuf::from).filter(|p| p.is_dir()).unwrap_or_else(|| st.tools.project_dir.clone());
         (model, info["harness"]["id"].as_str().map(String::from), cwd)
     };
-    let system = Some(session_profile(st, id).prompt).filter(|p| !p.trim().is_empty());
+    // the shared prompt + the agent's own instructions ride on top of the harness's (Claude Code)
+    let system = Some(harness_system(&st.config.profiles.read().unwrap().shared, &session_profile(st, id)));
     let _slot = st.harness_slots.acquire().await.map_err(|e| e.to_string())?;
     let (etx, mut erx) = mpsc::unbounded_channel::<harness::Ev>();
     let fut = harness::run(kind, model.as_deref(), resume.as_deref(), &cwd, &prompt, system.as_deref(), move |ev| {
@@ -2095,7 +2124,8 @@ async fn agent_loop(
             append_text(last, &tree::snapshot(st, id));
         }
     }
-    apply_clock_headers(&mut convo);
+    let shared = st.config.profiles.read().unwrap().shared.clone();
+    apply_clock_headers(&mut convo, &shared);
     // static system block (cache law, all three are constant for the session's life):
     // preamble · the AGENTS.md chain (OG-ctx) · the profile's role. The 10-04 brain-wide voice
     // prompt is gone: voice brevity rides only the voice turns (VOICE_TURN_NOTE).
@@ -2431,8 +2461,10 @@ fn session_upstream(st: &AppState, id: &str) -> (String, String, Option<Value>) 
             .filter(|t| t["function"]["name"].as_str().is_some_and(|n| allowed.contains(&n)))
             .cloned()
             .collect();
-        if prof.sessions {
-            list.extend(tree::schemas(&st.config.profiles.read().unwrap()));
+        // a managing agent gets every tree tool; a read-only reader (review) only find + read
+        if prof.reads_tree() {
+            let tree_tools = tree::schemas(&st.config.profiles.read().unwrap());
+            list.extend(tree_tools.into_iter().filter(|t| prof.sessions || matches!(t["function"]["name"].as_str(), Some("sessions_find" | "session_read"))));
         }
         Value::Array(list)
     });
@@ -2821,7 +2853,7 @@ async fn main() {
             _ => default,
         }
     };
-    let rollup_tokens = env_num("YGG_ROLLUP_TOKENS", 100_000);
+    let rollup_tokens = env_num("YGG_ROLLUP_TOKENS", 200_000); // owner 11-13: 200k
     let dialect = match std::env::var("YGG_UPSTREAM_STYLE").unwrap_or_default().to_ascii_lowercase().as_str() {
         "" | "openai" => Dialect::OpenAi,
         "anthropic" => Dialect::Anthropic,
@@ -2850,9 +2882,8 @@ async fn main() {
         let (m, tier) = entry.split_once(':').unwrap_or((entry, "full"));
         match tier {
             "lite" => drop(tiers.insert(m.to_string(), "lite")),
-            "smart" => drop(tiers.insert(m.to_string(), "smart")),
             "full" => {}
-            other => eprintln!("YGG_MODELS {entry}: unknown tier {other} (lite | full | smart) — read as full"),
+            other => eprintln!("YGG_MODELS {entry}: unknown tier {other} (lite | full) — read as full"),
         }
         if !models.iter().any(|x| x == m) {
             models.push(m.to_string());
@@ -2982,6 +3013,7 @@ async fn main() {
         .route("/api/session/{id}/agent", post(switch_agent))
         .route("/config/providers", get(config_providers))
         .route("/agent", get(list_agents))
+        .route("/shared-prompt", get(get_shared).put(put_shared))
         .route("/agent/{name}", get(get_agent).put(put_agent).delete(delete_agent))
         .route("/event", get(events))
         .route("/tree", get(get_tree))
@@ -3061,7 +3093,7 @@ mod time_awareness_tests {
     /// What agent_loop sends for a stored session (without the roll-up call).
     fn request_for(stored: &[Value]) -> Vec<Value> {
         let mut convo = upstream_history(stored);
-        apply_clock_headers(&mut convo);
+        apply_clock_headers(&mut convo, SYSTEM_PREAMBLE);
         convo
     }
 
@@ -3168,7 +3200,7 @@ mod time_awareness_tests {
     #[test]
     fn non_string_user_content_is_not_erased() {
         let mut convo = vec![json!({"role": "user", "content": [{"type": "text", "text": "x"}], "_ts": 1000})];
-        apply_clock_headers(&mut convo);
+        apply_clock_headers(&mut convo, SYSTEM_PREAMBLE);
         // multi-part content (an image turn) is kept whole; the header rides its text part
         let parts = convo[1]["content"].as_array().expect("still parts");
         assert_eq!(parts.len(), 1);
@@ -3535,7 +3567,7 @@ mod voice_turn_tests {
 
     fn request_for(stored: &[Value]) -> Vec<Value> {
         let mut convo = upstream_history(stored);
-        apply_clock_headers(&mut convo);
+        apply_clock_headers(&mut convo, SYSTEM_PREAMBLE);
         convo
     }
 
@@ -3704,7 +3736,7 @@ mod image_tests {
         let new = &convo[4]["content"];
         assert_eq!(new[1]["image_url"]["url"], "data:image/png;base64,NEW");
         let mut c = convo.clone();
-        apply_clock_headers(&mut c);
+        apply_clock_headers(&mut c, SYSTEM_PREAMBLE);
         assert!(c[5]["content"][0]["text"].as_str().unwrap().starts_with("[clock "), "header rides the text part");
         assert!(rollup::est_tokens(&convo) < 2000, "an image counts as ~1.6k tokens, not its bytes");
     }

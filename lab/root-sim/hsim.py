@@ -185,7 +185,7 @@ def run_checks(sc, work, tree, main_id, visible):
                 res.append({"name": name, "ok": bool(hit), "detail": ", ".join(f"{r['title']} → {r['card'].get('root')} ({r['card'].get('status')})" for r in hit) or "no proxy on that root"})
             elif kind == "child_profile":
                 kids = [r for r in tree if r.get("parentID") == main_id and r.get("agent") == c["agent"]]
-                res.append({"name": name, "ok": len(kids) >= 1, "detail": ", ".join(f"{r['title']} ({r['agent']}, {(r.get('card') or {}).get('status')})" for r in kids) or f"no {c['agent']} session under main"})
+                res.append({"name": name, "ok": len(kids) >= c.get("value", 1), "detail": ", ".join(f"{r['title']} ({r['agent']}, {(r.get('card') or {}).get('status')})" for r in kids) or f"no {c['agent']} session under main"})
             elif kind == "proactive_report":
                 # main spoke at least N times without being asked (an assistant message right after another assistant message)
                 n, prev = 0, None

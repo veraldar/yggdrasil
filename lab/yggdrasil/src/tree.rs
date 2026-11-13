@@ -234,10 +234,13 @@ fn err(s: String) -> Out {
 
 /// The caller sees every session (the door) or only its own subtree (a lead).
 fn in_scope(st: &AppState, sessions: &HashMap<String, Session>, caller: &str, target: &str) -> bool {
-    if crate::profile_name_of(st, sessions.get(caller).map(|s| &s.info).unwrap_or(&Value::Null)) == "coordinator" {
-        return true;
-    }
-    descendants(sessions, caller).iter().any(|d| d == target)
+    sees_whole_tree(st, sessions, caller) || descendants(sessions, caller).iter().any(|d| d == target)
+}
+
+/// The door sees every session; so does a read-only reader (review), which can only read them.
+fn sees_whole_tree(st: &AppState, sessions: &HashMap<String, Session>, caller: &str) -> bool {
+    let name = crate::profile_name_of(st, sessions.get(caller).map(|s| &s.info).unwrap_or(&Value::Null));
+    name == "coordinator" || crate::agent(st, &name).is_some_and(|p| !p.sessions && p.reads_tree())
 }
 
 /// The session a tool call names (`id` = id or exact title) — if the caller may act on it.
@@ -345,8 +348,7 @@ fn find(st: &AppState, caller: &str, input: &Value) -> Out {
     let limit = input["limit"].as_u64().unwrap_or(8).clamp(1, 25) as usize;
     let archived = input["archived"].as_bool().unwrap_or(false);
     let sessions = st.sessions.lock().unwrap();
-    let door = crate::profile_name_of(st, sessions.get(caller).map(|s| &s.info).unwrap_or(&Value::Null)) == "coordinator";
-    let pool: Vec<String> = if door {
+    let pool: Vec<String> = if sees_whole_tree(st, &sessions, caller) {
         sessions.keys().filter(|k| k.as_str() != caller).cloned().collect()
     } else {
         descendants(&sessions, caller)

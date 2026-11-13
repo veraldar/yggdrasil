@@ -16,7 +16,7 @@ ART="$HOME/Work/root-coord-pwa/artifacts" # lib/artifacts.ts: the worktree's ../
 # the running unit's environment (upstream key included) — reused as is, a few keys set
 # (systemd quotes values with spaces, e.g. YGG_ROOT_NOTE: split like a shell would)
 mapfile -t ENVV < <(systemctl --user show "$UNIT" -p Environment --value | python3 -c 'import shlex,sys; print("\n".join(shlex.split(sys.stdin.read())))' | grep -vE '^(YGG_MODELS|YGG_VISION_MODELS|YGG_ARTIFACTS_DIR)=')
-ENVV+=("YGG_MODELS=glm-5.3-flash,glm-5.3:smart,glm-5.2" "YGG_VISION_MODELS=glm-5.3-flash" "YGG_ARTIFACTS_DIR=$ART")
+ENVV+=("YGG_MODELS=glm-5.3-flash,glm-5.3,glm-5.2" "YGG_VISION_MODELS=glm-5.3-flash" "YGG_ARTIFACTS_DIR=$ART")
 [ "${#ENVV[@]}" -gt 10 ] || { echo "no environment read from $UNIT"; exit 1; }
 
 # the preview's agents: the staged overlay's models (fix included)

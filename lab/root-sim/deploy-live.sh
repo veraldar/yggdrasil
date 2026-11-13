@@ -60,13 +60,14 @@ def put(k, v):
     line = f'{k}="{v}"' if any(c in v for c in " '()") else f"{k}={v}"
     s = re.sub(rf"(?m)^{k}=.*$", line, s) if re.search(rf"(?m)^{k}=", s) else s.rstrip("\n") + f"\n{line}\n"
 s += "" if "# root-coord" in s else "# root-coord (11-12): the coordinator door, profiles with models, roots, harness sessions\n"
-put("YGG_MODELS", "glm-5.3-flash,glm-5.3:smart,glm-5.2")
+put("YGG_MODELS", "glm-5.3-flash,glm-5.3,glm-5.2")
 put("YGG_ROOT_NAME", "omarchy")
 put("YGG_ROOT_NOTE", "the main computer (omarchy): 16 cpu / 30 GB, holds ~/Work and every project")
 put("YGG_MAX_INFLIGHT", "5")
 put("YGG_VISION_MODELS", "glm-5.3-flash")  # the one z.ai model here that reads images (probed 11-13)
 put("YGG_ARTIFACTS_DIR", os.path.expanduser("~/Work/bifrost/artifacts"))  # the review agent's only write
 put("YGG_VOICE_MAX_WORDS", "300")  # a safety limit now: voice commands control playback (11-13)
+put("YGG_ROLLUP_TOKENS", "200000")  # owner 11-13: a session rolls up past ~200k tokens (keeps the last quarter)
 open(p, "w").write(s)
 PY
   install -m600 "$STAGED_PROFILES" "$PROFILES"

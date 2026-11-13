@@ -22,11 +22,13 @@ you ⇄ [MAIN] coordinator            the transcript you read: only you + MAIN
   (manages others), `harness`. Built in: coordinator · lead · build · fix · research · review · AGI.
   `YGG_PROFILES` overlays fields and adds agents. Model and thinking: the agent's default, the
   session's explicit choice wins, stamped at creation (the agent too — the list shows `[BUI]`, `[FIX]`…).
-- **The prompt follows the model** (`YGG_MODELS id:lite | id:smart`, unmarked = full): lite → the
-  short role + the lean tool set; full → the role as written; smart (glm-5.3 and up) → the role +
-  `INTENT_NOTE` (work out what the user means — typos, voice slips, the goal behind the words —
-  before acting; not for [inbox] reports). `GET /agent/:name` returns `system`: everything the
-  model reads, per tier.
+- **One shared prompt, stored once**: every agent reads the same shared system prompt first — the
+  yggdrasil preamble + "re-interpret the user's intent before you do what you are asked"
+  (`profiles::default_shared`). It lives once, as `shared_prompt` in the agents file, edited from the
+  agents page (`GET/PUT /shared-prompt`, empty = default); each agent's prompt holds only its own role
+  (owner 11-13: no per-model variants, nothing repeated per agent). Claude Code agents get it appended
+  with their instructions. A model marked `id:lite` still reads the short role + lean tools.
+  `GET /agent/:name` returns `system`: everything the model reads.
 - **Card** (`info.card`): topic, brief, status, headline, summary, needs. Rewritten after every
   turn by a one-shot **digest** call (no session, no history); facts override the model (a failed
   run is failed, `QUESTION:` is blocked, running sub-sessions mean working, an outcome is never
@@ -69,7 +71,7 @@ thinking off.
 
 ## Env
 
-`YGG_MODELS` (`id[:lite|:smart]`, comma list) · `YGG_VISION_MODELS` · `YGG_ARTIFACTS_DIR` (review's only write) · `YGG_PROFILES` · `YGG_CONTEXT_FILES` · `YGG_ROOT_NAME` ·
+`YGG_MODELS` (`id[:lite]`, comma list) · `YGG_VISION_MODELS` · `YGG_ARTIFACTS_DIR` (review's only write) · `YGG_PROFILES` · `YGG_CONTEXT_FILES` · `YGG_ROOT_NAME` ·
 `YGG_ROOT_NOTE` · `YGG_PEERS` · `YGG_PEER_TOKEN` · `YGG_MAX_INFLIGHT` (upstream calls in flight, 6)
 · `YGG_MAX_HARNESS` (3) · `YGG_DIGEST_MODEL` · `YGG_WAKE_DEBOUNCE_MS` (4000) ·
 `YGG_TREE_MAX_DEPTH` / `_CHILDREN` / `_WAKES`.
@@ -87,6 +89,6 @@ stamps the agent's model + thinking (+ harness); the model can be changed afterw
 
 ## Endpoints added
 
-`GET /tree` · `GET /root` · `GET /session/:id/inbox` · `POST /session/:id/close` · `GET/PUT/DELETE /agent/:name` ·
+`GET /tree` · `GET /root` · `GET/PUT /shared-prompt` · `GET /session/:id/inbox` · `POST /session/:id/close` · `GET/PUT/DELETE /agent/:name` ·
 `POST /tree/report` (peer token). `POST /session` takes `agent`, `model`, `variant`,
 `report_to`. `GET /agent` lists the profiles.

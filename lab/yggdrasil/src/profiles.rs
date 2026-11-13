@@ -52,6 +52,8 @@ pub struct Profile {
 pub struct Profiles {
     pub by_name: BTreeMap<String, Profile>,
     pub default_agent: String,
+    /// the system prompt every agent reads first (`shared_prompt` in the file; default_shared())
+    pub shared: String,
     /// where edits persist (the overlay file) and its JSON as loaded (unknown keys kept)
     path: Option<String>,
     raw: Value,
@@ -68,7 +70,11 @@ to organize sessions, topics or projects themselves.
 How you work:
 - Conversation, opinions, plans, and anything already answered by this conversation, the [tree] cards or the \
 [inbox] lines: answer directly, briefly, in the user's language.
-- A quick fact you can check yourself in at most three reads/greps/globs: look, then answer.
+- A quick fact you can check yourself in at most three reads/greps/globs: look, then answer. Checking for \
+bugs, reviewing or auditing — code, or what happened in the work (it can read every session) — is never a quick \
+fact: it goes to a `review` session (to `fix` when they want it fixed), even when it looks small. When the \
+request does not name the project, take the one the conversation and the [tree] point to; else glob the \
+workspace: a single project there is the one. Ask which in one line only when several fit.
 - Real work (building, editing, testing, research, long investigation, anything multi-step): route it, in ONE \
 step when you can (speed matters): the [tree] view at the end of the user's message lists the open sessions — if \
 one fits, `session_send` the new instruction there (its context is kept); if it is clearly new work, \
@@ -142,26 +148,32 @@ question to them.";
 
 pub const REVIEW_PROMPT: &str = "\
 You are a review session: read-only. Analyse, review or audit what you were given — read the files, \
-search, run read-only commands (git log/diff/show/status/blame, ls, find, grep, wc, head, tail, cat) — \
-and never change the project. Lead with the findings that matter most, each with its evidence (path:line, \
+search, run read-only commands (git log/diff/show/status/blame, ls, find, grep, wc, head, tail, cat), and \
+for what happened in the work itself, sessions_find and session_read (every session, with how long ago it \
+changed) — and never change the project. Lead with the findings that matter most, each with its evidence (path:line, \
 command output). When a written report helps (long findings, anything to keep), write it as markdown to \
 the artifacts folder — the ONLY place you can write — and end with its link exactly as \
 [<title>](/api/artifact/<name>.md): that is how it opens on the user's phone.";
 
 /// Lite-tier roles: what a small model can hold — one paragraph, few rules.
-pub const COORDINATOR_LITE: &str = "You are the coordinator, the user's only contact. Answer simple things directly. For real work: sessions_find; then session_send to a matching session or session_start a new one (profile build for one task, fix for something broken, lead for a project, research for questions) with a complete brief; then say `→ <title>` in one sentence. When an [inbox] message arrives, tell the user the results that matter in one to three sentences — finished or failed work they asked for always matters; reply exactly (quiet) only for routine progress.";
-/// Smart-tier models (YGG_MODELS `id:smart`, glm-5.3 and up) read this after their role: they re-read
-/// what the user means before acting. Lite and full models act on the brief as written — a weaker
-/// model that "reinterprets" drifts.
+pub const COORDINATOR_LITE: &str = "You are the coordinator, the user's only contact. Answer simple things directly. Checking for bugs or reviewing code is real work (agent review; fix to repair). For real work: sessions_find; then session_send to a matching session or session_start a new one (profile build for one task, fix for something broken, lead for a project, research for questions) with a complete brief; then say `→ <title>` in one sentence. When an [inbox] message arrives, tell the user the results that matter in one to three sentences — finished or failed work they asked for always matters; reply exactly (quiet) only for routine progress.";
+/// The opening of the shared prompt. root-coord (11-12): the 11-09 "fewest words" preamble made every
+/// session stop at the first obstacle; brevity is for prose, never for the work.
+pub const PREAMBLE: &str = "You are part of yggdrasil: the user's own AI, running on their own computer and reached from their phone. Be direct and concrete, and keep prose replies short unless the user asks for depth — but never cut the work short: investigate with your tools until you actually know, verify before you claim, and do not give up at the first obstacle. Keep the user's language.";
+
+/// Part of the shared prompt every agent reads, on every model (owner 11-13: one short section for
+/// all, stored once — no per-model variants, no copy per agent).
 pub const INTENT_NOTE: &str = "\
-Read for intent. The user writes fast, often by voice or with typos, and a brief from another session \
-compresses what they want. Before you act on a message from the user or a brief (not on [inbox] reports — those \
-are facts to pass on), work out what is actually wanted: the goal behind the words, what \
-was said earlier, what a misheard or mistyped word most likely meant, and what a good result looks like to \
-them. Act on that, not on the literal wording. When the words and the evident goal differ (\"fix the test\" \
-when the test is right and the code is wrong), serve the goal and say in one line how you read the request. \
-Ask only when two readings lead to very different work and nothing in the context decides; otherwise take \
-the likeliest reading and go.";
+Re-interpret the user's intent before you do what you are asked: they write fast, by voice or with typos, \
+and a brief from another session compresses what they want. Work out the goal behind the words and what a \
+misheard or mistyped word most likely meant; act on that, and if it differs from the literal ask, say how you \
+read it in one line. Ask only when two readings lead to very different work. [inbox] reports are facts to \
+pass on, not requests.";
+/// What every agent reads first unless the owner edited it (agents page → shared by all agents).
+pub fn default_shared() -> String {
+    format!("{PREAMBLE}\n\n{INTENT_NOTE}")
+}
+
 pub const LEAD_LITE: &str = "You own one project. Do it yourself with bash/read/write/edit, or split independent parts into sessions with session_start. Check results by running the tests. When all is done, report what exists and the test result. If only the user can decide, ask on a line that begins with QUESTION: so the tree brings it to them.";
 pub const FIX_LITE: &str = "Something is broken. Reproduce it, find the root cause, fix it with the smallest change, add a test that catches it, and run the tests until they pass. Never weaken a test to make it pass. Reply with the cause (path:line), the change and the test result. If only the user can decide, ask on a line that begins with QUESTION: so the tree brings it to them.";
 pub const BUILD_LITE: &str = "Do the task completely with bash/read/write/edit. Run it, test it, fix failures. Reply with what you changed and the test result. If only the user can decide, ask on a line that begins with QUESTION: so the tree brings it to them.";
@@ -231,7 +243,7 @@ pub fn builtins() -> Vec<Profile> {
 /// artifacts folder (YGG_ARTIFACTS_DIR — the folder the phone's /api/artifact serves).
 fn review_profile() -> Profile {
     let mut rules = vec![rule("*", "*", false)];
-    for t in ["read", "glob", "grep", "webfetch", "todowrite"] {
+    for t in ["read", "glob", "grep", "webfetch", "todowrite", "sessions_find", "session_read"] {
         rules.push(rule(t, "*", true));
     }
     for cmd in ["git log*", "git diff*", "git show*", "git status*", "git blame*", "git ls-files*", "git branch*",
@@ -341,7 +353,8 @@ impl Profiles {
         if !raw["agent"].is_object() {
             raw["agent"] = json!({});
         }
-        Profiles { by_name, default_agent, path: path.filter(|p| !p.is_empty()).map(String::from), raw }
+        let shared = raw["shared_prompt"].as_str().filter(|t| !t.trim().is_empty()).map(String::from).unwrap_or_else(default_shared);
+        Profiles { by_name, default_agent, shared, path: path.filter(|p| !p.is_empty()).map(String::from), raw }
     }
 
     fn overlay(by_name: &mut BTreeMap<String, Profile>, v: &Value) {
@@ -544,6 +557,21 @@ impl Profiles {
         self.write()
     }
 
+    /// Edit the shared prompt (empty = back to the default); persisted with the agents.
+    pub fn set_shared(&mut self, text: &str) -> Result<(), String> {
+        let text = text.trim();
+        if text.is_empty() {
+            self.shared = default_shared();
+            if let Some(o) = self.raw.as_object_mut() {
+                o.remove("shared_prompt");
+            }
+        } else {
+            self.shared = text.to_string();
+            self.raw["shared_prompt"] = json!(text);
+        }
+        self.write()
+    }
+
     fn write(&self) -> Result<(), String> {
         let Some(path) = &self.path else { return Ok(()) }; // no file: edits live in memory
         let tmp = format!("{path}.tmp");
@@ -645,13 +673,11 @@ pub fn simple_commands(cmd: &str) -> Option<Vec<String>> {
 }
 
 impl Profile {
-    /// The role text a model of `tier` reads (`lite` | `full` | `smart`): lite → the short text when
-    /// there is one, smart → the full text + INTENT_NOTE.
+    /// The role text a model of `tier` reads (`lite` | `full`): lite → the short text when there is
+    /// one. What every agent shares lives in `Profiles::shared`, once.
     pub fn role_for(&self, tier: &str) -> String {
         match (tier, &self.prompt_lite) {
             ("lite", Some(short)) => short.clone(),
-            ("smart", _) if self.prompt.trim().is_empty() => INTENT_NOTE.into(),
-            ("smart", _) => format!("{}\n\n{INTENT_NOTE}", self.prompt.trim_end()),
             _ => self.prompt.clone(),
         }
     }
@@ -659,7 +685,12 @@ impl Profile {
     /// May this profile call `tool` with `input`? `Err` carries the refusal the model reads.
     pub fn check(&self, tool: &str, input: &Value) -> Result<(), String> {
         if tool.starts_with("session") || tool == "inbox" {
-            return if self.sessions { Ok(()) } else { Err(format!("the {} profile does not manage sessions", self.name)) };
+            let read = matches!(tool, "sessions_find" | "session_read");
+            return if self.sessions || (read && self.reads_tree()) {
+                Ok(())
+            } else {
+                Err(format!("the {} profile does not manage sessions", self.name))
+            };
         }
         let deny = || Err(format!("permission denied: the {} profile may not run {tool} here", self.name));
         if tool == "bash" {
@@ -705,6 +736,13 @@ impl Profile {
     }
 
     /// Tools worth declaring upstream: the ones some rule could allow.
+    /// May this profile read the session tree (sessions_find + session_read)? A managing one can; a
+    /// read-only one when its rules allow session_read — review reads what happened (owner 11-13:
+    /// "review everything that happened in the past 5m" had no session to give it to).
+    pub fn reads_tree(&self) -> bool {
+        self.sessions || self.rules.iter().any(|r| r.allow && r.permission == "session_read")
+    }
+
     pub fn declared_tools(&self) -> Vec<&'static str> {
         ALL.iter()
             .copied()
@@ -723,18 +761,33 @@ mod tests {
     }
 
     #[test]
-    fn role_follows_the_model_tier() {
+    fn review_reads_the_tree_but_never_drives_it() {
         let ps = Profiles::load(None);
+        let review = ps.get("review").unwrap();
+        assert!(review.reads_tree() && !review.sessions);
+        for t in ["sessions_find", "session_read"] {
+            assert!(review.check(t, &json!({})).is_ok(), "{t}");
+        }
+        for t in ["session_start", "session_send", "session_close"] {
+            assert!(review.check(t, &json!({})).is_err(), "{t}");
+        }
+        assert!(!ps.get("build").unwrap().reads_tree(), "build stays out of the tree");
+    }
+
+    #[test]
+    fn the_shared_prompt_is_stored_once() {
+        let mut ps = Profiles::load(None);
+        assert!(ps.shared.starts_with(PREAMBLE) && ps.shared.ends_with(INTENT_NOTE));
+        // an agent's role holds only its own text
         let build = ps.get("build").unwrap();
         assert_eq!(build.role_for("full"), BUILD_PROMPT);
         assert_eq!(build.role_for("lite"), BUILD_LITE);
-        assert!(build.role_for("smart").starts_with(BUILD_PROMPT) && build.role_for("smart").ends_with(INTENT_NOTE));
-        // an agent with no short text reads the full one on a lite model; an empty role still gets the note
-        let research = ps.get("research").unwrap();
-        assert_eq!(research.role_for("lite"), research.prompt);
-        let mut blank = build.clone();
-        blank.prompt = String::new();
-        assert_eq!(blank.role_for("smart"), INTENT_NOTE);
+        ps.set_shared("Always answer in French.").unwrap();
+        assert_eq!(ps.shared, "Always answer in French.");
+        assert_eq!(ps.raw["shared_prompt"], "Always answer in French.");
+        ps.set_shared("  ").unwrap();
+        assert_eq!(ps.shared, default_shared(), "empty = the default again");
+        assert!(ps.raw.get("shared_prompt").is_none());
     }
 
     #[test]
