@@ -46,7 +46,7 @@ systemd-run --user --unit="$UNIT" --collect -q \
   --setenv=YGG_DEFAULT_VARIANT="${SIM_VARIANT:-high}" --setenv=YGG_VOICE=1 \
   --setenv=YGG_LISTEN="127.0.0.1:$PORT" --setenv=YGG_DATA_DIR="$ROOT/data" --setenv=YGG_PROJECT_DIR="$ROOT/work" \
   --setenv=YGG_MAX_INFLIGHT="${SIM_INFLIGHT:-5}" --setenv=YGG_WAKE_DEBOUNCE_MS="${SIM_DEBOUNCE:-4000}" \
-  ${SIM_PROFILES:+--setenv=YGG_PROFILES=$SIM_PROFILES} \
+  ${SIM_PROFILES:+--setenv=YGG_PROFILES=$SIM_PROFILES} ${SIM_EXTENSIONS:+--setenv=YGG_EXTENSIONS=$SIM_EXTENSIONS} \
   ${YGG_ROOT_NAME:+--setenv=YGG_ROOT_NAME=$YGG_ROOT_NAME} ${YGG_PEERS:+--setenv=YGG_PEERS=$YGG_PEERS} \
   ${YGG_PEER_TOKEN:+--setenv=YGG_PEER_TOKEN=$YGG_PEER_TOKEN} ${YGG_ROOT_NOTE:+"--setenv=YGG_ROOT_NOTE=$YGG_ROOT_NOTE"} \
   --setenv=HOME="$SIMHOME" --setenv=PATH="$HPATH$HOME/.cache/root-sim/_venv/bin:/usr/local/bin:/usr/bin:/bin" --setenv=VIRTUAL_ENV="$HOME/.cache/root-sim/_venv" \

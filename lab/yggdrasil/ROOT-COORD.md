@@ -47,6 +47,18 @@ you ⇄ [MAIN] coordinator            the transcript you read: only you + MAIN
 - **Harness sessions**: the turn runs `claude -p` / `opencode run` / `codex exec`
   non-interactively, resuming the harness's own session (`info.harness.id`).
 
+## Extensions (outside the core)
+
+Heavier capabilities run as their own processes behind one small interface (`src/ext.rs`,
+`extensions/README.md`): `YGG_EXTENSIONS name=url`, `GET /manifest` → tools (+ an optional prompt
+line for every agent), `POST /call/<tool>`. Agents see `<extension>_<tool>`; a `self`-scoped tool is
+for every agent, a `world`-scoped one only where an agent's rules allow it. First one: the
+**librarian** (`extensions/librarian/`) — full-text index of every session + artifacts, keywords,
+facts per topic: `search`, `recent`, `remember`, `recall`.
+
+Every newest turn also tells the session its own size: `[context ≈ 43k tokens · rolls up at 200k]`,
+next to the clock header's gap since the last user turn.
+
 ## What changed for every session (the 11-09 regression)
 
 The AGENTS.md chain is back (OG-ctx). The "fewest words" preamble and the brain-wide voice
@@ -71,7 +83,7 @@ thinking off.
 
 ## Env
 
-`YGG_MODELS` (`id[:lite]`, comma list) · `YGG_VISION_MODELS` · `YGG_ARTIFACTS_DIR` (review's only write) · `YGG_PROFILES` · `YGG_CONTEXT_FILES` · `YGG_ROOT_NAME` ·
+`YGG_MODELS` (`id[:lite]`, comma list) · `YGG_EXTENSIONS` (`name=url`) · `YGG_EXT_TOKEN` · `YGG_ROLLUP_TOKENS` (200000) · `YGG_VISION_MODELS` · `YGG_ARTIFACTS_DIR` (review's only write) · `YGG_PROFILES` · `YGG_CONTEXT_FILES` · `YGG_ROOT_NAME` ·
 `YGG_ROOT_NOTE` · `YGG_PEERS` · `YGG_PEER_TOKEN` · `YGG_MAX_INFLIGHT` (upstream calls in flight, 6)
 · `YGG_MAX_HARNESS` (3) · `YGG_DIGEST_MODEL` · `YGG_WAKE_DEBOUNCE_MS` (4000) ·
 `YGG_TREE_MAX_DEPTH` / `_CHILDREN` / `_WAKES`.
@@ -89,6 +101,6 @@ stamps the agent's model + thinking (+ harness); the model can be changed afterw
 
 ## Endpoints added
 
-`GET /tree` · `GET /root` · `GET/PUT /shared-prompt` · `GET /session/:id/inbox` · `POST /session/:id/close` · `GET/PUT/DELETE /agent/:name` ·
+`GET /tree` · `GET /root` · `GET/PUT /shared-prompt` · `GET /extensions` · `GET /session/:id/inbox` · `POST /session/:id/close` · `GET/PUT/DELETE /agent/:name` ·
 `POST /tree/report` (peer token). `POST /session` takes `agent`, `model`, `variant`,
 `report_to`. `GET /agent` lists the profiles.

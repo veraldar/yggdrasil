@@ -152,7 +152,7 @@ Reply with ONLY one JSON object: {"scores":{"outcome":n,"door":n,"routing":n,"pr
 
 
 # ── deterministic checks ─────────────────────────────────────────────────────
-def run_checks(sc, work, tree, main_id, visible):
+def run_checks(sc, work, tree, main_id, visible, brain=None):
     res = []
     for c in sc.get("checks", []):
         kind = c.get("kind", "cmd")
@@ -176,6 +176,14 @@ def run_checks(sc, work, tree, main_id, visible):
             elif kind == "archived_match":
                 hit = [r for r in tree if r.get("archived") and re.search(c["title"], r["title"], re.I)]
                 res.append({"name": name, "ok": bool(hit), "detail": ", ".join(r["title"] for r in hit) or "nothing archived matching"})
+            elif kind == "main_tool":
+                # MAIN itself called a tool whose name matches (e.g. an extension's)
+                ms = [m for m in brain.req("GET", f"/session/{main_id}/message?internal=1") if m["info"]["role"] == "assistant"]
+                if c.get("first_turn"):  # unprompted: in MAIN's very first answer
+                    ms = ms[:1]
+                used = [p.get("tool", "") for m in ms for p in m.get("parts", []) if p.get("type") == "tool"]
+                hit = [t for t in used if re.search(c["regex"], t)]
+                res.append({"name": name, "ok": bool(hit), "detail": ", ".join(hit) or f"MAIN used: {', '.join(sorted(set(used))) or 'no tools'}"})
             elif kind == "main_says":
                 said = "\n".join(m["text"] for m in visible if m["role"] == "assistant")
                 hit = re.search(c["regex"], said, re.I | re.S)
@@ -248,6 +256,22 @@ def main():
                 print(upp.stdout, upp.stderr)
                 sys.exit(3)
             log(upp.stdout.strip())
+    # extensions outside the core, one process per sim: the librarian indexes this root (its
+    # "seed" = memory from before the conversation starts)
+    librarian = None
+    if "librarian" in sc.get("extensions", {}):
+        lport = a.port + 1000
+        os.makedirs(root, exist_ok=True)
+        args = ["python3", os.path.join(os.path.dirname(os.path.dirname(HERE)), "extensions", "librarian", "librarian.py"),
+                "--root", f"http://127.0.0.1:{a.port}", "--port", str(lport), "--db", os.path.join(root, "librarian.db"),
+                "--artifacts", os.path.join(root, "work", "artifacts"), "--poll", "5"]
+        seed = sc["extensions"]["librarian"].get("seed")
+        if seed:
+            json.dump(seed, open(os.path.join(root, "librarian-seed.json"), "w"))
+            args += ["--seed", os.path.join(root, "librarian-seed.json")]
+        librarian = subprocess.Popen(args, stdout=open(os.path.join(root, "librarian.log"), "a"), stderr=subprocess.STDOUT)
+        env = dict(env, SIM_EXTENSIONS=f"librarian=http://127.0.0.1:{lport}")
+        log(f"librarian extension on :{lport}")
     up = subprocess.run([f"{HERE}/brain-up.sh", name, str(a.port)], env=env, capture_output=True, text=True)
     if up.returncode != 0:
         print(up.stdout, up.stderr)
@@ -255,6 +279,12 @@ def main():
     log(up.stdout.strip())
     work = f"{root}/work"
     brain = Brain(f"http://127.0.0.1:{a.port}")
+    if librarian:  # the person speaks once the root can use its extensions
+        for _ in range(30):
+            if all(x.get("up") for x in brain.req("GET", "/extensions")):
+                break
+            time.sleep(1)
+        log(f"extensions: {[(x['name'], x['up']) for x in brain.req('GET', '/extensions')]}")
     main_id = brain.main_id()
     started = time.time()
     run_id = time.strftime("%Y%m%dT%H%M%S") + f"-{name}"
@@ -342,7 +372,7 @@ def main():
         time.sleep(5)
     tree = brain.tree()
     visible = brain.visible(main_id)
-    checks = run_checks(sc, work, tree, main_id, visible)
+    checks = run_checks(sc, work, tree, main_id, visible, brain)
     for c in checks:
         log(f"CHECK {'ok ' if c['ok'] else 'BAD'} {c['name']}: {c['detail'][:160]}")
 
@@ -383,6 +413,8 @@ def main():
         subprocess.run([f"{HERE}/brain-up.sh", name, "down"])
         for r in roots[1:]:
             subprocess.run([f"{HERE}/brain-up.sh", r["sim"], "down"])
+        if librarian:
+            librarian.terminate()
     sys.exit(0 if passed else 1)
 
 

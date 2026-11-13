@@ -14,11 +14,13 @@ on scratch ports, sandboxed, and walks the critical paths:
 
     tree-e2e.py [--bin PATH]     exit 0 = all green
 """
-import argparse, json, os, shutil, subprocess, sys, tempfile, time, urllib.request
+import argparse
+import time, json, os, shutil, subprocess, sys, tempfile, time, urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 YGG = os.path.join(HERE, "..", "yggdrasil")
-MOCK_PORT, HOME_PORT, LAB_PORT = 18197, 4187, 4188
+MOCK_PORT, HOME_PORT, LAB_PORT, LIB_PORT = 18197, 4187, 4188, 18310
+LIBRARIAN = os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(YGG))), "extensions", "librarian", "librarian.py")
 FAILS = []
 
 
@@ -70,16 +72,20 @@ def main():
     ap.add_argument("--bin", default=os.path.join(YGG, "target", "release", "yggdrasil"))
     a = ap.parse_args()
     tmp = tempfile.mkdtemp(prefix="tree-e2e-")
-    units = ["tree-e2e-mock", "tree-e2e-home", "tree-e2e-lab"]
+    units = ["tree-e2e-mock", "tree-e2e-home", "tree-e2e-lab", "tree-e2e-librarian"]
     try:
         unit(units[0], ["python3", os.path.join(YGG, "mock", "mock_upstream.py"), str(MOCK_PORT)], {})
         base = {"YGG_UPSTREAM_BASE_URL": f"http://127.0.0.1:{MOCK_PORT}", "YGG_UPSTREAM_STYLE": "anthropic", "YGG_UPSTREAM_API_KEY": "mock",
                 "YGG_UPSTREAM_MODEL": "mock", "YGG_WAKE_DEBOUNCE_MS": "400", "YGG_PEER_TOKEN": "e2e-token"}
+        # an extension outside the core: the librarian, indexing the home root
+        unit(units[3], ["python3", LIBRARIAN, "--root", f"http://127.0.0.1:{HOME_PORT}", "--port", str(LIB_PORT),
+                        "--db", os.path.join(tmp, "librarian.db"), "--poll", "1"], {})
         for name, port, other, oport in (("home", HOME_PORT, "lab", LAB_PORT), ("lab", LAB_PORT, "home", HOME_PORT)):
             d = os.path.join(tmp, name)
             os.makedirs(os.path.join(d, "work"))
+            extra = {"YGG_EXTENSIONS": f"librarian=http://127.0.0.1:{LIB_PORT}"} if name == "home" else {}
             unit(f"tree-e2e-{name}", [a.bin], dict(base, YGG_LISTEN=f"127.0.0.1:{port}", YGG_DATA_DIR=os.path.join(d, "data"), YGG_PROFILES=os.path.join(d, "agents.json"),
-                 YGG_PROJECT_DIR=os.path.join(d, "work"), YGG_ROOT_NAME=name, YGG_PEERS=f"{other}=http://127.0.0.1:{oport}"))
+                 YGG_PROJECT_DIR=os.path.join(d, "work"), YGG_ROOT_NAME=name, YGG_PEERS=f"{other}=http://127.0.0.1:{oport}", **extra))
         check("brains up", wait(lambda: req(HOME_PORT, "GET", "/root") and req(LAB_PORT, "GET", "/root"), 10))
         main_id = req(HOME_PORT, "POST", "/session", {"title": "[MAIN]"})["id"]
         check("a new MAIN is stamped coordinator", req(HOME_PORT, "GET", f"/session/{main_id}").get("agent") == "coordinator")
@@ -228,6 +234,23 @@ def main():
             check("peer report without the token is refused", False, "accepted")
         except urllib.error.HTTPError as e:
             check("peer report without the token is refused", e.code == 401, e.code)
+        # extensions: discovered from the manifest, offered to MAIN (scope self), run outside the core
+        ext = lambda: (req(HOME_PORT, "GET", "/extensions") or [{}])[0]
+        check("the librarian extension is discovered", wait(lambda: ext().get("up"), 20), ext())
+        check("its tools are listed with their scope", [t["name"] for t in ext().get("tools", [])] == ["search", "recent", "remember", "recall"], ext().get("tools"))
+        sysx = req(HOME_PORT, "GET", "/agent/build")["system"][0]["text"]
+        check("the extension's prompt joins the shared prompt", "[extensions]\n- librarian:" in sysx, sysx[-300:])
+        time.sleep(2)  # one index pass (poll 1 s) after the last turns
+        r = say(tool([["librarian_search", {"query": "ALPHA-DONE"}]]))
+        out = [p for p in r["parts"] if p["type"] == "tool"][0]["state"]
+        check("MAIN searches every session through the extension", out["status"] == "completed" and "alpha" in out["output"], out.get("output", "")[:200])
+        say(tool([["librarian_remember", {"topic": "e2e", "fact": "the sky is teal"}]]))
+        r = say(tool([["librarian_recall", {"topic": "e2e"}]]))
+        out = [p for p in r["parts"] if p["type"] == "tool"][0]["state"]["output"]
+        check("remember → recall through the extension", "the sky is teal" in out, out[:200])
+        r = say(tool([["librarian_recent", {"minutes": 10}]]))
+        out = [p for p in r["parts"] if p["type"] == "tool"][0]["state"]["output"]
+        check("recent lists what changed, with keywords", "session(s) changed" in out and "keywords:" in out, out[:300])
     finally:
         for u in units:
             subprocess.run(["systemctl", "--user", "stop", u], capture_output=True)

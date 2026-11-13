@@ -3,7 +3,7 @@
 # law (scripts/watch-landings.sh: sha-verified, applied when MAIN is idle and no lane runs,
 # frozen.conf rolled back by the watcher itself if the new process does not come up).
 #
-#   deploy-live.sh apply      backups → env + profiles → pending swap → wait for SWAP-DONE → probes
+#   deploy-live.sh apply      backups → env + profiles + librarian unit → pending swap → wait for SWAP-DONE → probes
 #   deploy-live.sh rollback   restore env + profiles from the backups → swap back to the previous binary
 #
 # Backups land in ~/.local/share/bifrost/backups/root-coord-live-<ts>/ (data dir tarball included).
@@ -68,15 +68,20 @@ put("YGG_VISION_MODELS", "glm-5.3-flash")  # the one z.ai model here that reads 
 put("YGG_ARTIFACTS_DIR", os.path.expanduser("~/Work/bifrost/artifacts"))  # the review agent's only write
 put("YGG_VOICE_MAX_WORDS", "300")  # a safety limit now: voice commands control playback (11-13)
 put("YGG_ROLLUP_TOKENS", "200000")  # owner 11-13: a session rolls up past ~200k tokens (keeps the last quarter)
+put("YGG_EXTENSIONS", "librarian=http://127.0.0.1:4310")  # extensions live outside the core (ext.rs)
 open(p, "w").write(s)
 PY
   install -m600 "$STAGED_PROFILES" "$PROFILES"
+  # the librarian extension (memory) — its own unit, independent of the brain
+  install -m644 "$HOME/Work/root-coord/extensions/librarian/librarian.service" "$HOME/.config/systemd/user/ygg-librarian.service"
+  systemctl --user daemon-reload && systemctl --user enable --now ygg-librarian.service
   swap_to "$NEW"
   sleep 2; probe
   ;;
 rollback)
   BK=$(cat "$LAST"); OLD=$(cat "$BK/previous-binary")
   install -m600 "$BK/yggdrasil.env" "$ENV"; install -m600 "$BK/yggdrasil-profiles.json" "$PROFILES"
+  systemctl --user disable --now ygg-librarian.service 2>/dev/null || true
   echo "env + profiles restored from $BK; data tarball kept at $BK/yggdrasil-data.tgz (restore by hand if needed)"
   swap_to "$OLD"
   ;;

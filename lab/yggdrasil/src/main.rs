@@ -72,6 +72,7 @@ use tokio::sync::{Notify, broadcast, mpsc, oneshot};
 use tokio_stream::wrappers::{BroadcastStream, ReceiverStream};
 
 mod anthropic;
+mod ext;
 mod gate;
 mod harness;
 mod peers;
@@ -372,6 +373,8 @@ struct Config {
     context_files: Vec<PathBuf>,
     /// root-coord: the other roots this one works with (peers.rs)
     peers: peers::Peers,
+    /// extensions: tools served by processes outside the core (ext.rs, YGG_EXTENSIONS)
+    ext: ext::Extensions,
     /// lite models (YGG_MODELS `id:lite`): the short role + the lean tool set; unmarked = full
     tiers: HashMap<String, &'static str>,
     /// models that can see images (YGG_VISION_MODELS): a turn carrying an image runs on the first
@@ -1115,6 +1118,16 @@ fn agent_model_stamp(st: &AppState, a: &profiles::Profile) -> Value {
     }
 }
 
+/// The shared prompt every agent reads first: the owner's (stored once) + what the extensions that
+/// are up ask agents to know (their manifest `prompt`).
+fn shared_prompt(st: &AppState) -> String {
+    let shared = st.config.profiles.read().unwrap().shared.clone();
+    match st.config.ext.prompt() {
+        Some(x) => format!("{shared}\n\n{x}"),
+        None => shared,
+    }
+}
+
 /// What a Claude Code agent appends to Claude Code's own prompt: the shared prompt, then its role.
 fn harness_system(shared: &str, prof: &profiles::Profile) -> String {
     let role = prof.role_for("full");
@@ -1149,7 +1162,7 @@ async fn get_agent(State(st): State<AppState>, Path(name): Path<String>) -> Resp
             // preamble, the AGENTS.md chain, then the role (+ the intent section); a lite model, if
             // this root serves one, reads the short role
             let prof = agent(&st, &name).expect("detail implies the agent");
-            let shared = st.config.profiles.read().unwrap().shared.clone();
+            let shared = shared_prompt(&st);
             d["system"] = json!(match &prof.harness {
                 None => ["full", "lite"]
                     .iter()
@@ -2062,7 +2075,7 @@ async fn harness_loop(st: &AppState, id: &str, history: Vec<Value>, tx: &mpsc::S
         (model, info["harness"]["id"].as_str().map(String::from), cwd)
     };
     // the shared prompt + the agent's own instructions ride on top of the harness's (Claude Code)
-    let system = Some(harness_system(&st.config.profiles.read().unwrap().shared, &session_profile(st, id)));
+    let system = Some(harness_system(&shared_prompt(st), &session_profile(st, id)));
     let _slot = st.harness_slots.acquire().await.map_err(|e| e.to_string())?;
     let (etx, mut erx) = mpsc::unbounded_channel::<harness::Ev>();
     let fut = harness::run(kind, model.as_deref(), resume.as_deref(), &cwd, &prompt, system.as_deref(), move |ev| {
@@ -2134,8 +2147,7 @@ async fn agent_loop(
             append_text(last, &tree::snapshot(st, id));
         }
     }
-    let shared = st.config.profiles.read().unwrap().shared.clone();
-    apply_clock_headers(&mut convo, &shared);
+    apply_clock_headers(&mut convo, &shared_prompt(st));
     // static system block (cache law, all three are constant for the session's life):
     // preamble · the AGENTS.md chain (OG-ctx) · the profile's role. The 10-04 brain-wide voice
     // prompt is gone: voice brevity rides only the voice turns (VOICE_TURN_NOTE).
@@ -2378,14 +2390,25 @@ async fn run_tool(st: &AppState, id: &str, tx: &mpsc::Sender<Event>, run: &mut R
 
     let res = match parsed {
         Ok(input) => {
-            // root-coord: the session's profile decides, at dispatch (opencode ruleset)
-            match session_profile(st, id).check(&call.name, &input) {
-                Err(refusal) => tools::ToolResult { ok: false, title: call.name.clone(), output: refusal, metadata: json!({ "denied": true }) },
-                Ok(()) if tree::is_tree_tool(&call.name) => {
-                    let o = tree::run(st, id, &call.name, &input).await;
-                    tools::ToolResult { ok: o.ok, title: call.name.clone(), output: o.output, metadata: o.metadata }
+            // root-coord: the session's profile decides, at dispatch (opencode ruleset); an
+            // extension's tool by its scope (ext.rs)
+            let prof = session_profile(st, id);
+            if st.config.ext.owns(&call.name) {
+                if st.config.ext.allows(&prof, &call.name) {
+                    ext::call(st, id, &call.name, &input).await
+                } else {
+                    let refusal = format!("permission denied: the {} profile may not run {} here", prof.name, call.name);
+                    tools::ToolResult { ok: false, title: call.name.clone(), output: refusal, metadata: json!({ "denied": true }) }
                 }
-                Ok(()) => tools::run(&st.tools, &call.name, &input).await,
+            } else {
+                match prof.check(&call.name, &input) {
+                    Err(refusal) => tools::ToolResult { ok: false, title: call.name.clone(), output: refusal, metadata: json!({ "denied": true }) },
+                    Ok(()) if tree::is_tree_tool(&call.name) => {
+                        let o = tree::run(st, id, &call.name, &input).await;
+                        tools::ToolResult { ok: o.ok, title: call.name.clone(), output: o.output, metadata: o.metadata }
+                    }
+                    Ok(()) => tools::run(&st.tools, &call.name, &input).await,
+                }
             }
         }
         Err(e) => tools::ToolResult { ok: false, title: call.name.clone(), output: e, metadata: json!({}) },
@@ -2478,6 +2501,10 @@ fn session_upstream(st: &AppState, id: &str) -> (String, String, Option<Value>) 
             .cloned()
             .collect();
         // a managing agent gets every tree tool; a read-only reader (review) only find + read
+        // extension tools (not for a lite model's lean set)
+        if !lite {
+            list.extend(st.config.ext.schemas(&prof));
+        }
         if prof.reads_tree() {
             let tree_tools = tree::schemas(&st.config.profiles.read().unwrap());
             list.extend(tree_tools.into_iter().filter(|t| prof.sessions || matches!(t["function"]["name"].as_str(), Some("sessions_find" | "session_read"))));
@@ -2929,6 +2956,7 @@ async fn main() {
         tree: tree_cfg,
         context_files: Vec::new(),
         peers: peers::Peers::load(),
+        ext: ext::Extensions::load(),
         tiers,
         vision: std::env::var("YGG_VISION_MODELS").unwrap_or_default().split(',').map(str::trim).filter(|m| !m.is_empty()).map(String::from).collect(),
         max_steps: env_num("YGG_MAX_STEPS", 100).max(1) as usize,
@@ -3030,6 +3058,7 @@ async fn main() {
         .route("/config/providers", get(config_providers))
         .route("/agent", get(list_agents))
         .route("/shared-prompt", get(get_shared).put(put_shared))
+        .route("/extensions", get(|State(st): State<AppState>| async move { Json(st.config.ext.describe()) }))
         .route("/agent/{name}", get(get_agent).put(put_agent).delete(delete_agent))
         .route("/event", get(events))
         .route("/tree", get(get_tree))
@@ -3040,6 +3069,7 @@ async fn main() {
         .with_state(state.clone());
     tree::recover(&state, interrupted);
     peers::spawn_watch(&state);
+    ext::spawn_watch(&state);
     spawn_harness_models(&state);
     eprintln!("root {} · peers: {}", state.config.peers.me, state.config.peers.list.iter().map(|(n, u)| format!("{n}={u}")).collect::<Vec<_>>().join(", "));
 
