@@ -137,7 +137,25 @@ class OpenCodeLLM(llm.LLM):
             logger.info(f"opencode session for room {self._room_key!r}: {self._session_id}")
         return self._session_id
 
-    async def ask(self, text: str) -> str:
+    async def speaks_modality(self) -> bool:
+        """A root (yggdrasil root-coord: it serves /tree) takes `modality: "voice"` and adds its
+        own hidden voice note to the turn — no `[ctx: …]` text in what the user sees."""
+        if getattr(self, "_modality", None) is None:
+            try:
+                async with httpx.AsyncClient(timeout=5) as c:
+                    self._modality = (await c.get(f"{self._base}/tree")).status_code == 200
+            except Exception:  # noqa: BLE001 — unknown brain: keep the text tag
+                self._modality = False
+        return self._modality
+
+    @staticmethod
+    def _body(text: str, voice: bool) -> dict:
+        body: dict = {"parts": [{"type": "text", "text": text}]}
+        if voice:
+            body["modality"] = "voice"
+        return body
+
+    async def ask(self, text: str, voice: bool = False) -> str:
         sid = await self._ensure_session()
         async with httpx.AsyncClient(timeout=300) as c:
             # no `model` in the body on purpose: sending one would clobber the
@@ -147,7 +165,7 @@ class OpenCodeLLM(llm.LLM):
             # creation (below), and a settings-page switch replaces it.
             r = await c.post(
                 f"{self._base}/session/{sid}/message",
-                json={"parts": [{"type": "text", "text": text}]},
+                json=self._body(text, voice),
             )
             r.raise_for_status()
             data = r.json()
@@ -168,7 +186,7 @@ class OpenCodeLLM(llm.LLM):
             llm=self, chat_ctx=chat_ctx, tools=tools, conn_options=conn_options
         )
 
-    async def ask_stream(self, text: str) -> AsyncIterable[str]:
+    async def ask_stream(self, text: str, voice: bool = False) -> AsyncIterable[str]:
         """Streaming first-sound (reviewer fix 3): consume yggdrasil's SSE reply
         and yield each COMPLETED sentence as it arrives, so the TTS speaks the
         first sentence seconds before the run completes. Raises on upstream
@@ -180,7 +198,7 @@ class OpenCodeLLM(llm.LLM):
             async with c.stream(
                 "POST",
                 f"{self._base}/session/{sid}/message",
-                json={"parts": [{"type": "text", "text": text}]},
+                json=self._body(text, voice),
                 headers={"Accept": "text/event-stream"},
             ) as r:
                 r.raise_for_status()
@@ -269,7 +287,10 @@ class OpenCodeStream(LLMStream):
         # mode context rides the payload (req 10-02): appended AFTER the
         # cumulative-dedup bookkeeping so last_prompt stays the raw speech
         mode = str(self._oc.mode_state.get("mode") or "text")
-        if mode == "free":
+        # hands-free: a root takes the turn as `modality: voice` (its own hidden note — nothing
+        # extra in the user's words); any other brain still gets the text tag
+        voice = mode == "free" and await self._oc.speaks_modality()
+        if mode == "free" and not voice:
             send = send + CTX_TAG
         logger.info("turn → opencode (mode=%s)", mode)
         # Streaming first-sound (AGENT_STREAM_TTS=1 default): speak sentences as
@@ -277,7 +298,7 @@ class OpenCodeStream(LLMStream):
         if os.environ.get("AGENT_STREAM_TTS", "1") != "0":
             spoke = False
             try:
-                async for chunk in self._oc.ask_stream(send):
+                async for chunk in self._oc.ask_stream(send, voice):
                     spoke = True
                     self._event_ch.send_nowait(
                         llm.ChatChunk(id="opencode", delta=llm.ChoiceDelta(content=chunk + " "))
@@ -297,7 +318,7 @@ class OpenCodeStream(LLMStream):
                     return
                 logger.warning("opencode stream failed before first sentence, falling back: %s", e)
         try:
-            reply = await self._oc.ask(send)
+            reply = await self._oc.ask(send, voice)
         except Exception as e:  # noqa: BLE001 - surface errors as speech
             reply = f"Sorry, talking to opencode failed: {e}"
         self._event_ch.send_nowait(
