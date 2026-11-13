@@ -64,8 +64,19 @@ thinking off.
 · `YGG_MAX_HARNESS` (3) · `YGG_DIGEST_MODEL` · `YGG_WAKE_DEBOUNCE_MS` (4000) ·
 `YGG_TREE_MAX_DEPTH` / `_CHILDREN` / `_WAKES`.
 
+## Agents (editable)
+
+What used to be "profiles" is one concept, **agents**. Every agent runs on a harness: `root` (this brain:
+model, thinking, system prompt, tools, steps, manages-sessions are all customizable) or `claude` /
+`opencode` / `codex` (description + model; Claude Code also takes extra instructions via
+`--append-system-prompt`). Built in: coordinator (MAIN's alone, tools locked), lead, build, research,
+plan, claude-code, opencode, codex, **AGI** (Claude Code on Opus). `GET /agent/:name` is the editor's
+detail (incl. `customizable`, `locked`, `models`); `PUT /agent/:name` creates or edits (partial body,
+persisted to `YGG_PROFILES`, live at once); `DELETE` removes agents you made. Switching a session's agent
+stamps the agent's model + thinking (+ harness); the model can be changed afterwards.
+
 ## Endpoints added
 
-`GET /tree` · `GET /root` · `GET /session/:id/inbox` · `POST /session/:id/close` ·
+`GET /tree` · `GET /root` · `GET /session/:id/inbox` · `POST /session/:id/close` · `GET/PUT/DELETE /agent/:name` ·
 `POST /tree/report` (peer token). `POST /session` takes `agent`, `model`, `variant`,
 `report_to`. `GET /agent` lists the profiles.
