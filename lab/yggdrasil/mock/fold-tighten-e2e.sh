@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # fold-tighten-r1 scratch e2e + LAT check (prefill mock :18106; scratch brain :14106; NEVER :4100).
-# Same 8 owner + 8 auto fat-turn session on BASE_BIN (live lineage, window 3) and BIN (window 2,
+# Same 8 owner + 8 auto fat-turn session on BASE_BIN (live lineage, window 2) and BIN (window 1,
 # station hard fold): fold counts on the wire + last-turn LAT ttfb_ms must drop.
 set -u
 D=/tmp/fold-tighten-e2e; rm -rf $D; mkdir -p $D
 CRATE=$(cd "$(dirname "$0")/.." && pwd); BIN=${BIN:-$CRATE/target/release/yggdrasil}
-BASE_BIN=${BASE_BIN:-$HOME/.local/share/bifrost/brain/yggdrasil-async-r1-e662bde7}
+BASE_BIN=${BASE_BIN:-$HOME/.local/share/bifrost/brain/yggdrasil-fold-tighten-r1-618eeba3}
 Y=127.0.0.1:14106; U=http://$Y; M=http://127.0.0.1:18106
 python3 $CRATE/mock/prefill_mock.py 18106 >$D/mock.log 2>&1 & MOCK=$!
 SRV=; trap 'kill $MOCK $SRV 2>/dev/null' EXIT
@@ -40,14 +40,14 @@ def lat(tag):
     return [int(re.search(r"ttfb_ms=(\d+)", r).group(1)) for r in rows]
 t = [txt(m) for m in body("new", 16)]
 verb = lambda w: any(w + "\nfiller filler" in x for x in t)
-chk("owner window 2: OWNER7-8 verbatim", all(verb(f"OWNER{i} ask") for i in (7, 8)))
-chk("owner 1-6 folded to [earlier turn] lines", not any(verb(f"OWNER{i} ask") for i in range(1, 7))
-    and sum(x.startswith("[earlier turn] OWNER") for x in t) == 6)
-chk("station window 2: AUTO7-8 verbatim", all(verb(f"AUTO{i} landing") for i in (7, 8)))
-chk("auto 1-6 hard-folded to [station turn] lines", not any(verb(f"AUTO{i} landing") for i in range(1, 7))
-    and sum(x.startswith("[station turn] AUTO") for x in t) == 6)
+chk("owner window 1: OWNER8 verbatim", verb("OWNER8 ask"))
+chk("owner 1-7 folded to [earlier turn] lines", not any(verb(f"OWNER{i} ask") for i in range(1, 7))
+    and sum(x.startswith("[earlier turn] OWNER") for x in t) == 7)
+chk("station window 1: AUTO8 verbatim", verb("AUTO8 landing"))
+chk("auto 1-7 hard-folded to [station turn] lines", not any(verb(f"AUTO{i} landing") for i in range(1, 7))
+    and sum(x.startswith("[station turn] AUTO") for x in t) == 7)
 tb = [txt(m) for m in body("base", 16)]
-chk("base (live lineage) kept 3 owners verbatim", sum("ask\nfiller filler" in x for x in tb) == 3)
+chk("base (live lineage) kept 2 owners verbatim", sum("ask\nfiller filler" in x for x in tb) == 2)
 a, b = [txt(m) for m in body("new", 14)], t
 common = next((i for i, (x, y) in enumerate(zip(a, b)) if x != y), min(len(a), len(b)))
 chk(f"prefix stable across adjacent turns (first {common} msgs identical)", common >= 6)

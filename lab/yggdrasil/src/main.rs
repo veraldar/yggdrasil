@@ -1124,10 +1124,10 @@ fn upstream_history(messages: &[Value]) -> Vec<Value> {
 
 /// Station turns (auto user message + its reply) kept verbatim in the upstream view.
 /// fold-tighten-r1: 3 -> 2 (upstream prefill dominated MAIN's p95).
-const STATION_KEEP: usize = 2;
+const STATION_KEEP: usize = 1;
 /// Owner exchanges (owner user message + its reply, tool steps included) kept verbatim.
 /// fold-tighten-r1: 3 -> 2.
-const OWNER_KEEP: usize = 2;
+const OWNER_KEEP: usize = 1;
 
 fn first_line(s: &str, max: usize) -> String {
     let l = s.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or_default();
@@ -1167,8 +1167,8 @@ fn collapse_stale_station(messages: &mut [Value]) {
         let replies: Vec<usize> = (i + 1..end).filter(|&j| messages[j]["info"]["role"] == "assistant").collect();
         let first_done = replies.iter().copied().find(|&j| messages[j]["info"]["time"]["completed"].is_number());
         let line = match first_done {
-            Some(j) => format!("[station turn] {} => {}", first_line(&message_text(&messages[i]), 160), first_line(&message_text(&messages[j]), 160)),
-            None => format!("[station turn] {}", first_line(&message_text(&messages[i]), 160)),
+            Some(j) => format!("[station turn] {} => {}", first_line(&message_text(&messages[i]), 80), first_line(&message_text(&messages[j]), 80)),
+            None => format!("[station turn] {}", first_line(&message_text(&messages[i]), 80)),
         };
         messages[i]["info"]["meta"]["digest"] = json!(line);
         for j in replies {
@@ -1206,8 +1206,8 @@ fn collapse_stale_owner(messages: &mut [Value]) {
             .collect();
         let first_done = replies.iter().copied().find(|&j| messages[j]["info"]["time"]["completed"].is_number());
         let line = match first_done {
-            Some(j) => format!("[earlier turn] {} => {}", first_line(&message_text(&messages[i]), 160), first_line(&message_text(&messages[j]), 160)),
-            None => format!("[earlier turn] {} => (no reply recorded)", first_line(&message_text(&messages[i]), 160)),
+            Some(j) => format!("[earlier turn] {} => {}", first_line(&message_text(&messages[i]), 80), first_line(&message_text(&messages[j]), 80)),
+            None => format!("[earlier turn] {} => (no reply recorded)", first_line(&message_text(&messages[i]), 80)),
         };
         messages[i]["info"]["meta"]["digest"] = json!(line);
         for j in replies {
@@ -2405,7 +2405,7 @@ mod law_tests {
     }
 
     #[test]
-    fn station_history_collapses_beyond_last_two_and_is_frozen() {
+    fn station_history_collapses_beyond_last_one_and_is_frozen() {
         let mut msgs: Vec<Value> = vec![];
         msgs.extend(pair(0, false)); // owner turn: verbatim forever
         for n in 1..=5 {
@@ -2413,20 +2413,21 @@ mod law_tests {
         }
         collapse_stale_station(&mut msgs);
         let h = upstream_history(&msgs);
-        // owner pair (2) + 3 collapsed single lines + 2 verbatim pairs (4)
-        assert_eq!(h.len(), 2 + 3 + 4);
+        // owner pair (2) + 4 collapsed single lines + 1 verbatim pair (2)
+        assert_eq!(h.len(), 2 + 4 + 2);
         assert_eq!(h[2]["content"], json!("[station turn] landing 1 => verdict 1"));
         assert_eq!(h[3]["content"], json!("[station turn] landing 2 => verdict 2"));
         assert_eq!(h[4]["content"], json!("[station turn] landing 3 => verdict 3"));
+        assert_eq!(h[5]["content"], json!("[station turn] landing 4 => verdict 4"));
         assert_eq!(h[0]["content"], json!("landing 0\nsecond line"));
-        assert!(h[5]["content"].as_str().unwrap().contains("landing 4"));
+        assert!(h[6]["content"].as_str().unwrap().contains("landing 5"));
         // append-only: another station turn only changes the digest of the one aging out
-        let before = h[..5].to_vec();
+        let before = h[..6].to_vec();
         msgs.extend(pair(6, true));
         collapse_stale_station(&mut msgs);
         let h2 = upstream_history(&msgs);
-        assert_eq!(&h2[..5], &before[..]);
-        assert_eq!(h2[5]["content"], json!("[station turn] landing 4 => verdict 4"));
+        assert_eq!(&h2[..6], &before[..]);
+        assert_eq!(h2[6]["content"], json!("[station turn] landing 5 => verdict 5"));
         // idempotent
         let snap = upstream_history(&msgs);
         collapse_stale_station(&mut msgs);
@@ -2439,21 +2440,20 @@ mod law_tests {
     }
 
     #[test]
-    fn owner_turns_fold_beyond_last_two_and_last_two_stay_verbatim() {
+    fn owner_turns_fold_beyond_last_one_and_last_one_stays_verbatim() {
         let mut msgs: Vec<Value> = vec![];
         for n in 0..6 {
             msgs.extend(pair(n, false));
         }
         fold_all(&mut msgs);
         let h = upstream_history(&msgs);
-        // 4 folded single lines + 2 verbatim pairs
-        assert_eq!(h.len(), 4 + 4);
+        // 5 folded single lines + 1 verbatim pair
+        assert_eq!(h.len(), 5 + 2);
         // digest shape: tag, first line of the ask, arrow, first line of the reply
         assert_eq!(h[0]["content"], json!("[earlier turn] landing 0 => verdict 0"));
-        assert_eq!(h[3]["content"], json!("[earlier turn] landing 3 => verdict 3"));
-        assert_eq!(h[4]["content"], json!("landing 4\nsecond line"));
-        assert_eq!(h[5]["content"], json!("verdict 4"));
-        assert_eq!(h[7]["content"], json!("verdict 5"));
+        assert_eq!(h[4]["content"], json!("[earlier turn] landing 4 => verdict 4"));
+        assert_eq!(h[5]["content"], json!("landing 5\nsecond line"));
+        assert_eq!(h[6]["content"], json!("verdict 5"));
         // stored transcript (UI) untouched
         assert_eq!(msgs.len(), 12);
         assert_eq!(message_text(&msgs[1]), "verdict 0");
@@ -2479,7 +2479,8 @@ mod law_tests {
         let h2 = upstream_history(&msgs);
         assert_eq!(&h2[..2], &snap[..2]);
         assert_eq!(h2[2]["content"], json!("[earlier turn] landing 2 => verdict 2"));
-        assert_eq!(h2.len(), 3 + 4);
+        assert_eq!(h2[3]["content"], json!("[earlier turn] landing 3 => verdict 3"));
+        assert_eq!(h2.len(), 4 + 2);
     }
 
     #[test]
@@ -2498,12 +2499,14 @@ mod law_tests {
         assert!(lines.contains(&"[earlier turn] landing 2 => verdict 2"));
         assert!(lines.contains(&"[station turn] landing 11 => verdict 11"));
         assert!(lines.contains(&"[station turn] landing 12 => verdict 12"));
-        // last 2 of each class stay whole
-        for n in [3, 4, 13, 14] {
+        assert!(lines.contains(&"[earlier turn] landing 3 => verdict 3"));
+        assert!(lines.contains(&"[station turn] landing 13 => verdict 13"));
+        // last 1 of each class stays whole
+        for n in [4, 14] {
             assert!(lines.contains(&format!("landing {n}\nsecond line").as_str()), "landing {n}");
             assert!(lines.contains(&format!("verdict {n}").as_str()), "verdict {n}");
         }
-        assert!(!lines.iter().any(|l| ["verdict 0", "verdict 2", "verdict 10", "verdict 12"].contains(l)));
+        assert!(!lines.iter().any(|l| ["verdict 0", "verdict 2", "verdict 3", "verdict 10", "verdict 12", "verdict 13"].contains(l)));
     }
 
     #[test]
@@ -2517,8 +2520,9 @@ mod law_tests {
         assert_eq!(h.len(), 5);
         assert_eq!(h[0]["content"], json!("[earlier turn] queued 0 => (no reply recorded)"));
         assert_eq!(h[2]["content"], json!("[earlier turn] queued 2 => (no reply recorded)"));
-        assert_eq!(h[3]["content"], json!("queued 3"));
-        assert!(msgs[3]["info"]["meta"]["digest"].is_null());
+        assert_eq!(h[3]["content"], json!("[earlier turn] queued 3 => (no reply recorded)"));
+        assert_eq!(h[4]["content"], json!("queued 4"));
+        assert!(msgs[4]["info"]["meta"]["digest"].is_null());
     }
 
     #[test]
@@ -2547,8 +2551,9 @@ mod law_tests {
         assert!(!lines.contains(&"fat orphan reply"));
         assert!(!lines.contains(&"half done"));
         assert_eq!(lines[4], "[earlier turn] landing 7 => verdict 7");
-        assert_eq!(h.len(), 5 + 4);
-        assert_eq!(lines[5], "landing 8\nsecond line");
+        assert_eq!(lines[5], "[earlier turn] landing 8 => verdict 8");
+        assert_eq!(h.len(), 6 + 2);
+        assert_eq!(lines[6], "landing 9\nsecond line");
         let snap = h.clone();
         fold_all(&mut msgs);
         assert_eq!(snap, upstream_history(&msgs));
@@ -2569,8 +2574,8 @@ mod law_tests {
         }
         collapse_stale_station(&mut only);
         assert!(only.iter().all(|m| m["info"]["meta"]["digest"].is_null()));
-        // window 2: answered autos 1..3 + 3 pending -> 4 aged, only the 3 answered fold; the
-        // aged pending one (and both in the window) stay verbatim
+        // window 1: answered autos 1..3 + 3 pending -> 5 aged, only the 3 answered fold; the
+        // aged pending ones stay verbatim
         for _ in 0..3 {
             msgs.push(pending.clone());
         }
@@ -2605,14 +2610,14 @@ mod law_tests {
         assert_eq!(h[0]["content"], json!("[station turn] landing 0 => checking"));
         let all = serde_json::to_string(&h).unwrap();
         assert!(!all.contains("big tool output") && !all.contains("long verdict body"));
-        assert_eq!(h.len(), 1 + 4);
+        assert_eq!(h.len(), 2 + 2);
         // stored transcript (UI) untouched
         assert_eq!(msgs.len(), 7);
         assert_eq!(message_text(&msgs[2]), "long verdict body");
     }
 
     #[test]
-    fn fold_counts_window_two_for_any_length() {
+    fn fold_counts_window_one_for_any_length() {
         for n in 0..9usize {
             let mut owners: Vec<Value> = vec![];
             let mut autos: Vec<Value> = vec![];
@@ -2622,7 +2627,7 @@ mod law_tests {
             }
             fold_all(&mut owners);
             fold_all(&mut autos);
-            let want = n.min(2) * 2 + n.saturating_sub(2);
+            let want = n.min(1) * 2 + n.saturating_sub(1);
             assert_eq!(upstream_history(&owners).len(), want, "owner n={n}");
             assert_eq!(upstream_history(&autos).len(), want, "station n={n}");
         }
