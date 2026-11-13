@@ -18,6 +18,25 @@ ART="$HOME/Work/root-coord-pwa/artifacts" # lib/artifacts.ts: the worktree's ../
 mapfile -t ENVV < <(systemctl --user show "$UNIT" -p Environment --value | python3 -c 'import shlex,sys; print("\n".join(shlex.split(sys.stdin.read())))' | grep -vE '^(YGG_MODELS|YGG_VISION_MODELS|YGG_ARTIFACTS_DIR|YGG_EXTENSIONS)=')
 ENVV+=("YGG_MODELS=glm-5.3-flash,glm-5.3,glm-5.2" "YGG_VISION_MODELS=glm-5.3-flash" "YGG_ARTIFACTS_DIR=$ART")
 [ "${#ENVV[@]}" -gt 10 ] || { echo "no environment read from $UNIT"; exit 1; }
+
+# Google's harness: Gemini CLI (mise `gemini`) + the node its launcher runs, on the brain's PATH;
+# its state (sessions, sign-in) is ~/.gemini, shared with the terminal like ~/.claude.
+# GEMINI_API_KEY=… preview-up.sh   signs it in with a key (kept on the next restarts).
+MISE="$HOME/.local/share/mise/installs"
+for i in "${!ENVV[@]}"; do
+  case "${ENVV[$i]}" in
+    PATH=*) p=${ENVV[$i]#PATH=}
+      for d in "$MISE/node/latest/bin" "$MISE/gemini/latest/node_modules/.bin"; do
+        case ":$p:" in *":$d:"*) ;; *) p="$d:$p" ;; esac
+      done
+      ENVV[$i]="PATH=$p" ;;
+  esac
+done
+if [ -n "${GEMINI_API_KEY:-}" ]; then
+  mapfile -t ENVV < <(printf '%s\n' "${ENVV[@]}" | grep -v '^GEMINI_API_KEY=')
+  ENVV+=("GEMINI_API_KEY=$GEMINI_API_KEY")
+fi
+mkdir -p "$HOME/.gemini"
 B="http://$(printf '%s\n' "${ENVV[@]}" | sed -n 's/^YGG_LISTEN=//p')"
 
 # the preview's extensions (outside the core): the librarian indexes this brain (:4310)
@@ -43,7 +62,7 @@ install -m755 "$BIN" "$UI/bin/yggdrasil"
 mkdir -p "$ART"
 args=(--user --unit "$UNIT" --collect -p ProtectHome=tmpfs
   -p "BindPaths=$UI" -p "BindPaths=$ART" -p "BindReadOnlyPaths=$HOME/.cache/root-sim/_venv"
-  -p "BindPaths=$HOME/.claude" -p "BindPaths=$HOME/.claude.json" -p "BindReadOnlyPaths=$HOME/.local/share/mise"
+  -p "BindPaths=$HOME/.claude" -p "BindPaths=$HOME/.claude.json" -p "BindPaths=$HOME/.gemini" -p "BindReadOnlyPaths=$HOME/.local/share/mise"
   -p "StandardOutput=append:$UI/brain.log" -p "StandardError=append:$UI/brain.log")
 for e in "${ENVV[@]}"; do args+=(--setenv="$e"); done
 systemd-run "${args[@]}" "$UI/bin/yggdrasil" >/dev/null
