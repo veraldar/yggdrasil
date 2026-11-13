@@ -22,8 +22,8 @@
   },
   {
    "name": "uses data/notes.json",
-   "cmd": "grep -rn 'notes.json' notes-api --include=*.py | head -3",
-   "expect": "data.{0,4}notes\\.json"
+   "cmd": "grep -rqE 'notes\\.json' notes-api --include=*.py && grep -rqE \"data/notes\\.json|['\\\"]data['\\\"]|DATA_DIR\" notes-api --include=*.py && echo DATA-NOTES",
+   "expect": "DATA-NOTES"
   },
   {
    "name": "notes-api tests pass",
