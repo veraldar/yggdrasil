@@ -2923,13 +2923,20 @@ async fn main() {
     // root-coord migration: MAIN carries its profile explicitly (the phone shows the registry
     // default for unpinned sessions, and that default is `build` again)
     let door_model = config.profiles.read().unwrap().get("coordinator").and_then(|p| p.model.clone()).filter(|m| config.models.contains(m));
+    let default_agent = config.profiles.read().unwrap().default_agent.clone();
     for (id, s) in sessions.iter_mut() {
-        if is_main_title(s.info["title"].as_str().unwrap_or_default()) && s.info["agent"] != "coordinator" {
+        let main = is_main_title(s.info["title"].as_str().unwrap_or_default());
+        if main && s.info["agent"] != "coordinator" {
             s.info["agent"] = json!("coordinator");
             // its old stamp was only the brain-wide default: it takes the door's model
             if let Some(m) = &door_model {
                 s.info["model"]["id"] = json!(m);
             }
+            persist(&data_dir, id, s);
+        } else if !main && s.info["agent"] == "coordinator" {
+            // the coordinator is MAIN's alone: a session stamped with it before that rule (a
+            // "fix this" from MAIN, 11-13 morning) runs the default agent
+            s.info["agent"] = json!(default_agent);
             persist(&data_dir, id, s);
         }
     }
