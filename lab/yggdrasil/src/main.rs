@@ -305,11 +305,27 @@ fn apply_clock_headers(convo: &mut Vec<Value>) {
             .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
             .unwrap_or_default();
         let hdr = clock_header(ts / 1000, m["_prev"].as_i64().map(|p| p / 1000), &mw);
-        if let Some(c) = m["content"].as_str() {
-            m["content"] = json!(format!("{hdr}\n{c}"));
-        }
+        prefix_text(m, &hdr);
     }
     strip_private(convo);
+}
+
+/// Puts `pre` + newline in front of a message's text (string content, or its first text part).
+fn prefix_text(m: &mut Value, pre: &str) {
+    if let Some(c) = m["content"].as_str() {
+        m["content"] = json!(format!("{pre}\n{c}"));
+    } else if let Some(t) = m["content"].as_array_mut().and_then(|ps| ps.iter_mut().find(|p| p["type"] == "text")) {
+        t["text"] = json!(format!("{pre}\n{}", t["text"].as_str().unwrap_or_default()));
+    }
+}
+
+/// Appends `\n\n` + `post` to a message's text (string content, or its first text part).
+fn append_text(m: &mut Value, post: &str) {
+    if let Some(c) = m["content"].as_str() {
+        m["content"] = json!(format!("{c}\n\n{post}"));
+    } else if let Some(t) = m["content"].as_array_mut().and_then(|ps| ps.iter_mut().find(|p| p["type"] == "text")) {
+        t["text"] = json!(format!("{}\n\n{post}", t["text"].as_str().unwrap_or_default()));
+    }
 }
 
 /// Removes every `_`-prefixed key from the top level of each message.
@@ -347,6 +363,9 @@ struct Config {
     peers: peers::Peers,
     /// models whose tier is `lite` (YGG_MODELS `id:lite`): short prompts, lean tool set
     lite: HashSet<String>,
+    /// models that can see images (YGG_VISION_MODELS): a turn carrying an image runs on the first
+    /// of them when the session's own model cannot (the door's glm-5.3 cannot; glm-5.3-flash can)
+    vision: Vec<String>,
     tools_enabled: bool,
     rollup_tokens: usize,
     rollup_keep_tokens: usize,
@@ -1484,6 +1503,10 @@ fn upstream_history(messages: &[Value]) -> Vec<Value> {
     }
     let mut out = Vec::new();
     let start = last_compaction(messages);
+    // images ride the newest two user turns as image parts (older ones as a one-line note):
+    // what the model is asked about now, without re-sending every photo of the session
+    let users: Vec<usize> = (0..messages.len()).filter(|&i| messages[i]["info"]["role"] == "user" && !is_compaction(&messages[i])).collect();
+    let recent_from = users.len().checked_sub(2).map(|k| users[k]).unwrap_or(0);
     // previous non-compaction user message's created ms; the chain runs over
     // the whole stored session so it survives the compaction boundary
     let mut prev: Option<i64> = None;
@@ -1533,8 +1556,29 @@ fn upstream_history(messages: &[Value]) -> Vec<Value> {
                 text.push('\n');
                 text.push_str(VOICE_TURN_NOTE);
             }
-            if !text.is_empty() {
-                let mut u = json!({ "role": role, "content": text });
+            let images: Vec<&str> = if role == "user" && !compaction {
+                m["parts"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter(|p| p["type"] == "file" && p["mime"].as_str().is_some_and(|t| t.starts_with("image/")))
+                    .filter_map(|p| p["url"].as_str().filter(|u| u.starts_with("data:")))
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            if !images.is_empty() && i < recent_from {
+                text = format!("{text}\n[{} image(s) attached earlier]", images.len());
+            }
+            if !text.is_empty() || !images.is_empty() {
+                let content = if images.is_empty() || i < recent_from {
+                    json!(text)
+                } else {
+                    let mut parts = vec![json!({ "type": "text", "text": if text.is_empty() { "(image)".to_string() } else { text.clone() } })];
+                    parts.extend(images.iter().map(|u| json!({ "type": "image_url", "image_url": { "url": u } })));
+                    Value::Array(parts)
+                };
+                let mut u = json!({ "role": role, "content": content });
                 // Private header vehicle for apply_clock_headers (stripped before send).
                 if role == "user" && !compaction {
                     if let Some(ts) = created { u["_ts"] = json!(ts); }
@@ -1722,6 +1766,8 @@ struct Run {
     think: u64,
     /// root-coord: this run's steps go out with thinking off (the empty-step retry)
     think_off: bool,
+    /// the turn being answered carries an image: it runs on a vision model
+    vision: bool,
 }
 
 impl Run {
@@ -1840,6 +1886,12 @@ async fn run_turn(st: &AppState, id: &str, tx: &mpsc::Sender<Event>, queue_ms: u
         queue_ms,
         think: 0,
         think_off: false,
+        vision: history
+            .iter()
+            .rev()
+            .find(|m| m["info"]["role"] == "user" && !is_compaction(m))
+            .and_then(|m| m["parts"].as_array())
+            .is_some_and(|ps| ps.iter().any(|p| p["type"] == "file" && p["mime"].as_str().is_some_and(|t| t.starts_with("image/")))),
     };
     let harness = session_profile(st, id).harness.as_deref().and_then(harness::Kind::parse);
     let outcome = {
@@ -1987,10 +2039,8 @@ async fn agent_loop(
     // root-coord: a managing session's newest turn carries the live [tree] view (only the
     // newest — earlier turns keep their bytes, so the cached prefix holds)
     if prof.sessions {
-        if let Some(last) = convo.iter_mut().rev().find(|m| m["role"] == "user" && m["content"].is_string()) {
-            let view = tree::snapshot(st, id);
-            let c = last["content"].as_str().unwrap_or_default().to_string();
-            last["content"] = json!(format!("{c}\n\n{view}"));
+        if let Some(last) = convo.iter_mut().rev().find(|m| m["role"] == "user") {
+            append_text(last, &tree::snapshot(st, id));
         }
     }
     apply_clock_headers(&mut convo);
@@ -2329,6 +2379,15 @@ fn session_upstream(st: &AppState, id: &str) -> (String, String, Option<Value>) 
     (model, variant, tools.filter(|t| t.as_array().is_some_and(|a| !a.is_empty())))
 }
 
+/// A turn with an image runs on a model that can see (YGG_VISION_MODELS) when the session's own
+/// model is not one of them; nothing changes when no vision model is configured.
+fn vision_model(st: &AppState, model: String, image: bool) -> String {
+    if !image || st.config.vision.is_empty() || st.config.vision.contains(&model) {
+        return model;
+    }
+    st.config.vision[0].clone()
+}
+
 /// One non-streamed, tool-less upstream call (the tree's digest): `system` + one user message,
 /// thinking off, behind the same in-flight cap as every run.
 async fn upstream_once(st: &AppState, model: &str, system: &str, user: &str, max_tokens: u64) -> Result<String, String> {
@@ -2389,6 +2448,7 @@ async fn relay(
     }
     let url = format!("{}/chat/completions", cfg.base_url.trim_end_matches('/'));
     let (model, _variant, tools) = session_upstream(st, session_id);
+    let model = vision_model(st, model, run.vision);
     let mut body = json!({ "model": model, "messages": convo, "stream": true });
     if let Some(t) = tools {
         body["tools"] = t;
@@ -2526,6 +2586,7 @@ async fn relay_anthropic(
     let full = &mut run.text;
     // model, thinking and tools: the session's stamps and profile (session_upstream)
     let (model, variant, tools) = session_upstream(st, session_id);
+    let model = vision_model(st, model, run.vision);
     let variant = if run.think_off { "off".to_string() } else { variant };
     let thinking = anthropic::thinking_for(Some(&variant), cfg.think_high);
     run.think = thinking.as_ref().and_then(|t| t["budget_tokens"].as_u64()).unwrap_or(0);
@@ -2757,6 +2818,7 @@ async fn main() {
         context_files: Vec::new(),
         peers: peers::Peers::load(),
         lite,
+        vision: std::env::var("YGG_VISION_MODELS").unwrap_or_default().split(',').map(str::trim).filter(|m| !m.is_empty()).map(String::from).collect(),
         max_steps: env_num("YGG_MAX_STEPS", 100).max(1) as usize,
         tools_enabled: std::env::var("YGG_TOOLS").map_or(true, |v| v != "0"),
         voice: std::env::var("YGG_VOICE").map_or(false, |v| v == "1"),
@@ -3033,7 +3095,11 @@ mod time_awareness_tests {
     fn non_string_user_content_is_not_erased() {
         let mut convo = vec![json!({"role": "user", "content": [{"type": "text", "text": "x"}], "_ts": 1000})];
         apply_clock_headers(&mut convo);
-        assert_eq!(convo[1]["content"], json!([{"type": "text", "text": "x"}]));
+        // multi-part content (an image turn) is kept whole; the header rides its text part
+        let parts = convo[1]["content"].as_array().expect("still parts");
+        assert_eq!(parts.len(), 1);
+        let t = parts[0]["text"].as_str().unwrap();
+        assert!(t.starts_with("[clock ") && t.ends_with("\nx"), "{t}");
     }
 
     #[test]
@@ -3081,6 +3147,7 @@ mod speed_law_tests {
             queue_ms: 42,
             think: 0,
             think_off: false,
+            vision: false,
         }
     }
 
@@ -3497,6 +3564,7 @@ mod voice_turn_tests {
             queue_ms: 0,
             think: 0,
             think_off: false,
+            vision: false,
         };
         run.lat_log("ok"); // the eprintln row ends voice_note=1; must not panic
     }
@@ -3519,4 +3587,41 @@ mod voice_turn_tests {
         assert!(completion_text("s", "", "u", &Ok(long)).len() < 800);
     }
 
+}
+
+#[cfg(test)]
+mod image_tests {
+    use super::*;
+
+    fn user(text: &str, image: Option<&str>, at: i64) -> Value {
+        let mut parts = vec![json!({ "type": "text", "text": text })];
+        if let Some(u) = image {
+            parts.push(json!({ "type": "file", "mime": "image/png", "url": u }));
+        }
+        json!({ "info": { "role": "user", "time": { "created": at } }, "parts": parts })
+    }
+
+    fn reply(text: &str, at: i64) -> Value {
+        json!({ "info": { "role": "assistant", "time": { "created": at, "completed": at } }, "parts": [{ "type": "text", "text": text }] })
+    }
+
+    #[test]
+    fn newest_turns_carry_images_older_ones_a_note() {
+        let msgs = vec![
+            user("old photo", Some("data:image/png;base64,OLD"), 1),
+            reply("ok", 2),
+            user("middle", None, 3),
+            reply("ok", 4),
+            user("what does it say?", Some("data:image/png;base64,NEW"), 5),
+        ];
+        let convo = upstream_history(&msgs);
+        let old = &convo[0]["content"];
+        assert!(old.as_str().is_some_and(|t| t.contains("[1 image(s) attached earlier]")), "{old}");
+        let new = &convo[4]["content"];
+        assert_eq!(new[1]["image_url"]["url"], "data:image/png;base64,NEW");
+        let mut c = convo.clone();
+        apply_clock_headers(&mut c);
+        assert!(c[5]["content"][0]["text"].as_str().unwrap().starts_with("[clock "), "header rides the text part");
+        assert!(rollup::est_tokens(&convo) < 2000, "an image counts as ~1.6k tokens, not its bytes");
+    }
 }

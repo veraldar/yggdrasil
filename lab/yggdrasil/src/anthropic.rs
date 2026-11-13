@@ -98,8 +98,22 @@ pub fn sanitize_id(id: &str) -> String {
 }
 
 fn text_blocks(content: &Value) -> Vec<Value> {
-    match content.as_str() {
-        Some(t) if !t.trim().is_empty() => vec![json!({ "type": "text", "text": t })],
+    match content {
+        Value::String(t) if !t.trim().is_empty() => vec![json!({ "type": "text", "text": t })],
+        // a user turn with images (OpenAI-shaped parts): text + base64 image blocks
+        Value::Array(parts) => parts
+            .iter()
+            .filter_map(|p| match p["type"].as_str() {
+                Some("text") => p["text"].as_str().filter(|t| !t.trim().is_empty()).map(|t| json!({ "type": "text", "text": t })),
+                Some("image_url") => {
+                    let url = p["image_url"]["url"].as_str()?;
+                    let (head, data) = url.strip_prefix("data:")?.split_once(',')?;
+                    let media = head.split(';').next().filter(|m| m.starts_with("image/"))?;
+                    Some(json!({ "type": "image", "source": { "type": "base64", "media_type": media, "data": data } }))
+                }
+                _ => None,
+            })
+            .collect(),
         _ => Vec::new(),
     }
 }
@@ -368,6 +382,16 @@ mod tests {
         assert!(body("m", 16384, &convo, None, true, thinking_for(None, 8192).as_ref()).get("thinking").is_none());
         // constant across turns: identical bytes for identical stamp
         assert_eq!(thinking_for(Some("high"), 8192), thinking_for(Some("high"), 8192));
+    }
+
+    #[test]
+    fn image_parts_become_image_blocks() {
+        let convo = [json!({"role":"user","content":[{"type":"text","text":"what does it say?"},
+            {"type":"image_url","image_url":{"url":"data:image/png;base64,AAAA"}}]})];
+        let (_, msgs) = convert(&convo);
+        let c = &msgs[0]["content"];
+        assert_eq!(c[0]["type"], "text");
+        assert_eq!(c[1], json!({"type":"image","source":{"type":"base64","media_type":"image/png","data":"AAAA"}}));
     }
 
     #[test]

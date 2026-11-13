@@ -29,7 +29,24 @@ preferences, decisions made, files and commands touched (exact paths), results o
 matter, errors and how they were resolved, the current state, and open tasks. Plain text, no preamble.";
 
 pub fn est_tokens(convo: &[Value]) -> usize {
-    serde_json::to_string(convo).map_or(0, |s| s.len()) / 4
+    // an image block costs what a model charges for it (~1.6k tokens), never its base64 bytes
+    // (one phone photo would otherwise read as ~50k tokens and force a roll-up every turn)
+    const IMAGE_TOKENS: usize = 1600;
+    let mut images = 0usize;
+    let light: Vec<Value> = convo
+        .iter()
+        .map(|m| match m["content"].as_array() {
+            Some(parts) => {
+                let mut m = m.clone();
+                m["content"] = Value::Array(
+                    parts.iter().filter(|p| if p["type"] == "image_url" { images += 1; false } else { true }).cloned().collect(),
+                );
+                m
+            }
+            None => m.clone(),
+        })
+        .collect();
+    serde_json::to_string(&light).map_or(0, |s| s.len()) / 4 + images * IMAGE_TOKENS
 }
 
 /// Prunes old tool results (oldest first, never the latest step's) until the estimate
