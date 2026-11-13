@@ -552,6 +552,8 @@ struct AppState {
     /// the models each harness offers (the agent editor's picker): claude's aliases, opencode's
     /// own `opencode models` (read at startup), codex's default until it is logged in
     harness_models: Arc<Mutex<HashMap<String, Vec<String>>>>,
+    /// a short human label per harness model (picker hints): harness → model → label
+    harness_labels: Arc<Mutex<HashMap<String, HashMap<String, String>>>>,
 }
 
 #[derive(Deserialize)]
@@ -952,6 +954,22 @@ async fn switch_model(State(st): State<AppState>, Path(id): Path<String>, Json(b
     let (Some(mid), Some(pid)) = (body["model"]["id"].as_str(), body["model"]["providerID"].as_str()) else {
         return bad_request("model needs id + providerID");
     };
+    // a session on a harness picks from that harness's models (providerID = the harness)
+    if matches!(pid, "claude" | "opencode" | "codex") {
+        let on = st.sessions.lock().unwrap().get(&id).and_then(|s| s.info["harness"]["kind"].as_str().map(String::from));
+        if on.as_deref() != Some(pid) {
+            return bad_request(&format!("this session does not run on {pid}"));
+        }
+        let offered = models_for(&st, pid);
+        let open = offered.len() == 1 && offered[0] == "default";
+        if !open && !offered.iter().any(|m| m == mid) {
+            return bad_request(&format!("{pid} does not offer {mid} ({})", offered.join(", ")));
+        }
+        return match with_session(&st, &id, |s| s.info["model"] = json!({ "id": mid, "providerID": pid })) {
+            Some(()) => StatusCode::NO_CONTENT.into_response(),
+            None => not_found(&id),
+        };
+    }
     let known = st.config.catalog["providers"]
         .as_array()
         .into_iter()
@@ -1044,6 +1062,7 @@ async fn get_agent(State(st): State<AppState>, Path(name): Path<String>) -> Resp
             d["models"] = json!(models_for(&st, d["harness"].as_str().unwrap_or("root")));
             // every harness's list, so the editor's picker follows a harness change before saving
             d["models_by_harness"] = json!(["root", "claude", "opencode", "codex"].iter().map(|h| (h.to_string(), json!(models_for(&st, h)))).collect::<serde_json::Map<_, _>>());
+            d["model_labels"] = json!(st.harness_labels.lock().unwrap().clone());
             Json(d).into_response()
         }
         None => (StatusCode::NOT_FOUND, Json(json!({ "error": format!("no agent {name}") }))).into_response(),
@@ -1081,19 +1100,44 @@ fn models_for(st: &AppState, harness: &str) -> Vec<String> {
     st.harness_models.lock().unwrap().get(harness).cloned().unwrap_or_else(|| vec!["default".into()])
 }
 
-/// Reads `opencode models` once at startup (its own providers decide what it offers).
+/// Reads each harness's own model list once at startup: `opencode models` (its providers'
+/// `provider/model` ids) and `codex debug models` (its catalog: listed slugs by priority, with
+/// display names). A harness that cannot be read keeps "default" (any id then accepted).
 fn spawn_harness_models(st: &AppState) {
     let st = st.clone();
     tokio::spawn(async move {
-        let out = tokio::time::timeout(Duration::from_secs(90), tokio::process::Command::new("opencode").arg("models").output()).await;
-        let Ok(Ok(out)) = out else {
-            eprintln!("harness models: opencode not readable; its picker offers \"default\"");
-            return;
+        let run = |cmd: &'static str, args: &'static [&'static str]| async move {
+            tokio::time::timeout(Duration::from_secs(90), tokio::process::Command::new(cmd).args(args).output())
+                .await
+                .ok()
+                .and_then(Result::ok)
+                .filter(|o| o.status.success())
+                .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
         };
-        let list: Vec<String> = String::from_utf8_lossy(&out.stdout).lines().map(str::trim).filter(|l| l.contains('/') && !l.contains(' ')).map(String::from).collect();
-        if !list.is_empty() {
-            eprintln!("harness models: opencode offers {}", list.len());
-            st.harness_models.lock().unwrap().insert("opencode".into(), list);
+        if let Some(out) = run("opencode", &["models"]).await {
+            let list: Vec<String> = out.lines().map(str::trim).filter(|l| l.contains('/') && !l.contains(' ')).map(String::from).collect();
+            if !list.is_empty() {
+                eprintln!("harness models: opencode offers {}", list.len());
+                st.harness_models.lock().unwrap().insert("opencode".into(), list);
+            }
+        }
+        if let Some(out) = run("codex", &["debug", "models"]).await {
+            let v: Value = serde_json::from_str(&out).unwrap_or(Value::Null);
+            let mut ms: Vec<&Value> = v["models"].as_array().into_iter().flatten().filter(|m| m["visibility"] == "list" && m["slug"].is_string()).collect();
+            ms.sort_by_key(|m| m["priority"].as_i64().unwrap_or(999));
+            let list: Vec<String> = ms.iter().filter_map(|m| m["slug"].as_str().map(String::from)).collect();
+            let labels: HashMap<String, String> = ms
+                .iter()
+                .filter_map(|m| {
+                    let first = m["description"].as_str().unwrap_or_default().split(". ").next().unwrap_or_default().trim_end_matches('.');
+                    Some((m["slug"].as_str()?.to_string(), format!("{} — {first}", m["display_name"].as_str().unwrap_or_default())))
+                })
+                .collect();
+            if !list.is_empty() {
+                eprintln!("harness models: codex offers {}", list.len());
+                st.harness_models.lock().unwrap().insert("codex".into(), list);
+                st.harness_labels.lock().unwrap().insert("codex".into(), labels);
+            }
         }
     });
 }
@@ -2779,6 +2823,14 @@ async fn main() {
             ("opencode".to_string(), vec!["default".to_string()]),
             ("codex".to_string(), vec!["default".to_string()]),
         ]))),
+        harness_labels: Arc::new(Mutex::new(HashMap::from([(
+            "claude".to_string(),
+            HashMap::from([
+                ("opus".to_string(), "strongest — hard, long work".to_string()),
+                ("sonnet".to_string(), "balanced — most coding".to_string()),
+                ("haiku".to_string(), "fastest — small, quick tasks".to_string()),
+            ]),
+        )]))),
     };
     if !interrupted.is_empty() {
         eprintln!("restart: closed {} run(s) the previous process left open", interrupted.len());

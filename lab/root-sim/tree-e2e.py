@@ -189,6 +189,15 @@ def main():
         req(HOME_PORT, "POST", f"/api/session/{sid}/agent", {"agent": "AGI"})
         info = req(HOME_PORT, "GET", f"/session/{sid}")
         check("switching to AGI moves the session onto Claude Code", info["model"] == {"id": "opus", "providerID": "claude"} and info["harness"]["kind"] == "claude", (info["model"], info.get("harness")))
+        req(HOME_PORT, "POST", f"/session/{sid}/model".replace("/session/", "/api/session/"), {"model": {"id": "sonnet", "providerID": "claude"}})
+        check("a Claude Code session can change model within Claude's", req(HOME_PORT, "GET", f"/session/{sid}")["model"] == {"id": "sonnet", "providerID": "claude"})
+        try:
+            req(HOME_PORT, "POST", f"/api/session/{sid}/model", {"model": {"id": "gpt-x", "providerID": "claude"}})
+            check("…and only within Claude's models", False, "accepted")
+        except urllib.error.HTTPError as e:
+            check("…and only within Claude's models", e.code == 400, e.code)
+        agi2 = req(HOME_PORT, "GET", "/agent/AGI")
+        check("model labels for the picker", agi2["model_labels"]["claude"]["opus"].startswith("strongest"), agi2.get("model_labels", {}).get("claude"))
         try:
             req(HOME_PORT, "PUT", "/agent/coordinator", {"tools": {"bash": True}})
             check("the coordinator's tools are locked", False, "accepted")
