@@ -322,10 +322,16 @@ async def entrypoint(ctx: JobContext) -> None:
         # batch whisper needs 1-2s per segment: with the 0.5s default the
         # turn commits BEFORE the STT final lands (livekit logs "transcript
         # arrives after turn has been committed") and the speech is dropped
-        turn_handling={"endpointing": {"min_delay": 1.5}},
+        # manual from the very first frame (root-coord 11-13): the default turn detector ran until
+        # the keyword setup below switched to manual, so speech in the first seconds after the
+        # join was auto-committed AND then committed again by its "over" — a duplicate turn
+        turn_handling={"endpointing": {"min_delay": 1.5}, "turn_detection": "manual"},
         stt=openai.STT(base_url=SPEACHES_URL, api_key=_api_key, model=STT_MODEL),
         llm=OpenCodeLLM(OPENCODE_URL, room_key=ctx.room.name, mode_state=mode_state),
-        tts=openai.TTS(base_url=SPEACHES_URL, api_key=_api_key, model=TTS_MODEL, voice=TTS_VOICE),
+        # AGENT_TTS=off: the phone speaks the replies (audio_enabled=False below), so the agent
+        # synthesizes nothing — a TTS that only 500s made the session close as "unrecoverable"
+        # after three replies and dropped hands-free turns until a re-dispatch (root-coord 11-13)
+        tts=None if os.environ.get("AGENT_TTS", "on") == "off" else openai.TTS(base_url=SPEACHES_URL, api_key=_api_key, model=TTS_MODEL, voice=TTS_VOICE),
     )
     await session.start(
         room=ctx.room,
@@ -547,10 +553,46 @@ async def entrypoint(ctx: JobContext) -> None:
         # punctuation → space so "over." / "over!" match
         return re.sub(r"[^a-z0-9\u4e00-\u9fff]+", " ", text.lower()).strip()
 
+    # ---- voice commands (owner 11-13): while a reply plays, a whole utterance that is only a
+    # command drives the phone's deck exactly like its buttons — it is never buffered as text.
+    _COMMANDS = {
+        _norm(w): cmd
+        for cmd, words in {
+            "stop": ["stop", "stop it", "stop talking", "stop stop", "quiet", "be quiet", "enough", "shut up",
+                     "silence", "arrête", "arrête toi", "tais toi"],
+            "faster": ["faster", "go faster", "speed up", "quicker", "plus vite", "accélère"],
+            "slower": ["slower", "go slower", "slow down", "moins vite", "ralentis"],
+        }.items()
+        for w in words
+    }
+
+    def _rpc_phone(method: str, payload: str) -> None:
+        async def _send() -> None:
+            try:
+                await ctx.room.local_participant.perform_rpc(
+                    destination_identity=human_identity, method=method, payload=payload, response_timeout=4_000
+                )
+            except Exception:  # noqa: BLE001 - phone may be gone
+                pass
+
+        asyncio.ensure_future(_send())
+
     @session.on("user_input_transcribed")
     def _on_transcript(ev) -> None:
         nonlocal turn_text, keyword_busy
         if not ev.is_final:
+            return
+        cmd = _COMMANDS.get(_norm(ev.transcript))
+        if cmd and mode_state["mode"] == "free":
+            # the command was the whole utterance: if nothing else is buffered, the session's
+            # user turn holds only it — clear it so the next "over" never carries it
+            if not turn_text.strip():
+                try:
+                    session.clear_user_turn()
+                except Exception as e:  # noqa: BLE001
+                    logger.warning("voice command clear: %s", e)
+            logger.info("voice command (%s)", cmd)
+            _rpc_phone("voice_command", '{"cmd":"%s"}' % cmd)
             return
         turn_text = f"{turn_text} {ev.transcript}".strip()
         if keyword_busy:
