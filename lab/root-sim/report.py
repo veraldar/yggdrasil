@@ -58,7 +58,7 @@ table{{border-collapse:collapse;width:100%;font-size:13px}} td,th{{border-bottom
 <li><b>MAIN is the only door.</b> You talk to it; it starts, continues, reads and closes sessions itself — by topic, so you never sort sessions. Your transcript with MAIN stays a conversation: results come back as MAIN's own words, never as raw lane posts.</li>
 <li><b>It comes back to you.</b> When work finishes, fails or needs a decision, MAIN tells you without being asked; routine progress stays in the tree. What you missed rides your next message.</li>
 <li><b>Sessions dig again.</b> The 11-09 swap had dropped AGENTS.md and turned on a brain-wide "two sentences" + 60-word cut for every session. Both fixed; brevity is for voice turns only.</li>
-<li><b>Profiles</b> = role + tools + model + thinking: coordinator (fast, glm-5.3, no thinking, cannot write), lead (owns a project, splits it, loops until green), build, research, plan — and <b>claude-code / opencode / codex</b> sessions that resume their own harness session.</li>
+<li><b>Five agents</b>: coordinator (MAIN, fast, read-only), build, lead (owns a project, splits it, loops until green), research, and <b>AGI</b> (Claude Code on Opus). Make your own on the root or on Claude Code / opencode / Codex.</li>
 <li><b>Several roots, one tree.</b> A session can run on another root (another machine or the VPS); you and MAIN see it like a local one. Proven over an SSH line to the Infomaniak VPS.</li>
 <li><b>Model-aware.</b> A lite model gets a short role prompt and a lean tool set.</li>
 </ul>

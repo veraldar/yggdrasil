@@ -549,6 +549,9 @@ struct AppState {
     wakes: Arc<Mutex<HashSet<String>>>,
     /// harness processes (claude/opencode/codex) running at once (YGG_MAX_HARNESS)
     harness_slots: Arc<tokio::sync::Semaphore>,
+    /// the models each harness offers (the agent editor's picker): claude's aliases, opencode's
+    /// own `opencode models` (read at startup), codex's default until it is logged in
+    harness_models: Arc<Mutex<HashMap<String, Vec<String>>>>,
 }
 
 #[derive(Deserialize)]
@@ -1037,8 +1040,10 @@ async fn get_agent(State(st): State<AppState>, Path(name): Path<String>) -> Resp
     let detail = st.config.profiles.read().unwrap().detail(&name);
     match detail {
         Some(mut d) => {
-            // the models a root agent can pick from: the ones this upstream serves
-            d["models"] = json!(st.config.models);
+            // the models this agent can pick from: the upstream's for a root agent, else its harness's
+            d["models"] = json!(models_for(&st, d["harness"].as_str().unwrap_or("root")));
+            // every harness's list, so the editor's picker follows a harness change before saving
+            d["models_by_harness"] = json!(["root", "claude", "opencode", "codex"].iter().map(|h| (h.to_string(), json!(models_for(&st, h)))).collect::<serde_json::Map<_, _>>());
             Json(d).into_response()
         }
         None => (StatusCode::NOT_FOUND, Json(json!({ "error": format!("no agent {name}") }))).into_response(),
@@ -1048,9 +1053,14 @@ async fn get_agent(State(st): State<AppState>, Path(name): Path<String>) -> Resp
 /// `PUT /agent/:name` — create or edit (partial body); answers the new detail.
 async fn put_agent(State(st): State<AppState>, Path(name): Path<String>, Json(body): Json<Value>) -> Response {
     if let Some(m) = body["model"].as_str().filter(|m| !m.is_empty()) {
-        let root = body["harness"].as_str().map_or_else(|| agent(&st, &name).is_none_or(|a| a.harness.is_none()), |h| h == "root");
-        if root && !st.config.models.iter().any(|x| x == m) {
-            return bad_request(&format!("model {m} is not served here ({})", st.config.models.join(", ")));
+        let harness = body["harness"].as_str().map(String::from).unwrap_or_else(|| {
+            agent(&st, &name).and_then(|a| a.harness).unwrap_or_else(|| "root".into())
+        });
+        let offered = models_for(&st, &harness);
+        // a harness whose list is only "default" (not logged in, list not read) takes any id
+        let open = offered.len() == 1 && offered[0] == "default";
+        if !open && !offered.iter().any(|x| x == m) {
+            return bad_request(&format!("model {m} is not offered by {harness} ({})", offered.join(", ")));
         }
     }
     let res = st.config.profiles.write().unwrap().upsert(&name, &body);
@@ -1061,6 +1071,31 @@ async fn put_agent(State(st): State<AppState>, Path(name): Path<String>, Json(bo
         }
         Err(e) => bad_request(&e),
     }
+}
+
+/// The models an agent on `harness` can use (root = what this upstream serves).
+fn models_for(st: &AppState, harness: &str) -> Vec<String> {
+    if harness == "root" {
+        return st.config.models.clone();
+    }
+    st.harness_models.lock().unwrap().get(harness).cloned().unwrap_or_else(|| vec!["default".into()])
+}
+
+/// Reads `opencode models` once at startup (its own providers decide what it offers).
+fn spawn_harness_models(st: &AppState) {
+    let st = st.clone();
+    tokio::spawn(async move {
+        let out = tokio::time::timeout(Duration::from_secs(90), tokio::process::Command::new("opencode").arg("models").output()).await;
+        let Ok(Ok(out)) = out else {
+            eprintln!("harness models: opencode not readable; its picker offers \"default\"");
+            return;
+        };
+        let list: Vec<String> = String::from_utf8_lossy(&out.stdout).lines().map(str::trim).filter(|l| l.contains('/') && !l.contains(' ')).map(String::from).collect();
+        if !list.is_empty() {
+            eprintln!("harness models: opencode offers {}", list.len());
+            st.harness_models.lock().unwrap().insert("opencode".into(), list);
+        }
+    });
 }
 
 /// `DELETE /agent/:name` — only agents you made.
@@ -2739,6 +2774,11 @@ async fn main() {
         upstream: Arc::new(tokio::sync::Semaphore::new(max_inflight)),
         wakes: Arc::default(),
         harness_slots: Arc::new(tokio::sync::Semaphore::new(env_num("YGG_MAX_HARNESS", 3).max(1) as usize)),
+        harness_models: Arc::new(Mutex::new(HashMap::from([
+            ("claude".to_string(), vec!["opus".to_string(), "sonnet".to_string(), "haiku".to_string()]),
+            ("opencode".to_string(), vec!["default".to_string()]),
+            ("codex".to_string(), vec!["default".to_string()]),
+        ]))),
     };
     if !interrupted.is_empty() {
         eprintln!("restart: closed {} run(s) the previous process left open", interrupted.len());
@@ -2764,6 +2804,7 @@ async fn main() {
         .with_state(state.clone());
     tree::recover(&state, interrupted);
     peers::spawn_watch(&state);
+    spawn_harness_models(&state);
     eprintln!("root {} · peers: {}", state.config.peers.me, state.config.peers.list.iter().map(|(n, u)| format!("{n}={u}")).collect::<Vec<_>>().join(", "));
 
     let listener = tokio::net::TcpListener::bind(&listen).await.expect("bind");

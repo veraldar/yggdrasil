@@ -164,6 +164,12 @@ def main():
         # 6b. agents: read, create, refuse, switch (model stamped, tools enforced), harness, lock, delete
         agi = req(HOME_PORT, "GET", "/agent/AGI")
         check("AGI agent: Claude Code on Opus", agi["harness"] == "claude" and agi["model"] == "opus" and agi["builtin"], {k: agi.get(k) for k in ("harness", "model")})
+        check("AGI offers Claude Code's models", {"opus", "sonnet", "haiku"} <= set(agi["models"]), agi.get("models"))
+        try:
+            req(HOME_PORT, "PUT", "/agent/AGI", {"model": "gpt-free-text"})
+            check("a harness model must be one it offers", False, "accepted")
+        except urllib.error.HTTPError as e:
+            check("a harness model must be one it offers", e.code == 400, e.code)
         made = req(HOME_PORT, "PUT", "/agent/reader", {"description": "reads only", "tools": {"read": True}, "model": "mock", "variant": "low"})
         check("create an agent", made["tools"]["read"] and not made["tools"]["bash"] and made["harness"] == "root", made.get("tools"))
         try:

@@ -17,7 +17,7 @@
 //! into its simple commands (`;` `&&` `||` `|` `&` newlines) and EVERY one must be allowed;
 //! substitutions (`$(`, backticks, `<(`, `>(`) fail closed unless a `*` rule allows bash.
 //!
-//! The built-in set (coordinator · lead · build · research · plan) is always present; a
+//! The built-in agents (coordinator · lead · build · research · AGI) are always present; a
 //! `YGG_PROFILES` file overrides fields of built-ins and adds profiles of its own.
 
 use std::collections::BTreeMap;
@@ -74,8 +74,8 @@ step when you can (speed matters): the [tree] view at the end of the user's mess
 one fits, `session_send` the new instruction there (its context is kept); if it is clearly new work, \
 `session_start` directly. Use `sessions_find` only for older or closed work the view does not show. New sessions \
 get the right agent: `build` for one concrete \
-task, `research` for reading/comparing/answering with sources, `plan` for analysis without changes, and `lead` for \
-a project with several parts or iterate-until-done loops. ONE project = ONE session under you: never split a \
+task, `research` for reading/comparing/answering with sources or analysis, `lead` for a project with several parts \
+or iterate-until-done loops, and `AGI` (Claude Code on Opus) for the hardest code or when the user asks for it. ONE project = ONE session under you: never split a \
 project into several sessions yourself — give it to one `lead`, which splits it below itself, keeps it looping and \
 reports the whole. You stay light and fast; projects are managed one level down. Write the brief self-contained: \
 goal, constraints, where (paths), what done means, and any facts from other sessions it needs.
@@ -128,9 +128,7 @@ pub const COORDINATOR_LITE: &str = "You are the coordinator, the user's only con
 pub const LEAD_LITE: &str = "You own one project. Do it yourself with bash/read/write/edit, or split independent parts into sessions with session_start. Check results by running the tests. When all is done, report what exists and the test result. If you need the user's decision, start your reply with QUESTION:.";
 pub const BUILD_LITE: &str = "Do the task completely with bash/read/write/edit. Run it, test it, fix failures. Reply with what you changed and the test result. If you need the user's decision, start your reply with QUESTION:.";
 
-pub const PLAN_PROMPT: &str = "\
-You are a planning session: analyze and plan without changing anything. Read what you need, then answer \
-with a concrete plan: steps, files, risks, and how to verify.";
+
 
 fn rule(permission: &str, pattern: &str, allow: bool) -> Rule {
     Rule { permission: permission.into(), pattern: pattern.into(), allow }
@@ -181,10 +179,8 @@ pub fn builtins() -> Vec<Profile> {
         lead,
         build,
         p("research", "reads, fetches and compares; answers with evidence", RESEARCH_PROMPT, 60, false, false, allow_all()),
-        p("plan", "analysis and plans, changes nothing", PLAN_PROMPT, 40, false, false, allow_only(&["read", "glob", "grep", "webfetch", "todowrite"])),
-        harness_profile("claude-code", "claude", Some("sonnet"), "Claude Code itself as a session (Anthropic's coding agent: strongest for hard code)"),
-        harness_profile("opencode", "opencode", None, "opencode as a session (its own config, models and tools)"),
-        harness_profile("codex", "codex", None, "OpenAI Codex CLI as a session (needs `codex login` on this root)"),
+        // five agents (user 11-13: "too many agent types"); opencode / codex stay a harness choice
+        // for agents you make in the editor
         harness_profile("AGI", "claude", Some("opus"), "the strongest: Claude Code on Opus — hard, long, multi-file work"),
     ]
 }
