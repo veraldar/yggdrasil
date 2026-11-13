@@ -69,11 +69,37 @@ VOICE_COMMANDS = {
 }
 
 
+# politeness around a command ("okay stop", "faster please") is still just the command
+FILLER = {"please", "now", "ok", "okay", "thanks", "merci", "so", "and", "um", "uh"}
+# words that end too many ordinary sentences to count as a command at the END of longer speech
+AMBIGUOUS = {_norm_words(w) for w in ("quiet", "enough", "silence", "wait", "hold on", "play", "continue", "go on")}
+
+
+def command_of(text: str, speaking: bool = False) -> str | None:
+    """The deck command an utterance gives, or None. The whole utterance (polite words aside) is a
+    command; while a reply plays it may also END with an unambiguous one — on a real phone the mic
+    hears the reply's own echo before the keyword (owner 11-13 r3: "stop" on :8447 did nothing)."""
+    words = _norm_words(text).split()
+    while words and words[-1] in FILLER:
+        words.pop()
+    while words and words[0] in FILLER:
+        words.pop(0)
+    whole = " ".join(words)
+    if whole in VOICE_COMMANDS:
+        return VOICE_COMMANDS[whole]
+    if speaking:
+        for k in (3, 2, 1):
+            tail = " ".join(words[-k:])
+            if len(words) > k and tail in VOICE_COMMANDS and tail not in AMBIGUOUS:
+                return VOICE_COMMANDS[tail]
+    return None
+
+
 def strip_commands(text: str) -> str:
     """Drops every sentence of a buffered turn that is only a voice command (the STT may have
     merged an earlier command into the turn buffer)."""
     parts = re.split(r"(?<=[.!?])\s+", text)
-    return " ".join(p for p in parts if _norm_words(p) not in VOICE_COMMANDS).strip()
+    return " ".join(p for p in parts if command_of(p) is None).strip()
 
 
 # whisper-small hallucinates on silence/room tone — these strings as an ENTIRE
@@ -628,7 +654,7 @@ async def entrypoint(ctx: JobContext) -> None:
         nonlocal turn_text, keyword_busy
         if not ev.is_final:
             return
-        cmd = VOICE_COMMANDS.get(_norm(ev.transcript))
+        cmd = command_of(ev.transcript, bool(mode_state.get("speaking")))
         if cmd and mode_state["mode"] == "free":
             # the command was the whole utterance: if nothing else is buffered, the session's
             # user turn holds only it — clear it so the next "over" never carries it
@@ -637,7 +663,7 @@ async def entrypoint(ctx: JobContext) -> None:
                     session.clear_user_turn()
                 except Exception as e:  # noqa: BLE001
                     logger.warning("voice command clear: %s", e)
-            logger.info("voice command (%s)", cmd)
+            logger.info("voice command (%s) from %r", cmd, ev.transcript[:80])
             _rpc_phone("voice_command", '{"cmd":"%s"}' % cmd)
             return
         # while the phone speaks a reply only keywords count (owner 11-13 r2): speech that is
@@ -648,7 +674,7 @@ async def entrypoint(ctx: JobContext) -> None:
                     session.clear_user_turn()
                 except Exception as e:  # noqa: BLE001
                     logger.warning("speaking discard: %s", e)
-            logger.info("heard over a playing reply, not a keyword — dropped")
+            logger.info("heard over a playing reply, not a keyword — dropped: %r", ev.transcript[:80])
             return
         turn_text = f"{turn_text} {ev.transcript}".strip()
         if keyword_busy:

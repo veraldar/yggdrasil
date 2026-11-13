@@ -392,7 +392,7 @@ fn resolve_variant(raw: &str) -> Result<String, String> {
 /// conversation is built. Never in the system prompt / position 0 (cache law:
 /// text turns and the cached prefix stay byte-identical). Independent of the
 /// brain-wide YGG_VOICE / VOICE_PROMPT path below. Editing resets caches once.
-const VOICE_TURN_NOTE: &str = "[voice turn] This reply will be spoken aloud: answer in 2 to 4 short, concrete sentences of plain speech, leading with the answer, with no lists, bullets, tables, headers, markdown, or code.";
+const VOICE_TURN_NOTE: &str = "[voice turn] This reply will be spoken aloud: plain speech, leading with the answer, with no lists, bullets, tables, headers, markdown, or code. Keep it to a few short, concrete sentences — unless the user asked for more (a story, details, something read out): then give what they asked for. They can say stop, pause, faster or slower while it plays.";
 
 fn is_voice_turn(msg: &Value) -> bool {
     msg["info"]["modality"] == "voice"
@@ -2887,7 +2887,9 @@ async fn main() {
         max_steps: env_num("YGG_MAX_STEPS", 100).max(1) as usize,
         tools_enabled: std::env::var("YGG_TOOLS").map_or(true, |v| v != "0"),
         voice: std::env::var("YGG_VOICE").map_or(false, |v| v == "1"),
-        voice_max_words: env_num("YGG_VOICE_MAX_WORDS", 60).max(5) as usize,
+        // a safety limit, not a style: the note keeps replies short, the voice commands control
+        // playback, and a story asked for by voice must fit (owner 11-13: "about eight sentences")
+        voice_max_words: env_num("YGG_VOICE_MAX_WORDS", 300).max(5) as usize,
         rollup_tokens: rollup_tokens as usize,
         rollup_keep_tokens: env_num("YGG_ROLLUP_KEEP_TOKENS", rollup_tokens / 4) as usize,
     };

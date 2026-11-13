@@ -66,6 +66,7 @@ put("YGG_ROOT_NOTE", "the main computer (omarchy): 16 cpu / 30 GB, holds ~/Work 
 put("YGG_MAX_INFLIGHT", "5")
 put("YGG_VISION_MODELS", "glm-5.3-flash")  # the one z.ai model here that reads images (probed 11-13)
 put("YGG_ARTIFACTS_DIR", os.path.expanduser("~/Work/bifrost/artifacts"))  # the review agent's only write
+put("YGG_VOICE_MAX_WORDS", "300")  # a safety limit now: voice commands control playback (11-13)
 open(p, "w").write(s)
 PY
   install -m600 "$STAGED_PROFILES" "$PROFILES"
