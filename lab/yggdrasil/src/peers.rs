@@ -102,7 +102,7 @@ pub fn describe(st: &AppState) -> Value {
     let running = st.running.lock().unwrap().len();
     let sessions = st.sessions.lock().unwrap().len();
     let models: Vec<Value> = st.config.models.iter().map(|m| json!({ "id": m, "tier": crate::model_tier(st, m) })).collect();
-    let profiles: Vec<Value> = st.config.profiles.by_name.values().map(|p| json!({ "name": p.name, "description": p.description, "harness": p.harness })).collect();
+    let profiles: Vec<Value> = st.config.profiles.read().unwrap().by_name.values().map(|p| json!({ "name": p.name, "description": p.description, "harness": p.harness })).collect();
     json!({
         "name": st.config.peers.me, "note": st.config.peers.note, "models": models, "profiles": profiles,
         "hardware": { "os": std::env::consts::OS, "arch": std::env::consts::ARCH,

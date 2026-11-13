@@ -38,7 +38,7 @@ impl Kind {
     }
 
     /// argv (program first) + whether the prompt goes on stdin.
-    fn argv(self, model: Option<&str>, resume: Option<&str>, cwd: &Path, prompt: &str) -> (Vec<String>, bool) {
+    fn argv(self, model: Option<&str>, resume: Option<&str>, cwd: &Path, prompt: &str, system: Option<&str>) -> (Vec<String>, bool) {
         let mut a: Vec<String> = Vec::new();
         let mut push = |xs: &[&str]| a.extend(xs.iter().map(|x| x.to_string()));
         match self {
@@ -49,6 +49,10 @@ impl Kind {
                 }
                 if let Some(r) = resume {
                     push(&["--resume", r]);
+                }
+                // the agent's own instructions ride on top of Claude Code's (the editor's prompt)
+                if let Some(sys) = system.filter(|s| !s.trim().is_empty()) {
+                    push(&["--append-system-prompt", sys]);
                 }
                 (a, true)
             }
@@ -162,8 +166,8 @@ pub struct Outcome {
 
 /// Runs one turn. `on` sees every event as it arrives (stream text, store tools). The child is
 /// killed when the returned future is dropped (an abort drops it).
-pub async fn run(kind: Kind, model: Option<&str>, resume: Option<&str>, cwd: &Path, prompt: &str, mut on: impl FnMut(&Ev)) -> Result<Outcome, String> {
-    let (argv, stdin_prompt) = kind.argv(model, resume, cwd, prompt);
+pub async fn run(kind: Kind, model: Option<&str>, resume: Option<&str>, cwd: &Path, prompt: &str, system: Option<&str>, mut on: impl FnMut(&Ev)) -> Result<Outcome, String> {
+    let (argv, stdin_prompt) = kind.argv(model, resume, cwd, prompt, system);
     let mut cmd = tokio::process::Command::new(&argv[0]);
     cmd.args(&argv[1..])
         .current_dir(cwd)
@@ -257,11 +261,12 @@ mod tests {
 
     #[test]
     fn argv_shapes() {
-        let (a, stdin) = Kind::Claude.argv(Some("sonnet"), Some("s1"), Path::new("/w"), "p");
+        let (a, stdin) = Kind::Claude.argv(Some("sonnet"), Some("s1"), Path::new("/w"), "p", Some("be terse"));
         assert!(stdin && a.contains(&"--resume".to_string()) && a.contains(&"sonnet".to_string()));
-        let (a, stdin) = Kind::Opencode.argv(None, Some("ses_1"), Path::new("/w"), "do it");
+        assert!(a.windows(2).any(|w| w[0] == "--append-system-prompt" && w[1] == "be terse"));
+        let (a, stdin) = Kind::Opencode.argv(None, Some("ses_1"), Path::new("/w"), "do it", None);
         assert!(!stdin && a.ends_with(&["--".to_string(), "do it".to_string()]) && a.contains(&"--session".to_string()));
-        let (a, _) = Kind::Codex.argv(None, Some("t1"), Path::new("/w"), "go");
+        let (a, _) = Kind::Codex.argv(None, Some("t1"), Path::new("/w"), "go", None);
         let i = a.iter().position(|x| x == "resume").unwrap();
         assert_eq!(&a[i + 1..], &["t1".to_string(), "go".to_string()]);
     }

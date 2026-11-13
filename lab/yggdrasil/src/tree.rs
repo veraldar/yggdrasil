@@ -54,10 +54,10 @@ pub fn schemas(profiles: &crate::profiles::Profiles) -> Vec<Value> {
           json!({ "query": s("words describing the topic, project or task"), "limit": { "type": "integer", "description": "max results (default 8)" },
                   "archived": { "type": "boolean", "description": "include closed sessions" } }), &["query"]),
         f("session_start", "Start a new session under you with a self-contained brief. It works in the background and reports back to you; do not wait for it.",
-          json!({ "title": s("short topic title, 2-6 words, unique"), "profile": s(&format!("one of — {}", offer.join(" · "))),
+          json!({ "title": s("short topic title, 2-6 words, unique"), "agent": s(&format!("one of — {}", offer.join(" · "))),
                   "brief": s("self-contained instructions: goal, constraints, paths, what done means, needed facts"),
                   "root": s("optional: another root (machine) to run it on — see the roots line of the [tree] view"),
-                  "model": s("optional model id"), "variant": s("optional thinking: high | low | off") }), &["title", "profile", "brief"]),
+                  "model": s("optional model id"), "variant": s("optional thinking: high | low | off") }), &["title", "agent", "brief"]),
         f("session_send", "Send a message or follow-up instruction to an existing session (its context is kept). It reports back when done.",
           json!({ "id": s("session id (or exact title)"), "message": s("the message") }), &["id", "message"]),
         f("session_read", "Read a session's card, status, last request, last reply and sub-sessions.",
@@ -273,7 +273,7 @@ async fn run_remote(st: &AppState, caller: &str, name: &str, input: &Value) -> O
     if name == "session_start" {
         let root = input["root"].as_str().filter(|r| !r.is_empty() && *r != me)?;
         let (title, brief) = (input["title"].as_str().unwrap_or("work"), input["brief"].as_str().unwrap_or_default());
-        let profile = input["profile"].as_str().unwrap_or("build");
+        let profile = input["agent"].as_str().or(input["profile"].as_str()).unwrap_or("build");
         if brief.trim().is_empty() {
             return Some(err("brief required".into()));
         }
@@ -384,13 +384,14 @@ fn unique_title(sessions: &HashMap<String, Session>, want: &str) -> String {
 
 fn start(st: &AppState, caller: &str, input: &Value) -> Out {
     let Some(brief) = input["brief"].as_str().filter(|b| !b.trim().is_empty()) else { return err("brief required".into()) };
-    let profile = input["profile"].as_str().unwrap_or("build").trim().to_lowercase();
+    let profile = input["agent"].as_str().or(input["profile"].as_str()).unwrap_or("build").trim().to_string();
     if profile == "coordinator" {
-        return err("there is one coordinator; pick lead | build | research | plan".into());
+        return err("there is one coordinator; pick another agent".into());
     }
-    if st.config.profiles.get(&profile).is_none() {
-        let known: Vec<&str> = st.config.profiles.by_name.keys().map(String::as_str).filter(|n| *n != "coordinator").collect();
-        return err(format!("unknown profile {profile:?}; known: {}", known.join(", ")));
+    if crate::agent(st, &profile).is_none() {
+        let agents = st.config.profiles.read().unwrap();
+        let known: Vec<&str> = agents.by_name.keys().map(String::as_str).filter(|n| *n != "coordinator").collect();
+        return err(format!("unknown agent {profile:?}; known: {}", known.join(", ")));
     }
     let title = {
         let sessions = st.sessions.lock().unwrap();
@@ -803,7 +804,7 @@ pub enum Target {
 /// origin when that one manages sessions.
 pub fn report_target(st: &AppState, sid: &str, origin: Option<&str>) -> Option<Target> {
     let sessions = st.sessions.lock().unwrap();
-    let manages = |id: &str| sessions.get(id).is_some_and(|s| st.config.profiles.get(&crate::profile_name_of(st, &s.info)).is_some_and(|p| p.sessions));
+    let manages = |id: &str| sessions.get(id).is_some_and(|s| crate::agent(st, &crate::profile_name_of(st, &s.info)).is_some_and(|p| p.sessions));
     let s = sessions.get(sid)?;
     if let Some(p) = parent_of(s).filter(|p| manages(p)) {
         return Some(Target::Local(p));

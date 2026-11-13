@@ -52,6 +52,9 @@ pub struct Profile {
 pub struct Profiles {
     pub by_name: BTreeMap<String, Profile>,
     pub default_agent: String,
+    /// where edits persist (the overlay file) and its JSON as loaded (unknown keys kept)
+    path: Option<String>,
+    raw: Value,
 }
 
 const ALL: &[&str] = &["bash", "read", "write", "edit", "glob", "grep", "webfetch", "todowrite"];
@@ -70,7 +73,7 @@ How you work:
 step when you can (speed matters): the [tree] view at the end of the user's message lists the open sessions — if \
 one fits, `session_send` the new instruction there (its context is kept); if it is clearly new work, \
 `session_start` directly. Use `sessions_find` only for older or closed work the view does not show. New sessions \
-get the right profile: `build` for one concrete \
+get the right agent: `build` for one concrete \
 task, `research` for reading/comparing/answering with sources, `plan` for analysis without changes, and `lead` for \
 a project with several parts or iterate-until-done loops. ONE project = ONE session under you: never split a \
 project into several sessions yourself — give it to one `lead`, which splits it below itself, keeps it looping and \
@@ -84,6 +87,7 @@ working — never contradict it.
 the evidence that proves them, decisions they must take, failures and what you did about them. One to four \
 sentences. If a session asks a question you can answer from the conversation, answer it with `session_send` \
 yourself instead of bothering the user. If nothing is worth the user's attention, reply exactly: (quiet)
+- When the user names an agent (\"use AGI\", \"with Claude Code\") start the session with exactly that agent.
 - When the user answers a question a session asked, `session_send` the answer to that session.
 - The user cancels or drops a topic: `session_close` (cancel=true if it is still running). Never close sessions \
 to tidy up — finished sessions stay in the tree. Status questions: answer from the [tree] cards; \
@@ -181,6 +185,7 @@ pub fn builtins() -> Vec<Profile> {
         harness_profile("claude-code", "claude", Some("sonnet"), "Claude Code itself as a session (Anthropic's coding agent: strongest for hard code)"),
         harness_profile("opencode", "opencode", None, "opencode as a session (its own config, models and tools)"),
         harness_profile("codex", "codex", None, "OpenAI Codex CLI as a session (needs `codex login` on this root)"),
+        harness_profile("AGI", "claude", Some("opus"), "the strongest: Claude Code on Opus — hard, long, multi-file work"),
     ]
 }
 
@@ -233,10 +238,12 @@ impl Profiles {
     pub fn load(path: Option<&str>) -> Profiles {
         let mut by_name: BTreeMap<String, Profile> = builtins().into_iter().map(|p| (p.name.clone(), p)).collect();
         let mut default_agent = "build".to_string();
+        let mut raw = json!({ "agent": {} });
         if let Some(path) = path.filter(|p| !p.is_empty()) {
             match std::fs::read(path).map_err(|e| e.to_string()).and_then(|b| serde_json::from_slice::<Value>(&b).map_err(|e| e.to_string())) {
                 Ok(v) => {
                     Self::overlay(&mut by_name, &v);
+                    raw = v.clone();
                     if let Some(d) = v["default_agent"].as_str() {
                         // The coordinator is MAIN's profile, never a session default.
                         if d != "coordinator" {
@@ -250,7 +257,10 @@ impl Profiles {
         if !by_name.contains_key(&default_agent) {
             default_agent = "build".into();
         }
-        Profiles { by_name, default_agent }
+        if !raw["agent"].is_object() {
+            raw["agent"] = json!({});
+        }
+        Profiles { by_name, default_agent, path: path.filter(|p| !p.is_empty()).map(String::from), raw }
     }
 
     fn overlay(by_name: &mut BTreeMap<String, Profile>, v: &Value) {
@@ -299,7 +309,7 @@ impl Profiles {
                 p.sessions = b;
             }
             if let Some(h) = a["harness"].as_str() {
-                p.harness = Some(h.into()).filter(|h: &String| !h.is_empty());
+                p.harness = Some(h.into()).filter(|h: &String| !h.is_empty() && h != "root");
             }
             // The coordinator's tool scope is the brain's contract (it routes, it does not
             // write); a file entry may describe it but not widen it.
@@ -327,6 +337,137 @@ impl Profiles {
                 })
                 .collect(),
         )
+    }
+}
+
+/// The tools an agent on the root can be given, in the order the editor shows them.
+pub const TOOLS: &[&str] = ALL;
+
+impl Profiles {
+    fn builtin(name: &str) -> bool {
+        builtins().iter().any(|p| p.name == name)
+    }
+
+    /// Everything the agent editor needs: what it is, what it runs on, what it may do.
+    pub fn detail(&self, name: &str) -> Option<Value> {
+        let p = self.by_name.get(name)?;
+        let root = p.harness.is_none();
+        let tools: serde_json::Map<String, Value> = TOOLS.iter().map(|t| ((*t).to_string(), json!(root && p.declared_tools().contains(t)))).collect();
+        let simple = p.rules.iter().all(|r| r.pattern == "*");
+        Some(json!({
+            "name": p.name, "description": p.description, "builtin": Self::builtin(&p.name),
+            "harness": p.harness.clone().unwrap_or_else(|| "root".into()),
+            "model": p.model, "variant": p.variant, "prompt": p.prompt, "prompt_lite": p.prompt_lite,
+            "steps": p.steps, "fold": p.fold, "sessions": p.sessions && root, "tools": tools,
+            // pattern rules (bash allowlists…) are shown, not flattened, until the user edits tools
+            "rules": if simple { Value::Null } else { json!(p.rules.iter().map(|r| json!({ "permission": r.permission, "pattern": r.pattern,
+                "action": if r.allow { "allow" } else { "deny" } })).collect::<Vec<_>>()) },
+            "locked": if p.name == "coordinator" { json!(["tools", "harness", "sessions", "fold"]) } else { json!([]) },
+            "customizable": if root { json!(["description", "model", "variant", "prompt", "prompt_lite", "tools", "steps", "sessions"]) }
+                else if p.harness.as_deref() == Some("claude") { json!(["description", "model", "prompt"]) } else { json!(["description", "model"]) },
+        }))
+    }
+
+    /// Creates or edits an agent from a partial JSON body; persists. `Err` = what the user must fix.
+    pub fn upsert(&mut self, name: &str, body: &Value) -> Result<(), String> {
+        let ok_name = !name.is_empty() && name.len() <= 40 && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+        if !ok_name {
+            return Err("an agent name is letters, digits, - and _ (40 max)".into());
+        }
+        let mut p = self.by_name.get(name).cloned().unwrap_or_else(|| Profile {
+            name: name.into(), description: String::new(), mode: "primary".into(), prompt: BUILD_PROMPT.into(), model: None,
+            variant: None, steps: None, fold: false, sessions: false, rules: allow_all(), harness: None, prompt_lite: None,
+        });
+        let door = name == "coordinator";
+        if let Some(h) = body["harness"].as_str() {
+            if door && h != "root" {
+                return Err("the coordinator runs on the root".into());
+            }
+            p.harness = match h {
+                "root" | "" => None,
+                "claude" | "opencode" | "codex" => Some(h.into()),
+                other => return Err(format!("unknown harness {other:?} (root | claude | opencode | codex)")),
+            };
+        }
+        if let Some(d) = body["description"].as_str() {
+            p.description = d.trim().chars().take(300).collect();
+        }
+        if body.get("model").is_some() {
+            p.model = body["model"].as_str().map(str::trim).filter(|m| !m.is_empty()).map(String::from);
+        }
+        if body.get("variant").is_some() {
+            p.variant = match body["variant"].as_str().unwrap_or("") {
+                "" => None,
+                v @ ("high" | "low" | "off") => Some(v.into()),
+                other => return Err(format!("unknown thinking level {other:?} (high | low | off)")),
+            };
+        }
+        if let Some(t) = body["prompt"].as_str() {
+            p.prompt = t.to_string();
+        }
+        if body.get("prompt_lite").is_some() {
+            p.prompt_lite = body["prompt_lite"].as_str().filter(|t| !t.trim().is_empty()).map(String::from);
+        }
+        if let Some(n) = body["steps"].as_u64() {
+            p.steps = Some(n.clamp(1, 500) as usize);
+        }
+        if let Some(b) = body["sessions"].as_bool() {
+            if door && !b {
+                return Err("the coordinator always manages sessions".into());
+            }
+            p.sessions = b;
+        }
+        if let Some(tools) = body["tools"].as_object() {
+            if door {
+                return Err("the coordinator's tools are fixed: it reads and routes, it never writes".into());
+            }
+            // the editor's toggles become a plain ruleset: deny all, allow each ticked tool
+            let mut rules = vec![rule("*", "*", false)];
+            rules.extend(TOOLS.iter().filter(|t| tools.get(**t).and_then(Value::as_bool).unwrap_or(false)).map(|t| rule(t, "*", true)));
+            p.rules = rules;
+        }
+        self.by_name.insert(name.to_string(), p);
+        self.persist(name)
+    }
+
+    /// Deletes an agent you made (built-ins are edited, never deleted).
+    pub fn remove(&mut self, name: &str) -> Result<(), String> {
+        if Self::builtin(name) {
+            return Err("built-in agents can be edited, not deleted".into());
+        }
+        self.by_name.remove(name).ok_or("no such agent")?;
+        if let Some(a) = self.raw["agent"].as_object_mut() {
+            a.remove(name);
+        }
+        self.write()
+    }
+
+    fn persist(&mut self, name: &str) -> Result<(), String> {
+        let p = &self.by_name[name];
+        let entry = &mut self.raw["agent"][name];
+        if !entry.is_object() {
+            *entry = json!({});
+        }
+        entry["description"] = json!(p.description);
+        entry["mode"] = json!(p.mode);
+        entry["harness"] = json!(p.harness.clone().unwrap_or_else(|| "root".into()));
+        entry["model"] = json!(p.model);
+        entry["variant"] = json!(p.variant);
+        entry["prompt"] = json!(p.prompt);
+        entry["prompt_lite"] = json!(p.prompt_lite);
+        entry["steps"] = json!(p.steps);
+        entry["fold"] = json!(p.fold);
+        entry["sessions"] = json!(p.sessions);
+        entry["permission"] = json!(p.rules.iter().map(|r| json!({ "permission": r.permission, "pattern": r.pattern,
+            "action": if r.allow { "allow" } else { "deny" } })).collect::<Vec<_>>());
+        self.write()
+    }
+
+    fn write(&self) -> Result<(), String> {
+        let Some(path) = &self.path else { return Ok(()) }; // no file: edits live in memory
+        let tmp = format!("{path}.tmp");
+        let bytes = serde_json::to_vec_pretty(&self.raw).map_err(|e| e.to_string())?;
+        std::fs::write(&tmp, bytes).and_then(|_| std::fs::rename(&tmp, path)).map_err(|e| format!("could not save agents to {path}: {e}"))
     }
 }
 
@@ -502,6 +643,30 @@ mod tests {
         assert!(p.check("bash", &json!({"command": "ls $(rm -rf /)"})).is_err());
         assert!(p.check("bash", &json!({"command": "grep 'a;b' file"})).is_ok());
         assert!(prof(allow_all()).check("bash", &json!({"command": "echo $(date) `id`"})).is_ok());
+    }
+
+    #[test]
+    fn edit_create_delete_persist() {
+        let dir = std::env::temp_dir().join(format!("ygg-agents-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("agents.json");
+        std::fs::write(&f, r#"{"keep":"me","agent":{}}"#).unwrap();
+        let mut ps = Profiles::load(f.to_str());
+        assert_eq!(ps.detail("AGI").unwrap()["harness"], "claude");
+        assert!(ps.upsert("coordinator", &json!({"tools": {"bash": true}})).is_err(), "the door stays read-only");
+        assert!(ps.upsert("coordinator", &json!({"model": "glm-5.2"})).is_ok());
+        ps.upsert("tester", &json!({"description": "runs tests", "tools": {"bash": true, "read": true}, "model": "glm-5.3", "variant": "low"})).unwrap();
+        let t = ps.get("tester").unwrap();
+        assert!(t.check("bash", &json!({"command": "pytest"})).is_ok() && t.check("write", &json!({"filePath": "x"})).is_err());
+        assert!(ps.upsert("bad name!", &json!({})).is_err());
+        assert!(ps.upsert("x", &json!({"harness": "emacs"})).is_err());
+        let again = Profiles::load(f.to_str());
+        assert_eq!(again.get("tester").unwrap().model.as_deref(), Some("glm-5.3"));
+        assert_eq!(again.get("coordinator").unwrap().model.as_deref(), Some("glm-5.2"));
+        let raw: Value = serde_json::from_slice(&std::fs::read(&f).unwrap()).unwrap();
+        assert_eq!(raw["keep"], "me", "unknown keys survive an edit");
+        assert!(ps.remove("AGI").is_err() && ps.remove("tester").is_ok());
+        assert!(Profiles::load(f.to_str()).get("tester").is_none());
     }
 
     #[test]

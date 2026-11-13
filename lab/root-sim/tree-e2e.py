@@ -78,7 +78,7 @@ def main():
         for name, port, other, oport in (("home", HOME_PORT, "lab", LAB_PORT), ("lab", LAB_PORT, "home", HOME_PORT)):
             d = os.path.join(tmp, name)
             os.makedirs(os.path.join(d, "work"))
-            unit(f"tree-e2e-{name}", [a.bin], dict(base, YGG_LISTEN=f"127.0.0.1:{port}", YGG_DATA_DIR=os.path.join(d, "data"),
+            unit(f"tree-e2e-{name}", [a.bin], dict(base, YGG_LISTEN=f"127.0.0.1:{port}", YGG_DATA_DIR=os.path.join(d, "data"), YGG_PROFILES=os.path.join(d, "agents.json"),
                  YGG_PROJECT_DIR=os.path.join(d, "work"), YGG_ROOT_NAME=name, YGG_PEERS=f"{other}=http://127.0.0.1:{oport}"))
         check("brains up", wait(lambda: req(HOME_PORT, "GET", "/root") and req(LAB_PORT, "GET", "/root"), 10))
         main_id = req(HOME_PORT, "POST", "/session", {"title": "[MAIN]"})["id"]
@@ -93,7 +93,7 @@ def main():
         say = lambda text: req(HOME_PORT, "POST", f"/session/{main_id}/message", {"parts": [{"type": "text", "text": text}]}, 60)
 
         # 1. start → report → wake
-        r = say(tool([["session_start", {"title": "alpha", "profile": "build", "brief": "Reply with exactly: ALPHA-DONE"}]]))
+        r = say(tool([["session_start", {"title": "alpha", "agent": "build", "brief": "Reply with exactly: ALPHA-DONE"}]]))
         out = [p for p in r["parts"] if p["type"] == "tool"][0]["state"]["output"]
         check("session_start answers at once", out.startswith("STARTED"), out)
         t = tree(HOME_PORT)
@@ -110,8 +110,8 @@ def main():
         check("inbox event delivered", inbox and inbox[-1]["from"] == t["alpha"]["id"] and inbox[-1]["delivered"] is True, inbox[-1:] if inbox else inbox)
 
         # 2. lead nesting
-        lead_brief = tool([["session_start", {"title": "beta-1", "profile": "build", "brief": "Reply with exactly: B1-DONE"}]])
-        say(tool([["session_start", {"title": "beta", "profile": "lead", "brief": lead_brief}]]))
+        lead_brief = tool([["session_start", {"title": "beta-1", "agent": "build", "brief": "Reply with exactly: B1-DONE"}]])
+        say(tool([["session_start", {"title": "beta", "agent": "lead", "brief": lead_brief}]]))
         ok = wait(lambda: "beta-1" in tree(HOME_PORT) and (tree(HOME_PORT)["beta-1"].get("card") or {}).get("status") == "done", 30)
         t = tree(HOME_PORT)
         check("grandchild under the lead (depth 2)", ok and t["beta-1"]["parentID"] == t["beta"]["id"] and t["beta-1"]["depth"] == 2, {k: (v.get("parentID"), v.get("depth")) for k, v in t.items()})
@@ -136,7 +136,7 @@ def main():
         check("session_close archives the family", t["beta"]["archived"] and t["beta-1"]["archived"], (t["beta"]["archived"], t["beta-1"]["archived"]))
 
         # 4b. a running session is not closed to tidy up — only cancelled on purpose
-        say(tool([["session_start", {"title": "slow", "profile": "build", "brief": "sleep 8 then Reply with exactly: SLOW-DONE"}]]))
+        say(tool([["session_start", {"title": "slow", "agent": "build", "brief": "sleep 8 then Reply with exactly: SLOW-DONE"}]]))
         wait(lambda: tree(HOME_PORT)["slow"]["busy"], 10)
         r = say(tool([["session_close", {"id": "slow", "reason": "tidy"}]]))
         out = [p for p in r["parts"] if p["type"] == "tool"][0]["state"]["output"]
@@ -156,8 +156,43 @@ def main():
         check("automation not in MAIN's transcript", len(req(HOME_PORT, "GET", f"/session/{main_id}/message")) == before)
         check("automation filed in the inbox", wait(lambda: any(e["from"] == "external" for e in req(HOME_PORT, "GET", f"/session/{main_id}/inbox")), 15))
 
+        # 6b. agents: read, create, refuse, switch (model stamped, tools enforced), harness, lock, delete
+        agi = req(HOME_PORT, "GET", "/agent/AGI")
+        check("AGI agent: Claude Code on Opus", agi["harness"] == "claude" and agi["model"] == "opus" and agi["builtin"], {k: agi.get(k) for k in ("harness", "model")})
+        made = req(HOME_PORT, "PUT", "/agent/reader", {"description": "reads only", "tools": {"read": True}, "model": "mock", "variant": "low"})
+        check("create an agent", made["tools"]["read"] and not made["tools"]["bash"] and made["harness"] == "root", made.get("tools"))
+        try:
+            req(HOME_PORT, "PUT", "/agent/reader", {"model": "gpt-nope"})
+            check("a model this root does not serve is refused", False, "accepted")
+        except urllib.error.HTTPError as e:
+            check("a model this root does not serve is refused", e.code == 400, e.code)
+        raw = json.load(open(os.path.join(tmp, "home", "agents.json")))
+        check("agent edits persist to the agents file", raw["agent"]["reader"]["description"] == "reads only")
+        sid = req(HOME_PORT, "POST", "/session", {"title": "switcher", "agent": "build"})["id"]
+        req(HOME_PORT, "POST", f"/api/session/{sid}/agent", {"agent": "reader"})
+        info = req(HOME_PORT, "GET", f"/session/{sid}")
+        check("switching takes the agent's model + thinking", info["agent"] == "reader" and info["model"]["id"] == "mock" and info["model"]["variant"] == "low", info["model"])
+        r = req(HOME_PORT, "POST", f"/session/{sid}/message", {"parts": [{"type": "text", "text": tool([["bash", {"command": "echo hi"}]])}]}, 60)
+        out = [p for p in r["parts"] if p["type"] == "tool"][0]["state"]["output"]
+        check("the switched agent's tools are enforced", "permission denied" in out, out)
+        req(HOME_PORT, "POST", f"/api/session/{sid}/agent", {"agent": "AGI"})
+        info = req(HOME_PORT, "GET", f"/session/{sid}")
+        check("switching to AGI moves the session onto Claude Code", info["model"] == {"id": "opus", "providerID": "claude"} and info["harness"]["kind"] == "claude", (info["model"], info.get("harness")))
+        try:
+            req(HOME_PORT, "PUT", "/agent/coordinator", {"tools": {"bash": True}})
+            check("the coordinator's tools are locked", False, "accepted")
+        except urllib.error.HTTPError as e:
+            check("the coordinator's tools are locked", e.code == 400, e.code)
+        try:
+            req(HOME_PORT, "DELETE", "/agent/AGI")
+            check("built-in agents cannot be deleted", False, "accepted")
+        except urllib.error.HTTPError as e:
+            check("built-in agents cannot be deleted", e.code == 400, e.code)
+        req(HOME_PORT, "DELETE", "/agent/reader")
+        check("a made agent can be deleted", "reader" not in [x["name"] for x in req(HOME_PORT, "GET", "/agent")])
+
         # 7. another root
-        r = say(tool([["session_start", {"title": "gamma", "profile": "build", "root": "lab", "brief": "Reply with exactly: GAMMA-ON-LAB"}]]))
+        r = say(tool([["session_start", {"title": "gamma", "agent": "build", "root": "lab", "brief": "Reply with exactly: GAMMA-ON-LAB"}]]))
         out = [p for p in r["parts"] if p["type"] == "tool"][0]["state"]["output"]
         check("session_start on another root", "on root lab" in out, out)
         t = tree(HOME_PORT)

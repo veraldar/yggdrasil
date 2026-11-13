@@ -337,8 +337,9 @@ struct Config {
     models: Vec<String>,
     catalog: Value,
     max_steps: usize,
-    /// root-coord: what each session is (role prompt, tools, model, steps, fold)
-    profiles: profiles::Profiles,
+    /// root-coord: the agents — what each session is (role prompt, tools, model, harness…);
+    /// editable at runtime (PUT /agent/:name), persisted to YGG_PROFILES
+    profiles: std::sync::RwLock<profiles::Profiles>,
     tree: tree::TreeCfg,
     /// OG-ctx (10-27, restored 11-12): the AGENTS.md chain, re-read every run
     context_files: Vec<PathBuf>,
@@ -416,18 +417,26 @@ fn context_prompt(files: &[PathBuf]) -> Option<String> {
 /// A session's profile name: its stamped agent if known, `coordinator` for [MAIN], else the
 /// default (legacy sessions carry no agent).
 fn profile_name_of(st: &AppState, info: &Value) -> String {
-    if let Some(a) = info["agent"].as_str().filter(|a| st.config.profiles.get(a).is_some()) {
+    let agents = st.config.profiles.read().unwrap();
+    if let Some(a) = info["agent"].as_str().filter(|a| agents.get(a).is_some()) {
         return a.to_string();
     }
     if is_main_title(info["title"].as_str().unwrap_or_default()) {
         return "coordinator".into();
     }
-    st.config.profiles.default_agent.clone()
+    agents.default_agent.clone()
+}
+
+/// An agent by name (a copy: agents can be edited while sessions run).
+fn agent(st: &AppState, name: &str) -> Option<profiles::Profile> {
+    st.config.profiles.read().unwrap().get(name).cloned()
 }
 
 fn session_profile(st: &AppState, id: &str) -> profiles::Profile {
-    let name = st.sessions.lock().unwrap().get(id).map(|s| profile_name_of(st, &s.info)).unwrap_or_else(|| st.config.profiles.default_agent.clone());
-    st.config.profiles.get(&name).or_else(|| st.config.profiles.get("build")).cloned().expect("build profile")
+    let name = st.sessions.lock().unwrap().get(id).map(|s| s.info.clone()).map(|i| profile_name_of(st, &i));
+    let agents = st.config.profiles.read().unwrap();
+    let name = name.unwrap_or_else(|| agents.default_agent.clone());
+    agents.get(&name).or_else(|| agents.get("build")).cloned().expect("build profile")
 }
 
 /// The phone resolves sessions by title slug (pwa lib/slug.ts): lowercase, whitespace → `-`,
@@ -702,14 +711,15 @@ fn new_session(st: &AppState, title: &str, parent: Option<&str>, agent: Option<&
     let mut info = json!({ "id": id, "title": title, "time": { "created": now, "updated": now } });
     // the coordinator is the door: MAIN's profile and no one else's (a "fix this" session started
     // from MAIN once inherited it — read-only, it could fix nothing)
-    let agent = agent.filter(|a| *a != "coordinator" || is_main_title(title));
-    if let Some(a) = agent.filter(|a| st.config.profiles.get(a).is_some()) {
+    let agent_name = agent.filter(|a| *a != "coordinator" || is_main_title(title));
+    if let Some(a) = agent_name.filter(|a| crate::agent(st, a).is_some()) {
         info["agent"] = json!(a);
     } else if is_main_title(title) {
         info["agent"] = json!("coordinator"); // the door is stamped, so the phone shows it right
     }
     let pname = profile_name_of(st, &info);
-    let prof = st.config.profiles.get(&pname);
+    let prof = crate::agent(st, &pname);
+    let prof = prof.as_ref();
     let model = model
         .filter(|m| st.config.models.iter().any(|x| x == m))
         .or(prof.and_then(|p| p.model.as_deref()).filter(|m| st.config.models.iter().any(|x| x == m)))
@@ -929,7 +939,7 @@ async fn config_providers(State(st): State<AppState>) -> Json<Value> {
 
 /// `GET /agent` — `[{name, mode, description, ...}]`: the profiles (root-coord).
 async fn list_agents(State(st): State<AppState>) -> Json<Value> {
-    Json(st.config.profiles.catalog())
+    Json(st.config.profiles.read().unwrap().catalog())
 }
 
 /// `POST /api/session/:id/model` — v2 switch, `{model:{id, providerID}}` → 204.
@@ -970,19 +980,95 @@ async fn switch_model(State(st): State<AppState>, Path(id): Path<String>, Json(b
     }
 }
 
-/// `POST /api/session/:id/agent` — v2 switch, `{agent}` → 204. Must be a catalog agent.
+/// `POST /api/session/:id/agent` — v2 switch, `{agent}` → 204. The session takes the agent's
+/// defaults at once — its model and thinking level, and its harness (a different harness starts
+/// a fresh harness session) — and keeps its history; the model can still be changed afterwards.
 async fn switch_agent(State(st): State<AppState>, Path(id): Path<String>, Json(body): Json<Value>) -> Response {
     let Some(name) = body["agent"].as_str() else { return bad_request("agent required") };
     let main = st.sessions.lock().unwrap().get(&id).is_some_and(|s| is_main_title(s.info["title"].as_str().unwrap_or_default()));
     if name == "coordinator" && !main {
         return bad_request("the coordinator is MAIN's alone — pick build, lead, research, plan or a harness");
     }
-    if st.config.profiles.get(name).is_none() {
+    let Some(target) = agent(&st, name) else {
         return bad_request(&format!("unknown agent {name}"));
-    }
-    match with_session(&st, &id, |s| s.info["agent"] = json!(name)) {
-        Some(()) => StatusCode::NO_CONTENT.into_response(),
+    };
+    let stamp = agent_model_stamp(&st, &target);
+    match with_session(&st, &id, |s| {
+        s.info["agent"] = json!(name);
+        s.info["model"] = stamp.clone();
+        match &target.harness {
+            Some(h) if s.info["harness"]["kind"].as_str() == Some(h.as_str()) => {}
+            Some(h) => s.info["harness"] = json!({ "kind": h }),
+            None => {
+                if let Some(o) = s.info.as_object_mut() {
+                    o.remove("harness");
+                }
+            }
+        }
+        s.info.clone()
+    }) {
+        Some(info) => {
+            publish(&st, "session.updated", json!({ "info": info }));
+            StatusCode::NO_CONTENT.into_response()
+        }
         None => not_found(&id),
+    }
+}
+
+/// The `info.model` an agent gives a session: its model (a root agent's must be one this
+/// upstream serves) and thinking level, else the brain's defaults; a harness agent's model is
+/// the harness's own (none = its default).
+fn agent_model_stamp(st: &AppState, a: &profiles::Profile) -> Value {
+    match &a.harness {
+        Some(h) => json!({ "id": a.model.clone().unwrap_or_else(|| "default".into()), "providerID": h }),
+        None => {
+            let model = a.model.clone().filter(|m| st.config.models.contains(m)).unwrap_or_else(|| st.config.model.clone());
+            let variant = a.variant.clone().unwrap_or_else(|| st.config.default_variant.clone());
+            json!({ "id": model, "providerID": "yggdrasil", "variant": variant })
+        }
+    }
+}
+
+/// `GET /agent/:name` — everything the agent editor shows (+ what it may change).
+async fn get_agent(State(st): State<AppState>, Path(name): Path<String>) -> Response {
+    let detail = st.config.profiles.read().unwrap().detail(&name);
+    match detail {
+        Some(mut d) => {
+            // the models a root agent can pick from: the ones this upstream serves
+            d["models"] = json!(st.config.models);
+            Json(d).into_response()
+        }
+        None => (StatusCode::NOT_FOUND, Json(json!({ "error": format!("no agent {name}") }))).into_response(),
+    }
+}
+
+/// `PUT /agent/:name` — create or edit (partial body); answers the new detail.
+async fn put_agent(State(st): State<AppState>, Path(name): Path<String>, Json(body): Json<Value>) -> Response {
+    if let Some(m) = body["model"].as_str().filter(|m| !m.is_empty()) {
+        let root = body["harness"].as_str().map_or_else(|| agent(&st, &name).is_none_or(|a| a.harness.is_none()), |h| h == "root");
+        if root && !st.config.models.iter().any(|x| x == m) {
+            return bad_request(&format!("model {m} is not served here ({})", st.config.models.join(", ")));
+        }
+    }
+    let res = st.config.profiles.write().unwrap().upsert(&name, &body);
+    match res {
+        Ok(()) => {
+            publish(&st, "agent.updated", json!({ "name": name }));
+            get_agent(State(st), Path(name)).await
+        }
+        Err(e) => bad_request(&e),
+    }
+}
+
+/// `DELETE /agent/:name` — only agents you made.
+async fn delete_agent(State(st): State<AppState>, Path(name): Path<String>) -> Response {
+    let res = st.config.profiles.write().unwrap().remove(&name);
+    match res {
+        Ok(()) => {
+            publish(&st, "agent.updated", json!({ "name": name, "deleted": true }));
+            Json(true).into_response()
+        }
+        Err(e) => bad_request(&e),
     }
 }
 
@@ -1751,9 +1837,10 @@ async fn harness_loop(st: &AppState, id: &str, history: Vec<Value>, tx: &mpsc::S
         let cwd = info["cwd"].as_str().map(PathBuf::from).filter(|p| p.is_dir()).unwrap_or_else(|| st.tools.project_dir.clone());
         (model, info["harness"]["id"].as_str().map(String::from), cwd)
     };
+    let system = Some(session_profile(st, id).prompt).filter(|p| !p.trim().is_empty());
     let _slot = st.harness_slots.acquire().await.map_err(|e| e.to_string())?;
     let (etx, mut erx) = mpsc::unbounded_channel::<harness::Ev>();
-    let fut = harness::run(kind, model.as_deref(), resume.as_deref(), &cwd, &prompt, move |ev| {
+    let fut = harness::run(kind, model.as_deref(), resume.as_deref(), &cwd, &prompt, system.as_deref(), move |ev| {
         let _ = etx.send(ev.clone());
     });
     tokio::pin!(fut);
@@ -1841,7 +1928,7 @@ async fn agent_loop(
         _ => prof.prompt.clone(),
     };
     if !role.trim().is_empty() {
-        convo.insert(at, json!({ "role": "system", "content": format!("[profile: {}]\n{}", prof.name, role) }));
+        convo.insert(at, json!({ "role": "system", "content": format!("[agent: {}]\n{}", prof.name, role) }));
     }
     let max = prof.steps.unwrap_or(st.config.max_steps).min(st.config.max_steps).max(1);
     for _ in 0..max {
@@ -2153,7 +2240,7 @@ fn session_upstream(st: &AppState, id: &str) -> (String, String, Option<Value>) 
             .cloned()
             .collect();
         if prof.sessions {
-            list.extend(tree::schemas(&st.config.profiles));
+            list.extend(tree::schemas(&st.config.profiles.read().unwrap()));
         }
         Value::Array(list)
     });
@@ -2583,7 +2670,7 @@ async fn main() {
         catalog,
         model,
         models,
-        profiles,
+        profiles: std::sync::RwLock::new(profiles),
         tree: tree_cfg,
         context_files: Vec::new(),
         peers: peers::Peers::load(),
@@ -2624,7 +2711,7 @@ async fn main() {
     let interrupted = close_interrupted(&mut sessions, &data_dir);
     // root-coord migration: MAIN carries its profile explicitly (the phone shows the registry
     // default for unpinned sessions, and that default is `build` again)
-    let door_model = config.profiles.get("coordinator").and_then(|p| p.model.clone()).filter(|m| config.models.contains(m));
+    let door_model = config.profiles.read().unwrap().get("coordinator").and_then(|p| p.model.clone()).filter(|m| config.models.contains(m));
     for (id, s) in sessions.iter_mut() {
         if is_main_title(s.info["title"].as_str().unwrap_or_default()) && s.info["agent"].is_null() {
             s.info["agent"] = json!("coordinator");
@@ -2664,6 +2751,7 @@ async fn main() {
         .route("/api/session/{id}/agent", post(switch_agent))
         .route("/config/providers", get(config_providers))
         .route("/agent", get(list_agents))
+        .route("/agent/{name}", get(get_agent).put(put_agent).delete(delete_agent))
         .route("/event", get(events))
         .route("/tree", get(get_tree))
         .route("/tree/report", post(tree_report))
