@@ -39,8 +39,8 @@
   },
   {
    "name": "site is green",
-   "cmd": "grep -rhiE 'green|#[0-3][0-9a-f][8-9a-f][0-9a-f]{3}|#2e7d32|#1b5e20|#4caf50|#2ecc71|#27ae60|#16a34a|#22c55e|rgb\\(' recipes-site --include=*.css --include=*.html | head -5",
-   "expect": "."
+   "cmd": "python3 -c \"import re,glob; t=' '.join(open(f).read() for f in glob.glob('recipes-site/**/*.css',recursive=True)+glob.glob('recipes-site/**/*.html',recursive=True)); hs=[h for h in re.findall(r'#([0-9a-fA-F]{6})', t) if (lambda r,g,b: g>r+24 and g>b+16)(*(int(h[i:i+2],16) for i in (0,2,4)))]; print(('GREEN' if hs or re.search(r'\\bgreen\\b',t,re.I) else 'NOT-GREEN'), hs[:3])\"",
+   "expect": "^GREEN"
   },
   {
    "name": "follow-ups reused sessions (<=3 under main)",
