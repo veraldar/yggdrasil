@@ -64,6 +64,7 @@ put("YGG_MODELS", "glm-5.3-flash,glm-5.3,glm-5.2")
 put("YGG_ROOT_NAME", "omarchy")
 put("YGG_ROOT_NOTE", "the main computer (omarchy): 16 cpu / 30 GB, holds ~/Work and every project")
 put("YGG_MAX_INFLIGHT", "5")
+put("YGG_VISION_MODELS", "glm-5.3-flash")  # the one z.ai model here that reads images (probed 11-13)
 open(p, "w").write(s)
 PY
   install -m600 "$STAGED_PROFILES" "$PROFILES"
