@@ -181,6 +181,8 @@ def wer_prefix(ref, hyp):
         return (wer(ref, hyp), 0)
     best = (1e9, 0)
     lo, hi = max(1, int(len(h) * 0.6)), min(len(r), int(len(h) * 1.5) + 3)
+    if lo > hi:  # far more was heard than the reference holds: score it whole
+        return (wer(ref, hyp), len(r))
     for k in range(lo, hi + 1):
         e = _edits(r[:k], h) / k
         if e < best[0]:

@@ -127,7 +127,7 @@ def up(name, roots, port=4170, brain_env=None, peers_net=True, auth="tailnet"):
     vpy = os.path.join(vdir, ".venv", "bin", "python")
     if not os.path.isfile(vpy):
         subprocess.run(["uv", "sync"], cwd=vdir, check=True)
-    out = {"name": name, "livekit": {"container": lk_name, "port": lk_port}, "roots": [],
+    out = {"name": name, "livekit": {"container": lk_name, "port": lk_port, "key": key, "secret": secret}, "roots": [],
            "speech": {"upstream": upstream, "gate": spe, "box_stt": stt, "box_tts_en": os.environ.get("TTS_MODEL_EN", "mlx-community/Kokoro-82M-bf16")}}
     sims = sims_of(name, roots)
     token = secrets.token_hex(12)

@@ -461,6 +461,14 @@ class Persona:
                 out = os.path.join(self.audio, f"{k}-reply{i + 1}.wav")
                 speech.trim(reply_path, out, max(0, (a - pr["t0"]) / 1000), (b - pr["t0"]) / 1000 if b else None)
                 spans = speech.loud_spans(out)
+                if u["kind"] == "barge" and spans and spans[0][0] < 0.3:
+                    # the old reply still playing when the barge-in ended is not this one's answer:
+                    # its run (until the first second of silence) is skipped
+                    k = 1
+                    while k < len(spans) and spans[k][0] - spans[k - 1][1] < 1.0:
+                        k += 1
+                    u["old_reply_tail_s"] = round(spans[k - 1][1], 1)
+                    spans = spans[k:]
                 u["reply_wav"] = os.path.relpath(out, os.path.dirname(self.audio))
                 u["reply_audio_s"] = round(sum(e - s0 for s0, e in spans), 1)
                 if rw.get("how") == "went silent":
