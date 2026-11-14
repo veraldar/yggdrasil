@@ -162,7 +162,10 @@ def up(name, roots, port=4170, brain_env=None, peers_net=True, auth="tailnet"):
         unit(f"vsim-app-{name}-{r['name']}", cmd, adir, app_env, os.path.join(st_dir, f"app-{r['name']}.log"))
         ag_env = {"OPENCODE_URL": f"http://127.0.0.1:{bport}", "AGENT_NAME": agent, "LIVEKIT_URL": f"ws://127.0.0.1:{lk_port}",
                   "LIVEKIT_API_KEY": key, "LIVEKIT_API_SECRET": secret, "SPEACHES_URL": spe, "STT_MODEL": stt,
-                  "AGENT_TTS": "off", "AGENT_HTTP_PORT": str(hport), "AGENT_LOAD_THRESHOLD": "0.99", "AGENT_STREAM_TTS": "1",
+                  "AGENT_TTS": "off", "AGENT_HTTP_PORT": str(hport),
+                  # one room per worker here: a loaded box (CPU TTS/STT, Chromium, other builds) must never
+                  # mark it 'at full capacity' — that left a room agent-less in the full run
+                  "AGENT_LOAD_THRESHOLD": "1.5", "AGENT_STREAM_TTS": "1",
                   "VOICE_MODEL": "yggdrasil/" + os.environ.get("SIM_MODEL", "glm-5.3-flash"), "PATH": os.environ.get("PATH", "")}
         alog = os.path.join(st_dir, f"agent-{r['name']}.log")
         unit(f"vsim-agent-{name}-{r['name']}", [vpy, "agent.py", "start"], vdir, ag_env, alog)

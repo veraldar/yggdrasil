@@ -17,7 +17,7 @@ Transport-agnostic: the phone only knows the target app URL (whatever carries it
 today, the trunk tomorrow); the brain URL is a side channel for checks and transcripts.
 Exit 0 = PASS, 1 = FAIL, 3 = rig error (never a pass).
 """
-import argparse, json, os, re, signal, subprocess, sys, threading, time, traceback
+import argparse, calendar, json, os, re, signal, subprocess, sys, threading, time, traceback
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -106,6 +106,7 @@ class Line:
         self.audio_dir = audio_dir
         self.pulled_t = 0  # wall ms the reply bus was last pulled at
         self.opened = False
+        self.incidents = []  # voice-path trouble before any turn (no agent, …)
 
     def pair(self, admin_token=None):
         """devices mode: the box console mints a one-time code (POST /api/pair/code — loopback or the
@@ -128,9 +129,21 @@ class Line:
             self.paired = True
         url = self.root["app"].rstrip("/") + (f"/session/main?id={self.main_id}" if self.main_id else "/session/main")
         self.phone.call("open", tab=self.tab, url=url, timeout=60)
-        t_tap = self.phone.call("since", tab=self.tab, t=0)["now"]
-        r = self.phone.call("handsfree", tab=self.tab, timeout=90, settle=1500)
-        self.wait_agent(t_tap)
+        for attempt in range(3):
+            t_tap = self.phone.call("since", tab=self.tab, t=0)["now"]
+            r = self.phone.call("handsfree", tab=self.tab, timeout=90, settle=1500)
+            if self.wait_agent(t_tap):
+                break
+            # no agent in the room: what a person does — hands-free off, on again (a fresh dispatch)
+            log(f"[{self.persona['id']}→{self.tab}] no voice agent in the room — hands-free off and on again")
+            self.incidents.append(f"no voice agent after hands-free on (attempt {attempt + 1})")
+            try:
+                self.phone.call("tap", tab=self.tab, testid="free-exit")
+            except Exception:  # noqa: BLE001
+                self.phone.call("open", tab=self.tab, url=url, timeout=60)
+            time.sleep(3)
+        else:
+            raise RuntimeError(f"no voice agent ever joined the room on {self.tab}")
         self.opened = True
         log(f"[{self.persona['id']}→{self.tab}] hands-free on ({r['ms']} ms)")
 
@@ -146,13 +159,13 @@ class Line:
                     if pat in line:
                         try:
                             ts = json.loads(line).get("timestamp", "")
-                            t = time.mktime(time.strptime(ts[:19], "%Y-%m-%dT%H:%M:%S")) - time.timezone
+                            t = calendar.timegm(time.strptime(ts[:19], "%Y-%m-%dT%H:%M:%S"))
                         except Exception:  # noqa: BLE001
                             t = time.time()
                         if t * 1000 >= since_ms - 2000:
                             return True
                 time.sleep(0.5)
-            log(f"[{self.tab}] agent never armed for room {self.main_id} — going on anyway")
+            log(f"[{self.tab}] agent never armed for room {self.main_id}")
             return False
         t0 = self.phone.call("since", tab=self.tab, t=0)["now"]
         time.sleep(12)
@@ -270,7 +283,8 @@ class Persona:
         self.n += 1
         k = f"{self.id}-t{self.n:02d}"
         intended = (act.get("text") or "").strip()
-        rec = {"n": self.n, "persona": self.id, "root": to, "intended": intended, "utterances": [], "incidents": []}
+        rec = {"n": self.n, "persona": self.id, "root": to, "intended": intended, "utterances": [], "incidents": ln.incidents}
+        ln.incidents = []
         # every wav is synthesized BEFORE the mic opens: a keyword must come out on time
         say_wav = os.path.join(self.audio, f"{k}-say.wav")
         spoken = self.mouth(intended, say_wav, act.get("pauses"))
@@ -513,7 +527,7 @@ class Persona:
                 try:
                     d = json.loads(line)
                     ts = d.get("timestamp", "")
-                    t = (time.mktime(time.strptime(ts[:19], "%Y-%m-%dT%H:%M:%S")) - time.timezone) * 1000 + int(ts[20:23] or 0)
+                    t = (calendar.timegm(time.strptime(ts[:19], "%Y-%m-%dT%H:%M:%S"))) * 1000 + int(ts[20:23] or 0)
                 except Exception:  # noqa: BLE001
                     continue
                 if u["t0"] - 500 <= t <= u["t1"] + 8000:
