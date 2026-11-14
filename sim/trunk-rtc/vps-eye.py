@@ -5,8 +5,9 @@ A VPS holds the access point's TLS key, so it can read everything the ap decrypt
 where a curious (or hostile) VPS operator would: between sni-443.py and the ap, terminating TLS
 with the ap's own certificate and key (phones and the home bridge's pin accept it — it IS the
 VPS's key), re-encrypting to the ap, and writing every decrypted byte to LOG (JSON lines:
-t, conn, who = phone | bridge, dir = c2s | s2c, b64). The spec reads it: after pairing, no app
-data may appear in it.
+t, conn, who = phone | bridge | root, src = the client's address (from the PROXY line), dir =
+c2s | s2c, b64). The spec reads it: after pairing, no app data may appear in it; a joined root's
+link (`GET /rootlink`, sim/trunk-e2e.sh) is `root`.
 
 MITM_FILE present = an ACTIVE attack: on phone connections, every DTLS fingerprint the VPS
 carries (a=fingerprint:sha-256 …, in the /offer answer) is swapped for its own — the phone
@@ -43,15 +44,15 @@ def main(listen, ap, cert, key, logpath, mitm_file):
     cctx.set_alpn_protocols(["http/1.1"])
     seq = [0]
 
-    def write(cid, who, d, b):
-        log.write(json.dumps({"t": int(time.time() * 1000), "conn": cid, "who": who, "dir": d,
+    def write(cid, who, d, b, src=""):
+        log.write(json.dumps({"t": int(time.time() * 1000), "conn": cid, "who": who, "src": src, "dir": d,
                               "b64": base64.b64encode(b).decode()}) + "\n")
         log.flush()
 
-    async def pipe(r, w, cid, who, d, rewrite, first=b""):
+    async def pipe(r, w, cid, who, src, d, rewrite, first=b""):
         carry = b""
         if first:
-            write(cid, who, d, first)
+            write(cid, who, d, first, src)
             w.write(first)
         while True:
             try:
@@ -64,7 +65,7 @@ def main(listen, ap, cert, key, logpath, mitm_file):
                 break
             if not b:
                 break
-            write(cid, who, d, b)
+            write(cid, who, d, b, src)
             if rewrite and os.path.exists(mitm_file):
                 b = FP.sub(lambda m: m.group(1) + FAKE, carry + b)
                 carry, b = b[-120:], b[:-120]  # a fingerprint may straddle two reads
@@ -95,9 +96,13 @@ def main(listen, ap, cert, key, logpath, mitm_file):
             return
         seq[0] += 1
         cid = seq[0]
-        # the first request line tells the home bridge's channel (GET /ap) from a phone
-        who = "bridge" if first.startswith(b"GET /ap ") else "phone"
-        await asyncio.gather(pipe(r, uw, cid, who, "c2s", False, first), pipe(ur, w, cid, who, "s2c", who == "phone"))
+        # the first request line tells the home bridge's channel (GET /ap) and a joined root's link
+        # (GET /rootlink) from a phone; the PROXY line names the client's real address
+        who = "bridge" if first.startswith(b"GET /ap ") else "root" if first.startswith(b"GET /rootlink") else "phone"
+        parts = line.split()
+        src = parts[2].decode() if len(parts) >= 6 and parts[0] == b"PROXY" else ""
+        await asyncio.gather(pipe(r, uw, cid, who, src, "c2s", False, first),
+                             pipe(ur, w, cid, who, src, "s2c", who == "phone"))
 
     async def run():
         srv = await asyncio.start_server(one, *parse(listen))

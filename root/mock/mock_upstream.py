@@ -35,6 +35,11 @@ Slice 7 anthropic dialect: POST .../v1/messages. The request is validated the wa
   zai-style balance rejection.
 Real-upstream dry run: "use the bash tool to run `CMD`" -> one bash call, then
   "The command printed: <output>".
+Spoken delegation (sim/trunk-e2e.sh — words from real STT, so no "tool:" script): a turn that says
+  "start a session on <root> and <brief>" to a session that has session_start -> one
+  session_start {title "on <root>", root, brief, agent lead when the brief delegates again, else
+  build}, then "On its way: I started a session on <root>, and it will report back when it is
+  done." — what a compliant coordinator does (plain speech: the reply is spoken).
 PROVIDER-WAVE (10-28), both dialects, by key (Bearer or x-api-key): "mock-1310" -> 429 with z.ai's
   exact weekly/monthly-limit body, its reset = now + MOCK_RESET_S (default 3600) printed in UTC+8
   like z.ai; "mock-401" -> 401 authentication_error; "mock-429" -> the 1113 balance body. Every
@@ -68,6 +73,28 @@ def key_error(key):
     return None
 NL_TOOL = re.compile(r"use the bash tool to run `([^`]+)`", re.I)
 TOOL_ID = re.compile(r"^[a-zA-Z0-9_-]+$")
+# a spoken delegation (sim/trunk-e2e.sh: the words reach MAIN through real STT, no "tool:" script)
+NL_DELEGATE = re.compile(r"\bstart (?:a |an |one )?(?:new )?session on (?:the )?([a-z][a-z0-9-]*)\b[\s,.;:]*(?:and |to |that )?(.*)",
+                         re.I | re.S)
+
+
+def delegate_plan(msgs, ui, m):
+    """NL delegation: "start a session on <root> and <brief>" → session_start {root, brief} (agent
+    lead when the brief delegates again, else build), then the coordinator's one line."""
+    root = m.group(1).lower()
+    # the brief is the rest of what was said — not the brain's framing after it ([voice turn] …)
+    rest = re.split(r"\s*\[(?:voice turn|roots|tree|inbox)\b", m.group(2))[0]
+    brief = re.sub(r"\s+", " ", rest).strip().rstrip(".!?,") or "say done"
+    results = [x for x in msgs[ui + 1:] if x["role"] == "tool"]
+    if not results:
+        args = {"title": f"on {root}", "agent": "lead" if NL_DELEGATE.search(brief) else "build",
+                "brief": brief, "root": root}
+        return {"kind": "tools", "text": "", "calls": [("call_nl_delegate", "session_start", json.dumps(args))]}
+    r = results[-1]["content"]
+    if r.startswith("STARTED"):
+        return {"kind": "text", "text": f"On its way: I started a session on {root}, and it will report back when it is done.",
+                "chunk": 8}
+    return {"kind": "text", "text": f"Could not start it on {root}: {r.strip()[:200]}", "chunk": 8}
 
 
 def plan(body):
@@ -104,6 +131,8 @@ def plan(body):
         if core.startswith("tool:") or re.search(r"reply with exactly:", core, re.I):
             msgs[users[-1]] = dict(msgs[users[-1]], content=core)
             scripted = True
+        elif NL_DELEGATE.search(core) and "session_start" in json.dumps(body.get("tools") or []):
+            return delegate_plan(msgs, users[-1], NL_DELEGATE.search(core))
     # TIME-AWARENESS sim, cache-law edition: the header rides INSIDE the
     # LAST user turn (users[-1]; static system preamble sits at position 0). Same gap
     # logic as before: >4h → acknowledge + refresh; ≤60m → no preamble.
