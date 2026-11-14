@@ -665,13 +665,6 @@ async def entrypoint(ctx: JobContext) -> None:
             deck["stopped"] = time.monotonic()
         return "ok"
 
-    @session.on("user_state_changed")
-    def _on_user_state(ev) -> None:
-        # a segment that STARTS over the reply is speech over the reply until its final, even when
-        # the final lands after the reply ended (the echo held the segment open to its end)
-        if ev.new_state == "speaking":
-            deck["seg_over"] = bool(mode_state.get("speaking")) or time.monotonic() - deck["stopped"] < ECHO_TAIL_S
-
     ctx.room.local_participant.register_rpc_method("deck_state", _deck_state_rpc)
     ctx.room.local_participant.register_rpc_method("ptt_begin", _ptt_begin_rpc)
     ctx.room.local_participant.register_rpc_method("ptt_abort", _ptt_abort_rpc)
@@ -715,6 +708,13 @@ async def entrypoint(ctx: JobContext) -> None:
                 pass
 
         asyncio.ensure_future(_send())
+
+    @session.on("user_state_changed")
+    def _on_user_state(ev) -> None:
+        # a segment that STARTS over the reply is speech over the reply until its final, even when
+        # the final lands after the reply ended (the echo held the segment open to its end)
+        if ev.new_state == "speaking":
+            deck["seg_over"] = bool(mode_state.get("speaking")) or time.monotonic() - deck["stopped"] < ECHO_TAIL_S
 
     @session.on("user_input_transcribed")
     def _on_transcript(ev) -> None:
