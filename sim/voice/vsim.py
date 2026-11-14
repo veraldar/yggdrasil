@@ -17,7 +17,7 @@ Transport-agnostic: the phone only knows the target app URL (whatever carries it
 today, the trunk tomorrow); the brain URL is a side channel for checks and transcripts.
 Exit 0 = PASS, 1 = FAIL, 3 = rig error (never a pass).
 """
-import argparse, json, os, re, shutil, statistics, subprocess, sys, threading, time, traceback
+import argparse, json, os, re, signal, subprocess, sys, threading, time, traceback
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -107,7 +107,25 @@ class Line:
         self.pulled_t = 0  # wall ms the reply bus was last pulled at
         self.opened = False
 
+    def pair(self, admin_token=None):
+        """devices mode: the box console mints a one-time code (POST /api/pair/code — loopback or the
+        admin token), the phone 'scans' the QR (opens its URL: the app behind the access point that
+        BIFROST_PUBLIC_URL names) and redeems it. From then on the phone talks to that origin."""
+        import urllib.request
+        hdr = {"content-type": "application/json"}
+        if admin_token:
+            hdr["authorization"] = f"Bearer {admin_token}"
+        r = urllib.request.Request(self.root["app"].rstrip("/") + "/api/pair/code", data=json.dumps({"name": f"vsim-{self.persona['id']}"}).encode(), headers=hdr)
+        qr = json.loads(urllib.request.urlopen(r, timeout=20).read())["url"]
+        res = self.phone.call("pair", tab=self.tab, url=qr, timeout=60)
+        self.root = dict(self.root, app=qr.split("/pair#")[0])
+        log(f"[{self.persona['id']}→{self.tab}] paired through {self.root['app']} → landed {res['landed']}")
+        return res
+
     def open(self):
+        if self.root.get("pair") and not getattr(self, "paired", False):
+            self.pair(self.root.get("admin_token"))
+            self.paired = True
         url = self.root["app"].rstrip("/") + (f"/session/main?id={self.main_id}" if self.main_id else "/session/main")
         self.phone.call("open", tab=self.tab, url=url, timeout=60)
         t_tap = self.phone.call("since", tab=self.tab, t=0)["now"]
@@ -230,7 +248,12 @@ class Persona:
         similar-sounding one reaches the mic) and 'over' at the end"""
         spoken = intended.strip()
         for mh in self.sc.get("mishear", []) + self.spec.get("mishear", []):
-            spoken = re.sub(rf"\b{re.escape(mh['meant'])}\b", mh["say"], spoken, flags=re.I)
+            used = mh.setdefault("_used", 0)
+            if mh.get("times") is not None and used >= mh["times"]:
+                continue  # the recognizer only got it wrong the first N times
+            if re.search(rf"\b{re.escape(mh['meant'])}\b", spoken, re.I):
+                spoken = re.sub(rf"\b{re.escape(mh['meant'])}\b", mh["say"], spoken, flags=re.I)
+                mh["_used"] = used + 1
         if not re.search(r"\bover(\s+and\s+out)?[\s.!?]*$", spoken, re.I) and not re.match(COMMAND_WORDS, spoken, re.I):
             spoken = spoken.rstrip(" .!?,") + ". Over."
         words = len(spoken.split())
@@ -261,8 +284,9 @@ class Persona:
                 speech.speak(dtext, w, voice=self.voice["voice"], speed=self.voice.get("speed", 1.0), lead_s=0.1, tail_s=0.2)
             during.append({"at_s": float(d.get("at_s", 3)), "text": dtext, "wav": w,
                            "barge": bool(re.search(r"\bover[\s.!?]*$", dtext, re.I))})
-        # a polite person lets a reply that is still playing end first (unless they barge in)
-        self.wait_quiet(ln, 120)
+        # a polite person lets a reply that is still playing end first (unless they barge in) —
+        # and hears it: anything spoken since the last pull is an unprompted report
+        self.drain(ln, "while the person was about to speak")
         before = {m["id"] for m in ln.messages()}
         log(f"[{self.id}→{to}] SAYS: {spoken}")
         r = ln.phone.call("say", tab=ln.tab, wav=say_wav, timeout=300)
@@ -485,6 +509,40 @@ class Persona:
                     out.append(d["message"][:140])
         return out
 
+    def drain(self, ln, why="between turns"):
+        """whatever the phone said while the person was thinking (an unprompted report spoken
+        between turns) is heard too: pull it, transcribe it, remember it"""
+        if not ln.opened:
+            return None
+        self.wait_quiet(ln, 120)
+        raw = os.path.join(self.audio, f"{self.id}-d{self.n:02d}-{int(time.time())}.wav")
+        pr = ln.phone.call("pull", tab=ln.tab, bus="reply", path=raw)
+        ln.phone.call("pull", tab=ln.tab, bus="mic", path=None)
+        if not pr.get("path"):
+            return None
+        spans = speech.loud_spans(raw)
+        if not spans or sum(e - a for a, e in spans) < 0.8:
+            os.remove(raw)
+            return None
+        self.n += 1
+        k = f"{self.id}-r{self.n:02d}"
+        out = os.path.join(self.audio, f"{k}-report.wav")
+        speech.trim(raw, out, max(0, spans[0][0] - 0.3), spans[-1][1] + 0.5)
+        os.remove(raw)
+        heard = speech.stt(out)
+        t_on = pr["t0"] + spans[0][0] * 1000
+        s = ln.since(int(t_on) - 30000)
+        tts_ref = " ".join(x["text"] for x in s["tts"] if x["t"] <= t_on + 2000)
+        self.turns.append({"n": self.n, "persona": self.id, "root": ln.tab, "kind": "report", "incidents": [], "reply_wait": {"how": why},
+                           "utterances": [{"kind": "report", "spoken": "", "intended": "", "persona_heard": heard, "tts_text": tts_ref,
+                                           "reply_wav": os.path.relpath(out, os.path.dirname(self.audio)), "t0": t_on, "t1": t_on,
+                                           "reply_wer": speech.wer(tts_ref, heard) if tts_ref and heard else None,
+                                           "reply_wer_heard": speech.wer_prefix(tts_ref, heard)[0] if tts_ref and heard else None,
+                                           "reply_audio_s": round(sum(e - a for a, e in spans), 1)}]})
+        self.heard.append({"t": t_on / 1000, "who": "main", "root": ln.tab, "text": heard})
+        log(f"[{self.id}←{ln.tab}] UNPROMPTED ({why}), heard: {heard[:200]}")
+        return heard
+
     # ── waiting for main to come back by itself ─────────────────────────────
     def wait(self, secs):
         ln = self.lines[self.home] if self.lines[self.home].opened else next((x for x in self.lines.values() if x.opened), None)
@@ -538,7 +596,11 @@ class Persona:
                 got.append(heard)
                 log(f"[{self.id}←{name}] UNPROMPTED, heard: {heard[:200]}")
         waited = int(secs - max(0, end - time.time()))
-        return f" You just waited {waited}s" + (" — main came back to you (see above)." if got else " — main said nothing.")
+        self.silent_s = 0 if got else getattr(self, "silent_s", 0) + waited
+        note = f" You just waited {waited}s" + (" — main came back to you (see above)." if got else " — main said nothing.")
+        if self.silent_s >= 300:
+            note += f" That makes {self.silent_s // 60} minutes with no word from main: a real person would ask main about it now."
+        return note
 
     # ── the loop ────────────────────────────────────────────────────────────
     def run(self, max_min, max_turns):
@@ -554,6 +616,9 @@ class Persona:
                 self.events.append({"t": el, "kind": "turns"})
                 log(f"[{self.id}] turn budget spent")
                 break
+            for ln in self.lines.values():
+                if self.drain(ln) and not waited_note:
+                    waited_note = " Main said something by itself (see above)."
             act = self.decide(waited_note)
             waited_note = ""
             a = act.get("action")
@@ -601,16 +666,42 @@ def utts_of(personas, kinds=("turn", "barge")):
     return [u for p in personas for t in p.turns for u in t["utterances"] if u["kind"] in kinds]
 
 
-def voice_checks(sc, personas):
+def main_spoken(personas):
+    """every MAIN message the person could have heard: was it read aloud by the app? (a TTS call
+    whose text opens like the message — the e2e suite's `spoken()` rule)"""
+    out = []
+    for p in personas:
+        for name, ln in p.lines.items():
+            if not (ln.opened and ln.brain):
+                continue
+            tts = [hsim_norm(x["text"]) for x in ln.since(0)["tts"] if x.get("status") in (200, None)]
+            for m in ln.brain.visible(ln.main_id):
+                if m["role"] != "assistant" or (m["created"] or 0) < p.started * 1000 - 5000:
+                    continue
+                head = " ".join(hsim_norm(m["text"]).split()[:4])
+                out.append({"persona": p.id, "root": name, "auto": m["auto"], "text": m["text"][:200],
+                            "spoken": bool(head) and any(head in t for t in tts)})
+    return out
+
+
+def hsim_norm(s):
+    s = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", s or "")
+    return re.sub(r"[^a-z0-9]+", " ", re.sub(r"(\*\*|__|`|#)", "", s.lower())).strip()
+
+
+def voice_checks(sc, personas, acct=None):
     res = []
+    acct = acct or []
     spoken = utts_of(personas)
     cmds = utts_of(personas, ("command",))
 
     def add(name, ok, detail):
         res.append({"name": name, "ok": bool(ok), "detail": detail})
 
-    for c in sc.get("voice_checks", []):
+    for c in sc.get("voice_checks", []) + [{"kind": "proactive_spoken", "advisory": True,
+                                             "name": "MAIN's unprompted reports were read aloud (hands-free: the person can't see the screen)"}]:
         k, name = c["kind"], c.get("name", c["kind"])
+        n0 = len(res)
         if k == "all_turns_landed":
             miss = [u["spoken"][:60] for u in spoken if not u.get("box_heard")]
             add(name, not miss, f"{len(spoken) - len(miss)}/{len(spoken)} landed" + (f"; lost: {miss}" if miss else ""))
@@ -696,6 +787,15 @@ def voice_checks(sc, personas):
             heard = " ".join(u.get("box_heard") or "" for u in spoken)
             m = re.search(c["regex"], heard, re.I | re.S)
             add(name, m, m.group(0)[:120] if m else "the box never heard it")
+        elif k == "proactive_spoken":
+            auto = [x for x in acct if x["auto"]]
+            if not auto:
+                continue
+            silent = [x for x in auto if not x["spoken"]]
+            add(name, not silent, f"{len(auto) - len(silent)}/{len(auto)} read aloud" +
+                (f"; silent: {[x['text'][:90] for x in silent[:3]]}" if silent else ""))
+        if c.get("advisory") and len(res) > n0:
+            res[-1]["advisory"] = True
     return res
 
 
@@ -748,6 +848,7 @@ def write_report(outdir, sc, report, personas, checks, judgement, tree_lines, co
         f.write(f"| end of speech → first reply audio | p50 {v['first_audio_p50']}s · p90 {v['first_audio_p90']}s · max {v['first_audio_max']}s |\n")
         f.write(f"| end of speech → end of reply | p50 {v['reply_end_p50']}s · max {v['reply_end_max']}s |\n")
         f.write(f"| breakdown p50 | STT+commit {v['stt_commit_p50']}s · MAIN {v['main_p50']}s · TTS to first sound {v['tts_first_p50']}s |\n")
+        f.write(f"| MAIN's messages read aloud | {v['main_msgs_spoken']}/{v['main_msgs']} (unprompted reports left silent: {v['main_auto_silent']}) |\n")
         f.write(f"| engines | {', '.join(f'{k}: {x}' for k, x in engines.items())} |\n\n")
         f.write("## Personas\n\n")
         for p in personas:
@@ -792,7 +893,7 @@ def write_report(outdir, sc, report, personas, checks, judgement, tree_lines, co
                                   for h in sorted(p.heard, key=lambda h: h["t"])) + "\n\n")
         f.write("## Conversation as the box holds it (MAIN, text)\n\n" + convo + "\n\n")
         f.write("## Session tree\n\n```\n" + "\n".join(tree_lines) + "\n```\n\n## Checks\n\n")
-        f.write("\n".join(f"- {'✅' if c['ok'] else '❌'} {c['name']}: {esc(c['detail'], 300)}" for c in checks) + "\n")
+        f.write("\n".join(f"- {'✅' if c['ok'] else ('⚠️' if c.get('advisory') else '❌')} {c['name']}{' (advisory)' if c.get('advisory') else ''}: {esc(c['detail'], 300)}" for c in checks) + "\n")
 
 
 # ── the run ───────────────────────────────────────────────────────────────────
@@ -830,6 +931,9 @@ def main():
     ap.add_argument("--keep", action="store_true", help="leave the own stack running")
     ap.add_argument("--headed", action="store_true")
     ap.add_argument("--out", default=os.path.expanduser("~/Work/bifrost/artifacts/voice-sim"))
+    ap.add_argument("--auth", choices=["tailnet", "devices"], default="tailnet", help="own stack: the app's auth mode")
+    ap.add_argument("--pair", action="store_true", help="pair each phone first (devices mode: QR code → /pair)")
+    ap.add_argument("--admin-token", default=os.environ.get("VSIM_ADMIN_TOKEN"), help="mints pairing codes when not on the box's loopback")
     a = ap.parse_args()
     sc = load_scenario(a.scenario)
     name = a.name or sc["id"]
@@ -838,6 +942,8 @@ def main():
     os.makedirs(outdir, exist_ok=True)
     librarian = None
     stack = None
+    phones = {}
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(130))  # a stop still tears the stack down
     try:
         if a.target:
             tg, br = kv(a.target), kv(a.brain)
@@ -861,7 +967,7 @@ def main():
                     largs += ["--seed", os.path.join(rdir, "librarian-seed.json")]
                 librarian = subprocess.Popen(largs, stdout=open(os.path.join(rdir, "librarian.log"), "a"), stderr=subprocess.STDOUT)
                 brain_env["SIM_EXTENSIONS"] = f"librarian=http://127.0.0.1:{lport}"
-            stack = stackmod.up(name, sc["roots"], a.port, brain_env)
+            stack = stackmod.up(name, sc["roots"], a.port, brain_env, auth=a.auth)
             roots = stack["roots"]
             target = ", ".join(f"{r['name']}={r['app']}" for r in roots) + " (own stack, tailnet mode, LiveKit on loopback)"
             if librarian:
@@ -870,6 +976,9 @@ def main():
                     if all(x.get("up") for x in b.req("GET", "/extensions")):
                         break
                     time.sleep(1)
+        for r in roots:
+            if a.pair or a.auth == "devices":
+                r["pair"], r["admin_token"] = True, a.admin_token
         engines = dict(speech.engines())
         if stack:
             engines.update({"box_stt": stack["speech"]["box_stt"], "box_tts": stack["speech"]["box_tts_en"] + " (app /api/tts/stream)"})
@@ -879,7 +988,7 @@ def main():
                 for r in roots[1:]:
                     if c["root_sim"].endswith("-" + r["name"]) and r.get("sim"):
                         c["root_sim"] = r["sim"]
-        phones, personas = {}, []
+        personas = []
         for sp in sc["personas"]:
             pcfg = {"noiseDb": None, "echo": 0, "captureRtc": bool(sc.get("capture_rtc")), **(sp.get("phone") or {})}
             phones[sp["id"]] = Phone(sp["id"], os.path.join(outdir, "audio"), pcfg, a.headed)
@@ -906,8 +1015,6 @@ def main():
             log(f"rig error: {errors or 'nothing was spoken'} — not graded")
             json.dump({"run": run_id, "rig_errors": errors, "personas": [{"id": p.id, "turns": p.turns, "events": p.events} for p in personas]},
                       open(os.path.join(outdir, "rig-error.json"), "w"), indent=1, default=str)
-            for ph in phones.values():
-                ph.close()
             sys.exit(3)
         # settle, then grade
         settle_until = time.time() + sc.get("settle_seconds", 120)
@@ -944,9 +1051,10 @@ def main():
                 tz = tz or m["created"]
                 lines.append(f"[+{(m['created'] - tz) / 60000:.1f}m] {'you' if m['role'] == 'user' else 'main'}{' (voice)' if m['voice'] else ''}: {m['text']}")
             convo_parts.append((f"### {r['name']}\n\n" if len(roots) > 1 else "") + "\n\n".join(lines))
-        checks += voice_checks(sc, personas)
+        spoken_acct = main_spoken(personas)
+        checks += voice_checks(sc, personas, spoken_acct)
         for c in checks:
-            log(f"CHECK {'ok ' if c['ok'] else 'BAD'} {c['name']}: {c['detail'][:180]}")
+            log(f"CHECK {'ok ' if c['ok'] else ('WARN' if c.get('advisory') else 'BAD')} {c['name']}: {c['detail'][:180]}")
         spoken = utts_of(personas)
         reports = utts_of(personas, ("report",))
         lat = lambda k: [(u.get("latency") or {}).get(k) for u in spoken]  # noqa: E731
@@ -956,13 +1064,15 @@ def main():
              "reply_wer_full_mean": mean([u.get("reply_wer") for u in spoken + reports]),
              "first_audio_p50": pct(lat("first_audio_s"), .5), "first_audio_p90": pct(lat("first_audio_s"), .9),
              "first_audio_max": pct(lat("first_audio_s"), 1), "reply_end_p50": pct(lat("reply_end_s"), .5), "reply_end_max": pct(lat("reply_end_s"), 1),
-             "stt_commit_p50": pct(lat("stt_commit_s"), .5), "main_p50": pct(lat("main_s"), .5), "tts_first_p50": pct(lat("tts_first_s"), .5)}
+             "stt_commit_p50": pct(lat("stt_commit_s"), .5), "main_p50": pct(lat("main_s"), .5), "tts_first_p50": pct(lat("tts_first_s"), .5),
+             "main_msgs": len(spoken_acct), "main_msgs_spoken": sum(x["spoken"] for x in spoken_acct),
+             "main_auto_silent": sum(1 for x in spoken_acct if x["auto"] and not x["spoken"])}
         convo = "\n\n".join(convo_parts)
         judge_in = (f"SCENARIO\n{json.dumps({'title': sc['title'], 'personas': [{k: p[k] for k in ('id', 'persona', 'goals', 'script') if k in p} for p in sc['personas']], 'mishear': sc.get('mishear')}, indent=1)}\n\n"
                     f"VOICE TURNS (what was said, heard, answered, heard back)\n{voice_table(personas, t0)}\n\n"
                     f"VOICE NUMBERS {json.dumps(v)}\n\n"
                     f"CONVERSATION (as the box holds it: MAIN's text)\n{convo}\n\nSESSION TREE\n" + "\n".join(tree_lines) +
-                    "\n\nDETERMINISTIC CHECKS\n" + "\n".join(f"- {'PASS' if c['ok'] else 'FAIL'} {c['name']}: {c['detail'][:300]}" for c in checks) +
+                    "\n\nDETERMINISTIC CHECKS\n" + "\n".join(f"- {'PASS' if c['ok'] else ('ADVISORY (a known product gap, not a failed check)' if c.get('advisory') else 'FAIL')} {c['name']}: {c['detail'][:300]}" for c in checks) +
                     "\n\nTHE PEOPLE'S OWN VERDICTS: " + json.dumps({p.id: p.verdict for p in personas}))
         cost = sum(p.cost for p in personas)
         try:
@@ -971,7 +1081,7 @@ def main():
             judgement = hsim.jobj(jt)
         except Exception as e:  # noqa: BLE001
             judgement = {"pass": False, "summary": f"judge failed: {e}", "scores": {}}
-        checks_ok = all(c["ok"] for c in checks)
+        checks_ok = all(c["ok"] or c.get("advisory") for c in checks)
         persona_ok = all(p.verdict and p.verdict.get("satisfied") for p in personas)
         passed = bool(judgement.get("pass")) and checks_ok and persona_ok
         report = {"run": run_id, "scenario": sc["id"], "pass": passed, "checks_ok": checks_ok, "persona_satisfied": persona_ok,
@@ -983,10 +1093,10 @@ def main():
         write_report(outdir, sc, report, personas, checks, judgement, tree_lines, convo, engines, target)
         log(f"RESULT {'PASS' if passed else 'FAIL'} — judge {judgement.get('scores')} pass={judgement.get('pass')} checks_ok={checks_ok} "
             f"persona={persona_ok} box WER {v['box_wer_mean']} reply WER {v['reply_wer_mean']} first audio p50 {v['first_audio_p50']}s → {outdir}/report.md")
-        for ph in phones.values():
-            ph.close()
         sys.exit(0 if passed else 1)
     finally:
+        for ph in phones.values():
+            ph.close()
         if librarian:
             librarian.terminate()
         if stack and not a.keep:

@@ -86,14 +86,14 @@ def unit(name, cmd, cwd, env, logf):
     """a transient user unit (stopped by `down`, never the live/preview ones)"""
     subprocess.run(["systemctl", "--user", "stop", name], capture_output=True)
     subprocess.run(["systemctl", "--user", "reset-failed", name], capture_output=True)
-    props = ["-p", f"WorkingDirectory={cwd}", "-p", f"StandardOutput=append:{logf}", "-p", f"StandardError=append:{logf}"]
+    props = ["-p", "TimeoutStopSec=8", "-p", f"WorkingDirectory={cwd}", "-p", f"StandardOutput=append:{logf}", "-p", f"StandardError=append:{logf}"]
     envs = [f"--setenv={k}={v}" for k, v in env.items()]
     r = subprocess.run(["systemd-run", "--user", f"--unit={name}", "--collect", "-q", *props, *envs, *cmd], capture_output=True, text=True)
     if r.returncode:
         raise RuntimeError(f"{name}: {r.stderr.strip()}")
 
 
-def up(name, roots, port=4170, brain_env=None, peers_net=True):
+def up(name, roots, port=4170, brain_env=None, peers_net=True, auth="tailnet"):
     """roots: [{"name","note","seed":{path: content},"env":{...}}] — the first is home."""
     st_dir = os.path.join(CACHE, name)
     os.makedirs(st_dir, exist_ok=True)
@@ -152,8 +152,14 @@ def up(name, roots, port=4170, brain_env=None, peers_net=True):
                    "AGENT_NAME": agent, "VOICE_ROOM_BY_ID": "1", "SPEACHES_URL": spe,
                    "ARTIFACTS_DIR": os.path.join(rdir, "work", "artifacts"), "YGG_PROFILES": env["SIM_PROFILES"],
                    "PATH": os.environ.get("PATH", "")}
-        unit(f"vsim-app-{name}-{r['name']}", [NODE, "node_modules/next/dist/bin/next", "start", "-p", str(aport), "-H", "127.0.0.1"],
-             adir, app_env, os.path.join(st_dir, f"app-{r['name']}.log"))
+        if auth == "devices":
+            # devices mode (pairing): served by server.mjs (it stamps the peer address), its own registry
+            app_env.update(BIFROST_AUTH="devices", BIFROST_DEVICES_FILE=os.path.join(st_dir, f"devices-{r['name']}.json"),
+                           BIFROST_MAIN_TITLE="[MAIN]")
+            cmd = [NODE, "server.mjs"]
+        else:
+            cmd = [NODE, "node_modules/next/dist/bin/next", "start", "-p", str(aport), "-H", "127.0.0.1"]
+        unit(f"vsim-app-{name}-{r['name']}", cmd, adir, app_env, os.path.join(st_dir, f"app-{r['name']}.log"))
         ag_env = {"OPENCODE_URL": f"http://127.0.0.1:{bport}", "AGENT_NAME": agent, "LIVEKIT_URL": f"ws://127.0.0.1:{lk_port}",
                   "LIVEKIT_API_KEY": key, "LIVEKIT_API_SECRET": secret, "SPEACHES_URL": spe, "STT_MODEL": stt,
                   "AGENT_TTS": "off", "AGENT_HTTP_PORT": str(hport), "AGENT_LOAD_THRESHOLD": "0.99", "AGENT_STREAM_TTS": "1",

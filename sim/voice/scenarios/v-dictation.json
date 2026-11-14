@@ -8,7 +8,7 @@
    "voice": {"voice": "bm_george", "speed": 0.92, "pause_s": 1.6},
    "phone": {"noiseDb": -50, "noiseColor": "pink", "echo": 0},
    "goals": [
-    "In ONE long spoken turn (at least six sentences, set \"pauses\": true), dictate this request: a tiny HTTP service in a folder named pingd, Python standard library only; GET /health answers JSON with ok true; GET /time answers JSON with the current unix time as an integer under the key time; any other path is a 404; it listens on port eight thousand — then, still in the same turn, correct yourself: no wait, make that port eight one hundred; and it must come with pytest tests that start the server on a free port.",
+    "In ONE long spoken turn (at least six sentences, set \"pauses\": true), dictate this request: a tiny HTTP service in a folder named pinger, Python standard library only; GET /health answers JSON with ok true; GET /time answers JSON with the current unix time as an integer under the key time; any other path is a 404; it listens on port eight thousand — then, still in the same turn, correct yourself: no wait, make that port eight one hundred; and it must come with pytest tests that start the server on a free port.",
     "Get it built exactly as dictated (port 8100, not 8000).",
     "At the end, ask how it was tested and finish."
    ],
@@ -21,10 +21,10 @@
  "max_minutes": 25,
  "max_turns": 6,
  "checks": [
-  {"name": "port 8100 (the corrected one)", "cmd": "grep -rn '8100' pingd --include=*.py | head -3", "expect": "8100"},
-  {"name": "not the first-said port 8000 as the default", "cmd": "grep -rnE '(PORT|port)\\s*[=:]\\s*8000\\b|, *8000\\)' pingd --include=*.py || echo CLEAN", "expect": "CLEAN"},
-  {"name": "/health and /time served", "cmd": "grep -rlE '/health' pingd --include=*.py && grep -rlE '/time' pingd --include=*.py", "expect": "py"},
-  {"name": "pingd tests pass", "cmd": "cd pingd && python3 -m pytest -q >/tmp/pytest.$$.out 2>&1 && echo PYTEST-OK || tail -5 /tmp/pytest.$$.out", "expect": "PYTEST-OK"}
+  {"name": "port 8100 (the corrected one)", "cmd": "grep -rn '8100' pinger --include=*.py | head -3", "expect": "8100"},
+  {"name": "not the first-said port 8000 as the default", "cmd": "grep -rnE '(PORT|port)\\s*[=:]\\s*8000\\b|, *8000\\)' pinger --include=*.py || echo CLEAN", "expect": "CLEAN"},
+  {"name": "/health and /time served", "cmd": "grep -rlE '/health' pinger --include=*.py && grep -rlE '/time' pinger --include=*.py", "expect": "py"},
+  {"name": "pinger tests pass", "cmd": "cd pinger && python3 -m pytest -q >/tmp/pytest.$$.out 2>&1 && echo PYTEST-OK || tail -5 /tmp/pytest.$$.out", "expect": "PYTEST-OK"}
  ],
  "voice_checks": [
   {"kind": "all_turns_landed", "name": "the long dictation landed as ONE turn"},

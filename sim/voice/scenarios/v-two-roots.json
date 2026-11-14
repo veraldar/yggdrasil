@@ -55,7 +55,7 @@
    }
   }
  ],
- "max_minutes": 30,
+ "max_minutes": 25,
  "max_turns": 8,
  "checks": [
   {
@@ -93,8 +93,8 @@
   },
   {
    "root": "lab",
-   "name": "sales-backup made on lab (an exact copy)",
-   "cmd": "test -f sales-backup/sales_2026.csv && cmp sales/sales_2026.csv sales-backup/sales_2026.csv && echo BACKUP-OK",
+   "name": "a backup of the sales folder made on lab (an exact copy; spoken 'sales-backup' may land as 'sales backup')",
+   "cmd": "d=$(ls -d sales*backup* 2>/dev/null | head -1); [ -n \"$d\" ] && cmp sales/sales_2026.csv \"$d/sales_2026.csv\" && echo \"BACKUP-OK in '$d'\"",
    "expect": "BACKUP-OK"
   },
   {

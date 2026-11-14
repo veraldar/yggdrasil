@@ -145,6 +145,22 @@ const handlers = {
     if (ready) await t.page.getByPlaceholder(ready).waitFor({ timeout });
     return { url: t.page.url() };
   },
+  /** devices mode: scan the QR — open its URL (the code rides the fragment), let /pair redeem it
+   *  (the device + refresh cookies land in this phone's context) and wait for the landing */
+  async pair({ tab: name = 'main', url, timeout = 30000 }) {
+    const t = await openTab(name, url);
+    const end = Date.now() + timeout;
+    while (Date.now() < end) {
+      const path = new URL(t.page.url()).pathname;
+      if (path !== '/pair') break;
+      const err = await t.page.locator('text=/already used|expired|not one the box issued|failed/i').count().catch(() => 0);
+      if (err) throw new Error(`pairing refused: ${await t.page.locator('body').innerText()}`.slice(0, 300));
+      await t.page.waitForTimeout(250);
+    }
+    const cookies = (await t.page.context().cookies()).map((c) => c.name);
+    if (!cookies.includes('bifrost_device')) throw new Error(`paired page ${t.page.url()} but no device cookie`);
+    return { landed: t.page.url(), cookies };
+  },
   /** tap the mic (a tap = hands-free on bifrost) and wait until the voice room is up */
   async handsfree({ tab: name, testid = 'composer-mic', timeout = 40000, settle = 3000 }) {
     const t = tab(name);
