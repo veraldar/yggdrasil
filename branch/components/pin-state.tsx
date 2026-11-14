@@ -17,6 +17,7 @@ const SAY: Record<PinState, string> = {
   connecting: 'pinning…',
   pinned: 'end to end',
   fallback: "via the trunk's TLS",
+  reconnecting: 'reconnecting — nothing sent meanwhile',
   refused: 'box key mismatch — nothing sent',
 };
 

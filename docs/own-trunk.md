@@ -101,6 +101,9 @@ any key for them. A small line at the bottom of the screen says which road the p
 - **end to end**: the pinned channel is up. The server sees encrypted bytes, nothing else.
 - **via the trunk's TLS**: the channel could not come up (a network that blocks it). The phone
   falls back to the trunk's line, as before: then the server *can* read what passes.
+- **reconnecting — nothing sent meanwhile**: the channel was up and dropped (your home computer
+  restarting, the network blinking). The phone opens it again by itself; until then it sends
+  nothing, and never switches to the trunk's line on its own.
 - **box key mismatch — nothing sent**: the key that came back is not the one in the QR. Someone in
   the middle, maybe the server itself. The phone refuses and sends no data at all.
 

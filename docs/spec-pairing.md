@@ -131,7 +131,7 @@ the kill-switch, which severs every live connection within a second.
   streams by the STUN username's receiver ufrag, LiveKit the rest). It carries raw HTTP/1.1
   streams under the access point's stream law (`ap::tunnel_stream`), the credential bound at
   /offer injected as the device cookie; the service worker routes `/api/*` (not `/api/pair/*`)
-  and `/rtc/*` to it. States: pinned · connecting (requests wait) · fallback · refused. The bridge device-gates `/rtc` and cuts it on revoke. The spoken reply
+  and `/rtc/*` to it. States: pinned · connecting (requests wait) · fallback (first contact only: the channel never came up on this page) · reconnecting (the page had the channel and lost it — the box restarting: requests wait, then answer 503 `pin-reconnecting`, websockets to `/rtc` wait for the channel; the offer is retried with backoff 0.5–8 s and nothing goes to the access point's TLS; a 401 from the box — a revoked device — ends it in fallback, where the app's own 401 sends the phone back to pairing) · refused. The bridge device-gates `/rtc` and cuts it on revoke. The spoken reply
   rides the room as well while it is up: the deck asks the agent (RPC `tts_stream`), which
   streams the box's own `/api/tts/stream` bytes back as a LiveKit byte stream
   (`lib/voice-tts.ts`); with no room it falls back to https (through the access point). Where voice cannot work

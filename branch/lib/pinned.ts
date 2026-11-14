@@ -21,12 +21,15 @@
  *
  * States (the indicator, components/pin-state.tsx): off (no pin) · connecting
  * (requests wait) · pinned · fallback (the channel cannot come up: the trunk's
- * TLS carries the app, as before) · refused (the box key did not match: a man
- * in the middle — nothing is sent, nothing falls back).
+ * TLS carries the app, as before) · reconnecting (this page HAD the channel and
+ * lost it — the box restarting, the network blinking: requests wait, then get a
+ * 503, and the channel is opened again with backoff; nothing goes to the
+ * trunk's TLS — fallback is a first-contact answer only) · refused (the box key
+ * did not match: a man in the middle — nothing is sent, nothing falls back).
  */
 import { type Pin, PinMismatch, assertPinned, loadPin } from '@/lib/p2p';
 
-export type PinState = 'off' | 'connecting' | 'pinned' | 'fallback' | 'refused';
+export type PinState = 'off' | 'connecting' | 'pinned' | 'fallback' | 'reconnecting' | 'refused';
 
 const OPEN = 1;
 const DATA = 2;
@@ -34,6 +37,9 @@ const CLOSE = 3;
 const AUTH = 5;
 const CHUNK = 16 * 1024;
 const CONNECT_MS = 8_000;
+/** after a lost channel: the first retry, and the most it waits between two */
+const RETRY_FIRST_MS = 500;
+const RETRY_MAX_MS = 8_000;
 const REFRESH_EVERY_MS = 12 * 60_000; // access tokens live 15 min (lib/devices.ts)
 
 const enc = new TextEncoder();
@@ -135,6 +141,10 @@ let state: PinState = 'off';
 let why = '';
 let link: Link | null = null;
 let opening: Promise<void> | null = null;
+/** this page had the channel up once: a later failure is a loss (reconnecting), never a fallback */
+let wasPinned = false;
+let retryMs = RETRY_FIRST_MS;
+const waiting = () => state === 'connecting' || state === 'reconnecting';
 const listeners = new Set<(s: PinState, why: string) => void>();
 const waiters: Array<() => void> = [];
 let origFetch: typeof fetch | null = null;
@@ -143,7 +153,7 @@ function setState(s: PinState, w = '') {
   state = s;
   why = w;
   for (const l of listeners) l(s, w);
-  if (s !== 'connecting') waiters.splice(0).forEach((f) => f());
+  if (s !== 'connecting' && s !== 'reconnecting') waiters.splice(0).forEach((f) => f());
   tellWorker();
 }
 
@@ -161,9 +171,9 @@ function tellWorker() {
   }
 }
 
-/** wait until the state is no longer `connecting` (bounded) */
+/** wait until the state is no longer `connecting` / `reconnecting` (bounded) */
 function settled(): Promise<void> {
-  if (state !== 'connecting') return Promise.resolve();
+  if (!waiting()) return Promise.resolve();
   return new Promise((done) => {
     waiters.push(done);
     setTimeout(done, CONNECT_MS + 2_000);
@@ -183,6 +193,10 @@ function gathered(pc: RTCPeerConnection, ms: number): Promise<void> {
   });
 }
 
+/** the box itself said no (a revoked or unknown device): an answer, not a loss — the app's own
+ *  requests then meet the same 401 and send the phone back to pairing */
+class BoxRefused extends Error {}
+
 async function openLink(pin: Pin): Promise<Link> {
   const pc = new RTCPeerConnection({ iceServers: [] });
   const dc = pc.createDataChannel('tun', { ordered: true });
@@ -201,10 +215,11 @@ async function openLink(pin: Pin): Promise<Link> {
       // an expired access cookie: one refresh (first contact), then once more
       const hint = await r.json().catch(() => ({}));
       if (hint?.reauth !== 'refresh')
-        throw new Error(`the box refused this phone (${hint?.why || 401})`);
+        throw new BoxRefused(`the box refused this phone (${hint?.why || 401})`);
       const f = await origFetch!('/api/pair/refresh', { method: 'POST' });
-      if (!f.ok) throw new Error('the box refused this phone (refresh)');
+      if (!f.ok) throw new BoxRefused('the box refused this phone (refresh)');
       r = await post();
+      if (r.status === 401) throw new BoxRefused('the box refused this phone');
     }
     if (!r.ok || !(r.headers.get('content-type') || '').includes('json')) {
       throw new Error(`no pinned channel here (${r.status})`);
@@ -229,22 +244,32 @@ async function openLink(pin: Pin): Promise<Link> {
 
 function connect(pin: Pin): Promise<void> {
   opening ??= (async () => {
-    setState('connecting');
+    setState(wasPinned ? 'reconnecting' : 'connecting', why);
     try {
       const l = await openLink(pin);
       link = l;
       l.onClose = (w) => {
         if (link !== l) return;
         link = null;
-        // the box hung up (a revoked device, a lapsed token, the network): try once more
-        setState('connecting', w);
-        setTimeout(() => void connect(pin), 500);
+        // the box hung up (it restarts, the network blinked — or a revoked device, whose next
+        // offer is refused): open it again; meanwhile nothing goes to the trunk's TLS
+        setState('reconnecting', w);
+        retryMs = RETRY_FIRST_MS;
+        setTimeout(() => void connect(pin), retryMs);
       };
+      wasPinned = true;
+      retryMs = RETRY_FIRST_MS;
       setState('pinned');
     } catch (e) {
       link = null;
+      const w = e instanceof Error ? e.message : String(e);
       if (e instanceof PinMismatch) setState('refused', String(e.message));
-      else setState('fallback', e instanceof Error ? e.message : String(e));
+      else if (wasPinned && !(e instanceof BoxRefused)) {
+        // a loss, not a blocking network: keep trying (backoff), keep the trunk's TLS out of it
+        setState('reconnecting', w);
+        retryMs = Math.min(RETRY_MAX_MS, retryMs * 2);
+        setTimeout(() => void connect(pin), retryMs);
+      } else setState('fallback', w);
     } finally {
       opening = null;
     }
@@ -478,24 +503,29 @@ export class TunnelWebSocket extends EventTarget {
     ];
     const ps = typeof protocols === 'string' ? [protocols] : protocols || [];
     if (ps.length) extra.push(['Sec-WebSocket-Protocol', ps.join(', ')]);
-    const l = link;
-    if (!l || !l.up) {
-      setTimeout(() => this.fail(1006, 'no pinned channel'), 0);
-      return;
-    }
-    const req: TunnelRequest = {
-      method: 'GET',
-      url: u.pathname + u.search,
-      headers: [],
-      body: null,
+    const start = () => {
+      const l = link;
+      if (this.readyState === 3) return;
+      if (!l || !l.up) return this.fail(1006, 'no pinned channel');
+      const req: TunnelRequest = {
+        method: 'GET',
+        url: u.pathname + u.search,
+        headers: [],
+        body: null,
+      };
+      // Connection: Upgrade must survive headOf's filter: written by hand
+      let h = dec.decode(headOf(req)).replace(/\r\n$/, '');
+      for (const [k, v] of extra) h += `${k}: ${v}\r\n`;
+      this.s = l.stream(enc.encode(h + '\r\n'), {
+        data: (b) => this.data(b),
+        close: () => this.fail(1006, 'stream closed'),
+      });
     };
-    // Connection: Upgrade must survive headOf's filter: written by hand
-    let h = dec.decode(headOf(req)).replace(/\r\n$/, '');
-    for (const [k, v] of extra) h += `${k}: ${v}\r\n`;
-    this.s = l.stream(enc.encode(h + '\r\n'), {
-      data: (b) => this.data(b),
-      close: () => this.fail(1006, 'stream closed'),
-    });
+    // the channel is being (re)opened: wait for it (bounded) — this socket never takes the
+    // trunk's TLS instead (LiveKit's own retry comes back once the channel is up)
+    if (link?.up) start();
+    else if (waiting()) void settled().then(start);
+    else setTimeout(() => this.fail(1006, 'no pinned channel'), 0);
   }
 
   private emit(type: string, e: Event) {
@@ -671,6 +701,11 @@ async function inPage(orig: typeof fetch, input: RequestInfo | URL, init?: Reque
       status: 503,
       headers: { 'content-type': 'application/json', 'x-bifrost-via': 'refused' },
     });
+  if (state === 'reconnecting')
+    return new Response(JSON.stringify({ error: 'pin-reconnecting', why }), {
+      status: 503,
+      headers: { 'content-type': 'application/json', 'x-bifrost-via': 'reconnecting' },
+    });
   if (state !== 'pinned' || !link) return orig(req);
   const headers: Array<[string, string]> = [];
   req.headers.forEach((v, k) => headers.push([k, v]));
@@ -760,7 +795,9 @@ export function bootPinned(): void {
   const Real = RealWS;
   const Patched = function (url: string | URL, protocols?: string | string[]) {
     const u = new URL(String(url), location.href);
-    if (u.host === location.host && tunnelled(u.pathname) && state === 'pinned') {
+    // pinned — or the channel on its way (first open, or back after a loss): the tunnel's socket
+    // waits for it; only a page in fallback (first contact found no channel) takes the TLS
+    if (u.host === location.host && tunnelled(u.pathname) && (state === 'pinned' || waiting())) {
       return new TunnelWebSocket(u.href, protocols);
     }
     return new Real(url, protocols);
