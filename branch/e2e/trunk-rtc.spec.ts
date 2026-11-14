@@ -1,5 +1,13 @@
 import { execFileSync } from 'child_process';
-import { appendFileSync, existsSync, readFileSync, readdirSync, statSync, writeFileSync } from 'fs';
+import {
+  appendFileSync,
+  existsSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'fs';
 import { RoomServiceClient } from 'livekit-server-sdk';
 import { join } from 'path';
 import {
@@ -32,8 +40,14 @@ import {
  *     ap), UDP was tried and dropped, LiveKit saw a tcp participant
  *  R5 the VPS held no keys: every frame it forwarded on the media path is STUN, DTLS or SRTP —
  *     opaque — and nothing on the VPS knows a LiveKit, DTLS or device secret
+ *  P1 after pairing, the app's traffic rides the PINNED channel (lib/pinned.ts): a data channel to
+ *     the box's bridge over ICE-TCP <vps>:443, its DTLS key = the one the QR pinned
+ *  E1 the VPS's own eyes (vps-eye.py, with the ap's TLS key): after pairing it carried no app
+ *     data — no API call, no transcript, no reply, no session id, no LiveKit signaling
  *  R6 revoke the phone on the box console → voice is cut: out of the room, its peer connection
  *     down, its signaling closed, no new token
+ *  M1 an ACTIVE man in the middle at the VPS (it swaps the box's DTLS fingerprint): a fresh phone
+ *     refuses the channel, says so, and sends the VPS no app data
  * Every step lands in $PW_STATE/steps.tsv (the table the script prints, with its timings).
  */
 
@@ -51,6 +65,8 @@ const LK = {
   key: process.env.PW_LK_KEY || '',
   secret: process.env.PW_LK_SECRET || '',
 };
+const EYE = process.env.PW_EYE || '';
+const MITM = process.env.PW_MITM || '';
 const WAV = join(__dirname, 'fixtures/first-turn-en.wav');
 const ROOM = 'main';
 const HUMAN = `user_${ROOM}`;
@@ -225,6 +241,33 @@ const words = (s: string) =>
     .split(' ')
     .filter(Boolean);
 
+/** the VPS's decrypted view (vps-eye.py): records since `from` */
+type Eye = { t: number; conn: number; who: 'phone' | 'bridge'; dir: 'c2s' | 's2c'; b64: string };
+function eyeSince(from: number, to = Infinity): Eye[] {
+  if (!existsSync(EYE)) return [];
+  return readFileSync(EYE, 'utf8')
+    .split('\n')
+    .filter(Boolean)
+    .map((l) => JSON.parse(l) as Eye)
+    .filter((r) => r.t >= from && r.t <= to);
+}
+/** the request lines phones sent the VPS in those records */
+function eyeRequests(recs: Eye[]): string[] {
+  const text = (conn: number) =>
+    Buffer.concat(
+      recs
+        .filter((r) => r.conn === conn && r.dir === 'c2s')
+        .map((r) => Buffer.from(r.b64, 'base64'))
+    ).toString('latin1');
+  const conns = [...new Set(recs.filter((r) => r.who === 'phone').map((r) => r.conn))];
+  return conns.flatMap((c) =>
+    text(c)
+      .split('\r\n')
+      .filter((l) => /^(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS) \//.test(l))
+  );
+}
+const appCall = (line: string) => /^[A-Z]+ \/(api\/(?!pair)|rtc)/.test(line);
+
 const nsExec = (netns: string, cmd: string[]) =>
   execFileSync('nsenter', [`--net=${netns}`, '--', ...cmd]).toString();
 
@@ -246,6 +289,9 @@ test('trunk rtc: phone ⇄ vps:443 ⇄ box — pair, talk, hear the reply, media
       `--use-file-for-fake-audio-capture=${WAV}`,
       '--autoplay-policy=no-user-gesture-required',
       `--host-resolver-rules=MAP ${new URL(AP).hostname} ${AP_IP}`,
+      // the test ap's self-signed cert: a service worker script is refused on a cert error even
+      // with ignoreHTTPSErrors (a phone on the real trunk has its Let's Encrypt cert)
+      '--ignore-certificate-errors',
     ],
   });
   const phoneCtx: BrowserContext = await phoneBrowser.newContext({
@@ -382,6 +428,7 @@ test('trunk rtc: phone ⇄ vps:443 ⇄ box — pair, talk, hear the reply, media
 
   let mainId = '';
   let deviceId = '';
+  let pairedAt = 0;
   let released = 0;
   let voiceTurn: Msg | null = null;
 
@@ -400,6 +447,7 @@ test('trunk rtc: phone ⇄ vps:443 ⇄ box — pair, talk, hear the reply, media
         expect(qrUrl.startsWith(`${AP}/pair#`), qrUrl).toBe(true);
         await phone.goto(qrUrl);
         await phone.waitForURL(`${AP}/`, { timeout: 30_000 });
+        pairedAt = Date.now();
         await expect(phone.getByTestId('roots')).toBeVisible({ timeout: 30_000 });
         const pin = await phone.evaluate(() =>
           JSON.parse(localStorage.getItem('bifrost.pin') || 'null')
@@ -412,6 +460,52 @@ test('trunk rtc: phone ⇄ vps:443 ⇄ box — pair, talk, hear the reply, media
         const probe = await phoneFetch(phone, '/api/token');
         expect(probe.status, JSON.stringify(probe.body)).toBe(200);
         return `device ${deviceId}, MAIN ${mainId}`;
+      }
+    );
+
+    // ---------------------------------------------------------------- P1 the pinned channel
+    await step(
+      'P1',
+      `after pairing the app rides the pinned channel: ICE-TCP ${AP_IP}:443, the QR's box key`,
+      async () => {
+        await expect(phone.getByTestId('pin-state')).toHaveAttribute('data-state', 'pinned', {
+          timeout: 20_000,
+        });
+        const v = await phone.evaluate(async () => {
+          const pin = JSON.parse(localStorage.getItem('bifrost.pin') || 'null');
+          for (const pc of (window as unknown as { __pcs: RTCPeerConnection[] }).__pcs) {
+            const sdp = pc.remoteDescription?.sdp || '';
+            const fp = /a=fingerprint:sha-256 (\S+)/.exec(sdp)?.[1] || '';
+            if (!sdp.includes('webrtc-datachannel') || sdp.includes('m=audio')) continue;
+            let remote = '';
+            const st = await pc.getStats();
+            st.forEach((s: Record<string, unknown>) => {
+              if (s.type === 'transport' && s.selectedCandidatePairId) {
+                const pair = st.get(String(s.selectedCandidatePairId));
+                const r = pair && st.get(pair.remoteCandidateId);
+                if (r) remote = `${r.protocol} ${r.address}:${r.port}`;
+              }
+            });
+            return { fp, pin: String(pin?.fp || ''), remote, conn: pc.connectionState };
+          }
+          return null;
+        });
+        expect(v, 'the bridge peer connection').toBeTruthy();
+        const norm = (x: string) =>
+          x
+            .toLowerCase()
+            .replace(/^sha-256\s*/, '')
+            .replace(/[^0-9a-f]/g, '');
+        expect(norm(v!.fp), 'the answer carried the QR-pinned key').toBe(norm(v!.pin));
+        expect(v!.conn).toBe('connected');
+        expect(v!.remote).toBe(`tcp ${AP_IP}:443`);
+        // an API call answered over it
+        const r = await phone.evaluate(async () => {
+          const x = await fetch('/api/session/main');
+          return { status: x.status, via: x.headers.get('x-bifrost-via') };
+        });
+        expect(r).toEqual({ status: 200, via: 'pinned' });
+        return `pinned (${v!.remote}), box key = QR ${v!.pin.slice(0, 17)}…, /api answered via ${r.via}`;
       }
     );
 
@@ -629,10 +723,69 @@ test('trunk rtc: phone ⇄ vps:443 ⇄ box — pair, talk, hear the reply, media
       }
     );
 
+    // ---------------------------------------------------------------- E1 the VPS's own eyes
+    await step(
+      'E1',
+      'the VPS (it holds the ap TLS key) saw no app data after pairing: no API call, transcript, reply',
+      async () => {
+        expect(pairedAt, 'needs R1').toBeGreaterThan(0);
+        const recs = eyeSince(pairedAt + 1);
+        expect(recs.length, 'the eye is on the path').toBeGreaterThan(0);
+        const lines = eyeRequests(recs);
+        expect(lines.filter(appCall), 'API calls through the VPS after pairing').toEqual([]);
+        expect(
+          lines.some((l) => l.startsWith('POST /offer ')),
+          'the pinned signaling crossed it'
+        ).toBe(true);
+        const plain = Buffer.concat(recs.map((r) => Buffer.from(r.b64, 'base64'))).toString(
+          'latin1'
+        );
+        const turn = voiceTurn ? textOf(voiceTurn) : '';
+        const needles = [
+          'MOCK-REPLY',
+          'What is 2',
+          'mode=hands-free',
+          '"role":"assistant"',
+          mainId,
+          ...(turn ? [turn.slice(0, 24)] : []),
+        ].filter(Boolean);
+        const seen = needles.filter((n) => plain.includes(n));
+        expect(seen, 'app plaintext the VPS could read').toEqual([]);
+        // and LiveKit's DTLS key never crossed it in clear: only the bridge's (pinned) answer did
+        const fps = [
+          ...plain.matchAll(/a=fingerprint:sha-256 ((?:[0-9A-Fa-f]{2}:){31}[0-9A-Fa-f]{2})/g),
+        ].map((m) => m[1]);
+        const pin = await phone.evaluate(
+          () => JSON.parse(localStorage.getItem('bifrost.pin') || 'null')?.fp
+        );
+        const norm = (x: string) =>
+          x
+            .toLowerCase()
+            .replace(/^sha-256\s*/, '')
+            .replace(/[^0-9a-f]/g, '');
+        const notBridge = fps.filter((f) => norm(f) !== norm(String(pin)));
+        // (the phone's own offer fingerprints cross too — never LiveKit's, which rides the channel)
+        const kinds = lines.reduce<Record<string, number>>((a, l) => {
+          const k = l.startsWith('GET /_next/')
+            ? 'GET /_next/*'
+            : l.split(' ').slice(0, 2).join(' ').replace(/\?.*/, '');
+          a[k] = (a[k] || 0) + 1;
+          return a;
+        }, {});
+        return `after pairing the VPS carried ${lines.length} phone requests: ${Object.entries(
+          kinds
+        )
+          .map(([k, n]) => `${k}×${n}`)
+          .join(
+            ', '
+          )} · 0 API calls · 0 of ${needles.length} app strings in ${plain.length} decrypted bytes · DTLS fingerprints it saw: the box's (pinned) + ${notBridge.length} of the phone's own offers, never LiveKit's`;
+      }
+    );
+
     // ---------------------------------------------------------------- R6 revoke
     await step(
       'R6',
-      'box console revokes the phone → voice cut: out of the room, pc down, /rtc closed, no token',
+      'box console revokes the phone → voice cut: out of the room, pc down, pinned channel severed, no token',
       async () => {
         expect(deviceId, 'needs R1').toBeTruthy();
         expect(
@@ -667,9 +820,18 @@ test('trunk rtc: phone ⇄ vps:443 ⇄ box — pair, talk, hear the reply, media
             .filter((f) => f.cls === 'closed' && (f.t || 0) >= t0);
         await expect.poll(() => tapClosed().length, { timeout: 15_000 }).toBeGreaterThan(0);
         const tapMs = Math.min(...tapClosed().map((f) => f.t || 0)) - t0;
-        const rtc = sockets.filter((s) => s.url.includes('/rtc'));
-        expect(rtc.length).toBeGreaterThan(0);
-        await expect.poll(() => rtc.every((s) => s.closedAt > 0), { timeout: 15_000 }).toBe(true);
+        // the pinned channel (and the LiveKit signaling inside it) is severed by the box
+        await expect
+          .poll(
+            () =>
+              /severed peer \d+ \(.*\) — revoked/.test(
+                readFileSync(join(STATE, 'bridge.log'), 'utf8')
+              ),
+            {
+              timeout: 15_000,
+            }
+          )
+          .toBe(true);
         // its page may be navigating back to pairing right now: ask once it has settled
         let t = { status: 0, body: {} as Record<string, unknown> };
         for (let i = 0; i < 20 && !t.status; i++) {
@@ -679,7 +841,75 @@ test('trunk rtc: phone ⇄ vps:443 ⇄ box — pair, talk, hear the reply, media
         }
         expect(t.status).toBe(401);
         expect(t.body.why).toBe('revoked');
-        return `revoke→out of the room ${goneMs} ms · →ICE-TCP closed at the VPS ${tapMs} ms · →phone pc ${down()!.state} ${pcMs} ms · /rtc closed · /api/token 401 revoked`;
+        return `revoke→out of the room ${goneMs} ms · →ICE-TCP closed at the VPS ${tapMs} ms · →phone pc ${down()!.state} ${pcMs} ms · the pinned channel severed · /api/token 401 revoked`;
+      }
+    );
+    // ---------------------------------------------------------------- M1 an active MITM at the VPS
+    await step(
+      'M1',
+      'an active man in the middle at the VPS swaps the box key: a fresh phone refuses, sends nothing',
+      async () => {
+        await phone.close().catch(() => {});
+        writeFileSync(MITM, 'swap the DTLS fingerprints');
+        const evilCtx = await phoneBrowser.newContext({
+          ...devices['Pixel 7'],
+          ignoreHTTPSErrors: true,
+          permissions: ['microphone'],
+          storageState: {
+            cookies: [],
+            origins: [
+              {
+                origin: AP,
+                localStorage: [
+                  { name: 'bifrost-door', value: 'v2' },
+                  { name: 'bifrost-first-turn', value: '1' },
+                ],
+              },
+            ],
+          },
+        });
+        try {
+          const p2 = await evilCtx.newPage();
+          screens.push(['mitm-phone', p2]);
+          await box.goto(`${BASE}/pair`);
+          const qr = box.getByTestId('pair-qr');
+          await expect(qr.locator('svg')).toBeVisible();
+          const png = join(STATE, 'pair-qr-mitm.png');
+          writeFileSync(png, await qr.screenshot());
+          const qrUrl = execFileSync('zbarimg', ['--raw', '-q', png]).toString().trim();
+          // "after pairing" starts the moment the claim answered (the /pair page's own boot
+          // requests before it are first contact: no pin exists yet)
+          const claimed = p2.waitForResponse((r) => r.url().endsWith('/api/pair/claim'));
+          await p2.goto(qrUrl);
+          await claimed;
+          const t1 = Date.now();
+          await p2.waitForURL(`${AP}/`, { timeout: 30_000 });
+          await expect(p2.getByTestId('pin-state')).toHaveAttribute('data-state', 'refused', {
+            timeout: 20_000,
+          });
+          await expect(p2.getByTestId('pin-state')).toHaveText(/mismatch/);
+          const r = await phoneFetch(p2, '/api/session/main');
+          expect(r.status).toBe(503);
+          expect(r.body.error).toBe('pin-refused');
+          const v = await phoneFetch(p2, '/api/token', { method: 'POST', body: { room: ROOM } });
+          expect(v.status, 'no voice token either').toBe(503);
+          await p2.waitForTimeout(1_500);
+          const lines = eyeRequests(eyeSince(t1));
+          expect(lines.filter(appCall), 'API calls through the attacking VPS').toEqual([]);
+          const swapped = eyeSince(t1 - 10_000).some(
+            (x) =>
+              x.who === 'phone' &&
+              x.dir === 's2c' &&
+              Buffer.from(x.b64, 'base64').includes('a=fingerprint')
+          );
+          expect(swapped, 'the attack was on the path (the /offer answer crossed it)').toBe(true);
+          return `the VPS swapped the box key in the /offer answer → the phone refused ("${await p2
+            .getByTestId('pin-state')
+            .textContent()}"), /api 503 pin-refused, no voice token, 0 API calls through the VPS`;
+        } finally {
+          rmSync(MITM, { force: true });
+          await evilCtx.close().catch(() => {});
+        }
       }
     );
   } finally {

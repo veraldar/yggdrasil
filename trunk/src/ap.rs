@@ -21,7 +21,7 @@
 //! smuggling past the gate: only the declared body is forwarded) and passes
 //! websocket upgrades through once the upstream answered 101.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
@@ -53,9 +53,9 @@ const OP_BIN: u8 = 0x2;
 const OP_CLOSE: u8 = 0x8;
 const OP_PING: u8 = 0x9;
 const OP_PONG: u8 = 0xA;
-const OPEN: u8 = 1;
-const DATA: u8 = 2;
-const CLOSE: u8 = 3;
+pub(crate) const OPEN: u8 = 1;
+pub(crate) const DATA: u8 = 2;
+pub(crate) const CLOSE: u8 = 3;
 const OPEN_RAW: u8 = 4;
 const PING_EVERY: Duration = Duration::from_secs(15);
 const SILENT: Duration = Duration::from_secs(45);
@@ -141,6 +141,37 @@ pub struct DialConfig {
     /// token against the region the ap saw, never the loopback hop.
     pub branch: Option<String>,
     pub tokens: Arc<TokenStore>,
+    /// ICE-TCP streams of the raw forward `name` belong either to this
+    /// bridge's own WebRTC peers (the pinned channel) or to LiveKit: the
+    /// first STUN binding request's USERNAME names the receiver's ufrag, and
+    /// the bridge's peers register theirs at /offer
+    pub ice_demux: Option<IceDemux>,
+}
+
+pub struct IceDemux {
+    pub name: String,
+    /// the bridge's own ICE-TCP listener (loopback)
+    pub bridge: SocketAddr,
+    pub ufrags: Arc<Mutex<HashSet<String>>>,
+}
+
+/// The receiver's ufrag in an ICE binding request: USERNAME = "<receiver>:<sender>".
+pub fn stun_receiver_ufrag(msg: &[u8]) -> Option<String> {
+    if msg.len() < 20 || msg[4..8] != [0x21, 0x12, 0xA4, 0x42] {
+        return None;
+    }
+    let end = (20 + u16::from_be_bytes([msg[2], msg[3]]) as usize).min(msg.len());
+    let mut p = 20;
+    while p + 4 <= end {
+        let (t, l) = (u16::from_be_bytes([msg[p], msg[p + 1]]), u16::from_be_bytes([msg[p + 2], msg[p + 3]]) as usize);
+        let v = msg.get(p + 4..p + 4 + l)?;
+        if t == 0x0006 {
+            let user = std::str::from_utf8(v).ok()?;
+            return Some(user.split(':').next()?.to_string());
+        }
+        p += 4 + l.div_ceil(4) * 4;
+    }
+    None
 }
 
 /// A per-process secret the ap dial-out stamps (`X-Bifrost-Edge`) on the
@@ -441,7 +472,7 @@ async fn ws_recv<R: AsyncRead + Unpin>(r: &mut R) -> io::Result<(u8, Vec<u8>)> {
     Ok((h[0] & 0x0f, p))
 }
 
-fn mux(kind: u8, id: u32, payload: &[u8]) -> (u8, Vec<u8>) {
+pub(crate) fn mux(kind: u8, id: u32, payload: &[u8]) -> (u8, Vec<u8>) {
     let mut m = Vec::with_capacity(5 + payload.len());
     m.push(kind);
     m.extend_from_slice(&id.to_be_bytes());
@@ -449,7 +480,7 @@ fn mux(kind: u8, id: u32, payload: &[u8]) -> (u8, Vec<u8>) {
     (OP_BIN, m)
 }
 
-fn unmux(m: &[u8]) -> Option<(u8, u32, &[u8])> {
+pub(crate) fn unmux(m: &[u8]) -> Option<(u8, u32, &[u8])> {
     let id = u32::from_be_bytes(m.get(1..5)?.try_into().ok()?);
     Some((*m.first()?, id, &m[5..]))
 }
@@ -479,7 +510,7 @@ fn stamp_hsts(head: &[u8], hsts: &str) -> Option<Vec<u8>> {
 
 // ---- the access point ----------------------------------------------------------------
 
-type Frames = mpsc::UnboundedSender<(u8, Vec<u8>)>;
+pub(crate) type Frames = mpsc::UnboundedSender<(u8, Vec<u8>)>;
 type StreamTx = mpsc::UnboundedSender<Option<Vec<u8>>>;
 
 #[derive(Clone)]
@@ -1144,7 +1175,12 @@ async fn serve_stream(
     let upgrade = req.header("upgrade").is_some();
     // a phone naming a root: the bridge's own /branch (it authenticates the
     // device token itself, in the region of the address the ap saw)
-    let branch = cfg.branch.as_ref().filter(|_| rootlink.is_none() && p == "/branch");
+    // …and the pinned channel's signaling: POST /offer (its answer carries the DTLS fingerprint
+    // the phone pinned from the QR — an edge that swaps it is refused by the phone) + /identity
+    let branch = cfg
+        .branch
+        .as_ref()
+        .filter(|_| rootlink.is_none() && matches!(p, "/branch" | "/offer" | "/identity"));
     let target = match (rootlink, livekit) {
         (Some(rl), _) => rl.clone(),
         (None, _) if branch.is_some() => branch.cloned().unwrap_or_default(),
@@ -1218,6 +1254,43 @@ async fn serve_stream(
     pump.abort();
 }
 
+/// One HTTP stream over the PINNED channel (the phone's tunnel, bridge.rs):
+/// the same law as an edge stream — the device gate, one request per stream,
+/// websocket upgrades passed through, LiveKit /rtc device-gated — with the
+/// client address and the device credential the bridge bound at /offer
+/// (the page cannot read its HttpOnly cookie; it never needs to). A request
+/// that names its own Authorization keeps it (and gets no cookie).
+pub(crate) async fn tunnel_stream(
+    cfg: Arc<DialConfig>,
+    id: u32,
+    ip: IpAddr,
+    head: Vec<u8>,
+    bearer: String,
+    rx: mpsc::UnboundedReceiver<Option<Vec<u8>>>,
+    out: Frames,
+) {
+    let path = parse_head(&head).map(|r| r.path).unwrap_or_default();
+    let np = normalize_path(&path);
+    if np == "/rootlink" || np == "/offer" || np.starts_with("/_root") {
+        let _ = out.send(mux(DATA, id, &http_response(404, "Not Found", "text/plain", "not over the pinned channel\n")));
+        let _ = out.send(mux(CLOSE, id, &[]));
+        return;
+    }
+    // the credential rides as the device cookie (what the edge sees from a browser): never
+    // Authorization, which LiveKit's /rtc would read as its own join token
+    let mut h = head;
+    let lower = String::from_utf8_lossy(&h).to_ascii_lowercase();
+    if !lower.contains("\r\ncookie:") && !lower.contains("\r\nauthorization:") && !bearer.is_empty() {
+        if let Some(eol) = h.windows(2).position(|w| w == b"\r\n") {
+            let line = format!("Cookie: bifrost_device={bearer}\r\n");
+            h.splice(eol + 2..eol + 2, line.into_bytes());
+        }
+    }
+    let mut open = format!("{ip}\n").into_bytes();
+    open.extend_from_slice(&h);
+    serve_stream(cfg, id, open, rx, out).await
+}
+
 /// A raw forward on the bridge: only targets named in bridge.toml [ap.tcp].
 async fn serve_raw(
     cfg: Arc<DialConfig>,
@@ -1227,7 +1300,29 @@ async fn serve_raw(
     out: Frames,
 ) {
     let name = open.split(|&b| b == b'\n').nth(1).and_then(|n| std::str::from_utf8(n).ok()).unwrap_or("");
-    let up = match cfg.tcp.get(name) {
+    let mut target = cfg.tcp.get(name).cloned();
+    // ICE-TCP: the bridge's own peer, or LiveKit? The first RFC 4571 frame (a
+    // binding request) names the receiver's ufrag.
+    let mut first = vec![];
+    if let Some(d) = cfg.ice_demux.as_ref().filter(|d| d.name == name) {
+        let whole = |b: &[u8]| b.len() >= 2 && b.len() >= 2 + u16::from_be_bytes([b[0], b[1]]) as usize;
+        while !whole(&first) {
+            match timeout(Duration::from_secs(10), rx.recv()).await {
+                Ok(Some(Some(chunk))) => first.extend_from_slice(&chunk),
+                _ => {
+                    let _ = out.send(mux(CLOSE, id, &[]));
+                    return;
+                }
+            }
+        }
+        let n = u16::from_be_bytes([first[0], first[1]]) as usize;
+        if let Some(uf) = stun_receiver_ufrag(&first[2..2 + n]) {
+            if d.ufrags.lock().unwrap().contains(&uf) {
+                target = Some(d.bridge.to_string());
+            }
+        }
+    }
+    let up = match target {
         Some(target) => TcpStream::connect(target).await.ok(),
         None => None,
     };
@@ -1237,6 +1332,10 @@ async fn serve_raw(
     };
     let _ = up.set_nodelay(true);
     let (mut ur, mut uw) = up.into_split();
+    if !first.is_empty() && uw.write_all(&first).await.is_err() {
+        let _ = out.send(mux(CLOSE, id, &[]));
+        return;
+    }
     let out2 = out.clone();
     let pump = tokio::spawn(async move {
         let mut buf = vec![0u8; 16384];
@@ -1337,6 +1436,7 @@ pub fn selftest() -> Result<String, String> {
             rootlink: Some(rl_addr.to_string()),
             branch: Some(up_addr.to_string()),
             tokens: Arc::new(TokenStore::open(&reg_path)),
+            ice_demux: None,
         })
     };
     let bad_tok = rt.block_on(async { timeout(Duration::from_secs(5), dial_once(&mk(&pin, "not-the-pairing-token-000"))).await });

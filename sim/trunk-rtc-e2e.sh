@@ -5,9 +5,11 @@
 # network namespace per machine — nothing live is touched, every process dies with the run).
 #
 #        phone 198.51.100.50                 vps 198.51.100.7                  home 198.51.100.20
-#   Chromium (Pixel 7, fake mic WAV)   :443 sni-443.py ─┬─ TLS "ap.tree.test" → ap 127.0.0.1:4443
+#   Chromium (Pixel 7, fake mic WAV)   :443 sni-443.py ─┬─ TLS "ap.tree.test" → vps-eye → ap :4443
 #     https://ap.tree.test   ───tcp 443───▶             └─ ICE-TCP (RFC 4571 STUN) → tap → ap raw
 #     ICE-TCP 198.51.100.7:443                                 forward "livekit-ice" 127.0.0.1:4479
+#   (vps-eye: the VPS's own view — it holds the ap's TLS key: every decrypted byte, logged; with
+#    $STATE/mitm present it swaps DTLS fingerprints — an active man in the middle)
 #                                                 ap ◀═══ dial-OUT wss (pinned) ═══ bridge (home)
 #   home: bridge → app (devices mode) · LiveKit (/rtc + ICE-TCP 198.51.100.20:7881) · the voice
 #         agent (branch/voice/agent.py, livekit-agents) · speech: edge/voice_server.py (sherpa-onnx
@@ -58,7 +60,7 @@ VPS=198.51.100.7 HOMEIP=198.51.100.20 PHONE=198.51.100.50 AP_HOST=ap.tree.test
 AP_URL="https://$AP_HOST"
 STATE=${TRUNK_RTC_STATE:-$(mktemp -d "${TMPDIR:-/tmp}/trunk-rtc.XXXXXX")}
 mkdir -p "$STATE"/{home/work,vps/tls,phone} && chmod 700 "$STATE"
-rm -f "$STATE"/devices.json* "$STATE"/steps.tsv "$STATE"/tap.jsonl
+rm -f "$STATE"/devices.json* "$STATE"/steps.tsv "$STATE"/tap.jsonl "$STATE"/eye.jsonl "$STATE"/mitm
 { cat /etc/hosts; echo "$VPS $AP_HOST"; } >"$STATE/hosts"
 mount --bind "$STATE/hosts" /etc/hosts
 
@@ -129,7 +131,7 @@ listen = "127.0.0.1:4479"
 TOML
 cat >"$STATE/vps/sni-443.conf" <<CONF
 listen  $VPS:443
-route   $AP_HOST 127.0.0.1:4443 proxy
+route   $AP_HOST 127.0.0.1:4444 proxy
 default 127.0.0.1:8443
 ice     127.0.0.1:4478
 CONF
@@ -138,6 +140,9 @@ pids+=($!)
 on vps python3 -u "$ROOT/trunk/deploy/sni-443.py" -c "$STATE/vps/sni-443.conf" >"$STATE/sni-443.log" 2>&1 &
 pids+=($!)
 on vps python3 -u "$ROOT/sim/trunk-rtc/tap.py" 127.0.0.1:4478 127.0.0.1:4479 "$STATE/tap.jsonl" >"$STATE/tap.log" 2>&1 &
+pids+=($!)
+on vps python3 -u "$ROOT/sim/trunk-rtc/vps-eye.py" 127.0.0.1:4444 127.0.0.1:4443 "$STATE/vps/tls/cert.pem" \
+  "$STATE/vps/tls/key.pem" "$STATE/eye.jsonl" "$STATE/mitm" >"$STATE/eye.log" 2>&1 &
 pids+=($!)
 on vps python3 -m http.server --bind 127.0.0.1 8443 --directory "$STATE/vps" >"$STATE/website.log" 2>&1 &
 pids+=($!)
@@ -266,7 +271,7 @@ set +e
 on home env PW_AP_URL="$AP_URL" PW_AP_IP="$VPS" PW_BASE_URL="http://127.0.0.1:$APP" PW_STATE="$STATE" \
   PW_HOME="http://127.0.0.1:$HOMEP" PW_VOICE="http://127.0.0.1:$VOICEP/v1" PW_PHONE_CHROME="$PHONE_CHROME" \
   PW_LK_API="http://127.0.0.1:$LKP" PW_LK_KEY="$LK_KEY" PW_LK_SECRET="$LK_SECRET" PW_TAP="$STATE/tap.jsonl" \
-  PW_PHONE_IP="$PHONE" PW_VPS_DIR="$STATE/vps" \
+  PW_PHONE_IP="$PHONE" PW_VPS_DIR="$STATE/vps" PW_EYE="$STATE/eye.jsonl" PW_MITM="$STATE/mitm" \
   npx playwright test e2e/trunk-rtc.spec.ts --reporter=list 2>&1 | tee "$STATE/e2e.log"
 rc=${PIPESTATUS[0]}
 set -e

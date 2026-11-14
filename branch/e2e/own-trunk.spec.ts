@@ -223,7 +223,7 @@ test('own trunk: a lay user pairs a phone, talks to MAIN, joins a root, delegate
       await expect(mic).toHaveAttribute('data-voice', 'unavailable', { timeout: 20_000 });
       await mic.tap();
       await mic.tap();
-      await expect(phone.getByTestId('voice-unavailable')).toHaveText(/Voice isn't available over the trunk yet — type instead/);
+      await expect(phone.getByTestId('voice-unavailable')).toHaveText(/Voice isn't set up on your home computer — type instead/);
       await expect(phone.locator('main [role="alert"]')).toHaveCount(0); // no error box (Next's route announcer is outside <main>)
       await expect(phone.getByRole('button', { name: 'fix this' })).toHaveCount(0);
       await expect(phone.getByTestId('free-strip')).toHaveCount(0);

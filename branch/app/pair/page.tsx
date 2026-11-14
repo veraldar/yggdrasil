@@ -13,6 +13,7 @@ import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { LineIcon } from '@/components/line-icon';
 import { savePin } from '@/lib/p2p';
+import { pinSaved } from '@/lib/pinned';
 
 type Code = {
   url: string;
@@ -98,8 +99,12 @@ export default function PairPage() {
         deviceId: body.id,
         pairedAt: new Date().toISOString(),
       });
+      pinSaved();
     }
     setStatus(`paired as ${body.name} — opening`);
+    // the service worker carries the box's data over the pinned channel (lib/pinned.ts): it must
+    // be in charge before the first page of the app asks for any
+    await Promise.race([navigator.serviceWorker?.ready, new Promise((r) => setTimeout(r, 3_000))]);
     location.replace('/');
   }
 

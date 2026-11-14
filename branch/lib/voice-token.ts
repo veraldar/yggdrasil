@@ -19,8 +19,8 @@ export const VOICE_UNAVAILABLE = 'voice-unavailable';
 
 /** the one line the app shows for it */
 export const VOICE_OFF_NOTE = {
-  en: "Voice isn't available over the trunk yet — type instead",
-  fr: 'La voix ne passe pas encore par le tronc — écrivez plutôt',
+  en: "Voice isn't set up on your home computer — type instead",
+  fr: "La voix n'est pas installée sur votre ordinateur — écrivez plutôt",
 } as const;
 
 export type VoiceToken = {

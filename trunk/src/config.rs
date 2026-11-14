@@ -45,6 +45,12 @@ pub struct ApDialSection {
     /// raw TCP forwards the ap may name → local target, e.g. { livekit-ice = "127.0.0.1:7881" }
     #[serde(default)]
     pub tcp: std::collections::HashMap<String, String>,
+    /// the pinned channel's ICE over TCP: where phones dial it (the ap's :443).
+    /// Absent = the ap url's host on :443, resolved at start; [] = off. Its
+    /// connections arrive on the `livekit-ice` raw forward and are told apart
+    /// from LiveKit's by the STUN username.
+    #[serde(default)]
+    pub ice_tcp: Option<Vec<String>>,
     /// where a `/rootlink` stream from the ap goes (a remote root dialing
     /// wss://<ap>/rootlink): default = this bridge's root-link listener;
     /// "off" = /rootlink is not routed (it falls through to the app upstream)

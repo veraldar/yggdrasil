@@ -69,7 +69,12 @@ test.use({
   launchOptions: {
     // /etc/hosts names the ap inside the run; this is the belt to that brace
     args: AP_IP
-      ? [`--host-resolver-rules=MAP ${new URL(AP || 'https://x').hostname} ${AP_IP}`]
+      ? [
+          `--host-resolver-rules=MAP ${new URL(AP || 'https://x').hostname} ${AP_IP}`,
+          // the test ap's self-signed cert: without this the service worker (which carries the
+          // paired phone's data over the pinned channel, lib/pinned.ts) is refused its script
+          '--ignore-certificate-errors',
+        ]
       : [],
   },
 });
@@ -78,7 +83,8 @@ type J = Record<string, unknown>;
 const failed: string[] = [];
 /** the screens a failed step photographs (STATE/fail-<step>-<name>.png) */
 const screens: Array<[string, Page]> = [];
-const VOICE_NA = /Voice isn't available over the trunk yet — type instead/;
+// the box in this world has no LiveKit: voice really is not set up (lib/voice-token.ts)
+const VOICE_NA = /Voice isn't set up on your home computer — type instead/;
 /** the app's error box (components/app/error-box.tsx) — inside the page's <main>; Next's own
  *  route announcer (role=alert too, outside <main>) is not it */
 const errorBox = (page: Page) => page.locator('main [role="alert"]');
