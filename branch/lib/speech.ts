@@ -227,11 +227,39 @@ function ensureEls(): [HTMLAudioElement, HTMLAudioElement] {
       a.preload = 'auto';
       (a as HTMLAudioElement & { playsInline?: boolean }).playsInline = true;
       a.addEventListener('ended', () => onPieceEnded(a));
+      a.addEventListener('pause', () => onForeignPause(a));
       return a;
     };
     els = [make(), make()];
   }
   return els;
+}
+
+/** A REPLY THAT GOES SILENT (voice-fixes 11-14): the browser itself paused the playing piece —
+ *  no pause button, no voice command, not its end (the rig caught it 0.5 s and 5.6 s into a
+ *  reply; a phone does it on an audio-focus or route change). The deck still said "speaking",
+ *  so hands-free waited on it for minutes. It plays on; when it cannot (or keeps being paused),
+ *  the deck closes and the page gets its mic back — never a silent "speaking". */
+let foreignPauses = 0;
+function onForeignPause(el: HTMLAudioElement): void {
+  if (!els || el !== els[activeEl] || el.ended || userPaused || state.phase !== 'playing') return;
+  const myGen = gen;
+  setTimeout(() => {
+    if (gen !== myGen || !els || el !== els[activeEl] || !el.paused || el.ended || userPaused) return;
+    if (state.phase !== 'playing') return;
+    foreignPauses++;
+    diagEvent('tts', `the reply's audio was paused by the browser at ${el.currentTime.toFixed(1)}s — playing on (${foreignPauses})`);
+    if (foreignPauses > 3) {
+      stopSpeech();
+      playFailHandler?.();
+      return;
+    }
+    void el.play().catch((e) => {
+      console.warn('tts resume after a foreign pause failed:', String(e));
+      stopSpeech();
+      playFailHandler?.();
+    });
+  }, 300);
 }
 
 function onPieceEnded(el: HTMLAudioElement): void {
@@ -491,6 +519,7 @@ export function startSpeech(text: string, slug = ''): void {
   spokenPlayedChars = 0; // nothing has played yet — the whole text is live evidence
   spokenAt = Date.now();
   msgLang = detectLang(clean.slice(0, 600), slug); // ONE language per message
+  foreignPauses = 0;
   userPaused = false;
   ensureEls();
   abort = new AbortController();
