@@ -123,7 +123,10 @@ the kill-switch, which severs every live connection within a second.
   phone ↔ box; the VPS forwards opaque bytes. **Not pinned**: LiveKit's DTLS fingerprint arrives by
   signaling through the access point (its TLS), so a malicious access point could actively
   man-in-the-middle a new call; the bridge's own media (this document's pinned DTLS identity) does
-  not have that gap. The bridge device-gates `/rtc` and cuts it on revoke. Where voice cannot work
+  not have that gap. The bridge device-gates `/rtc` and cuts it on revoke. The spoken reply
+  rides the room as well while it is up: the deck asks the agent (RPC `tts_stream`), which
+  streams the box's own `/api/tts/stream` bytes back as a LiveKit byte stream
+  (`lib/voice-tts.ts`); with no room it falls back to https (through the access point). Where voice cannot work
   (no LiveKit, or a browser that is not a paired device) the route answers `503
   {error:"voice-unavailable", why}` (always JSON), and the app treats it as a state, not an error —
   one calm line, no error box, no retry (`lib/voice-token.ts`).

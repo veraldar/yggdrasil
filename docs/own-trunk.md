@@ -98,14 +98,16 @@ someone else.
 The trunk does **not** hold your model key, your sessions or your files. Those stay at home. On the
 server there is only its own key and certificate and a fingerprint of your home computer's token.
 
-**Your voice is the exception.** The sound from your phone's microphone travels encrypted from the
-phone to your home computer (WebRTC: DTLS-SRTP). The server only passes the encrypted bytes along; it
-has no key for them. Two limits, plainly:
+**Your voice is the exception.** The sound from your phone's microphone, and the spoken reply
+while the voice line is open (hands-free, or holding the tree), travel encrypted between the phone
+and your home computer (WebRTC: DTLS-SRTP for the microphone, DTLS for the reply). The server only
+passes the encrypted bytes along; it has no key for them. The limits, plainly:
 - The call is set up through the server's encrypted line (LiveKit's signaling), so a server that is
   *actively* malicious could put itself in the middle of a new call. It cannot listen to a call
   passively.
-- The spoken reply and its text are app data: they come back like the rest of the app, through the
-  server's line.
+- The text of what you said and of the reply is app data, like everything you type and read: it
+  passes through the server's line. So does a reply spoken after the voice line closed (push to
+  talk on a session page lets go of it at once).
 
 ## Voice through the trunk
 

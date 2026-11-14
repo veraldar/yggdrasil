@@ -16,10 +16,13 @@ import { type ByteStreamReader, type Room, RoomEvent } from 'livekit-client';
 import { trunkActive } from '@/lib/trunk-ice';
 
 const TOPIC = 'bifrost.tts';
-const OPEN_MS = 4_000; // the agent's first byte stream header, or https
+// the agent answers once the box's synthesis has STARTED (a whole reply on a small CPU voice takes
+// seconds before its first byte — over https the deck waits that long too); then its stream opens
+const SYNTH_MS = 60_000;
+const OPEN_MS = 5_000;
 const MAX_RPC = 14_000; // LiveKit RPC payloads stop at 15 KiB
 
-type Waiter = (reader: ByteStreamReader, rate: number, status: number) => void;
+type Waiter = (reader: ByteStreamReader) => void;
 let room: Room | null = null;
 const waiting = new Map<string, Waiter>();
 
@@ -27,11 +30,11 @@ const waiting = new Map<string, Waiter>();
 export function voiceRoom(r: Room): void {
   room = r;
   r.registerByteStreamHandler(TOPIC, (reader) => {
-    const a = reader.info.attributes || {};
-    const w = waiting.get(a.id || '');
+    const id = reader.info.attributes?.id || '';
+    const w = waiting.get(id);
     if (!w) return; // nobody asked (a stopped reply): dropped
-    waiting.delete(a.id!);
-    w(reader, Number(a.rate) || 24000, Number(a.status) || 200);
+    waiting.delete(id);
+    w(reader);
   });
   r.on(RoomEvent.Disconnected, () => {
     if (room === r) room = null;
@@ -59,35 +62,34 @@ async function overRoom(
   const id = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
   const payload = JSON.stringify({ id, text: body.text, lang: body.lang || '' });
   if (payload.length > MAX_RPC) return null;
-  const opened = new Promise<{ reader: ByteStreamReader; rate: number; status: number } | null>(
-    (done) => {
-      const t = setTimeout(() => {
-        waiting.delete(id);
-        done(null);
-      }, OPEN_MS);
-      waiting.set(id, (reader, rate, status) => {
-        clearTimeout(t);
-        done({ reader, rate, status });
-      });
-    }
-  );
+  // the stream may open the moment the agent answers: listen before asking
+  let open: (r: ByteStreamReader | null) => void = () => {};
+  const opened = new Promise<ByteStreamReader | null>((done) => (open = done));
+  waiting.set(id, (reader) => open(reader));
+  let rate = 0;
   try {
-    const ok = await r.localParticipant.performRpc({
-      destinationIdentity: agent,
-      method: 'tts_stream',
-      payload,
-      responseTimeout: OPEN_MS,
-    });
-    if (ok !== 'ok') {
-      waiting.delete(id);
-      return null;
-    }
+    const answer = JSON.parse(
+      await r.localParticipant.performRpc({
+        destinationIdentity: agent,
+        method: 'tts_stream',
+        payload,
+        responseTimeout: SYNTH_MS,
+      })
+    ) as { status?: number; rate?: number };
+    if (answer.status !== 200) throw new Error(`agent tts ${answer.status}`);
+    rate = Number(answer.rate) || 24000;
   } catch {
     waiting.delete(id);
-    return null; // an agent without tts_stream, or gone: https
+    return null; // an agent without tts_stream, gone, or its TTS failed: https
   }
-  const got = await opened;
-  if (!got || got.status !== 200 || signal.aborted) return null;
+  const t = setTimeout(() => {
+    waiting.delete(id);
+    open(null);
+  }, OPEN_MS);
+  const reader = await opened;
+  clearTimeout(t);
+  if (!reader || signal.aborted) return null;
+  const got = { reader, rate };
   const it = got.reader[Symbol.asyncIterator]();
   signal.addEventListener('abort', () => void it.return?.(), { once: true });
   const stream = new ReadableStream<Uint8Array>({

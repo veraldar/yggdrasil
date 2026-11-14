@@ -611,22 +611,18 @@ async def entrypoint(ctx: JobContext) -> None:
         return "ok"
 
     # ---- the phone's TTS over the room (trunk): the app's own /api/tts/stream bytes, as a byte
-    # stream to the caller only (topic bifrost.tts, attributes id/rate/status). The voice, the
-    # deck and every command stay the phone's — only the transport of the audio changes.
-    async def _tts_to_phone(sid: str, text: str, lang: str, who: str) -> None:
+    # stream to the caller only (topic bifrost.tts, attribute id). The voice, the deck and every
+    # command stay the phone's — only the transport of the audio changes. The RPC answers once the
+    # synthesis has started (its sample rate), so a slow first byte never looks like a dead agent.
+    async def _tts_pump(sid: str, client: httpx.AsyncClient, r: httpx.Response, who: str) -> None:
         writer = None
         try:
-            async with httpx.AsyncClient(timeout=httpx.Timeout(600.0, connect=5.0)) as c:
-                async with c.stream("POST", f"{APP_URL}/api/tts/stream", json={"text": text, "lang": lang}) as r:
-                    writer = await ctx.room.local_participant.stream_bytes(
-                        f"tts-{sid}",
-                        topic="bifrost.tts",
-                        destination_identities=[who],
-                        attributes={"id": sid, "rate": r.headers.get("x-sample-rate", "24000"), "status": str(r.status_code)},
-                    )
-                    async for chunk in r.aiter_bytes():
-                        await writer.write(chunk)
-        except Exception as e:  # noqa: BLE001 — the phone falls back to https on a short stream
+            writer = await ctx.room.local_participant.stream_bytes(
+                f"tts-{sid}", topic="bifrost.tts", destination_identities=[who], attributes={"id": sid}
+            )
+            async for chunk in r.aiter_bytes():
+                await writer.write(chunk)
+        except Exception as e:  # noqa: BLE001 — the phone's deck ends a short stream like https's
             logger.warning("tts over the room (%s): %s", sid, e)
         finally:
             if writer is not None:
@@ -634,17 +630,32 @@ async def entrypoint(ctx: JobContext) -> None:
                     await writer.aclose()
                 except Exception:  # noqa: BLE001
                     pass
+            await r.aclose()
+            await client.aclose()
 
     async def _tts_stream_rpc(data) -> str:
         if not APP_URL:
-            return "off"
+            return json.dumps({"status": 0, "why": "off"})
         try:
             req = json.loads(data.payload)
             sid, text, lang = str(req["id"])[:64], str(req["text"]), str(req.get("lang") or "")
         except Exception:  # noqa: BLE001
-            return "bad-payload"
-        asyncio.ensure_future(_tts_to_phone(sid, text, lang, data.caller_identity))
-        return "ok"
+            return json.dumps({"status": 0, "why": "bad-payload"})
+        client = httpx.AsyncClient(timeout=httpx.Timeout(600.0, connect=5.0))
+        try:
+            r = await client.send(
+                client.build_request("POST", f"{APP_URL}/api/tts/stream", json={"text": text, "lang": lang}),
+                stream=True,
+            )
+        except Exception as e:  # noqa: BLE001
+            await client.aclose()
+            return json.dumps({"status": 0, "why": str(e)[:200]})
+        if r.status_code != 200:
+            await r.aclose()
+            await client.aclose()
+            return json.dumps({"status": r.status_code})
+        asyncio.ensure_future(_tts_pump(sid, client, r, data.caller_identity))
+        return json.dumps({"status": 200, "rate": int(r.headers.get("x-sample-rate") or 24000)})
 
     ctx.room.local_participant.register_rpc_method("tts_stream", _tts_stream_rpc)
     ctx.room.local_participant.register_rpc_method("deck_state", _deck_state_rpc)
