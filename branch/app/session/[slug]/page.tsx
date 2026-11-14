@@ -1903,6 +1903,10 @@ export default function SessionView({
     // message polls recreate objects — the SAME message must not restart
     // (a second startSpeech stops the first one mid-playback)
     if (freeSpokeMsgRef.current === a.time) return;
+    // MAIN's own report (a wake's reply) landing while a reply is still out loud or
+    // paused never cuts it: the cycle ends with that reply, the mic comes back, and the
+    // arrival path speaks the unheard report then (voice-fixes 11-14: stop/pause hold)
+    if (a.autoReply && freeSpokeMsgRef.current && getSpeech().phase !== 'idle') return;
     freeSpokeMsgRef.current = a.time;
     // the echo's answer is never spoken (pwa-flow-fix 11-03): the reply to a
     // discarded echo prompt — the user message right before it — stays silent
@@ -1915,7 +1919,7 @@ export default function SessionView({
       return;
     }
     try {
-      if (!shouldAutoSpeak(a)) {
+      if (!shouldAutoSpeak(a, isMainSlug(slug))) {
         // quiet-assess: silent verdict reply — give the mic back, no voice
         diagEvent('voice', 'auto-verdict reply — not spoken');
         freeMicGiveBack();
