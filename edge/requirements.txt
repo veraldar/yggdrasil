@@ -1,4 +1,4 @@
-sherpa-onnx>=1.10.30
+sherpa-onnx>=1.10.30,<2  # 2.x drops the espeak-ng frontend: piper voices fail ("no lexicon, no frontend")
 fastapi>=0.115
 uvicorn>=0.30
 numpy

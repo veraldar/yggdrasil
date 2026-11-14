@@ -4,7 +4,8 @@
 Fake backends: a 'website' and a 'coturn' that record the first bytes and answer their name, and a real TLS
 'access point' that requires the PROXY v1 line first (like `bifrost-net ap` with proxy_protocol = true).
 Checks every route, byte-exact passthrough, case and trailing-dot names, a wildcard route, STUN, garbage,
-an idle connection that outlives the 5 s connect timeout, IPv6 (when this machine has it) and config errors.
+an idle connection that outlives the 5 s connect timeout, IPv6 (when this machine has it), ICE over TCP (RFC 4571-framed
+STUN → the `ice` backend, then framed DTLS byte-exact both ways) and config errors.
     python3 trunk/deploy/sni-443-test.py        exit 0 = GREEN
 """
 import importlib.util
@@ -81,7 +82,30 @@ def tls_backend(name, s, want_proxy):
         threading.Thread(target=one, daemon=True).start()
 
 
-website, coturn, ap, apps = listener(), listener(), listener(), listener()
+def echo(name, s):
+    """records every byte it got, and echoes it (an ICE-TCP endpoint's stand-in)"""
+    while True:
+        c, _ = s.accept()
+
+        def one(c=c):
+            c.settimeout(5)
+            seen = bytearray()
+            got.setdefault(name, []).append(seen)
+            try:
+                while True:
+                    d = c.recv(65536)
+                    if not d:
+                        break
+                    seen.extend(d)
+                    c.sendall(d)
+            except OSError:
+                pass
+            c.close()
+        threading.Thread(target=one, daemon=True).start()
+
+
+website, coturn, ap, apps, ice = listener(), listener(), listener(), listener(), listener()
+threading.Thread(target=echo, args=("ice", ice), daemon=True).start()
 threading.Thread(target=fake, args=("website", website), daemon=True).start()
 threading.Thread(target=fake, args=("coturn", coturn), daemon=True).start()
 threading.Thread(target=tls_backend, args=("AP", ap, True), daemon=True).start()
@@ -101,6 +125,7 @@ route   Trunk.Example.Org.  127.0.0.1:{ap.getsockname()[1]}  proxy   # case + tr
 route   *.apps.example.org  127.0.0.1:{apps.getsockname()[1]}
 default 127.0.0.1:{website.getsockname()[1]}
 stun    127.0.0.1:{coturn.getsockname()[1]}
+ice     127.0.0.1:{ice.getsockname()[1]}
 """)
 cfg = sni.load(conf)
 ports = []
@@ -170,6 +195,41 @@ c.sendall(stun)
 r = c.recv(100)
 c.close()
 check("STUN/TURN → coturn", r == b"coturn", r)
+# 4b. ICE over TCP (RFC 6544): an RFC 4571 frame holding a STUN binding request → the ice backend; what follows
+# (framed DTLS / SRTP) passes byte-exact both ways — opaque bytes, nothing parsed
+username = b"\x00\x06\x00\x09" + b"abcd:efgh" + b"\x00\x00\x00"
+binding = (0x0001).to_bytes(2, "big") + len(username).to_bytes(2, "big") + b"\x21\x12\xa4\x42" + os.urandom(12) + username
+framed = len(binding).to_bytes(2, "big") + binding
+dtls = os.urandom(300)
+c = socket.create_connection(("127.0.0.1", port))
+c.sendall(framed)
+time.sleep(0.2)
+c.sendall(len(dtls).to_bytes(2, "big") + dtls)
+want = len(framed) + 2 + len(dtls)
+r = b""
+c.settimeout(3)
+try:
+    while len(r) < want:
+        d = c.recv(65536)
+        if not d:
+            break
+        r += d
+except OSError:
+    pass
+c.close()
+check("ICE-TCP framed STUN → ice backend, then framed DTLS echoed byte-exact", r == framed + len(dtls).to_bytes(2, "big") + dtls,
+      f"{len(r)}/{want}")
+check("the ice backend got the binding request first, unchanged", bytes(got.get("ice", [b""])[0][:len(framed)]) == framed)
+check("framed_stun_head: unframed STUN (TURN) is not ICE-TCP", not sni.framed_stun_head(stun[:8]))
+check("framed_stun_head: TLS and http are not ICE-TCP", not sni.framed_stun_head(b"\x16\x03\x01\x02\x00\x01\x00\x01")
+      and not sni.framed_stun_head(b"GET / HT"))
+n = len(got.get("website", []))
+bad = len(binding).to_bytes(2, "big") + binding[:6] + b"\x00\x00\x00\x00" + binding[10:]  # frame + type ok, magic wrong
+c = socket.create_connection(("127.0.0.1", port))
+c.sendall(bad)
+r = c.recv(100)
+c.close()
+check("a frame with the wrong magic cookie → website, not ice", r == b"website", r)
 # 5. a real openssl client (OpenSSL 3: a big ClientHello), the name in another case + trailing dot
 n = len(got.get("AP-proxy", []))
 subprocess.run(["openssl", "s_client", "-connect", f"127.0.0.1:{port}", "-servername", "TRUNK.Example.Org."],
