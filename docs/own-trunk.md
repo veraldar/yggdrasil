@@ -86,28 +86,33 @@ tree**. Your main session can now start work on that computer, and its results c
 - **The trunk itself:** `./install.sh --trunk off` at home goes back to your own Wi-Fi only. On the
   server: `sudo systemctl disable --now yggdrasil-trunk yggdrasil-trunk-cert.timer`.
 
-## Be clear about this: the encryption ends on your server
+## What the server can see
 
-Your phone's connection is encrypted up to the trunk. The trunk decrypts each request to route it,
-then sends it home over its own encrypted line, which your home computer accepts only from that
-server's key. So **whoever controls the server can read and change what passes through it**: your
-messages, the answers and the pairing. That can be you, and also your hosting provider. This is
-why the trunk must be a server you rent and trust, in a country you choose, and never one run by
-someone else.
+**Before pairing**, and for the app itself, your phone's connection is encrypted up to the trunk:
+the trunk decrypts each request to route it, then sends it home over its own encrypted line, which
+your home computer accepts only from that server's key.
+
+**After pairing, your data skips it.** The pairing QR also carries your home computer's key (its
+fingerprint). From then on the phone opens its own encrypted channel straight to your home computer
+(WebRTC, keyed by that fingerprint) and sends everything over it: your messages, the answers, your
+files, your voice and the spoken replies. The server passes those bytes along on port 443 without
+any key for them. A small line at the bottom of the screen says which road the phone is on:
+
+- **end to end**: the pinned channel is up. The server sees encrypted bytes, nothing else.
+- **via the trunk's TLS**: the channel could not come up (a network that blocks it). The phone
+  falls back to the trunk's line, as before: then the server *can* read what passes.
+- **box key mismatch — nothing sent**: the key that came back is not the one in the QR. Someone in
+  the middle, maybe the server itself. The phone refuses and sends no data at all.
+
+The limits, plainly:
+- The app's code (its pages and scripts) still comes from the server, like any website. A server
+  that is actively malicious could serve changed code. The pinned channel protects what you send
+  and receive, not the code that sends it. So the trunk must still be a server you rent and trust,
+  in a country you choose, and never one run by someone else.
+- Pairing itself (the one-time code in the QR) passes through the server's line.
 
 The trunk does **not** hold your model key, your sessions or your files. Those stay at home. On the
 server there is only its own key and certificate and a fingerprint of your home computer's token.
-
-**Your voice is the exception.** The sound from your phone's microphone, and the spoken reply
-while the voice line is open (hands-free, or holding the tree), travel encrypted between the phone
-and your home computer (WebRTC: DTLS-SRTP for the microphone, DTLS for the reply). The server only
-passes the encrypted bytes along; it has no key for them. The limits, plainly:
-- The call is set up through the server's encrypted line (LiveKit's signaling), so a server that is
-  *actively* malicious could put itself in the middle of a new call. It cannot listen to a call
-  passively.
-- The text of what you said and of the reply is app data, like everything you type and read: it
-  passes through the server's line. So does a reply spoken after the voice line closed (push to
-  talk on a session page lets go of it at once).
 
 ## Voice through the trunk
 
@@ -124,7 +129,9 @@ speech. UDP is not needed.
   `ice 127.0.0.1:4479`. `trunk.sh` writes it in a new config and warns when an existing one lacks it.
   Then run `sudo systemctl restart yggdrasil-sni-443`. With nginx's `stream { … }` instead, voice
   needs `sni-443.py` (nginx cannot tell ICE from other bytes).
-- **Only paired phones** get a voice line. Revoking a phone cuts its call within a second.
+- **Only paired phones** get a voice line, and its setup (LiveKit's signaling) rides the pinned
+  channel too: the server cannot swap the call's keys. Revoking a phone cuts its call and its
+  channel within a second.
 - **Tested** by `sim/trunk-rtc-e2e.sh`: a phone, the server and a home computer, each allowed only
   TCP 443 to the server, with the real voice agent and speech engines.
 

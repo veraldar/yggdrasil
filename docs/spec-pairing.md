@@ -120,10 +120,18 @@ the kill-switch, which severs every live connection within a second.
   forward (sni-443.py `ice`, or the ap's own `ice`), the bridge maps it to LiveKit's TCP port on the
   box's address, and the phone adds `<trunk IP>:443` as a passive TCP candidate (`lib/trunk-ice.ts`,
   from the token's `iceTcp`) — LiveKit cannot advertise a port it does not bind. DTLS-SRTP runs
-  phone ↔ box; the VPS forwards opaque bytes. **Not pinned**: LiveKit's DTLS fingerprint arrives by
-  signaling through the access point (its TLS), so a malicious access point could actively
-  man-in-the-middle a new call; the bridge's own media (this document's pinned DTLS identity) does
-  not have that gap. The bridge device-gates `/rtc` and cuts it on revoke. The spoken reply
+  phone ↔ box; the VPS forwards opaque bytes. **Pinned through the channel**: once paired, LiveKit's
+  signaling (its websocket, hence its DTLS fingerprint and ICE credentials) rides the pinned
+  channel below (`lib/pinned.ts` TunnelWebSocket), so the access point cannot swap them; only
+  when that channel cannot come up does `/rtc` fall back to the access point's TLS.
+- **The pinned channel** (after pairing through a trunk): a data channel `tun` to the bridge,
+  signaled by `POST /offer` through the access point (authenticated by the device cookie; the
+  answer must carry the QR-pinned fingerprint — a mismatch is refused before any byte flows and
+  nothing falls back), media over ICE-TCP `<vps>:443` (the ap dial-out hands the bridge its own
+  streams by the STUN username's receiver ufrag, LiveKit the rest). It carries raw HTTP/1.1
+  streams under the access point's stream law (`ap::tunnel_stream`), the credential bound at
+  /offer injected as the device cookie; the service worker routes `/api/*` (not `/api/pair/*`)
+  and `/rtc/*` to it. States: pinned · connecting (requests wait) · fallback · refused. The bridge device-gates `/rtc` and cuts it on revoke. The spoken reply
   rides the room as well while it is up: the deck asks the agent (RPC `tts_stream`), which
   streams the box's own `/api/tts/stream` bytes back as a LiveKit byte stream
   (`lib/voice-tts.ts`); with no room it falls back to https (through the access point). Where voice cannot work

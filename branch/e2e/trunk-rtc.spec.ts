@@ -471,6 +471,7 @@ test('trunk rtc: phone ⇄ vps:443 ⇄ box — pair, talk, hear the reply, media
         await expect(phone.getByTestId('pin-state')).toHaveAttribute('data-state', 'pinned', {
           timeout: 20_000,
         });
+        const pinnedMs = Date.now() - pairedAt;
         const v = await phone.evaluate(async () => {
           const pin = JSON.parse(localStorage.getItem('bifrost.pin') || 'null');
           for (const pc of (window as unknown as { __pcs: RTCPeerConnection[] }).__pcs) {
@@ -505,7 +506,17 @@ test('trunk rtc: phone ⇄ vps:443 ⇄ box — pair, talk, hear the reply, media
           return { status: x.status, via: x.headers.get('x-bifrost-via') };
         });
         expect(r).toEqual({ status: 200, via: 'pinned' });
-        return `pinned (${v!.remote}), box key = QR ${v!.pin.slice(0, 17)}…, /api answered via ${r.via}`;
+        // what a call costs over it (phone → vps:443 → the box's bridge → the app, and back)
+        const rtts = await phone.evaluate(async () => {
+          const out: number[] = [];
+          for (let i = 0; i < 7; i++) {
+            const t = performance.now();
+            await (await fetch('/api/session/main', { cache: 'no-store' })).text();
+            out.push(performance.now() - t);
+          }
+          return out.sort((a, b) => a - b);
+        });
+        return `pinned ${pinnedMs} ms after the app opened (${v!.remote}), box key = QR ${v!.pin.slice(0, 17)}…, /api via ${r.via}: median ${Math.round(rtts[3])} ms per call`;
       }
     );
 

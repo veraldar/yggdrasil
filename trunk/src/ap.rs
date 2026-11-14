@@ -1414,6 +1414,19 @@ pub fn selftest() -> Result<String, String> {
         }
     });
 
+    // the bridge's own ICE-TCP listener stand-in: answers "BRIDGE" (the demux picked it)
+    let bice = std::net::TcpListener::bind("127.0.0.1:0").map_err(|e| e.to_string())?;
+    let bice_addr = bice.local_addr().map_err(|e| e.to_string())?;
+    std::thread::spawn(move || {
+        for mut s in bice.incoming().flatten() {
+            use std::io::{Read, Write};
+            let mut b = [0u8; 4096];
+            let _ = s.read(&mut b);
+            let _ = s.write_all(b"BRIDGE");
+        }
+    });
+    let ufrags: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::from(["boxufrag".to_string()])));
+
     // device registry: one loopback-region token (the region curl on this box has)
     let dev_tok = "dev-token-0123456789abcdef";
     let reg = serde_json::json!({ "version": 2, "killEpoch": 0, "devices": [
@@ -1436,7 +1449,7 @@ pub fn selftest() -> Result<String, String> {
             rootlink: Some(rl_addr.to_string()),
             branch: Some(up_addr.to_string()),
             tokens: Arc::new(TokenStore::open(&reg_path)),
-            ice_demux: None,
+            ice_demux: Some(IceDemux { name: "livekit-ice".into(), bridge: bice_addr, ufrags: ufrags.clone() }),
         })
     };
     let bad_tok = rt.block_on(async { timeout(Duration::from_secs(5), dial_once(&mk(&pin, "not-the-pairing-token-000"))).await });
@@ -1626,6 +1639,60 @@ pub fn selftest() -> Result<String, String> {
     if echoed != framed {
         return Err("ICE-TCP framed STUN did not ride the raw forward byte-exact".into());
     }
+    // 8b. the same forward, a binding request for the BRIDGE's own peer (its ufrag registered):
+    // the demux hands it to the bridge's listener instead of LiveKit's
+    let mut ours = vec![0x00, 0x01, 0x00, 0x14, 0x21, 0x12, 0xA4, 0x42];
+    ours.extend_from_slice(&[9u8; 12]);
+    ours.extend_from_slice(&[0x00, 0x06, 0x00, 0x0e]);
+    ours.extend_from_slice(b"boxufrag:phone\0\0"); // 14 bytes + 2 padding
+    if stun_receiver_ufrag(&ours).as_deref() != Some("boxufrag") {
+        return Err(format!("stun_receiver_ufrag: {:?}", stun_receiver_ufrag(&ours)));
+    }
+    let mut framed2 = (ours.len() as u16).to_be_bytes().to_vec();
+    framed2.extend_from_slice(&ours);
+    let got = rt.block_on(async {
+        let mut tcp = TcpStream::connect(ap_addr).await.map_err(|e| e.to_string())?;
+        tcp.write_all(&framed2).await.map_err(|e| e.to_string())?;
+        let mut b = [0u8; 6];
+        timeout(Duration::from_secs(5), tcp.read_exact(&mut b)).await.map_err(|_| "demux timeout".to_string())?.map_err(|e| e.to_string())?;
+        Ok::<_, String>(b)
+    })?;
+    if &got != b"BRIDGE" {
+        return Err("ICE-TCP for the bridge's own ufrag did not reach the bridge".into());
+    }
+    // 8c. the pinned channel's tunnel (bridge.rs "tun" streams): the bridge-bound credential
+    // rides as the device cookie (the gate admits it), /rootlink and /offer never ride it
+    let tun = |head: &str, bearer: &str| -> Result<String, String> {
+        let cfg = mk(&pin, &bridge_tok);
+        rt.block_on(async {
+            let (_tx, rx) = mpsc::unbounded_channel::<Option<Vec<u8>>>();
+            let (otx, mut orx) = mpsc::unbounded_channel::<(u8, Vec<u8>)>();
+            tokio::spawn(tunnel_stream(cfg, 7, "127.0.0.1".parse().unwrap(), head.as_bytes().to_vec(), bearer.into(), rx, otx));
+            let mut got = vec![];
+            while let Ok(Some((_, m))) = timeout(Duration::from_secs(5), orx.recv()).await {
+                let Some((kind, _, body)) = unmux(&m) else { break };
+                if kind == CLOSE {
+                    break;
+                }
+                got.extend_from_slice(body);
+            }
+            Ok(String::from_utf8_lossy(&got).to_string())
+        })
+    };
+    let r = tun("GET /api/sessions HTTP/1.1\r\nHost: localhost\r\n\r\n", dev_tok)?;
+    if !r.starts_with("HTTP/1.1 200") || !r.contains("path=/api/sessions;") || !r.contains("xff=127.0.0.1;") {
+        return Err(format!("tunnel request with the bound credential: {r}"));
+    }
+    let r = tun("GET /api/sessions HTTP/1.1\r\nHost: localhost\r\n\r\n", "")?;
+    if !r.starts_with("HTTP/1.1 401") {
+        return Err(format!("tunnel request without a credential passed the gate: {}", r.lines().next().unwrap_or("")));
+    }
+    for p in ["/rootlink", "/offer", "/_roots"] {
+        let r = tun(&format!("GET {p} HTTP/1.1\r\nHost: localhost\r\n\r\n"), dev_tok)?;
+        if !r.starts_with("HTTP/1.1 404") {
+            return Err(format!("{p} rode the pinned tunnel: {}", r.lines().next().unwrap_or("")));
+        }
+    }
     // 9. LiveKit signaling /rtc: a paired device only, and cut when it is revoked
     let ws = |auth: &str| format!("GET /rtc/v1?access_token=x HTTP/1.1\r\nHost: localhost\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n{auth}\r\n").into_bytes();
     let r = text(&client(ws(""), None)?);
@@ -1660,7 +1727,9 @@ pub fn selftest() -> Result<String, String> {
          websocket 101 + 3000 bytes echoed byte-exact; /rootlink → root-link listener (no device gate), plain GET 426, /_root + /_roots 404 at the edge; \
          /branch → the bridge with the edge key, a client-sent edge key dropped; \
          the join contract's 3 own-credential calls pass, 9 neighbours gated; \
-         ICE-TCP framed STUN on :443 → raw livekit-ice forward byte-exact; /rtc 401 without a device, 101 with one, cut {} ms after revoke",
+         ICE-TCP framed STUN on :443 → raw livekit-ice forward byte-exact, the bridge's own ufrag → the bridge; \
+         pinned tunnel: bound credential admitted, none 401, /rootlink + /offer + /_roots 404; \
+         /rtc 401 without a device, 101 with one, cut {} ms after revoke",
         &pin[..20],
         cut.as_millis()
     ))

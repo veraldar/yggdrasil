@@ -803,4 +803,9 @@ if __name__ == "__main__":
     lt = os.environ.get("AGENT_LOAD_THRESHOLD")
     if lt:
         server._load_threshold = float(lt)
+    # AGENT_LOAD=off: report no cpu load at all. The cgroup monitor measures the whole user
+    # session (every other process of this login), so a busy machine reads as a full worker and
+    # LiveKit dispatches nothing — a box whose only voice job is this one can say so
+    if os.environ.get("AGENT_LOAD") == "off":
+        server._load_fnc = lambda: 0.0
     cli.run_app(server)
