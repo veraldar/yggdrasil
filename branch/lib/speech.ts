@@ -1,7 +1,3 @@
-import { diagEvent } from '@/lib/diag';
-import { stripMarkers } from '@/lib/tree-first';
-import { ttsStream } from '@/lib/voice-tts';
-
 /** Streaming TTS deck: ONE continuous generation per message on the Mac
  *  (raw PCM stream) — the voice is physically constant, no chunk boundaries.
  *
@@ -122,7 +118,9 @@ let state: SpeechState = {
   rate: initialRate(),
 };
 const subs = new Set<() => void>();
-
+import { ttsStream } from '@/lib/voice-tts';
+import { diagEvent } from '@/lib/diag';
+import { stripMarkers } from '@/lib/tree-first';
 function set(patch: Partial<SpeechState>) {
   state = { ...state, ...patch };
   subs.forEach((f) => f());
@@ -179,18 +177,14 @@ function setPhase(p: SpeechPhase) {
 function detectLang(s: string): 'fr' | 'en' {
   if (/[àâçéèêëîïôùûüœ]/i.test(s)) return 'fr';
   const fr = (
-    s
-      .toLowerCase()
-      .match(
-        /\b(le|la|les|un|une|des|du|et|est|que|qui|pour|avec|dans|pas|vous|je|sur|au|aux|ce|cette|mais|plus|tout|tous|par|comme|il|elle|on|nous|son|sa|ses|ne|se|en|y|déjà|très|alors|donc|corriger|corrigé|déployer|déployé|deploye|tester|testé|changer|changé|voix|faut|était|peux|veux|vais|voilà|merci|parce|pendant|depuis|encore|aussi|besoin)\b/gi
-      ) || []
+    s.toLowerCase().match(
+      /\b(le|la|les|un|une|des|du|et|est|que|qui|pour|avec|dans|pas|vous|je|sur|au|aux|ce|cette|mais|plus|tout|tous|par|comme|il|elle|on|nous|son|sa|ses|ne|se|en|y|déjà|très|alors|donc|corriger|corrigé|déployer|déployé|deploye|tester|testé|changer|changé|voix|faut|était|peux|veux|vais|voilà|merci|parce|pendant|depuis|encore|aussi|besoin)\b/gi
+    ) || []
   ).length;
   const en = (
-    s
-      .toLowerCase()
-      .match(
-        /\b(the|and|is|are|you|for|with|this|that|have|not|was|from|but|they|will|can|what|when|how|should|would|there|then|again)\b/gi
-      ) || []
+    s.toLowerCase().match(
+      /\b(the|and|is|are|you|for|with|this|that|have|not|was|from|but|they|will|can|what|when|how|should|would|there|then|again)\b/gi
+    ) || []
   ).length;
   return fr >= 1 && fr >= en ? 'fr' : 'en';
 }
@@ -274,30 +268,28 @@ function playPiece(idx: number, offsetSec = 0): void {
     setPhase('paused');
     return;
   }
-  void e0
-    .play()
-    .then(() => {
-      if (state.phase === 'loading') {
-        setPhase('playing');
-        if (startedAt) {
-          console.warn(`tts: first audio in ${Date.now() - startedAt}ms`);
-          startedAt = 0;
-          if (stallTimer) {
-            clearTimeout(stallTimer);
-            stallTimer = null;
-          }
+  void e0.play().then(() => {
+    if (state.phase === 'loading') {
+      setPhase('playing');
+      if (startedAt) {
+        console.warn(`tts: first audio in ${Date.now() - startedAt}ms`);
+        startedAt = 0;
+        if (stallTimer) {
+          clearTimeout(stallTimer);
+          stallTimer = null;
         }
       }
-      if (pieces[idx + 1]) e1.src = pieces[idx + 1].url; // preload next
-    })
-    .catch((e) => {
-      console.warn('tts audio play failed:', String(e)); // diag
-      // a rejected play() (NotAllowedError…) is not a user pause: 'paused' here
-      // strands the deck + mic hostage forever — close it and tell the page
-      stopSpeech();
-      playFailHandler?.();
-    });
+    }
+    if (pieces[idx + 1]) e1.src = pieces[idx + 1].url; // preload next
+  }).catch((e) => {
+    console.warn('tts audio play failed:', String(e)); // diag
+    // a rejected play() (NotAllowedError…) is not a user pause: 'paused' here
+    // strands the deck + mic hostage forever — close it and tell the page
+    stopSpeech();
+    playFailHandler?.();
+  });
 }
+
 
 function wavBlob(f32: Float32Array, len: number): Blob {
   const buf = new ArrayBuffer(44 + len * 2);
@@ -335,7 +327,8 @@ function enqueuePiece(startSample: number, len: number): void {
   // hiccups that would otherwise break playback at an early boundary
   const initialReady = curIdx < 0 && (pieces.length >= 2 || streamDone);
   const stalledAtBoundary = curIdx >= 0 && idx === curIdx + 1 && state.phase === 'loading';
-  const continuationWhileEnded = curIdx >= 0 && els !== null && els[activeEl].ended;
+  const continuationWhileEnded =
+    curIdx >= 0 && els !== null && els[activeEl].ended;
   if (initialReady || stalledAtBoundary || continuationWhileEnded) {
     // ALWAYS start the chain at the FIRST piece (the beginning of the text) —
     // starting at idx (the latest enqueued) made playback jump to ~12s on open
@@ -411,6 +404,7 @@ async function run(text: string, myGen: number): Promise<void> {
     stopSpeech();
   }
 }
+
 
 function appendPcm(int16: Int16Array, myGen: number): void {
   if (!pendingFloat || pendingFloat.length < pendingLen + int16.length) {
