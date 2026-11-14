@@ -70,9 +70,9 @@
    "regex": "south"
   },
   {
-   "name": "main reports its revenue (14526)",
+   "name": "main reports its revenue (14526, in digits or spoken words)",
    "kind": "main_says",
-   "regex": "14[,. ]?526|14526"
+   "regex": "14[,. ]?526|fourteen thousand,? five hundred (and )?twenty.six"
   },
   {
    "name": "analysis ran as a proxy on lab",
@@ -92,16 +92,16 @@
    "expect": "clean"
   },
   {
-   "root": "lab",
    "name": "a backup of the sales folder made on lab (an exact copy; spoken 'sales-backup' may land as 'sales backup')",
    "cmd": "d=$(ls -d sales*backup* 2>/dev/null | head -1); [ -n \"$d\" ] && cmp sales/sales_2026.csv \"$d/sales_2026.csv\" && echo \"BACKUP-OK in '$d'\"",
-   "expect": "BACKUP-OK"
+   "expect": "BACKUP-OK",
+   "on": "lab"
   },
   {
-   "root": "lab",
    "kind": "main_says",
    "name": "lab's main says 48 data rows",
-   "regex": "\\b48\\b|forty.eight"
+   "regex": "\\b48\\b|forty.eight",
+   "on": "lab"
   }
  ],
  "voice_checks": [

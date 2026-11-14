@@ -86,6 +86,7 @@
         ev('recorder-up', { rate: ctx.sampleRate });
       })
       .catch((e) => ev('recorder-failed', { msg: String(e) }));
+    ctx.onstatechange = () => ev('ctx-' + ctx.state, {});
     if (ctx.state !== 'running') ctx.resume().catch(() => {});
     return ctx;
   }
@@ -284,7 +285,7 @@
       ev('hook-failed', { el: el.__vsim, msg: String(e) });
     }
     hooked.add(el);
-    for (const n of ['playing', 'pause', 'ended', 'ratechange', 'error', 'stalled', 'waiting'])
+    for (const n of ['playing', 'pause', 'ended', 'ratechange', 'error', 'stalled', 'waiting', 'emptied', 'abort', 'suspend'])
       el.addEventListener(n, () => ev('media-' + n, { el: el.__vsim, rate: el.playbackRate, at: +el.currentTime.toFixed(2) }));
   }
   const play0 = HTMLMediaElement.prototype.play;

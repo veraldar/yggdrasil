@@ -382,6 +382,9 @@ class Persona:
                 last = sp[-1]["b"]
                 if not s["playing"] and s["now"] - last > quiet_ms and not s["uiState"].startswith(("working", "speaking")):
                     return {"onset": onset, "end": last, "how": "spoken", "ui": s["uiState"]}
+                if s["now"] - last > 15000 and "paused" not in s["uiState"]:
+                    # a person notices 15 s of silence in the middle of an answer
+                    return {"onset": onset, "end": last, "how": "went silent", "ui": s["uiState"]}
             else:
                 # MAIN answered but nothing plays: the app chose not to speak it (or failed to)
                 msgs = ln.messages()
@@ -408,6 +411,7 @@ class Persona:
             rec["mic_wav"] = os.path.relpath(mic_path, os.path.dirname(self.audio))
         s = ln.since(t_first - 1000)
         rec["timeline"] = {"ui": [(u["t"] - t_first, u["state"]) for u in s["ui"]],
+                           "console": [(c["t"] - t_first, c["type"], c["text"][:160]) for c in s.get("console", [])][-30:],
                            "events": [(e["t"] - t_first, e["kind"]) for e in s["events"] if not e["kind"].startswith("media-ratechange")][:80],
                            "diag": [(d["t"] - t_first, d["msg"][:120]) for d in s["diag"]][:60]}
         rec["tts"] = [{"text": x["text"], "status": x["status"], "t": x["t"] - t_first} for x in s["tts"]]
@@ -444,7 +448,14 @@ class Persona:
                 spans = speech.loud_spans(out)
                 u["reply_wav"] = os.path.relpath(out, os.path.dirname(self.audio))
                 u["reply_audio_s"] = round(sum(e - s0 for s0, e in spans), 1)
-                if spans:
+                if rw.get("how") == "went silent":
+                    rec["incidents"].append(f"the reply went silent {round(sum(e - s0 for s0, e in spans), 1)} s in (deck still '{rw.get('ui')}')")
+                if spans and sum(e - s0 for s0, e in spans) < 0.6:
+                    u["first_audio_s"] = round(spans[0][0], 2)
+                    u["persona_heard"] = ""  # a blip, nothing a person could understand (whisper makes 'you' of it)
+                    self.heard.append({"t": u["t1"] / 1000 + spans[0][0], "who": "main", "root": ln.tab,
+                                       "text": "(starts to speak, then silence — you heard nothing you could understand)"})
+                elif spans:
                     u["first_audio_s"] = round(spans[0][0], 2)
                     u["reply_end_s"] = round(spans[-1][1], 2)
                     clip = os.path.join(self.audio, f"{k}-heard{i + 1}.wav")
@@ -1032,7 +1043,8 @@ def main():
             mid = b.main_id()
             tree = b.tree()
             visible = b.visible(mid)
-            mine = [c for c in sc.get("checks", []) if c.get("root", roots[0]["name"]) == r["name"]]
+            # "on": which root's MAIN / workspace a check reads (hsim's proxy_on uses "root" for the card)
+            mine = [c for c in sc.get("checks", []) if c.get("on", roots[0]["name"]) == r["name"]]
             if r.get("work") or not any(c.get("kind", "cmd") == "cmd" for c in mine):
                 rc = hsim.run_checks({"checks": mine}, r.get("work") or "/nonexistent", tree, mid, visible, b)
             else:
@@ -1100,7 +1112,7 @@ def main():
         if librarian:
             librarian.terminate()
         if stack and not a.keep:
-            stackmod.down(name)
+            stackmod.down(name, keep_state=True)  # workspaces stay for a post-mortem; the next run wipes them
 
 
 if __name__ == "__main__":
