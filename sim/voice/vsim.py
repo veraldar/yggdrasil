@@ -426,9 +426,10 @@ class Persona:
         s = ln.since(t_first - 1000)
         rec["timeline"] = {"ui": [(u["t"] - t_first, u["state"]) for u in s["ui"]],
                            "console": [(c["t"] - t_first, c["type"], c["text"][:160]) for c in s.get("console", [])][-30:],
-                           "events": [(e["t"] - t_first, e["kind"]) for e in s["events"] if not e["kind"].startswith("media-ratechange")][:80],
+                           "events": [(e["t"] - t_first, e["kind"] + (f"#{e['el']}" if e.get("el") else ""), e.get("stack", "")[:300])
+                                      for e in s["events"] if not e["kind"].startswith("media-ratechange")][:120],
                            "diag": [(d["t"] - t_first, d["msg"][:120]) for d in s["diag"]][:60]}
-        rec["tts"] = [{"text": x["text"], "status": x["status"], "t": x["t"] - t_first} for x in s["tts"]]
+        rec["tts"] = [{"text": x["text"], "status": x["status"], "t": x["t"] - t_first, "lang": x.get("lang")} for x in s["tts"]]
         msgs = ln.messages()
         new = [m for m in msgs if m["id"] not in before]
         # the box side: each over-ending utterance should be a voice turn, answered by MAIN
@@ -494,6 +495,26 @@ class Persona:
                 if u.get("t_main_done") and u.get("t_user_msg"):
                     u["latency"]["main_s"] = round((u["t_main_done"] - u["t_user_msg"]) / 1000, 2)
                     u["latency"]["tts_first_s"] = round(u["first_audio_s"] - (u["t_main_done"] - u["t1"]) / 1000, 2)
+        # how long the reply kept playing after an interjection (a barge-in or "stop") was spoken:
+        # the reply bus's loud run that covers the interjection, until its first gap of 1 s or more
+        # (the next reply starts only after MAIN answered — never within a second)
+        spans = sorted(s["reply"], key=lambda x: x["a"])
+        for x in utts:
+            if x["kind"] not in ("barge", "command") or x.get("skipped"):
+                continue
+            run_end = None
+            for sp in spans:
+                if sp["b"] < x["t0"]:
+                    continue
+                if run_end is None:
+                    if sp["a"] > x["t0"] + 1000:
+                        break  # nothing was playing when they spoke
+                    run_end = sp["b"]
+                elif sp["a"] - run_end < 1000:
+                    run_end = sp["b"]
+                else:
+                    break
+            x["kept_playing_s"] = round(max(0, (run_end - x["t1"]) / 1000), 1) if run_end else 0.0
         # deck effects of the voice commands (ui transitions after each command)
         for u in utts:
             if u["kind"] != "command" or u.get("skipped"):
@@ -723,8 +744,9 @@ def voice_checks(sc, personas, acct=None):
     def add(name, ok, detail):
         res.append({"name": name, "ok": bool(ok), "detail": detail})
 
-    for c in sc.get("voice_checks", []) + [{"kind": "proactive_spoken", "advisory": True,
-                                             "name": "MAIN's unprompted reports were read aloud (hands-free: the person can't see the screen)"}]:
+    for c in sc.get("voice_checks", []) + [{"kind": "proactive_spoken",
+                                             "name": "MAIN's unprompted reports were read aloud (hands-free: the person can't see the screen)"},
+                                            {"kind": "tts_lang", "name": "every reply was voiced in the person's language"}]:
         k, name = c["kind"], c.get("name", c["kind"])
         n0 = len(res)
         if k == "all_turns_landed":
@@ -776,18 +798,14 @@ def voice_checks(sc, personas, acct=None):
             ok = all(u.get("box_heard") and u.get("persona_heard") for u in bs)
             add(name, ok, "; ".join(f"{u['spoken'][:50]!r} → box heard {u.get('box_heard')!r}, answered: {(u.get('persona_heard') or '')[:80]!r}" for u in bs))
         elif k == "reply_cut":
-            # the reply a stop / barge-in landed on stopped early: far fewer words played than were sent
-            cut = []
-            for p in personas:
-                for t in p.turns:
-                    us = t["utterances"]
-                    for i, u in enumerate(us):
-                        if u["kind"] in ("turn", "barge") and any(x["kind"] in ("command", "barge") and not x.get("skipped")
-                                                                  and re.search(c.get("by", "stop|over"), x["spoken"], re.I) for x in us[i + 1:]):
-                            cut.append(u)
-            ok = bool(cut) and all(u.get("reply_words_total") and u.get("reply_words_covered") is not None
-                                   and u["reply_words_covered"] < 0.8 * u["reply_words_total"] for u in cut)
-            add(name, ok, "; ".join(f"played ~{u.get('reply_words_covered')}/{u.get('reply_words_total')} words ({u.get('reply_audio_s')}s)" for u in cut) or "no cut reply found")
+            # the reply a stop / barge-in landed on STOPPED: it kept playing at most `value` seconds
+            # after the person finished the interjection (the words played before it began are
+            # not the measure — a reply that ignores the barge-in and plays on is not cut)
+            limit = float(c.get("value", 3.0))
+            cut = [x for p in personas for t in p.turns for x in t["utterances"]
+                   if x["kind"] in ("command", "barge") and not x.get("skipped") and re.search(c.get("by", "stop|over"), x["spoken"], re.I)]
+            ok = bool(cut) and all(x.get("kept_playing_s") is not None and x["kept_playing_s"] <= limit for x in cut)
+            add(name, ok, "; ".join(f"{x['spoken'][:40]!r}: the reply played on {x.get('kept_playing_s')}s after it (max {limit}s)" for x in cut) or "no interjection found")
         elif k == "no_echo_messages":
             # the phone hearing its own reply (speaker → mic) must never become a message to MAIN
             said = [x["text"] for p in personas for t in p.turns for x in t.get("tts", [])]
@@ -812,6 +830,23 @@ def voice_checks(sc, personas, acct=None):
             heard = " ".join(u.get("box_heard") or "" for u in spoken)
             m = re.search(c["regex"], heard, re.I | re.S)
             add(name, m, m.group(0)[:120] if m else "the box never heard it")
+        elif k == "tts_lang":
+            # the app picks the TTS voice's language per reply: a short English reply ("On it → greet")
+            # voiced by the French model is noise to the person
+            bad, n = [], 0
+            for p in personas:
+                want = (p.spec.get("lang") or sc.get("lang") or "en").lower()
+                for name, ln in p.lines.items():
+                    if not ln.opened:
+                        continue
+                    for x in ln.since(0)["tts"]:
+                        if not x.get("lang"):
+                            continue
+                        n += 1
+                        if x["lang"].lower() != want:
+                            bad.append(f"{x['lang']} for {x['text'][:70]!r}")
+            if n:
+                add(name, not bad, f"{n - len(bad)}/{n} in the person's language" + (f"; wrong: {bad[:3]}" if bad else ""))
         elif k == "proactive_spoken":
             auto = [x for x in acct if x["auto"]]
             if not auto:
@@ -853,6 +888,29 @@ def voice_table(personas, t0):
 
 
 # ── report ────────────────────────────────────────────────────────────────────
+def echo_note(g):
+    """what the echo setting models (audio-bridge.js): the residual after the phone's own AEC"""
+    import math
+    g = float(g or 0)
+    if g <= 0:
+        return "0 (none: a headset, or an AEC that removes it all)"
+    db = round(20 * math.log10(g))
+    kind = "a working phone AEC's residual" if g <= 0.04 else "an AEC that is failing (speakerphone, cheap device)" if g >= 0.1 else "a weak AEC"
+    return f"{g} ({db} dB speaker→mic AFTER the phone's AEC: {kind})"
+
+
+def gum_note(p):
+    for ln in p.lines.values():
+        if ln.opened:
+            try:
+                g = ln.since(int(time.time() * 1000))["gum"]
+            except Exception:  # noqa: BLE001
+                g = None
+            if g:
+                return f"; the app asked the mic for AEC={g.get('echoCancellation')} NS={g.get('noiseSuppression')} AGC={g.get('autoGainControl')}"
+    return ""
+
+
 def esc(s, n=None):
     s = (s or "").replace("|", "\\|").replace("\n", " ")
     return s[:n] + "…" if n and len(s) > n else s
@@ -879,7 +937,7 @@ def write_report(outdir, sc, report, personas, checks, judgement, tree_lines, co
         for p in personas:
             vv = p.voice
             f.write(f"- **{p.id}** on {', '.join(p.lines)} — voice {vv['voice']} ×{vv.get('speed', 1)}, noise {p.spec.get('phone', {}).get('noiseDb')} dBFS, "
-                    f"echo {p.spec.get('phone', {}).get('echo', 0)} — verdict: {json.dumps(p.verdict) if p.verdict else 'none (budget spent)'}\n")
+                    f"echo {echo_note(p.spec.get('phone', {}).get('echo', 0))}{gum_note(p)} — verdict: {json.dumps(p.verdict) if p.verdict else 'none (budget spent)'}\n")
         f.write("\n## Turns\n\n| # | who→root | kind | person said | box heard (WER) | MAIN replied (text) | person heard (WER) | first audio / end | audio |\n|---|---|---|---|---|---|---|---|---|\n")
         for p in personas:
             for t in p.turns:
@@ -1094,7 +1152,7 @@ def main():
              "main_msgs": len(spoken_acct), "main_msgs_spoken": sum(x["spoken"] for x in spoken_acct),
              "main_auto_silent": sum(1 for x in spoken_acct if x["auto"] and not x["spoken"])}
         convo = "\n\n".join(convo_parts)
-        judge_in = (f"SCENARIO\n{json.dumps({'title': sc['title'], 'personas': [{k: p[k] for k in ('id', 'persona', 'goals', 'script') if k in p} for p in sc['personas']], 'mishear': sc.get('mishear')}, indent=1)}\n\n"
+        judge_in = (f"SCENARIO\n{json.dumps({'title': sc['title'], 'personas': [{k: p[k] for k in ('id', 'persona', 'goals', 'script') if k in p} for p in sc['personas']], 'mishear': sc.get('mishear'), 'note': sc.get('note')}, indent=1)}\n\n"
                     f"VOICE TURNS (what was said, heard, answered, heard back)\n{voice_table(personas, t0)}\n\n"
                     f"VOICE NUMBERS {json.dumps(v)}\n\n"
                     f"CONVERSATION (as the box holds it: MAIN's text)\n{convo}\n\nSESSION TREE\n" + "\n".join(tree_lines) +

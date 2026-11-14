@@ -14,7 +14,8 @@ share the LiveKit without colliding. Nothing here touches the live or preview un
 Ports for base P (default 4170), root i: brain P+i · app P+4000+i · agent http P+14000+i ·
 LiveKit P+3800 (rtc tcp +1, udp P+47930..+47990).
 Env: VSIM_SPEACHES_URL (agent STT + app TTS; default: the preview agent's SPEACHES_URL),
-VSIM_STT_MODEL, VSIM_BRAIN_BIN, VSIM_APP_DIR (a built branch/), SIM_* passed to brain-up.sh.
+VSIM_STT_MODEL, VSIM_BRAIN_BIN, VSIM_APP_DIR (a built branch/), VSIM_VOICE_DIR (the agent's dir, with
+its .venv — an A/B against a snapshot), SIM_* passed to brain-up.sh.
 """
 import argparse, json, os, re, secrets, shutil, subprocess, sys, time, urllib.request
 
@@ -120,7 +121,7 @@ def up(name, roots, port=4170, brain_env=None, peers_net=True, auth="tailnet"):
     if not wait_http(spe.rsplit("/v1", 1)[0] + "/health", 20):
         raise RuntimeError(f"speech server unreachable through the gate ({upstream})")
     bbin, adir = brain_bin(), app_dir()
-    vdir = os.path.join(REPO, "branch", "voice")
+    vdir = os.environ.get("VSIM_VOICE_DIR") or os.path.join(REPO, "branch", "voice")
     vpy = os.path.join(vdir, ".venv", "bin", "python")
     if not os.path.isfile(vpy):
         subprocess.run(["uv", "sync"], cwd=vdir, check=True)

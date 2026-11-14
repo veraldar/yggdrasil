@@ -86,12 +86,15 @@ async function openTab(name, url, seeds) {
     page.on('request', (r) => {
       if (!r.url().includes('/api/tts/stream')) return;
       let text = '';
+      let lang = null;
       try {
-        text = String(r.postDataJSON()?.text || '');
+        const j = r.postDataJSON() || {};
+        text = String(j.text || '');
+        lang = j.lang || null; // the language the app picked for this reply's voice
       } catch {
         /* not json */
       }
-      t.tts.push({ t: Date.now(), text, status: null, url: r.url() });
+      t.tts.push({ t: Date.now(), text, lang, status: null, url: r.url() });
       r.response()
         .then((resp) => {
           const e = t.tts.find((x) => x.text === text && x.status === null);

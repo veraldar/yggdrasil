@@ -4,6 +4,12 @@
  *   mic   getUserMedia({audio}) returns a WebAudio stream fed by the "mic bus": per-turn speech
  *         injected with __vsim.say(wav) (any audio, any time — not one static wav per launch),
  *         an optional noise bed, and an optional echo of the phone's own speaker.
+ *         ECHO, honestly: this stream never passes the browser's echo canceller (it is not a
+ *         device), so `echo` is the RESIDUAL echo that reaches the app AFTER a phone's AEC: the
+ *         reply bus, delayed by nothing, at that linear gain. A working phone AEC (the app asks
+ *         getUserMedia for echoCancellation — recorded as the 'gum' event's constraints) leaves
+ *         roughly 0.01-0.03 (−40…−30 dB); 0.1-0.2 (−20…−14 dB) is a phone whose AEC fails
+ *         (speakerphone at full volume, a cheap device, a Bluetooth speaker it cannot cancel).
  *   ear   every audio the page plays is captured on the "reply bus": <audio>/<video> elements
  *         (blob/http sources through createMediaElementSource, MediaStream sources such as a
  *         WebRTC remote track through createMediaStreamSource) and, with captureRtc, every
@@ -221,6 +227,7 @@
     uiState: uiState(),
     saying: !!V.saying,
     ctx: ctx ? ctx.state : 'none',
+    gum: V.gum || null,
   });
   V.setEcho = (g) => {
     C();
@@ -237,7 +244,12 @@
         const dst = ctx.createMediaStreamDestination();
         V.micBus.connect(dst);
         for (const tr of dst.stream.getAudioTracks()) tr.__vsimMic = true;
-        ev('gum', {});
+        // what the app asked the mic for (echoCancellation, noiseSuppression, autoGainControl):
+        // a real phone applies these before the app hears anything; this stream cannot
+        const a = typeof c.audio === 'object' ? c.audio : {};
+        const pick = (k) => (a[k] && typeof a[k] === 'object' ? a[k].ideal ?? a[k].exact ?? null : a[k] ?? null);
+        V.gum = { echoCancellation: pick('echoCancellation'), noiseSuppression: pick('noiseSuppression'), autoGainControl: pick('autoGainControl') };
+        ev('gum', { constraints: V.gum });
         return dst.stream;
       }
       return orig(c);
@@ -288,6 +300,14 @@
     for (const n of ['playing', 'pause', 'ended', 'ratechange', 'error', 'stalled', 'waiting', 'emptied', 'abort', 'suspend'])
       el.addEventListener(n, () => ev('media-' + n, { el: el.__vsim, rate: el.playbackRate, at: +el.currentTime.toFixed(2) }));
   }
+  // who pauses a playing element (a reply that "went silent"): the page's own call, with the top
+  // of its stack — a browser-side pause fires 'pause' with no pause-call before it
+  const pause0 = HTMLMediaElement.prototype.pause;
+  HTMLMediaElement.prototype.pause = function () {
+    if (this.__vsim && !this.paused)
+      ev('pause-call', { el: this.__vsim, at: +this.currentTime.toFixed(2), stack: String(new Error().stack || '').split('\n').slice(2, 7).join(' | ').slice(0, 600) });
+    return pause0.apply(this, arguments);
+  };
   const play0 = HTMLMediaElement.prototype.play;
   HTMLMediaElement.prototype.play = function () {
     try {

@@ -3,6 +3,7 @@
 # (the live env's key), its own data dir + workspace under ~/.cache/root-sim/NAME, sandboxed
 # (ProtectHome=tmpfs: only the workspace and the binary are visible under /home).
 # brain-up.sh NAME down — stop it.   State: ~/.cache/root-sim/NAME/{data,work,brain.log}
+# SIM_UPSTREAM_BASE_URL: another door to the same upstream (sim/voice/upstream_tap.py measures it)
 set -euo pipefail
 NAME=${1:?name}; PORT=${2:?port|down}
 ROOT="$HOME/.cache/root-sim/$NAME"; UNIT="rootsim-$NAME"
@@ -42,7 +43,7 @@ systemd-run --user --unit="$UNIT" --collect -q \
   -p ProtectHome=tmpfs -p "BindPaths=$ROOT" -p "BindReadOnlyPaths=$HOME/.cache/root-sim/_venv$RO_PROFILES" "${HARNESS_PROPS[@]}" \
   --setenv=XDG_DATA_HOME="$ROOT/xdg" \
   -p StandardOutput="append:$ROOT/brain.log" -p StandardError="append:$ROOT/brain.log" \
-  --setenv=YGG_UPSTREAM_BASE_URL="$YGG_UPSTREAM_BASE_URL" --setenv=YGG_UPSTREAM_API_KEY="$YGG_UPSTREAM_API_KEY" \
+  --setenv=YGG_UPSTREAM_BASE_URL="${SIM_UPSTREAM_BASE_URL:-$YGG_UPSTREAM_BASE_URL}" --setenv=YGG_UPSTREAM_API_KEY="$YGG_UPSTREAM_API_KEY" \
   --setenv=YGG_UPSTREAM_STYLE="${YGG_UPSTREAM_STYLE:-anthropic}" --setenv=YGG_UPSTREAM_MODEL="${SIM_MODEL:-glm-5.3-flash}" \
   --setenv=YGG_MODELS="${SIM_MODELS:-glm-5.3-flash,glm-5.3,glm-5.2}" --setenv=YGG_VISION_MODELS="${SIM_VISION:-glm-5.3-flash}" --setenv=YGG_ARTIFACTS_DIR="$ROOT/work/artifacts" \
   --setenv=YGG_MAX_TOKENS="${YGG_MAX_TOKENS:-16384}" --setenv=YGG_THINK_HIGH="${YGG_THINK_HIGH:-8192}" \
