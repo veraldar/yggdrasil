@@ -270,7 +270,10 @@ case $LK_MODE in
   binary)
     [ -n "$(cfg LIVEKIT_API_KEY)" ] || envset "$BF_ENV" LIVEKIT_API_KEY "API$(rand 12)"
     [ -n "$(cfg LIVEKIT_API_SECRET)" ] || envset "$BF_ENV" LIVEKIT_API_SECRET "$(rand 48)"
-    LK_PHONE=$(cfg LIVEKIT_URL "ws://$LAN:$LK_PORT") LK_LOCAL=ws://127.0.0.1:$LK_PORT LK_API=http://127.0.0.1:$LK_PORT ;;
+    # behind the trunk the phone reaches LiveKit through it: signaling = wss://<trunk>/rtc (the
+    # bridge routes /rtc, device-gated), media = ICE over TCP via <trunk>:443 (BIFROST_TRUNK_ICE)
+    if [ -n "$TRUNK" ]; then LK_DEF=wss://$T_HOSTPORT; else LK_DEF=ws://$LAN:$LK_PORT; fi
+    LK_PHONE=$(cfg LIVEKIT_URL "$LK_DEF") LK_LOCAL=ws://127.0.0.1:$LK_PORT LK_API=http://127.0.0.1:$LK_PORT ;;
   cloud)
     LK_PHONE=$(cfg LIVEKIT_URL) LK_LOCAL=$LK_PHONE LK_API=$(printf '%s' "$LK_PHONE" | sed 's|^ws|http|') ;;
   *) die "LIVEKIT_MODE=$LK_MODE in $BF_ENV — use binary or cloud" ;;
@@ -380,6 +383,12 @@ pin = "$T_PIN"
 token = "$T_TOKEN"
 upstream = "127.0.0.1:$APP_PORT"
 TOML
+    # voice through the trunk (LIVEKIT_MODE=binary): LiveKit's signaling and its ICE-TCP port. The
+    # ICE target is the box's own address, never loopback: LiveKit's TCP mux files a connection
+    # under the interface address it arrived on, and loopback is not one of its candidates.
+    if [ "$LK_MODE" = binary ] && on livekit; then
+      printf 'livekit = "127.0.0.1:%s"\ntcp = { livekit-ice = "%s:%s" }\n' "$LK_PORT" "$LAN" "$LK_TCP" >>"$BF_CONF/bridge.toml.new"
+    fi
   fi
   place_secret "$BF_CONF/bridge.toml.new" "$BF_CONF/bridge.toml" bifrost-bridge.service "bridge config (node private key)"
   unit_from bifrost-bridge.service
@@ -422,6 +431,8 @@ if on app; then
       [ -n "$ROOT_NAME" ] && echo "YGG_ROOT_NAME=$ROOT_NAME"
       # the phone lands on the brain's coordinator: only a session titled [MAIN] may start work on other roots
       echo "BIFROST_MAIN_TITLE=$(cfg BIFROST_MAIN_TITLE '[MAIN]')"
+      # voice over the trunk: the phone adds the trunk's :443 as its ICE-TCP candidate (resolved here)
+      if [ "$LK_MODE" = binary ]; then echo "BIFROST_TRUNK_ICE=$(cfg BIFROST_TRUNK_ICE auto)"; fi
     else
       echo "BIFROST_PUBLIC_URL=http://$LAN:$APP_PORT"
     fi
@@ -550,6 +561,8 @@ if on agent; then
       echo "OPENCODE_URL=$BRAIN_URL"
       echo "SPEACHES_URL=$SPEACHES"
       echo "AGENT_HTTP_PORT=$AGENT_PORT"
+      # the phone's TTS over the voice room (through the trunk): the app's /api/tts/stream on loopback
+      echo "APP_URL=http://127.0.0.1:$APP_PORT"
       for k in STT_MODEL TTS_MODEL TTS_VOICE VOICE_MODEL; do v=$(cfg "$k"); [ -n "$v" ] && echo "$k=$v"; done
     } >"$BF_CONF/agent.env.new"
     place_secret "$BF_CONF/agent.env.new" "$BF_CONF/agent.env" bifrost-agent.service "agent env (generated: LiveKit secret)"

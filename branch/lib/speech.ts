@@ -95,7 +95,9 @@ export function setPlayFailHandler(f: (() => void) | null): void {
   playFailHandler = f;
 }
 
-const SAMPLE_RATE = 24000;
+// the stream's own rate (X-Sample-Rate): 24 kHz from the Mac's Kokoro, 16 kHz from the box's
+// bifrost-voice (piper) — a fixed 24000 played those replies 1.5× fast and high
+let SAMPLE_RATE = 24000;
 const PIECE_SEC = 10; // wav blob length for the playlist
 const SEC_PER_CHAR = 0.075;
 
@@ -118,6 +120,7 @@ let state: SpeechState = {
   rate: initialRate(),
 };
 const subs = new Set<() => void>();
+import { ttsStream } from '@/lib/voice-tts';
 import { diagEvent } from '@/lib/diag';
 import { stripMarkers } from '@/lib/tree-first';
 function set(patch: Partial<SpeechState>) {
@@ -366,13 +369,10 @@ async function run(text: string, myGen: number): Promise<void> {
   // the route holds the connection up to 10 min, a mid-stream death
   // otherwise looked exactly like the eternal "synthesizing…" of 09-30
   try {
-    const res = await fetch('/api/tts/stream', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text, lang: msgLang }),
-      signal: abort!.signal,
-    });
+    // over the trunk the reply's sound rides the voice room (lib/voice-tts.ts), else https
+    const res = await ttsStream({ text, lang: msgLang }, abort!.signal);
     if (!res.ok) throw new Error(`tts ${res.status}: ${(await res.text()).slice(0, 120)}`);
+    SAMPLE_RATE = Number(res.headers.get('X-Sample-Rate')) || 24000;
     const reader = res.body!.getReader();
     let carry = new Uint8Array(0);
     while (true) {

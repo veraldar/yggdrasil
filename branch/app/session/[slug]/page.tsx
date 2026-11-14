@@ -73,6 +73,7 @@ import {
   voiceProbe,
   voiceToken,
 } from '@/lib/voice-token';
+import { voiceRoom } from '@/lib/voice-tts';
 
 type Mode = 'text' | 'free';
 /** the door's last step, in MAIN — the walk-through (UX-CALM 10-27: the
@@ -1336,6 +1337,7 @@ export default function SessionView({
       armWatch();
       diagEvent('voice', 'connecting signal…');
       await withTimeout(room.connect(d.serverUrl, d.participantToken), 12_000, 'signal');
+      voiceRoom(room); // the reply's sound may ride this room (lib/voice-tts.ts)
       diagEvent('voice', 'connected, mic stays muted until a mode/handler turns it on');
       // the agent calls this on "over and out": leave hands-free, teardown
       // to keyboard (the final reply lands as text in the session instead

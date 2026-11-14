@@ -5,6 +5,9 @@ It reads the first bytes of every connection and forwards the connection, bytes 
   * a TLS ClientHello naming a routed name  → that route's backend (with `proxy`: a PROXY v1 line
     first, so the backend learns the client's real address — the trunk's ap.toml proxy_protocol);
   * STUN / TURN over TCP (magic cookie 0x2112A442), when a `stun` backend is set → there;
+  * ICE over TCP (RFC 6544: RFC 4571 frames — a 2-byte length, then a STUN message, its magic
+    cookie at offset 6), when an `ice` backend is set → there (the access point's raw `ice`
+    forward: a phone's WebRTC media to the box at home, DTLS/SRTP end to end — opaque here);
   * anything else (other names, no name, plain http, garbage)               → the `default` backend.
 TLS is never terminated here: every backend keeps its own certificate and key.
 
@@ -16,6 +19,7 @@ Config, one directive per line (# starts a comment):
     route   *.apps.example.org 127.0.0.1:9443     any name below apps.example.org
     default 127.0.0.1:8443               required
     stun    127.0.0.1:3478               optional
+    ice     127.0.0.1:4479               optional (ap.toml [[ap.tcp]] listen of the ICE forward)
 Names match without case and without a trailing dot. trunk/deploy/sni-443-test.py is its test.
 """
 import ipaddress
@@ -37,8 +41,9 @@ def parse_addr(text):
 
 
 def load(path):
-    """The config file → dict(listen=[addr], routes=[(name, addr, proxy)], default=addr, stun=addr|None)."""
-    cfg = {"listen": [], "routes": [], "default": None, "stun": None}
+    """The config file → dict(listen=[addr], routes=[(name, addr, proxy)], default=addr, stun=addr|None,
+    ice=addr|None)."""
+    cfg = {"listen": [], "routes": [], "default": None, "stun": None, "ice": None}
     with open(path) as f:
         for n, raw in enumerate(f, 1):
             words = raw.split("#", 1)[0].split()
@@ -50,7 +55,7 @@ def load(path):
                     cfg["listen"].append(parse_addr(args[0]))
                 elif key == "route" and len(args) in (2, 3) and (len(args) == 2 or args[2] == "proxy"):
                     cfg["routes"].append((args[0].lower().rstrip("."), parse_addr(args[1]), len(args) == 3))
-                elif key in ("default", "stun") and len(args) == 1:
+                elif key in ("default", "stun", "ice") and len(args) == 1:
                     cfg[key] = parse_addr(args[0])
                 else:
                     raise ValueError(f"cannot read: {raw.strip()!r}")
@@ -101,6 +106,16 @@ def sni_of(rec):
     return None
 
 
+def framed_stun_head(peek):
+    """The first 8 bytes look like an RFC 4571 frame holding a STUN message (ICE-TCP): frame length =
+    STUN length + 20, a 4-aligned STUN length, a STUN message type (top two bits 0), and the first
+    half of the magic cookie at offset 6 (the caller reads 2 more bytes for the second half)."""
+    if len(peek) < 8 or peek[2] & 0xC0 or peek[6:8] != MAGIC[:2]:
+        return False
+    frame, size = int.from_bytes(peek[0:2], "big"), int.from_bytes(peek[4:6], "big")
+    return frame == size + 20 and size % 4 == 0
+
+
 def recv_exact(sock, have, want):
     while len(have) < want:
         d = sock.recv(want - len(have))
@@ -149,8 +164,12 @@ def handle(cfg, client):
             client.close()
             return
         prefix = b""
+        if cfg["ice"] and framed_stun_head(peek):
+            peek = recv_exact(client, peek, 10)
         if len(peek) >= 8 and peek[4:8] == MAGIC and cfg["stun"]:
             backend = cfg["stun"]
+        elif cfg["ice"] and len(peek) >= 10 and framed_stun_head(peek) and peek[6:10] == MAGIC:
+            backend = cfg["ice"]
         elif peek[0] == 0x16 and len(peek) >= 5:
             peek = recv_exact(client, peek, 5 + min(int.from_bytes(peek[3:5], "big"), 16384))
             backend, proxy = route_of(cfg, sni_of(peek))

@@ -26,8 +26,8 @@
 //! default, rootlink.rs); a turn naming a root rides that root's link, gated
 //! by the device's `roots` allowlist (TOKEN LAW, bound at the admit gate).
 
-use std::collections::HashMap;
-use std::io::Read;
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::io::{Read, Write};
 use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream, UdpSocket};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
@@ -36,7 +36,7 @@ use std::time::{Duration, Instant};
 
 use str0m::change::SdpOffer;
 use str0m::media::{MediaData, MediaKind, MediaTime};
-use str0m::net::{Protocol, Receive};
+use str0m::net::{Protocol, Receive, TcpType};
 use str0m::{Candidate, Event, Input, Output, Rtc};
 
 use str0m::config::DtlsCert;
@@ -88,6 +88,14 @@ pub struct BridgeConfig {
     pub dtls_cert_file: Option<std::path::PathBuf>,
     /// the signaling URL phones dial (LAN address); None = http://<bind>
     pub public_url: Option<String>,
+    /// ICE over TCP through the trunk: the address(es) phones dial for media
+    /// (the access point's :443). Each /offer advertises a passive TCP host
+    /// candidate there; those connections arrive on the bridge's own loopback
+    /// ICE-TCP listener (the ap dial-out hands them over by ufrag). Empty = off.
+    pub ice_tcp: Vec<SocketAddr>,
+    /// the pinned channel's HTTP tunnel (data channel "tun"): the same stream
+    /// law as the access point's edge (ap.rs). None = no tunnel.
+    pub tunnel: Option<Arc<crate::ap::DialConfig>>,
 }
 
 pub struct BridgeHandle {
@@ -100,6 +108,10 @@ pub struct BridgeHandle {
     pub root_link_addr: Option<SocketAddr>,
     /// "sha-256 AB:CD:…" of the persisted DTLS certificate
     pub fingerprint: String,
+    /// the loopback ICE-TCP listener (when `ice_tcp` is set)
+    pub ice_listen: Option<SocketAddr>,
+    /// the live peers' local ICE ufrags (what the ap dial-out demuxes by)
+    pub ufrags: Arc<Mutex<HashSet<String>>>,
     stop: Arc<AtomicBool>,
 }
 
@@ -124,6 +136,13 @@ pub struct Admit {
     pub rtc: Rtc,
     pub grant: Grant,
     pub epoch: u64,
+    /// the raw device credential of the /offer (memory only): the tunnel's
+    /// requests carry it to the app, which checks it like any other
+    pub token: String,
+    /// the client's real address at /offer (the ap's X-Forwarded-For)
+    pub ip: IpAddr,
+    /// this peer's local ICE ufrag (the ap dial-out's ICE-TCP demux key)
+    pub ufrag: String,
 }
 
 struct Peer {
@@ -144,6 +163,26 @@ struct Peer {
     capturing: bool,
     voice_buf: Vec<Vec<u8>>,
     media_pos_ms: u64,
+    token: String,
+    ip: IpAddr,
+    ufrag: String,
+    /// the pinned HTTP tunnel: its data channel, live streams, and the frames
+    /// the streams answer with (written in order; a full buffer waits)
+    tun: Option<str0m::channel::ChannelId>,
+    tun_streams: HashMap<u32, tokio::sync::mpsc::UnboundedSender<Option<Vec<u8>>>>,
+    tun_out: (crate::ap::Frames, tokio::sync::mpsc::UnboundedReceiver<(u8, Vec<u8>)>),
+    tun_pending: VecDeque<Vec<u8>>,
+}
+
+/// One ICE-TCP connection (RFC 4571 framing) handed over by the ap dial-out.
+struct TcpIce {
+    sock: TcpStream,
+    /// its (loopback) peer address: the remote candidate str0m learns
+    src: SocketAddr,
+    rbuf: Vec<u8>,
+    wbuf: Vec<u8>,
+    peer: Option<usize>,
+    dead: bool,
 }
 
 impl Peer {
@@ -252,6 +291,30 @@ pub fn start(cfg: BridgeConfig) -> Result<BridgeHandle, String> {
         .map_err(|e| format!("bridge http server: {e}"))?;
 
     let tokens = Arc::new(TokenStore::open(cfg.tokens_file.clone()));
+    let ufrags: Arc<Mutex<HashSet<String>>> = Arc::default();
+    let ice_listener = if cfg.ice_tcp.is_empty() {
+        None
+    } else {
+        let l = TcpListener::bind("127.0.0.1:0").map_err(|e| format!("bridge ice-tcp bind: {e}"))?;
+        l.set_nonblocking(true).map_err(|e| e.to_string())?;
+        Some(l)
+    };
+    let ice_listen = ice_listener.as_ref().and_then(|l| l.local_addr().ok());
+    let ice_tcp = cfg.ice_tcp.clone();
+    // the tunnel's streams are the ap's (async) stream law: their own runtime
+    let tunnel = cfg.tunnel.clone().map(|t| {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("tunnel runtime");
+        let h = rt.handle().clone();
+        std::thread::Builder::new()
+            .name("tunnel".into())
+            .spawn(move || rt.block_on(std::future::pending::<()>()))
+            .expect("tunnel thread");
+        (t, h)
+    });
     let oc = Arc::new(OpencodeClient::new(cfg.opencode_url.clone()));
     let roots_reg = Arc::new(Registry::new());
     // v4c GAP-A: per-root in-flight cap (config [root-link].max_inflight)
@@ -444,6 +507,8 @@ pub fn start(cfg: BridgeConfig) -> Result<BridgeHandle, String> {
         let branch_tx = branch_tx.clone();
         let switch = switch.clone();
         let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let ice_tcp = ice_tcp.clone();
+        let ufrags = ufrags.clone();
         std::thread::spawn(move || while !stop.load(Ordering::SeqCst) {
             let request = match server.recv_timeout(Duration::from_millis(100)) {
                 Ok(Some(r)) => r,
@@ -496,6 +561,8 @@ pub fn start(cfg: BridgeConfig) -> Result<BridgeHandle, String> {
                 &admit_tx,
                 &roots_reg,
                 &oc,
+                &ice_tcp,
+                &ufrags,
             );
         });
     }
@@ -505,11 +572,14 @@ pub fn start(cfg: BridgeConfig) -> Result<BridgeHandle, String> {
         let stop = stop.clone();
         let tokens = tokens.clone();
         let out_rx = Arc::new(Mutex::new(out_rx));
+        let ufrags = ufrags.clone();
         std::thread::spawn(move || {
             let mut peers: HashMap<usize, Peer> = HashMap::new();
             let mut next_id = 0usize;
             let mut buf = vec![0u8; 4000];
             let mut last_check = Instant::now();
+            let mut ice_conns: Vec<TcpIce> = vec![];
+            let ice_dest = ice_tcp.first().copied();
 
             loop {
                 if stop.load(Ordering::SeqCst) {
@@ -589,6 +659,16 @@ pub fn start(cfg: BridgeConfig) -> Result<BridgeHandle, String> {
                     peers.insert(
                         id,
                         Peer {
+                            token: adm.token,
+                            ip: adm.ip,
+                            ufrag: adm.ufrag,
+                            tun: None,
+                            tun_streams: HashMap::new(),
+                            tun_out: {
+                                let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+                                (tx, rx)
+                            },
+                            tun_pending: VecDeque::new(),
                             rtc: adm.rtc,
                             mid: None,
                             pt: None,
@@ -605,6 +685,57 @@ pub fn start(cfg: BridgeConfig) -> Result<BridgeHandle, String> {
                             region: adm.grant.region,
                         },
                     );
+                }
+
+                // ICE over TCP (RFC 4571): connections the ap dial-out handed
+                // over by ufrag. Every frame is one packet; the destination is
+                // the advertised trunk candidate (str0m matches it), the source
+                // the connection's own loopback address (a peer-reflexive
+                // remote — learned from the packet, like UDP).
+                if let (Some(l), Some(dest)) = (ice_listener.as_ref(), ice_dest) {
+                    while let Ok((sock, src)) = l.accept() {
+                        let _ = sock.set_nonblocking(true);
+                        let _ = sock.set_nodelay(true);
+                        ice_conns.push(TcpIce { sock, src, rbuf: vec![], wbuf: vec![], peer: None, dead: false });
+                    }
+                    for c in ice_conns.iter_mut() {
+                        loop {
+                            match c.sock.read(&mut buf) {
+                                Ok(0) => {
+                                    c.dead = true;
+                                    break;
+                                }
+                                Ok(n) => c.rbuf.extend_from_slice(&buf[..n]),
+                                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
+                                Err(_) => {
+                                    c.dead = true;
+                                    break;
+                                }
+                            }
+                        }
+                        while c.rbuf.len() >= 2 {
+                            let n = u16::from_be_bytes([c.rbuf[0], c.rbuf[1]]) as usize;
+                            if c.rbuf.len() < 2 + n {
+                                break;
+                            }
+                            let pkt: Vec<u8> = c.rbuf.drain(..2 + n).skip(2).collect();
+                            let Ok(contents) = pkt.as_slice().try_into() else { continue };
+                            let input = Input::Receive(
+                                now,
+                                Receive { proto: Protocol::Tcp, source: c.src, destination: dest, contents },
+                            );
+                            let owner = match c.peer.filter(|id| peers.contains_key(id)) {
+                                Some(id) => Some(id),
+                                None => peers.iter().find(|(_, p)| p.rtc.accepts(&input)).map(|(id, _)| *id),
+                            };
+                            if let Some(id) = owner {
+                                c.peer = Some(id);
+                                if let Some(p) = peers.get_mut(&id) {
+                                    let _ = p.rtc.handle_input(input);
+                                }
+                            }
+                        }
+                    }
                 }
 
                 // socket drain once, demux per datagram.
@@ -652,7 +783,14 @@ pub fn start(cfg: BridgeConfig) -> Result<BridgeHandle, String> {
                     loop {
                         match p.rtc.poll_output() {
                             Ok(Output::Transmit(t)) => {
-                                let _ = media_sock.send_to(&t.contents, t.destination);
+                                if t.proto == Protocol::Tcp {
+                                    if let Some(c) = ice_conns.iter_mut().find(|c| c.src == t.destination && !c.dead) {
+                                        c.wbuf.extend_from_slice(&(t.contents.len() as u16).to_be_bytes());
+                                        c.wbuf.extend_from_slice(&t.contents);
+                                    }
+                                } else {
+                                    let _ = media_sock.send_to(&t.contents, t.destination);
+                                }
                             }
                             Ok(Output::Timeout(_)) => break,
                             Ok(Output::Event(e)) => match e {
@@ -673,7 +811,18 @@ pub fn start(cfg: BridgeConfig) -> Result<BridgeHandle, String> {
                                     }
                                     room_audio.push((*id, d));
                                 }
-                                Event::ChannelOpen(cid, _) => p.channels.push(cid),
+                                Event::ChannelOpen(cid, label) => {
+                                    if label == "tun" && tunnel.is_some() {
+                                        p.tun = Some(cid);
+                                    } else {
+                                        p.channels.push(cid);
+                                    }
+                                }
+                                Event::ChannelData(cd) if Some(cd.id) == p.tun => {
+                                    if let Some((cfg, rt)) = tunnel.as_ref() {
+                                        tunnel_frame(p, &tokens, cfg, rt, &cd.data);
+                                    }
+                                }
                                 Event::ChannelData(cd) => {
                                     if let Ok(txt) = std::str::from_utf8(&cd.data) {
                                         // v0.9: in-band credential renewal,
@@ -709,6 +858,37 @@ pub fn start(cfg: BridgeConfig) -> Result<BridgeHandle, String> {
                         }
                     }
                 }
+
+                // the tunnel's answers → the "tun" channel, in order (a full SCTP
+                // buffer keeps the rest queued for the next turn of the loop)
+                for p in peers.values_mut() {
+                    let Some(cid) = p.tun else { continue };
+                    while let Ok((_, frame)) = p.tun_out.1.try_recv() {
+                        p.tun_pending.push_back(frame);
+                    }
+                    while let Some(frame) = p.tun_pending.front() {
+                        let Some(mut ch) = p.rtc.channel(cid) else { break };
+                        match ch.write(true, frame) {
+                            Ok(true) => {
+                                p.tun_pending.pop_front();
+                            }
+                            _ => break,
+                        }
+                    }
+                }
+                for c in ice_conns.iter_mut() {
+                    while !c.wbuf.is_empty() && !c.dead {
+                        match c.sock.write(&c.wbuf) {
+                            Ok(0) => c.dead = true,
+                            Ok(n) => {
+                                c.wbuf.drain(..n);
+                            }
+                            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
+                            Err(_) => c.dead = true,
+                        }
+                    }
+                }
+                ice_conns.retain(|c| !c.dead && c.peer.is_none_or(|id| peers.contains_key(&id)));
 
                 // trunk-v2 room relay: every peer's audio → all OTHER peers
                 // (byte-forwarded Opus, no decode/re-encode; sender excluded
@@ -751,6 +931,7 @@ pub fn start(cfg: BridgeConfig) -> Result<BridgeHandle, String> {
                         .collect();
                     for (id, why) in doomed {
                         if let Some(mut p) = peers.remove(&id) {
+                            ufrags.lock().unwrap().remove(&p.ufrag);
                             sever(&mut p, why, &media_sock);
                             if why != "gone" {
                                 println!("  bridge: severed peer {} ({}) — {why}", id, p.device);
@@ -770,8 +951,63 @@ pub fn start(cfg: BridgeConfig) -> Result<BridgeHandle, String> {
         root_link_port,
         root_link_addr,
         fingerprint,
+        ice_listen,
+        ufrags,
         stop,
     })
+}
+
+/// One frame of the pinned HTTP tunnel (data channel "tun"), phone → box:
+/// `[kind u8][stream u32 BE][payload]` — the access point's own mux. OPEN
+/// carries a raw HTTP/1.1 request head (DATA its body, CLOSE its end); AUTH
+/// (kind 5) hands over the device's renewed access token, which must belong
+/// to this peer's device (checked in the region of its /offer). Answers ride
+/// back the same way (DATA = raw response bytes, CLOSE).
+fn tunnel_frame(
+    p: &mut Peer,
+    tokens: &TokenStore,
+    cfg: &Arc<crate::ap::DialConfig>,
+    rt: &tokio::runtime::Handle,
+    data: &[u8],
+) {
+    const AUTH: u8 = 5;
+    let Some((kind, id, body)) = crate::ap::unmux(data) else { return };
+    match kind {
+        crate::ap::OPEN => {
+            let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+            p.tun_streams.insert(id, tx);
+            rt.spawn(crate::ap::tunnel_stream(
+                cfg.clone(),
+                id,
+                p.ip,
+                body.to_vec(),
+                p.token.clone(),
+                rx,
+                p.tun_out.0.clone(),
+            ));
+        }
+        crate::ap::DATA => {
+            if let Some(tx) = p.tun_streams.get(&id) {
+                let _ = tx.send(Some(body.to_vec()));
+            }
+        }
+        crate::ap::CLOSE => {
+            if let Some(tx) = p.tun_streams.remove(&id) {
+                let _ = tx.send(None);
+            }
+        }
+        AUTH => {
+            let raw = String::from_utf8_lossy(body).trim().to_string();
+            if let Ok(g) = tokens.check(&raw, &p.region) {
+                if g.device == p.device {
+                    p.token = raw;
+                    p.exp_ms = g.exp_ms;
+                }
+            }
+        }
+        _ => {}
+    }
+    p.tun_streams.retain(|_, tx| !tx.is_closed());
 }
 
 /// Tell the peer why, flush that last message onto the wire, then hang up.
@@ -910,6 +1146,56 @@ fn authorize(request: &tiny_http::Request, tokens: &TokenStore) -> Result<Grant,
     tokens.check(raw, &request_region(request))
 }
 
+/// /offer only: the Bearer, or the device cookie a same-origin page sends without its help
+/// (the pinned channel's /offer, through the ap — the page cannot read its HttpOnly cookie).
+fn authorize_offer(request: &tiny_http::Request, tokens: &TokenStore) -> Result<Grant, crate::tokens::Deny> {
+    match authorize(request, tokens) {
+        Err(crate::tokens::Deny::Missing) => {
+            let raw = device_cookie(request).ok_or(crate::tokens::Deny::Missing)?;
+            tokens.check(&raw, &request_region(request))
+        }
+        other => other,
+    }
+}
+
+/// The device credential a same-origin request carries without the page's
+/// help: the `bifrost_device` cookie (HttpOnly — the page cannot read it).
+/// It reaches this listener only through the access point (same origin).
+fn device_cookie(request: &tiny_http::Request) -> Option<String> {
+    request
+        .headers()
+        .iter()
+        .filter(|h| h.field.equiv("Cookie"))
+        .flat_map(|h| h.value.as_str().split(';').map(str::trim).map(str::to_string).collect::<Vec<_>>())
+        .find_map(|c| c.strip_prefix("bifrost_device=").map(str::to_string))
+}
+
+/// The raw credential of an authorized request (Bearer, else the cookie).
+fn raw_credential(request: &tiny_http::Request) -> String {
+    let auth = request
+        .headers()
+        .iter()
+        .find(|h| h.field.equiv("Authorization"))
+        .map(|h| h.value.as_str().to_string())
+        .unwrap_or_default();
+    bearer(&auth).map(str::to_string).or_else(|| device_cookie(request)).unwrap_or_default()
+}
+
+/// The address a request really came from (the request_region law).
+fn request_ip(request: &tiny_http::Request) -> Option<IpAddr> {
+    let sock = request.remote_addr().map(|a| a.ip())?;
+    let header = |name: &'static str| {
+        request.headers().iter().find(|h| h.field.equiv(name)).map(|h| h.value.as_str().trim().to_string())
+    };
+    match header("X-Bifrost-Edge") {
+        Some(k) if crate::roots::ct_eq(k.as_bytes(), crate::ap::edge_key().as_bytes()) => {
+            header("X-Forwarded-For").and_then(|x| x.parse::<IpAddr>().ok())
+        }
+        Some(_) => None,
+        None => Some(sock),
+    }
+}
+
 /// The region of the address a request really came from: its socket, except
 /// for a stream the access-point dial-out handed over (it comes from this host,
 /// with the client's address in X-Forwarded-For, believed only beside this
@@ -946,6 +1232,8 @@ fn handle_signaling_request(
     admit_tx: &SyncSender<Admit>,
     roots_reg: &Arc<Registry>,
     oc: &Arc<OpencodeClient>,
+    ice_tcp: &[SocketAddr],
+    ufrags: &Arc<Mutex<HashSet<String>>>,
 ) {
     let url = request.url().trim_end_matches('/').to_string();
     let method = request.method().clone();
@@ -971,12 +1259,17 @@ fn handle_signaling_request(
         let _ = request.respond(cors(tiny_http::Response::from_string("bifrost bridge")));
         return;
     }
-    let grant = match authorize(&request, tokens) {
+    let grant = match authorize_offer(&request, tokens) {
         Ok(g) => g,
         Err(d) => {
             let _ = request.respond(deny_response(d.why(), d.reauth()));
             return;
         }
+    };
+    let raw_token = raw_credential(&request);
+    let Some(client_ip) = request_ip(&request) else {
+        let _ = request.respond(deny_response("region", "refresh"));
+        return;
     };
     let epoch = tokens.kill_epoch();
     let bad = |msg: String| json_response(400, serde_json::json!({ "error": msg }).to_string());
@@ -1055,6 +1348,12 @@ fn handle_signaling_request(
             let _ = rtc.add_local_candidate(c);
         }
     }
+    // the trunk's ICE over TCP: a passive candidate at the access point's :443
+    for a in ice_tcp {
+        if let Ok(c) = Candidate::builder().tcp().host(*a).tcptype(TcpType::Passive).build() {
+            let _ = rtc.add_local_candidate(c);
+        }
+    }
     let answer = match rtc.sdp_api().accept_offer(offer) {
         Ok(a) => a,
         Err(e) => {
@@ -1080,7 +1379,15 @@ fn handle_signaling_request(
     // v4 TOKEN LAW: the device's root-allowlist claim rides the grant into
     // the admit gate — dispatch trusts ONLY this (never anything from the
     // wire). v0.9: the grant + epoch make the peer accountable (sweep).
-    if admit_tx.send(Admit { rtc, grant, epoch }).is_err() {
+    let ufrag = answer
+        .to_sdp_string()
+        .lines()
+        .find_map(|l| l.strip_prefix("a=ice-ufrag:").map(|u| u.trim().to_string()))
+        .unwrap_or_default();
+    if !ufrag.is_empty() {
+        ufrags.lock().unwrap().insert(ufrag.clone());
+    }
+    if admit_tx.send(Admit { rtc, grant, epoch, token: raw_token, ip: client_ip, ufrag }).is_err() {
         return;
     }
     let _ = request.respond(json_response(200, body));
@@ -1888,6 +2195,8 @@ pub fn bridge_test() -> Result<(), String> {
         name: "selftest".into(),
         dtls_cert_file: Some(dir.join("dtls.json")),
         public_url: None,
+        ice_tcp: vec![],
+        tunnel: None,
     })
     .map_err(|e| e.to_string())?;
 

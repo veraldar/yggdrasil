@@ -32,6 +32,10 @@ SPEACHES_URL = os.environ.get("SPEACHES_URL", "http://127.0.0.1:8000/v1")
 STT_MODEL = os.environ.get("STT_MODEL", "Systran/faster-whisper-small")
 TTS_MODEL = os.environ.get("TTS_MODEL", "speaches-ai/Kokoro-82M-v1.0-ONNX")
 TTS_VOICE = os.environ.get("TTS_VOICE", "af_heart")
+# the app on loopback (http://127.0.0.1:<port>): its /api/tts/stream is the phone's TTS. Set, the
+# phone may ask for a reply's speech over the ROOM (RPC "tts_stream") instead of over https — over
+# the trunk that keeps the spoken reply on the encrypted media path (phone ↔ box), off the VPS.
+APP_URL = os.environ.get("APP_URL", "").rstrip("/")
 INSTRUCTIONS = (
     "You relay the user's spoken words to a coding assistant and speak its answers. "
     "Answers arrive as text from opencode; speak them verbatim unless asked to summarize. "
@@ -606,6 +610,54 @@ async def entrypoint(ctx: JobContext) -> None:
             return "bad-payload"
         return "ok"
 
+    # ---- the phone's TTS over the room (trunk): the app's own /api/tts/stream bytes, as a byte
+    # stream to the caller only (topic bifrost.tts, attribute id). The voice, the deck and every
+    # command stay the phone's — only the transport of the audio changes. The RPC answers once the
+    # synthesis has started (its sample rate), so a slow first byte never looks like a dead agent.
+    async def _tts_pump(sid: str, client: httpx.AsyncClient, r: httpx.Response, who: str) -> None:
+        writer = None
+        try:
+            writer = await ctx.room.local_participant.stream_bytes(
+                f"tts-{sid}", topic="bifrost.tts", destination_identities=[who], attributes={"id": sid}
+            )
+            async for chunk in r.aiter_bytes():
+                await writer.write(chunk)
+        except Exception as e:  # noqa: BLE001 — the phone's deck ends a short stream like https's
+            logger.warning("tts over the room (%s): %s", sid, e)
+        finally:
+            if writer is not None:
+                try:
+                    await writer.aclose()
+                except Exception:  # noqa: BLE001
+                    pass
+            await r.aclose()
+            await client.aclose()
+
+    async def _tts_stream_rpc(data) -> str:
+        if not APP_URL:
+            return json.dumps({"status": 0, "why": "off"})
+        try:
+            req = json.loads(data.payload)
+            sid, text, lang = str(req["id"])[:64], str(req["text"]), str(req.get("lang") or "")
+        except Exception:  # noqa: BLE001
+            return json.dumps({"status": 0, "why": "bad-payload"})
+        client = httpx.AsyncClient(timeout=httpx.Timeout(600.0, connect=5.0))
+        try:
+            r = await client.send(
+                client.build_request("POST", f"{APP_URL}/api/tts/stream", json={"text": text, "lang": lang}),
+                stream=True,
+            )
+        except Exception as e:  # noqa: BLE001
+            await client.aclose()
+            return json.dumps({"status": 0, "why": str(e)[:200]})
+        if r.status_code != 200:
+            await r.aclose()
+            await client.aclose()
+            return json.dumps({"status": r.status_code})
+        asyncio.ensure_future(_tts_pump(sid, client, r, data.caller_identity))
+        return json.dumps({"status": 200, "rate": int(r.headers.get("x-sample-rate") or 24000)})
+
+    ctx.room.local_participant.register_rpc_method("tts_stream", _tts_stream_rpc)
     ctx.room.local_participant.register_rpc_method("deck_state", _deck_state_rpc)
     ctx.room.local_participant.register_rpc_method("ptt_begin", _ptt_begin_rpc)
     ctx.room.local_participant.register_rpc_method("ptt_abort", _ptt_abort_rpc)
@@ -751,4 +803,9 @@ if __name__ == "__main__":
     lt = os.environ.get("AGENT_LOAD_THRESHOLD")
     if lt:
         server._load_threshold = float(lt)
+    # AGENT_LOAD=off: report no cpu load at all. The cgroup monitor measures the whole user
+    # session (every other process of this login), so a busy machine reads as a full worker and
+    # LiveKit dispatches nothing — a box whose only voice job is this one can say so
+    if os.environ.get("AGENT_LOAD") == "off":
+        server._load_fnc = lambda: 0.0
     cli.run_app(server)

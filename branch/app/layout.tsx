@@ -4,6 +4,7 @@ import localFont from 'next/font/local';
 import { DeviceAuth } from '@/components/device-auth';
 import { DiagBoot } from '@/components/diag-boot';
 import { FreshReload } from '@/components/fresh-reload';
+import { PinStateLine } from '@/components/pin-state';
 import { ThemeColor } from '@/components/theme-color';
 import { DOOR_KEY } from '@/lib/tree-first';
 import '@/styles/globals.css';
@@ -70,6 +71,8 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
           <DiagBoot />
           {/* devices mode: a 401 reauth hint → one refresh + retry, or /pair (tailnet: inert) */}
           <DeviceAuth />
+          {/* after pairing through a trunk: the app's traffic on the QR-pinned channel (lib/pinned.ts) */}
+          <PinStateLine />
           <FreshReload />
           {children}
         </ThemeProvider>

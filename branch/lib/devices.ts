@@ -327,6 +327,13 @@ export async function listDevices(): Promise<{
   };
 }
 
+/** The device exists and is not revoked (the kill-switch revokes every one) —
+ *  re-read from the registry on every call, like the gate. */
+export async function deviceLive(id: string): Promise<boolean> {
+  const reg = await readRegistry();
+  return reg.devices.some((d) => d.id === id && !d.revoked);
+}
+
 export function revokeDevice(id: string, why = 'revoked from the device list'): Promise<boolean> {
   return mutate((reg) => {
     const d = reg.devices.find((x) => x.id === id);
