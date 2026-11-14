@@ -333,6 +333,10 @@ plaintext peer port and says so.
 `roots.json`) and `devices_file` (the app's `devices.json`); `udp` = the bridge's `wg_local`,
 `relay` = the bridge's `wg_relay`, `brain` = the hub brain. Its key: `bifrost-net wg-key
 <file>`; the app gets the public half (`<file>.pub`) through `BIFROST_WG_PUB_FILE`.
+`install.sh --trunk` sets this up on the hub: the key `hub-wg.key` in its state directory, the
+node as `bifrost-wg.service` (door `127.0.0.1:7893`, udp 7894, the bridge's relay socket 7895 —
+`BIFROST_WG_*` in bifrost.env), the bridge's `wg_relay`/`wg_local`, the brain's
+`YGG_PEERS_FROM`/`YGG_PEERS_VIA` on the node and the app's `BIFROST_WG_PUB_FILE`.
 
 ## Limits (known, not hidden)
 

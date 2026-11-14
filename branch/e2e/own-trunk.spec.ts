@@ -43,7 +43,14 @@ const INSTALL = '/repo/root/install';
 test.skip(!AP || !STATE, 'run by sim/own-trunk-e2e.sh (the docker world)');
 test.use({
   launchOptions: {
-    args: AP_IP ? [`--host-resolver-rules=MAP ${new URL(AP || 'https://x').hostname} ${AP_IP}`] : [],
+    args: AP_IP
+      ? [
+          `--host-resolver-rules=MAP ${new URL(AP || 'https://x').hostname} ${AP_IP}`,
+          // the trunk's test certificate: without this the service worker (which carries the paired
+          // phone's data over the pinned channel, lib/pinned.ts) is refused its script
+          '--ignore-certificate-errors',
+        ]
+      : [],
   },
 });
 
@@ -284,9 +291,19 @@ test('own trunk: a lay user pairs a phone, talks to MAIN, joins a root, delegate
         await expect
           .poll(() => home('cat ~/.local/state/bifrost/log/bifrost-bridge.service.log'), { timeout: 30_000 })
           .toContain(`root-link: root '${rootId}' LINKED`);
-        const r = hubGet(7890, `/_root/${rootId}/root`);
+        // inside WireGuard: the hub's node (bifrost-wg, :7893) pinned the key the phone approved
+        await expect
+          .poll(() => (hubGet(7893, '/_wg') as unknown as J[]).map((p) => p.id), { timeout: 30_000 })
+          .toEqual([rootId]);
+        let r = {} as J & J[];
+        for (let i = 0; i < 30 && r.name !== rootId; i++) {
+          r = JSON.parse(home(`curl -s -m 10 http://127.0.0.1:7893/_wg/${rootId}/root || echo '{}'`) || '{}');
+          if (r.name !== rootId) await phone.waitForTimeout(500);
+        }
         expect(r.name).toBe(rootId);
         expect(r.peers).toEqual([HUB_NAME]);
+        // the old plaintext switchboard is refused at the bridge
+        expect(home(`curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:7890/_root/${rootId}/root`)).toBe('403');
       });
 
       // -------------------------------------------------------------- 4 MAIN delegates

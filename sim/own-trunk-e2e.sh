@@ -191,8 +191,10 @@ if stage a; then
       grep -qx 'BIFROST_AUTH=devices' \$c/app.env && grep -qx 'BIFROST_TRUST_PROXY=1' \$c/app.env && \
       grep -qx 'BIFROST_ROOTLINK_URL=wss://$A/rootlink' \$c/app.env && grep -q '^YGG_PEER_TOKEN=peer-' \$c/app.env && \
       ss -Hltn 'sport = :8082' | awk '{print \$4}' | grep -qx '127.0.0.1:8082'"
-  check h3 "the brain: YGG_ROOT_NAME=home-pc, YGG_PEERS_FROM = the bridge's /_roots, the app's peer token" \
-    homesh "e=~/.config/yggdrasil/yggdrasil.env; grep -qx 'YGG_ROOT_NAME=home-pc' \$e && grep -qx 'YGG_PEERS_FROM=http://127.0.0.1:7890/_roots' \$e && \
+  check h3 "the brain: YGG_ROOT_NAME=home-pc, YGG_PEERS_FROM = the hub's WireGuard node (up), the app's peer token" \
+    homesh "e=~/.config/yggdrasil/yggdrasil.env; grep -qx 'YGG_ROOT_NAME=home-pc' \$e && grep -qx 'YGG_PEERS_FROM=http://127.0.0.1:7893/_wg/_roots' \$e && \
+      grep -qx 'YGG_PEERS_VIA=http://127.0.0.1:7893/_wg/{id}' \$e && curl -sf -o /dev/null 127.0.0.1:7893/_wg && \
+      grep -qx 'wg_relay = \"127.0.0.1:7895\"' ~/.config/bifrost/bridge.toml && grep -q '^BIFROST_WG_PUB_FILE=' ~/.config/bifrost/app.env && \
       [ \"\$(sed -n 's/^YGG_PEER_TOKEN=//p' \$e)\" = \"\$(sed -n 's/^YGG_PEER_TOKEN=//p' ~/.config/bifrost/app.env)\" ] && curl -s 127.0.0.1:4100/root | grep -q '\"name\":\"home-pc\"'"
   check h4 "from the internet: /pair 200, /api/* 401 at the edge, /_roots 404 (the trunk shows nothing private)" \
     outside "[ \"\$(curl -sk -o /dev/null -w '%{http_code}' https://$A/pair)\" = 200 ] && [ \"\$(curl -sk -o /dev/null -w '%{http_code}' https://$A/api/session)\" = 401 ] && \
@@ -201,7 +203,7 @@ if stage a; then
   # ------------------------------------------------------------------------------- the third machine
   docker run -d --name ot-mac --hostname mac-studio --network "$NET" --ip "$IP_MAC" \
     -v "$ROOT:/repo:ro" -v "$STATE/bin:/opt/bin:ro" -v "$STATE/sim:/sim" ubuntu:24.04 sleep infinity >/dev/null
-  dx ot-mac bash -c 'apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends python3 ca-certificates curl >/dev/null && (id ubuntu >/dev/null 2>&1 || useradd -m ubuntu)' >"$STATE/log/mac-apt.log" 2>&1
+  dx ot-mac bash -c 'apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends python3 ca-certificates curl libopus0 >/dev/null && (id ubuntu >/dev/null 2>&1 || useradd -m ubuntu)' >"$STATE/log/mac-apt.log" 2>&1
   dx -u ubuntu ot-mac bash -c 'mkdir -p ~/mock && cd ~/mock && (setsid nohup python3 /repo/root/mock/mock_upstream.py 18397 >mock.log 2>&1 &) &&
     printf "YGG_UPSTREAM_BASE_URL=http://127.0.0.1:18397\nYGG_UPSTREAM_STYLE=anthropic\nYGG_UPSTREAM_API_KEY=mock\nYGG_UPSTREAM_MODEL=mock\n" >~/model.env'
 

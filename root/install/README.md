@@ -32,6 +32,7 @@ ships them; otherwise the script runs `cargo build --release`).
 | `yggdrasil` | **brain**: chat sessions, relays to your model provider | `127.0.0.1:4100` |
 | `bifrost-app` | **app**: the phone UI and its `/api` seam (`node server.mjs`) | `0.0.0.0:8082` |
 | `bifrost-bridge` | **bridge**: pairing identity + direct phone↔box transport | `:7890` tcp, `<LAN IP>:7891` udp |
+| `bifrost-wg` | **WireGuard node** (with a trunk only): brain calls between your roots, inside WireGuard | `127.0.0.1:7893` tcp, `127.0.0.1:7894-7895` udp |
 | `bifrost-voice` | **voice**: local speech-to-text + text-to-speech (sherpa-onnx, CPU) | `127.0.0.1:8000` |
 | `bifrost-livekit` | **livekit**: the realtime voice transport (`LIVEKIT_MODE=binary`) | `:7880`, `:7881` tcp, `:7882` udp |
 | `bifrost-agent` | **voice agent**: speech in → brain → speech out | `:8081` (health) |
@@ -255,7 +256,7 @@ and restarts only what changed.
 Uninstall:
 
 ```sh
-systemctl --user disable --now yggdrasil bifrost-app bifrost-bridge bifrost-voice bifrost-livekit bifrost-agent
+systemctl --user disable --now yggdrasil bifrost-app bifrost-bridge bifrost-wg bifrost-voice bifrost-livekit bifrost-agent
 rm ~/.config/systemd/user/{yggdrasil,bifrost-*}.service ~/.local/bin/{yggdrasil,bifrost-net,livekit-server}
 systemctl --user daemon-reload
 # optional, your data: rm -r ~/.config/bifrost ~/.config/yggdrasil ~/.local/share/{bifrost,yggdrasil} ~/.local/state/bifrost

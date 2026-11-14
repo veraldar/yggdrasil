@@ -1,0 +1,18 @@
+# bifrost WireGuard node — the hub's end of root <-> root (bifrost-net wg), systemd user unit.
+# install.sh fills in the @…@ paths and writes it only with a trunk. Its config (@CONF@/wg-hub.toml)
+# names the key file (@STATE@/hub-wg.key, mode 600); its peers are the roots your phone approved.
+[Unit]
+Description=bifrost WireGuard node — root <-> root brain calls inside WireGuard (bifrost-net wg)
+After=network-online.target bifrost-bridge.service
+Wants=network-online.target
+
+[Service]
+Type=exec
+WorkingDirectory=@STATE@
+ExecStart=@BIN@/bifrost-net wg -c @CONF@/wg-hub.toml
+Restart=on-failure
+RestartSec=3
+UMask=0077
+
+[Install]
+WantedBy=default.target
