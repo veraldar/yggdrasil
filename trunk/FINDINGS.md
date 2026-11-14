@@ -580,3 +580,31 @@ that join (each its brain on its own mock, its node from the ROOT build, root-di
   that never ran (the phone's mic stuck connecting, no calm line): those lines are written only
   when LiveKit runs. The phone needs `--ignore-certificate-errors` on the test certificate (the
   service worker). Stage a: GREEN after.
+
+### Revocation in a second, a hub restart, the VPS kit (trunk-e2e, 2026-11-14, later)
+
+- **Revoked roots kept talking for 18 s.** Revoking the phone that approved mac and lab cut both
+  at the hub at once, but mac ↔ lab went on through the relay until each node's copy of the
+  directory went stale (20 s): a revoked root cannot fetch a new one, its tunnel to the hub is
+  gone. Now the hub's node pushes every directory change into each tunnel (`PUT /_wg/directory`,
+  versioned) and keeps a revoked peer's key for at most 2 s, only for that push (nothing else
+  is opened to it or accepted from it). Combined world: mac and lab drop each other 0.96–1.5 s
+  after the tap, the hub 0.8–1.2 s; cargo test: 0.8 s. The 5 s fetch and 20 s staleness stay as
+  the fallback.
+- **After a hub restart the voice leaked to the VPS.** The phone's pinned channel came back by
+  itself, but meanwhile LiveKit's reconnect opened `/rtc` (its access token in the URL) over the
+  trunk's TLS: the patched WebSocket only tunnelled while `pinned`. And a channel that failed its
+  one retry fell back to the trunk's TLS for good. Now a page that had the channel and lost it is
+  `reconnecting`: requests wait, then 503 `pin-reconnecting`; websockets wait for the channel;
+  the offer is retried with backoff (0.5–8 s); fallback is a first-contact answer only, and a 401
+  from the box (a revoked phone) still ends in pairing. Combined world, brain + bridge + wg node
+  restarted: the ap channel 0.3 s, the tunnels 5.6–6.7 s (the hub dials a root every 5 s until
+  its first handshake), the phone pinned again 6.8–7.9 s (it notices the drop ~5 s in), the voice
+  room rejoined, 0 app calls through the VPS, no re-pairing, no re-join.
+- **The active MITM in the combined world**: the VPS swaps the box key in the `/offer` answer →
+  a fresh phone says "box key mismatch — nothing sent", 0 API calls cross.
+- **The VPS kit** (`trunk/deploy/vps-443/`): sni-443.py with a config that keeps today's three
+  :443 rules and adds ICE-TCP → the ap's `livekit-ice` forward. `superset-test.py --old` runs the
+  owner's own dispatcher test, unmodified, against it (9/9 PASS); the ported cases + 4 ICE cases
+  pass too. Difference outside every test: a connection that closes before 8 bytes goes to the
+  website instead of being dropped.
