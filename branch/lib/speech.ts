@@ -173,19 +173,51 @@ function setPhase(p: SpeechPhase) {
   if (state.phase !== p) set({ phase: p });
 }
 
-function detectLang(s: string): 'fr' | 'en' {
-  if (/[àâçéèêëîïôùûüœ]/i.test(s)) return 'fr';
-  const fr = (
-    s.toLowerCase().match(
-      /\b(le|la|les|un|une|des|du|et|est|que|qui|pour|avec|dans|pas|vous|je|sur|au|aux|ce|cette|mais|plus|tout|tous|par|comme|il|elle|on|nous|son|sa|ses|ne|se|en|y|déjà|très|alors|donc|corriger|corrigé|déployer|déployé|deploye|tester|testé|changer|changé|voix|faut|était|peux|veux|vais|voilà|merci|parce|pendant|depuis|encore|aussi|besoin)\b/gi
-    ) || []
-  ).length;
-  const en = (
-    s.toLowerCase().match(
-      /\b(the|and|is|are|you|for|with|this|that|have|not|was|from|but|they|will|can|what|when|how|should|would|there|then|again)\b/gi
-    ) || []
-  ).length;
-  return fr >= 1 && fr >= en ? 'fr' : 'en';
+/** The voice's language for one reply (the FR or the EN model). Only WORDS count: code,
+ *  paths, URLs, numbers and symbols go first. A reply too short to tell — under 8 words, or no
+ *  clear majority — speaks the session's language (the last reply here long enough to tell),
+ *  else the person's own (the door's answer, else the phone's). voice-fixes 11-14: "On it →
+ *  notes-api." went to the French voice — "on" alone outvoted nothing. Words both languages use
+ *  (on, en, y, son, sa, plus, ce, a) are never evidence. */
+const FR_WORDS = new Set(
+  'le la les un une des du et est que qui pour avec dans pas vous je sur au aux cette mais tout tous par comme il elle nous ses ne se déjà très alors donc corriger corrigé déployer déployé tester testé changer changé voix faut était peux veux vais voilà merci parce pendant depuis encore aussi besoin oui non fait fini bien'.split(' ')
+);
+const EN_WORDS = new Set(
+  'the and is are you for with this that have not was from but they will can what when how should would there then again it its i i\'ve i\'ll i\'m your done to of in my me we our be been has had did does just now'.split(' ')
+);
+const langBySlug = new Map<string, 'fr' | 'en'>();
+
+function personLang(): 'fr' | 'en' {
+  try {
+    const p = JSON.parse(localStorage.getItem('bifrost-onboard') || '{}') as { lang?: string };
+    if (p.lang === 'fr' || p.lang === 'en') return p.lang;
+  } catch {
+    /* private mode */
+  }
+  return typeof navigator !== 'undefined' && /^fr/i.test(navigator.language || '') ? 'fr' : 'en';
+}
+
+export function detectLang(s: string, slug = ''): 'fr' | 'en' {
+  const words = (
+    s
+      .replace(/https?:\/\/\S+/g, ' ')
+      .replace(/\S*[/\\]\S*/g, ' ') // paths
+      .replace(/\S+\.(py|ts|tsx|js|json|md|csv|txt|sh|rs|html|css|toml|yaml|yml)\b/gi, ' ')
+      .toLowerCase()
+      .match(/\p{L}+(?:['’]\p{L}+)?/gu) || []
+  ).map((w) => w.replace('’', "'"));
+  let fr = 0;
+  let en = 0;
+  for (const w of words) {
+    if (FR_WORDS.has(w) || /[àâçéèêëîïôùûüœ]/.test(w)) fr++;
+    else if (EN_WORDS.has(w)) en++;
+  }
+  const fallback = langBySlug.get(slug) || personLang();
+  if (words.length < 8) return fallback;
+  const lang = fr >= 2 && fr > en * 1.5 ? 'fr' : en >= 2 && en > fr * 1.5 ? 'en' : null;
+  if (!lang) return fallback;
+  langBySlug.set(slug, lang); // the session's language, for its next short reply
+  return lang;
 }
 
 function ensureEls(): [HTMLAudioElement, HTMLAudioElement] {
@@ -458,7 +490,7 @@ export function startSpeech(text: string, slug = ''): void {
   spokenText = clean; // the echo ledger: what is about to go out loud
   spokenPlayedChars = 0; // nothing has played yet — the whole text is live evidence
   spokenAt = Date.now();
-  msgLang = detectLang(clean.slice(0, 600)); // ONE language per message
+  msgLang = detectLang(clean.slice(0, 600), slug); // ONE language per message
   userPaused = false;
   ensureEls();
   abort = new AbortController();
