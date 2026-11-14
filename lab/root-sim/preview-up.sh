@@ -19,17 +19,19 @@ mapfile -t ENVV < <(systemctl --user show "$UNIT" -p Environment --value | pytho
 ENVV+=("YGG_MODELS=glm-5.3-flash,glm-5.3,glm-5.2" "YGG_VISION_MODELS=glm-5.3-flash" "YGG_ARTIFACTS_DIR=$ART")
 [ "${#ENVV[@]}" -gt 10 ] || { echo "no environment read from $UNIT"; exit 1; }
 
-# Google's harness: Gemini CLI (mise `gemini`) + the node its launcher runs, on the brain's PATH;
-# its state (sessions, sign-in) is ~/.gemini, shared with the terminal like ~/.claude.
-# GEMINI_API_KEY=… preview-up.sh   signs it in with a key (kept on the next restarts).
+# Google's harness: Antigravity CLI (`agy`, ~/.local/bin; only agy is bound there) on the brain's
+# PATH (Gemini CLI is gone, 11-14); its conversations are ~/.gemini, shared with the terminal like
+# ~/.claude; its Google sign-in is in the keyring (below).
+# GEMINI_API_KEY=… preview-up.sh   runs it on a key instead (kept on the next restarts).
 MISE="$HOME/.local/share/mise/installs"
 for i in "${!ENVV[@]}"; do
   case "${ENVV[$i]}" in
-    PATH=*) p=${ENVV[$i]#PATH=}
-      for d in "$MISE/node/latest/bin" "$MISE/gemini/latest/node_modules/.bin"; do
-        case ":$p:" in *":$d:"*) ;; *) p="$d:$p" ;; esac
+    PATH=*) p=":${ENVV[$i]#PATH=}:"
+      p=${p//":$MISE/gemini/latest/node_modules/.bin:"/:}
+      for d in "$MISE/node/latest/bin" "$HOME/.local/bin"; do
+        case "$p" in *":$d:"*) ;; *) p=":$d$p" ;; esac
       done
-      ENVV[$i]="PATH=$p" ;;
+      p=${p#:}; ENVV[$i]="PATH=${p%:}" ;;
   esac
 done
 if [ -n "${GEMINI_API_KEY:-}" ]; then
@@ -38,6 +40,31 @@ if [ -n "${GEMINI_API_KEY:-}" ]; then
 fi
 mkdir -p "$HOME/.gemini"
 B="http://$(printf '%s\n' "${ENVV[@]}" | sed -n 's/^YGG_LISTEN=//p')"
+
+# agy's Google sign-in: a keyring item (Secret Service over the D-Bus session bus), which the
+# sandbox cannot see (ProtectHome also hides /run/user). A filtered proxy (unit rc-$NAME-secrets,
+# socket in the bound $UI) lets it read THAT item only: no other secret, no writes, no systemd,
+# nothing else on the bus. Signed out (no item): no proxy, and a turn says how to sign in.
+# A new sign-in (a new item) needs a rerun of this script.
+SS=org.freedesktop.secrets SP=/org/freedesktop/secrets SBUS="$UI/secrets.bus"
+systemctl --user stop "rc-$NAME-secrets" 2>/dev/null || true
+systemctl --user reset-failed "rc-$NAME-secrets" 2>/dev/null || true
+rm -f "$SBUS"
+mapfile -t ENVV < <(printf '%s\n' "${ENVV[@]}" | grep -vE '^(DBUS_SESSION_BUS_ADDRESS|AGY_CLI_DISABLE_AUTO_UPDATE)=')
+ENVV+=("AGY_CLI_DISABLE_AUTO_UPDATE=1") # the terminal's agy updates the shared binary
+AGY_ITEM=$(busctl --user --json=short call "$SS" "$SP/aliases/default" org.freedesktop.Secret.Collection SearchItems 'a{ss}' 2 service gemini username antigravity 2>/dev/null |
+  python3 -c 'import json,sys; d=json.load(sys.stdin)["data"][0]; print(d[0] if d else "")' 2>/dev/null || true)
+if [ -n "$AGY_ITEM" ]; then
+  systemd-run --user --unit "rc-$NAME-secrets" --collect -q \
+    xdg-dbus-proxy "${DBUS_SESSION_BUS_ADDRESS:-unix:path=/run/user/$(id -u)/bus}" "$SBUS" --filter \
+    --call="$SS=org.freedesktop.DBus.Properties.Get@$SP" --call="$SS=org.freedesktop.Secret.Service.OpenSession@$SP" \
+    --call="$SS=org.freedesktop.Secret.Service.Unlock@$SP" --call="$SS=org.freedesktop.Secret.Collection.SearchItems@$SP/aliases/default" \
+    --call="$SS=org.freedesktop.Secret.Item.GetSecret@$AGY_ITEM" --call="$SS=org.freedesktop.Secret.Session.Close@$SP/session/*"
+  for _ in $(seq 1 40); do [ -S "$SBUS" ] && break; sleep 0.1; done
+  ENVV+=("DBUS_SESSION_BUS_ADDRESS=unix:path=$SBUS")
+else
+  echo "agy: no Google sign-in in the keyring (run \`agy\` once in a terminal, then rerun this): its turns will say so"
+fi
 
 # the preview's extensions (outside the core): the librarian indexes this brain (:4310)
 if [ "$NAME" = preview ]; then
@@ -63,6 +90,7 @@ mkdir -p "$ART"
 args=(--user --unit "$UNIT" --collect -p ProtectHome=tmpfs
   -p "BindPaths=$UI" -p "BindPaths=$ART" -p "BindReadOnlyPaths=$HOME/.cache/root-sim/_venv"
   -p "BindPaths=$HOME/.claude" -p "BindPaths=$HOME/.claude.json" -p "BindPaths=$HOME/.gemini" -p "BindReadOnlyPaths=$HOME/.local/share/mise"
+  -p "BindReadOnlyPaths=-$HOME/.local/bin/agy"
   -p "StandardOutput=append:$UI/brain.log" -p "StandardError=append:$UI/brain.log")
 for e in "${ENVV[@]}"; do args+=(--setenv="$e"); done
 systemd-run "${args[@]}" "$UI/bin/yggdrasil" >/dev/null
