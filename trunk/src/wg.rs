@@ -34,9 +34,13 @@
 //!
 //! Joined root ↔ joined root: the hub's node publishes the tree's DIRECTORY (every pinned root:
 //! id, public key, tunnel address) at `GET /_wg/directory` on its in-tunnel door — only inside
-//! the tunnel, so only to roots it pinned, and the answer is authenticated by the hub's key. A
-//! joined node fetches it every 5 s from `local` and takes its roots as peers; a copy older
-//! than 20 s is dropped (a revoked root, or a root cut off from the hub, loses them — root ↔ root
+//! the tunnel, so only to roots it pinned, and the answer is authenticated by the hub's key. The
+//! hub PUSHES every change of it (`PUT /_wg/directory` on each joined node's in-tunnel door, from
+//! `local` only), so a joined node drops a revoked root within about a second. A root that is
+//! itself revoked hears it the same way before its tunnel is cut: the hub keeps the revoked peer
+//! for at most LEAVE_GRACE, only to hand it an empty directory (nothing else crosses meanwhile).
+//! A joined node also fetches it every 5 s from `local` (the fallback) and takes its roots as
+//! peers; a copy older than 20 s is dropped (a root cut off from the hub loses them — root ↔ root
 //! frames ride the hub's relay anyway, so a root cut off from the hub has nothing to lose). The relay
 //! carries root → root frames between any two linked roots: who may talk to whom is decided by
 //! the keys each node holds, not by the relay. A joined root's brain learns them like the hub's
@@ -89,6 +93,8 @@ const PERSISTENT_KEEPALIVE: u16 = 25;
 /// A joined node asks the hub for the directory this often; a copy older than DIR_TTL is dropped.
 const DIR_EVERY: Duration = Duration::from_secs(5);
 const DIR_TTL: Duration = Duration::from_secs(20);
+/// The hub keeps a revoked peer this long at most, only to push it its (empty) directory.
+const LEAVE_GRACE: Duration = Duration::from_secs(2);
 const B64: base64::engine::GeneralPurpose = base64::engine::general_purpose::STANDARD;
 
 /* ------------------------------------------------------------------ relay frames */
@@ -388,8 +394,47 @@ struct Source {
     devices: Option<crate::tokens::TokenStore>,
     warned: std::collections::HashSet<String>,
     me: [u8; 32],
-    /// a joined node: the hub's last directory (when it came, the roots in it)
-    directory: Arc<std::sync::Mutex<Option<(Instant, Vec<PeerSpec>)>>>,
+    /// a joined node whose static peer `local` is the hub: it follows the hub's directory
+    follows_hub: bool,
+    /// a joined node: the hub's last directory (when it came, the roots in it, its version)
+    directory: Dir,
+}
+
+/// A joined node's copy of the hub's directory: when it came, the roots in it, the hub's
+/// version of it (the ms it last changed; 0 = an older hub that sends none).
+type Dir = Arc<std::sync::Mutex<Option<(Instant, Vec<PeerSpec>, u64)>>>;
+
+/// The roots of a directory answer (a GET or a push), without this node's own key.
+fn parse_directory(v: &Value, me: &[u8; 32]) -> (Vec<PeerSpec>, u64) {
+    let mut roots = vec![];
+    for r in v["roots"].as_array().into_iter().flatten() {
+        let id = r["id"].as_str().unwrap_or_default();
+        let (Ok(public), Ok(ip)) = (
+            decode_key(r["public_key"].as_str().unwrap_or_default()),
+            r["ip"].as_str().unwrap_or_default().parse::<Ipv4Addr>(),
+        ) else {
+            continue;
+        };
+        if valid_addr(id) && id != "local" && public != *me {
+            roots.push(PeerSpec { id: id.to_string(), public, ip, proactive: false });
+        }
+    }
+    (roots, v["v"].as_u64().unwrap_or(0))
+}
+
+/// Take a directory into the copy unless it is older than the one held (a GET answered before a
+/// push may arrive after it). Returns the root ids when they changed.
+fn take_directory(dir: &Dir, roots: Vec<PeerSpec>, v: u64) -> Option<Vec<String>> {
+    let mut d = dir.lock().unwrap();
+    if let Some((_, _, held)) = d.as_ref() {
+        if v != 0 && v < *held {
+            return None;
+        }
+    }
+    let before: Option<Vec<String>> = d.as_ref().map(|(_, r, _)| r.iter().map(|p| p.id.clone()).collect());
+    let ids: Vec<String> = roots.iter().map(|r| r.id.clone()).collect();
+    *d = Some((Instant::now(), roots, v));
+    (before.as_ref() != Some(&ids)).then_some(ids)
 }
 
 impl Source {
@@ -405,8 +450,8 @@ impl Source {
         let mut addr = self.address;
         let Some(path) = self.roots_file.clone() else {
             // a joined node: the hub's directory, while it is fresh
-            let fresh = self.directory.lock().unwrap().clone().filter(|(at, _)| at.elapsed() < DIR_TTL);
-            if let (Some((_, roots)), Some(me)) = (fresh, addr) {
+            let fresh = self.directory.lock().unwrap().clone().filter(|(at, _, _)| at.elapsed() < DIR_TTL);
+            if let (Some((_, roots, _)), Some(me)) = (fresh, addr) {
                 for r in roots {
                     if r.public == self.me || r.ip == me.0 || !in_net(r.ip, me) {
                         continue;
@@ -475,8 +520,9 @@ impl Source {
 
 /// What threads ask of the engine.
 enum Cmd {
-    /// a TCP stream to `peer`:80 inside the tunnel
-    Open { peer: String, events: mpsc::Sender<Ev>, reply: mpsc::Sender<Result<u64, String>> },
+    /// a TCP stream to `peer`:80 inside the tunnel (`push`: the hub's directory push, the one
+    /// stream a leaving peer may still get)
+    Open { peer: String, events: mpsc::Sender<Ev>, reply: mpsc::Sender<Result<u64, String>>, push: bool },
     Write { id: u64, data: Vec<u8> },
     /// no more writes: FIN once the queue drained
     Shutdown { id: u64 },
@@ -485,6 +531,10 @@ enum Cmd {
     Stats { reply: mpsc::Sender<(Value, Value)> },
     /// the hub's node: the tree's directory (None on a joined node)
     Directory { reply: mpsc::Sender<Option<Value>> },
+    /// bring the peers in line with the source now (a pushed directory came)
+    Reload,
+    /// the hub's push to `peer` is done: a leaving peer goes now
+    Pushed { peer: String },
 }
 
 /// What the engine tells a stream's thread.
@@ -502,6 +552,9 @@ struct Peer {
     handshakes: u64,
     last_init: Instant,
     since_ms: u64,
+    /// the hub: no longer allowed (revoked) — kept until this instant only to push it its
+    /// empty directory; nothing else is opened to or accepted from it meanwhile
+    leaving: Option<Instant>,
 }
 
 struct Stream {
@@ -600,6 +653,9 @@ struct Engine {
     c: Counters,
     t0: Instant,
     scratch: Vec<u8>,
+    /// the hub: the directory's content as last pushed, and its version (ms it changed)
+    dir_pushed: Option<Value>,
+    dir_v: u64,
 }
 
 fn now_ms() -> u64 {
@@ -631,28 +687,32 @@ impl Engine {
             }
             self.addr = addr;
         }
+        let hub = self.source.roots_file.is_some();
         let gone: Vec<String> =
             self.peers.keys().filter(|id| !specs.iter().any(|s| &s.id == *id && self.peers[*id].spec == *s)).cloned().collect();
-        for id in gone {
-            if let Some(p) = self.peers.remove(&id) {
-                self.by_pub.remove(&p.spec.public);
-                self.by_idx.remove(&p.idx);
-                self.by_ip.remove(&p.spec.ip);
-                let cut: Vec<u64> = self.streams.iter().filter(|(_, s)| s.peer_ip == p.spec.ip).map(|(k, _)| *k).collect();
-                for sid in &cut {
-                    if let Some(s) = self.streams.get_mut(sid) {
-                        self.sockets.get_mut::<tcp::Socket>(s.handle).abort();
-                        let _ = s.events.send(Ev::Reset("the peer was removed".into()));
-                        s.eof_sent = true;
-                    }
-                }
-                eprintln!(
-                    "wg: peer '{id}' REMOVED (fp {}) — its tunnel is cut ({} stream(s) reset)",
-                    fingerprint(&p.spec.public),
-                    cut.len()
-                );
+        // allowed again inside its grace (restored): it stays
+        for p in self.peers.values_mut() {
+            if p.leaving.is_some() && !gone.contains(&p.spec.id) {
+                p.leaving = None;
+                eprintln!("wg: peer '{}' allowed again — kept", p.spec.id);
             }
         }
+        for id in gone {
+            if !hub {
+                self.remove_peer(&id, "removed");
+                continue;
+            }
+            // the hub: cut it now (every stream, every new call either way), but keep its key
+            // for LEAVE_GRACE so the push can tell it — then it goes (Cmd::Pushed or the deadline)
+            let Some(p) = self.peers.get_mut(&id) else { continue };
+            if p.leaving.is_none() {
+                p.leaving = Some(Instant::now() + LEAVE_GRACE);
+                let ip = p.spec.ip;
+                let n = self.reset_streams(ip, "the peer was revoked");
+                eprintln!("wg: peer '{id}' REVOKED — {n} stream(s) reset; it is told, then cut (≤ {} s)", LEAVE_GRACE.as_secs());
+            }
+        }
+        self.finish_leaving();
         for s in specs {
             if self.peers.contains_key(&s.id) {
                 continue;
@@ -673,8 +733,84 @@ impl Engine {
             self.by_ip.insert(s.ip, s.id.clone());
             self.peers.insert(
                 s.id.clone(),
-                Peer { spec: s, tun, idx, handshakes: 0, last_init: Instant::now() - Duration::from_secs(60), since_ms: now_ms() },
+                Peer {
+                    spec: s,
+                    tun,
+                    idx,
+                    handshakes: 0,
+                    last_init: Instant::now() - Duration::from_secs(60),
+                    since_ms: now_ms(),
+                    leaving: None,
+                },
             );
+        }
+        if hub {
+            self.push_directory();
+        }
+    }
+
+    /// Reset every stream with the peer at `ip`; how many.
+    fn reset_streams(&mut self, ip: Ipv4Addr, why: &str) -> usize {
+        let cut: Vec<u64> = self.streams.iter().filter(|(_, s)| s.peer_ip == ip).map(|(k, _)| *k).collect();
+        for sid in &cut {
+            if let Some(s) = self.streams.get_mut(sid) {
+                self.sockets.get_mut::<tcp::Socket>(s.handle).abort();
+                let _ = s.events.send(Ev::Reset(why.into()));
+                s.eof_sent = true;
+            }
+        }
+        cut.len()
+    }
+
+    fn remove_peer(&mut self, id: &str, how: &str) {
+        if let Some(p) = self.peers.remove(id) {
+            self.by_pub.remove(&p.spec.public);
+            self.by_idx.remove(&p.idx);
+            self.by_ip.remove(&p.spec.ip);
+            let n = self.reset_streams(p.spec.ip, "the peer was removed");
+            eprintln!("wg: peer '{id}' {} (fp {}) — its tunnel is cut ({n} stream(s) reset)", how.to_uppercase(), fingerprint(&p.spec.public));
+        }
+    }
+
+    /// The hub: leaving peers whose grace is over go.
+    fn finish_leaving(&mut self) {
+        let due: Vec<String> =
+            self.peers.values().filter(|p| p.leaving.is_some_and(|t| Instant::now() >= t)).map(|p| p.spec.id.clone()).collect();
+        for id in due {
+            self.remove_peer(&id, "removed");
+        }
+    }
+
+    /// The hub: when the directory changed, push it to every joined node — the allowed ones get
+    /// it, a leaving one gets an empty one (it is no longer in the tree) — inside each tunnel.
+    fn push_directory(&mut self) {
+        let Some(now) = self.directory_content() else { return };
+        if self.dir_pushed.as_ref() == Some(&now) {
+            return;
+        }
+        self.dir_v = now_ms().max(self.dir_v + 1);
+        self.dir_pushed = Some(now);
+        let full = self.directory().unwrap_or(Value::Null);
+        let ctl = Ctl { tx: self.cmd_tx.clone(), waker: self.waker.clone() };
+        for p in self.peers.values() {
+            let body = if p.leaving.is_some() {
+                json!({ "net": full["net"], "roots": [], "revoked": true, "v": self.dir_v })
+            } else {
+                full.clone()
+            };
+            let (ctl, id) = (ctl.clone(), p.spec.id.clone());
+            let _ = std::thread::Builder::new().name("wg-push".into()).spawn(move || {
+                let mut h = Map::new();
+                h.insert("content-type".into(), json!("application/json"));
+                if let Ok(req) = HttpReq::new("PUT", "/_wg/directory", h, body.to_string().into_bytes()) {
+                    let t = Instant::now();
+                    let r = tunnel_call_as(&ctl, &id, &req, true);
+                    if r.status != 200 {
+                        eprintln!("wg: directory push to '{id}': {} after {} ms (it falls back to its own fetch)", r.status, t.elapsed().as_millis());
+                    }
+                }
+                ctl.send(Cmd::Pushed { peer: id });
+            });
         }
     }
 
@@ -855,9 +991,12 @@ impl Engine {
 
     fn on_cmd(&mut self, cmd: Cmd) {
         match cmd {
-            Cmd::Open { peer, events, reply } => {
+            Cmd::Open { peer, events, reply, push } => {
                 let res = (|| {
                     let p = self.peers.get(&peer).ok_or_else(|| format!("no tunnel peer '{peer}'"))?;
+                    if p.leaving.is_some() && !push {
+                        return Err(format!("root '{peer}' was revoked: its tunnel is cut"));
+                    }
                     if self.addr.is_none() {
                         return Err("this node has no tunnel address yet".to_string());
                     }
@@ -916,18 +1055,34 @@ impl Engine {
             Cmd::Directory { reply } => {
                 let _ = reply.send(self.directory());
             }
+            Cmd::Reload => self.reload(),
+            Cmd::Pushed { peer } => {
+                if let Some(p) = self.peers.get_mut(&peer) {
+                    if p.leaving.is_some() {
+                        p.leaving = Some(Instant::now());
+                    }
+                }
+                self.finish_leaving();
+            }
         }
     }
 
     /// Every root this hub pinned (and still allows): what joined nodes learn each other from.
+    /// `v` = when its content last changed (ms): a node keeps the newest it saw.
     fn directory(&self) -> Option<Value> {
+        let mut d = self.directory_content()?;
+        d["v"] = json!(self.dir_v);
+        Some(d)
+    }
+
+    fn directory_content(&self) -> Option<Value> {
         self.source.roots_file.as_ref()?;
         let (ip, len) = self.addr?;
         let net = Ipv4Addr::from(u32::from(ip) & (u32::MAX << (32 - len)));
         let mut roots: Vec<Value> = self
             .peers
             .values()
-            .filter(|p| !p.spec.proactive)
+            .filter(|p| !p.spec.proactive && p.leaving.is_none())
             .map(|p| json!({ "id": p.spec.id, "public_key": B64.encode(p.spec.public), "ip": p.spec.ip.to_string() }))
             .collect();
         roots.sort_by(|a, b| a["id"].as_str().cmp(&b["id"].as_str()));
@@ -938,6 +1093,7 @@ impl Engine {
         let mut peers: Vec<Value> = self
             .peers
             .values()
+            .filter(|p| p.leaving.is_none())
             .map(|p| {
                 let (hs, tx, rx, _, _) = p.tun.stats();
                 json!({ "id": p.spec.id, "ip": p.spec.ip.to_string(), "fingerprint": fingerprint(&p.spec.public),
@@ -1044,7 +1200,8 @@ impl Engine {
         let peer = match remote {
             Some(IpAddress::Ipv4(ip)) => self.by_ip.get(&ip).cloned().map(|p| (p, ip)),
             _ => None,
-        };
+        }
+        .filter(|(p, _)| self.peers.get(p).is_some_and(|p| p.leaving.is_none()));
         let inbound_now = self.streams.len();
         let Some((peer, ip)) = peer.filter(|_| inbound_now < MAX_INBOUND * 2) else {
             sock.abort();
@@ -1071,7 +1228,11 @@ impl Engine {
         let ctl = Ctl { tx: self.cmd_tx.clone(), waker: self.waker.clone() };
         let brain = self.brain.clone();
         let agent = self.agent.clone();
-        let _ = std::thread::Builder::new().name("wg-in".into()).spawn(move || serve_inbound(id, rx, ctl, brain, agent, peer));
+        // a joined node takes the hub's pushes (from `local` only); the hub takes none
+        let dir = (self.source.follows_hub && peer == "local").then(|| (self.source.directory.clone(), self.source.me));
+        let _ = std::thread::Builder::new()
+            .name("wg-in".into())
+            .spawn(move || serve_inbound(id, rx, ctl, brain, agent, dir));
     }
 
     fn pump(&mut self) {
@@ -1268,7 +1429,7 @@ fn encode_request(peer: &str, req: &HttpReq) -> Vec<u8> {
 }
 
 /// The in-tunnel door: one exchange from a peer, performed against this root's brain.
-fn serve_inbound(id: u64, rx: mpsc::Receiver<Ev>, ctl: Ctl, brain: Option<String>, agent: ureq::Agent, _peer: String) {
+fn serve_inbound(id: u64, rx: mpsc::Receiver<Ev>, ctl: Ctl, brain: Option<String>, agent: ureq::Agent, dir: Option<(Dir, [u8; 32])>) {
     let deadline = Instant::now() + Duration::from_secs(30);
     let got = read_request(|buf| loop {
         let left = deadline.saturating_duration_since(Instant::now());
@@ -1292,7 +1453,23 @@ fn serve_inbound(id: u64, rx: mpsc::Receiver<Ev>, ctl: Ctl, brain: Option<String
                 HttpReply { status: 200, headers: h, body: d.to_string().into_bytes() }
             }
             ("GET", None) => HttpReply::error(404, "this node publishes no directory (only the hub does)"),
-            _ => HttpReply::error(405, "GET only"),
+            // the hub's push (a joined node, from `local` only): taken now, the peers follow at once
+            ("PUT", None) => match (&dir, serde_json::from_slice::<Value>(&r.body)) {
+                (Some((d, me)), Ok(v)) if v["roots"].is_array() => {
+                    let (roots, ver) = parse_directory(&v, me);
+                    if let Some(ids) = take_directory(d, roots, ver) {
+                        let why = if v["revoked"] == true { " — this root was revoked" } else { "" };
+                        eprintln!("wg: the hub pushed its directory: {} other root(s) [{}]{why}", ids.len(), ids.join(", "));
+                    }
+                    ctl.send(Cmd::Reload);
+                    let mut h = Map::new();
+                    h.insert("content-type".into(), json!("application/json"));
+                    HttpReply { status: 200, headers: h, body: b"{\"ok\":true}".to_vec() }
+                }
+                (Some(_), _) => HttpReply::error(400, "not a directory"),
+                (None, _) => HttpReply::error(403, "only the hub pushes a directory, and only to a joined node"),
+            },
+            _ => HttpReply::error(405, "GET or PUT"),
         },
         Ok(r) => match (HttpReq::new(&r.method, &r.target, r.headers, r.body), &brain) {
             (Err(e), _) => HttpReply::error(400, &e),
@@ -1307,6 +1484,10 @@ fn serve_inbound(id: u64, rx: mpsc::Receiver<Ev>, ctl: Ctl, brain: Option<String
 
 /// The front door's half: one exchange with `peer`'s brain through the tunnel.
 fn tunnel_call(ctl: &Ctl, peer: &str, req: &HttpReq) -> HttpReply {
+    tunnel_call_as(ctl, peer, req, false)
+}
+
+fn tunnel_call_as(ctl: &Ctl, peer: &str, req: &HttpReq, push: bool) -> HttpReply {
     // 1. the TCP connection inside the tunnel (the WireGuard handshake rides in this wait); a
     //    refused connect (the far side's listeners all busy) is tried again inside the window
     let until = Instant::now() + CONNECT_WAIT;
@@ -1314,7 +1495,7 @@ fn tunnel_call(ctl: &Ctl, peer: &str, req: &HttpReq) -> HttpReply {
     let (id, ev_rx) = loop {
         let (ev_tx, ev_rx) = mpsc::channel();
         let (rtx, rrx) = mpsc::channel();
-        if !ctl.send(Cmd::Open { peer: peer.to_string(), events: ev_tx, reply: rtx }) {
+        if !ctl.send(Cmd::Open { peer: peer.to_string(), events: ev_tx, reply: rtx, push }) {
             return HttpReply::error(503, "the tunnel engine is not running");
         }
         let id = match rrx.recv_timeout(Duration::from_secs(5)) {
@@ -1463,9 +1644,9 @@ fn serve_front(mut s: TcpStream, ctl: Ctl) {
     write_reply(&mut s, &reply);
 }
 
-/// A joined node: fetch the hub's directory every DIR_EVERY, inside the tunnel to `local`.
-fn follow_directory(ctl: Ctl, me: [u8; 32], dir: Arc<std::sync::Mutex<Option<(Instant, Vec<PeerSpec>)>>>) {
-    let mut last: Vec<String> = vec![];
+/// A joined node: fetch the hub's directory every DIR_EVERY, inside the tunnel to `local` (the
+/// fallback to the hub's pushes).
+fn follow_directory(ctl: Ctl, me: [u8; 32], dir: Dir) {
     loop {
         let reply = match HttpReq::new("GET", "/_wg/directory", Map::new(), vec![]) {
             Ok(req) => tunnel_call(&ctl, "local", &req),
@@ -1473,25 +1654,11 @@ fn follow_directory(ctl: Ctl, me: [u8; 32], dir: Arc<std::sync::Mutex<Option<(In
         };
         if reply.status == 200 {
             let v: Value = serde_json::from_slice(&reply.body).unwrap_or(Value::Null);
-            let mut roots = vec![];
-            for r in v["roots"].as_array().into_iter().flatten() {
-                let id = r["id"].as_str().unwrap_or_default();
-                let (Ok(public), Ok(ip)) = (
-                    decode_key(r["public_key"].as_str().unwrap_or_default()),
-                    r["ip"].as_str().unwrap_or_default().parse::<Ipv4Addr>(),
-                ) else {
-                    continue;
-                };
-                if valid_addr(id) && id != "local" && public != me {
-                    roots.push(PeerSpec { id: id.to_string(), public, ip, proactive: false });
-                }
-            }
-            let ids: Vec<String> = roots.iter().map(|r| r.id.clone()).collect();
-            if ids != last {
+            let (roots, ver) = parse_directory(&v, &me);
+            if let Some(ids) = take_directory(&dir, roots, ver) {
                 eprintln!("wg: the hub's directory: {} other root(s) [{}]", ids.len(), ids.join(", "));
-                last = ids;
+                ctl.send(Cmd::Reload);
             }
-            *dir.lock().unwrap() = Some((Instant::now(), roots));
         }
         std::thread::sleep(DIR_EVERY);
     }
@@ -1548,6 +1715,7 @@ pub fn start(cfg: NodeConfig) -> Result<NodeHandle, String> {
         devices: cfg.devices_file.clone().map(crate::tokens::TokenStore::open),
         warned: Default::default(),
         me: *public.as_bytes(),
+        follows_hub,
         directory: directory.clone(),
     };
     let brain = cfg.brain.clone().map(|b| b.trim_end_matches('/').to_string());
@@ -1603,6 +1771,8 @@ pub fn start(cfg: NodeConfig) -> Result<NodeHandle, String> {
                     c: Counters::default(),
                     t0,
                     scratch: vec![0u8; 65536],
+                    dir_pushed: None,
+                    dir_v: 0,
                 };
                 e.reload();
                 let _ = ready_tx.send(Ok(()));
@@ -1979,14 +2149,23 @@ mod tests {
         assert!(t.elapsed() < Duration::from_secs(15));
         assert!(stats(a.http)["dropped"]["unknown_key"].as_u64() >= Some(1));
 
-        // revoking D (roots.json) takes it out of the directory: B drops it within a refresh
+        // revoking D (roots.json): the hub pushes the change — B drops D, and D, told it is out
+        // of the tree before its tunnel is cut, drops B: within the hub's 1 s re-read + the push
         std::fs::write(p("roots.json"), roots(true).to_string()).unwrap();
         let t = Instant::now();
-        while roots_of(b.http) == ["d"] && t.elapsed() < Duration::from_secs(15) {
-            std::thread::sleep(Duration::from_millis(200));
+        while (!roots_of(b.http).is_empty() || !roots_of(d.http).is_empty()) && t.elapsed() < Duration::from_secs(15) {
+            std::thread::sleep(Duration::from_millis(50));
         }
+        let took = t.elapsed();
         assert!(roots_of(b.http).is_empty(), "B still holds the revoked D");
+        assert!(roots_of(d.http).is_empty(), "the revoked D still holds B");
+        assert!(took < Duration::from_millis(2500), "root <-> root revocation took {took:?}: the push did not arrive");
+        eprintln!("REVOKE root<->root: B and D dropped each other in {} ms (the hub's push)", took.as_millis());
         assert_eq!(http(b.http, "GET", "/_wg/d/root", b"", "").0, 502, "B still reaches the revoked D");
+        assert_eq!(http(d.http, "GET", "/_wg/b/root", b"", "").0, 502, "the revoked D still reaches B");
+        assert_eq!(http(a.http, "GET", "/_wg/d/root", b"", "").0, 502, "the hub still reaches the revoked D");
+        let listed: Value = serde_json::from_slice(&http(a.http, "GET", "/_wg", b"", "").1).unwrap();
+        assert_eq!(listed.as_array().map(|l| l.iter().filter(|p| p["id"] == "d").count()), Some(0), "D still listed");
 
         // revoking the approving device cuts B's tunnel within a reload
         std::fs::write(p("devices.json"), devs(true).to_string()).unwrap();

@@ -277,9 +277,13 @@ anything that is not a WireGuard-shaped message. It holds no key and reads nothi
 **Joined root ↔ joined root:** the hub's node answers `GET /_wg/directory` on its in-tunnel door,
 so only to roots it pinned, with the answer authenticated by the hub's key:
 `{net, roots:[{id, public_key, ip}]}`, every root it allows right now. A joined node asks for it
-every 5 s from `local` and takes those roots as peers; a copy older than 20 s is dropped. So
-revoking a root takes it off every other root within about 5 s, and a root the hub stopped
-vouching for (its device revoked) loses the others within about 20 s. Two joined roots then
+every 5 s from `local` and takes those roots as peers; a copy older than 20 s is dropped. The
+hub also PUSHES every change (`PUT /_wg/directory` to each joined node's in-tunnel door; a node
+takes it only from `local`, and never an older `v` than it holds), so a joined node drops a
+revoked root within about a second. A root that is itself revoked is told the same way before
+its tunnel goes: the hub keeps its key for at most 2 s, only to push it an empty directory
+(nothing else is opened to it or accepted from it meanwhile). The 5 s fetch and the 20 s
+staleness remain the fallback (a root that misses the push). Two joined roots then
 talk through the hub's relay, which still sees only ciphertext. A joined root's brain learns
 them with `YGG_PEERS_FROM=http://127.0.0.1:<node http>/_wg/_roots` and
 `YGG_PEERS_VIA=http://127.0.0.1:<node http>/_wg/{id}`, and keeps the hub as
