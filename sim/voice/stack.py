@@ -115,7 +115,9 @@ def up(name, roots, port=4170, brain_env=None, peers_net=True, auth="tailnet"):
     log(f"livekit {lk_name} on :{lk_port}")
     upstream, stt = speaches_url(), stt_model()
     gate_port = port + 10
-    unit(f"vsim-gate-{name}", [sys.executable, os.path.join(HERE, "speech_gate.py"), "--upstream", upstream, "--port", str(gate_port)],
+    stt_dump = os.path.join(st_dir, "stt")
+    shutil.rmtree(stt_dump, ignore_errors=True)
+    unit(f"vsim-gate-{name}", [sys.executable, os.path.join(HERE, "speech_gate.py"), "--upstream", upstream, "--port", str(gate_port), "--dump", stt_dump],
          HERE, {"PATH": os.environ.get("PATH", "")}, os.path.join(st_dir, "gate.log"))
     spe = f"http://127.0.0.1:{gate_port}/v1"
     if not wait_http(spe.rsplit("/v1", 1)[0] + "/health", 20):
