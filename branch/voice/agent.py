@@ -107,7 +107,7 @@ def strip_commands(text: str) -> str:
 # one long segment, the reply's sentences around a barge-in. The phone tells the agent the text it
 # is speaking (deck_state), and every run of words that also runs in that text is its echo.
 ECHO_RUN = 3  # words in a row that must match the reply to count as its echo
-ECHO_TAIL_S = 2.0  # speech that began this soon after the reply stopped still carries its tail
+ECHO_TAIL_S = 0.5  # speech that began this soon after the reply stopped still carries its tail
 
 
 def _tok(w: str) -> str:
@@ -721,12 +721,23 @@ async def entrypoint(ctx: JobContext) -> None:
         nonlocal turn_text, keyword_busy
         if not ev.is_final:
             return
-        over_reply = bool(mode_state.get("speaking")) or deck["seg_over"]
+        speaking = bool(mode_state.get("speaking"))
+        over_reply = speaking or deck["seg_over"]
         heard = ev.transcript
         if over_reply and deck["text"]:
             heard = strip_echo(heard, deck["text"])
+            raw_n, left = len(ev.transcript.split()), heard.split()
+            if left and len(left) <= 2 and raw_n >= 10 and command_of(heard, True) is None and not _norm(heard).endswith("over"):
+                heard = ""  # a word or two left over from a long echo is its residue, not the person
             if heard != ev.transcript.strip():
                 logger.info("echo of the reply dropped: %r → %r", ev.transcript[:80], heard[:80])
+            if not heard:
+                if not turn_text.strip():
+                    try:
+                        session.clear_user_turn()
+                    except Exception as e:  # noqa: BLE001
+                        logger.warning("echo discard: %s", e)
+                return
         cmd = command_of(ev.transcript, over_reply) or command_of(heard, over_reply)
         if cmd and mode_state["mode"] == "free":
             # the command was the whole utterance: if nothing else is buffered, the session's
@@ -741,7 +752,9 @@ async def entrypoint(ctx: JobContext) -> None:
             return
         # while the phone speaks a reply only keywords count (owner 11-13 r2): speech that is
         # neither a command nor ends in "over" is room noise or the reply's own echo — dropped
-        if over_reply and not _norm(heard).endswith("over"):
+        # (a segment that began over the reply but ends after it keeps its words, echo removed:
+        # the person may have started their next turn over the reply's last words)
+        if speaking and not _norm(heard).endswith("over"):
             if not turn_text.strip():
                 try:
                     session.clear_user_turn()
