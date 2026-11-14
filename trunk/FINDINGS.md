@@ -457,3 +457,84 @@ phone) and `trunk/deploy/sni-443-test.py`.
 
 **Not proven:** real Let's Encrypt (Pebble speaks the same ACME, but the run never leaves docker),
 a real VPS provider's firewall and DNS, IPv6 end to end, voice over the trunk (not wired).
+
+## Root ↔ root inside WireGuard (trunk-wg, 2026-11-14)
+
+Until now the VPS (TLS ends there) and the hub's bridge could read every brain call between
+roots: the switchboard carried them as `http` ops with the body in base64. Now each root runs a
+`bifrost-net wg` node (trunk/src/wg.rs): boringtun + a userspace TCP stack (smoltcp), no TUN, no
+privileges. The brain only gets URLs (`/_wg/<root>/…` on the node's loopback front door) and is
+unchanged. The datagrams ride the root link as binary ws frames; the bridge relays them by
+address (root → root under the claim law, root ↔ the hub's node over a loopback UDP pair) and
+drops anything not WireGuard-shaped. Each root's key is pinned when the phone approves its join
+(docs/spec-join.md). The plaintext switchboard is off unless `plaintext_http = true`.
+
+- **A relay that rewrites the source is what binds a key to a link.** The bridge stamps every
+  frame with the id of the link it came in on; the hub's node drops a pinned key arriving on any
+  other link (`wrong_link`). A copied private key is useless from another root's link.
+- **Revocation finally cuts a live root.** The hub's node re-reads roots.json + devices.json every
+  second: revoking the approving device, or `revoked: true` on the root, drops its peer and resets
+  its streams, while the ws link stays up (the old gap: links already up were never cut).
+- **40 ms per call was Nagle.** The first tunnel bench gave 43 ms medians against 3 ms on the old
+  path: root-dial.py's socket had no TCP_NODELAY, so each small WireGuard frame waited for a
+  delayed ACK. In-process the tunnel is 0.6 ms. With TCP_NODELAY the two paths are within noise.
+- **boringtun does not pad transport data** (the spec says pad to 16; it sends the exact size), so
+  the relay's shape check is `type 4, ≥ 32 bytes`, not a multiple of 16.
+- **A burst of calls found the far side's door shut.** smoltcp gives one connection per listening
+  socket; with 4 kept ready, the 9th of 16 simultaneous calls was refused. Now 16 listen, and a
+  refused connect is retried inside the 10 s connect window: 40 calls at once pass both ways.
+- **A restarted hub node waited 11 s** for WireGuard's own retry. Every node now dials each peer
+  until its first handshake (static peer every 2 s, pinned roots every 5 s): 1 s.
+
+**Proof:** `cargo test` (wg: two nodes through a fake relay, both ways, header law, 300 KB, 40
+concurrent calls, the
+relay sees WireGuard only, replay + tamper dropped, unpinned key refused, revoke cuts),
+`scripts/rootlink-sim.py` T15 (the real bridge's relay law), `sim/trunk-roots-e2e.py` (real brains
+through the ap; a tap where the ap hands the link to the bridge; unapproved key, stolen key,
+replay, tamper; revoke/restore/root revoke; node restart; `--rekey` 200 s; `--plaintext` baseline),
+`sim/trunk-full-e2e.sh` (the phone sees the fingerprint and approves; revoking it cuts the tunnel).
+
+**Not proven (then):** the real installer; joined ↔ joined roots — both done below. Still not: a
+direct UDP leg; a real VPS and its packet loss (TCP inside the link's TCP); a hub restart with
+roots linked for hours (only the node restart is simulated).
+
+### Real machines: join.sh, the directory, macOS (trunk-wg, 2026-11-14, later)
+
+- **join.sh runs the node.** It finds or downloads (Linux/WSL x86_64, SHA256SUMS) or builds
+  (macOS) `bifrost-net`, makes the key before the join, shows the fingerprint, and supervises
+  `bifrost-net wg` as a third service (systemd --user, launchd, nohup). A keyless root re-joins
+  by itself. join-test.sh's fake hub learns the key and grants the tunnel; it also serves a fake
+  release, and a tampered asset is refused.
+- **`NET_SRC=$(find_net)` ended join.sh in silence** when no binary was found: the function's last
+  test failed, and a failing `$(…)` in an assignment trips `set -e`. `find_brain` had the same
+  latent bug (a machine without a brain binary never reached the cargo build). Both end in
+  `return 0` now.
+- **The Linux binary links libopus.** In a clean ubuntu:24.04 the repo build stopped with
+  `libopus.so.0: cannot open shared object file`. join.sh now names the package, wsl-bootstrap.sh
+  installs `libopus0` with the rest, and the docker run lists it as a runtime need (as trunk.sh
+  already did on the VPS).
+- **macOS cannot be cross-checked here.** `cargo check --target aarch64-apple-darwin` stops in
+  C build scripts (ring, libopus) without the macOS SDK: it must be built on the Mac. It also
+  showed that CMake ≥ 4 refuses the bundled libopus (`Compatibility with CMake < 3.5 has been
+  removed`; `CMAKE_POLICY_VERSION_MINIMUM=3.5` fixes that). On the real Mac the full build then
+  failed anyway: no cmake at all.
+- **A joined root needs none of that: the root build.** opus, str0m (whose aws-lc-sys also
+  build-depends on cmake), the access point's TLS stack and the mesh lab sit behind the default
+  `bridge` feature. `cargo build --release --no-default-features` builds keygen, wg-key, wg and
+  rootlink mint only: no cmake, no libopus (in `rust:1-bookworm`, which has neither, it builds in
+  50 s while the full build fails in audiopus_sys); 69 s clean here, 4.8 MB, links only libc.
+  join.sh builds that one wherever it builds (macOS; Linux when the release cannot be fetched),
+  into `trunk/target/root`, and a release may ship it as `bifrost-net-root-<ver>-linux-<arch>`
+  (join.sh prefers it: no libopus0 needed).
+- **Joined roots reach each other through a directory, not the claim.** The hub's node serves
+  `/_wg/directory` inside the tunnel; joined nodes refresh it every 5 s and drop a copy older than
+  20 s. The relay now carries root → root between any two linked roots: keys decide, not the
+  link-token claim (which still gates the plaintext switchboard). Revoking a root takes it off
+  the others in ~5 s; revoking the device that approved them all, in ≤ 20 s.
+
+**Proof:** `cargo test` (a fourth node: B ↔ D via the directory, the unpinned C in none, revoking
+D drops it from B), rootlink-sim T15, trunk-roots-e2e (mac ↔ lab, brains learn each other, a
+session on lab reports to mac, the tap sees WireGuard only for the pair, a rogue holding mac's
+key is refused by mac), trunk-full-e2e 4e–4h (a third root approved on the phone; the tap where
+the ap hands the links over: 202 mac ↔ lab frames, all WireGuard), join-test.sh (local + docker
+ubuntu:24.04), win/launcher-test.sh (wine).
