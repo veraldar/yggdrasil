@@ -21,6 +21,7 @@ import {
   getSpeech,
   getSpeechServer,
   isEchoTranscript,
+  lastSpoken,
   pauseSpeech,
   rateSpeech,
   resumeSpeech,
@@ -406,7 +407,8 @@ export default function SessionView({
   const roomRef = useRef<Room | null>(null);
   // keywords-only while the deck speaks: the voice agent hears when it starts and stops
   const deckSpeaking = speech.phase !== 'idle';
-  useEffect(() => tellDeckState(roomRef.current, deckSpeaking), [deckSpeaking]);
+  const deckText = deckSpeaking ? lastSpoken().text : '';
+  useEffect(() => tellDeckState(roomRef.current, deckSpeaking, deckText), [deckSpeaking, deckText]);
   const modeRef = useRef<Mode>('text');
   const unmountedRef = useRef(false);
   const photoInputRef = useRef<HTMLInputElement>(null);

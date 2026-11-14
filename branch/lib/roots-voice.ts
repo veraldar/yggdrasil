@@ -25,6 +25,7 @@ import { markRead } from '@/lib/read';
 import {
   applyVoiceCommand,
   getSpeech,
+  lastSpoken,
   startSpeech,
   stopSpeech,
   subscribeSpeech,
@@ -732,7 +733,7 @@ export class RootsLine {
     const speaking = getSpeech().phase !== 'idle';
     if (speaking !== this.deckSpeaking) {
       this.deckSpeaking = speaking;
-      tellDeckState(this.room, speaking);
+      tellDeckState(this.room, speaking, speaking ? lastSpoken().text : '');
     }
     const cycle = this.cycle;
     if (!cycle?.speaking) return;

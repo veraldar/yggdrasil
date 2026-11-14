@@ -53,14 +53,15 @@ export function releaseMicDevice(room: Room) {
 /** Keywords-only while a reply plays (owner 11-13 r2): tell the voice agent when the deck starts
  *  and stops speaking, so meanwhile it keeps only voice commands and "… over" — room noise and the
  *  reply's own echo never join the next message. Fire and forget. */
-export function tellDeckState(room: Room | null, speaking: boolean): void {
+export function tellDeckState(room: Room | null, speaking: boolean, text = ''): void {
   const agent = room && Array.from(room.remoteParticipants.values())[0];
   if (!room || !agent) return;
   void room.localParticipant
     .performRpc({
       destinationIdentity: agent.identity,
       method: 'deck_state',
-      payload: JSON.stringify({ speaking }),
+      // the words being spoken (voice-fixes 11-14): the agent drops their echo from what the mic hears
+      payload: JSON.stringify(speaking && text ? { speaking, text: text.slice(0, 4000) } : { speaking }),
       responseTimeout: 3_000,
     })
     .catch(() => {});
