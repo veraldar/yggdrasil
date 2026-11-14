@@ -1,0 +1,74 @@
+{
+ "id": "v-misheard",
+ "title": "Voice: a misheard word MAIN must re-interpret ('delete' reaches the box as 'delight'), in a noisy kitchen",
+ "mishear": [
+  {
+   "meant": "delete",
+   "say": "delight",
+   "times": 1
+  }
+ ],
+ "seed": {
+  "notes/notes.py": "\"\"\"notes \u2014 a tiny note keeper (a list of strings in notes.json).\"\"\"\nimport json, os, sys\n\nPATH = os.path.join(os.path.dirname(__file__), \"notes.json\")\n\n\ndef load():\n    return json.load(open(PATH)) if os.path.exists(PATH) else []\n\n\ndef save(notes):\n    json.dump(notes, open(PATH, \"w\"))\n\n\ndef add(text):\n    notes = load()\n    notes.append(text)\n    save(notes)\n    return len(notes)\n\n\ndef list_notes():\n    return load()\n\n\nif __name__ == \"__main__\":\n    cmd = sys.argv[1] if len(sys.argv) > 1 else \"list\"\n    if cmd == \"add\":\n        print(add(\" \".join(sys.argv[2:])))\n    else:\n        for i, n in enumerate(list_notes(), 1):\n            print(i, n)\n",
+  "notes/test_notes.py": "import notes\n\n\ndef test_add_and_list(tmp_path, monkeypatch):\n    monkeypatch.setattr(notes, \"PATH\", str(tmp_path / \"n.json\"))\n    notes.add(\"milk\")\n    notes.add(\"eggs\")\n    assert notes.list_notes() == [\"milk\", \"eggs\"]\n"
+ },
+ "personas": [
+  {
+   "id": "owner",
+   "persona": "A developer cooking dinner, phone on the counter, talking hands-free over a noisy kitchen. Casual, short sentences. Believes the speech recognition hears them fine.",
+   "voice": {
+    "voice": "am_eric",
+    "speed": 1.05
+   },
+   "phone": {
+    "noiseDb": -38,
+    "noiseColor": "brown",
+    "echo": 0
+   },
+   "goals": [
+    "Your little notes tool lives in the notes folder (you can say so). Get a delete command added to it \u2014 delete a note by its number \u2014 with a pytest test.",
+    "If main asks what you meant, answer briefly. If main builds something other than a delete command, correct it.",
+    "In the end you want to hear that the delete command works and the tests pass."
+   ],
+   "script": [
+    "First turn: ask to add a delete command to the notes tool in the notes folder, deleting a note by its number, with a test.",
+    "Wait for main to come back; answer any question briefly.",
+    "When it says it's done, ask in a few words how it was tested, then finish."
+   ]
+  }
+ ],
+ "max_minutes": 25,
+ "max_turns": 8,
+ "checks": [
+  {
+   "name": "a delete function exists",
+   "cmd": "grep -nE 'def (delete|remove|del_note|delete_note)' notes/*.py | head -3",
+   "expect": "def"
+  },
+  {
+   "name": "nothing named 'delight' was built",
+   "cmd": "grep -rli --exclude-dir=.pytest_cache --exclude-dir=__pycache__ delight notes || echo CLEAN",
+   "expect": "CLEAN"
+  },
+  {
+   "name": "notes tests pass",
+   "cmd": "cd notes && python3 -m pytest -q >/tmp/pytest.$$.out 2>&1 && echo PYTEST-OK || tail -5 /tmp/pytest.$$.out",
+   "expect": "PYTEST-OK"
+  }
+ ],
+ "voice_checks": [
+  {
+   "kind": "box_heard_regex",
+   "regex": "delight",
+   "name": "the mishearing reached the box (it heard 'delight')"
+  },
+  {
+   "kind": "all_turns_landed",
+   "name": "every spoken turn reached MAIN"
+  },
+  {
+   "kind": "every_reply_spoken",
+   "name": "every reply was spoken"
+  }
+ ]
+}
