@@ -51,6 +51,9 @@ async function addTrunk(pc: RTCPeerConnection): Promise<void> {
   }
 }
 
+/** this page's voice rides the trunk (a token named its ICE-TCP address) */
+export const trunkActive = (): boolean => addrs.length > 0;
+
 /** remember where the trunk takes ICE-TCP, and make every peer connection
  *  offer it (idempotent; the latest token's list wins) */
 export function trunkIce(list: IceTcp[] | undefined): void {

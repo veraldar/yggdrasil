@@ -25,7 +25,9 @@ import {
  *
  *  R1 the box console's QR → the phone pairs through the ap → home: the list
  *  R2 hold the roots and talk: the WAV's words → LiveKit → the agent's STT on the box → MAIN
- *  R3 the reply is spoken back: TTS audio bytes at the phone; STT of those bytes matches the text
+ *  R3 the reply is spoken back, its sound over the voice room (the agent streams the box's TTS —
+ *     DTLS, phone ↔ box — never /api/tts/stream through the VPS); STT of the received bytes
+ *     matches MAIN's reply
  *  R4 the media path: the phone's selected candidate pair is tcp <vps>:443 (ICE-TCP through the
  *     ap), UDP was tried and dropped, LiveKit saw a tcp participant
  *  R5 the VPS held no keys: every frame it forwarded on the media path is STUN, DTLS or SRTP —
@@ -305,6 +307,25 @@ test('trunk rtc: phone ⇄ vps:443 ⇄ box — pair, talk, hear the reply, media
   await phoneCtx.exposeBinding('__pcEvent', (_src, state: string, t: number) => {
     pcEvents.push({ state, t });
   });
+  // the reply's sound as it arrived over the room (lib/voice-tts.ts' test hook, base64 here)
+  const roomTts = { chunks: [] as Buffer[], rate: 0, first: 0 };
+  await phoneCtx.exposeBinding('__ttsTapB64', (_src, b64: string, rate: number) => {
+    roomTts.chunks.push(Buffer.from(b64, 'base64'));
+    roomTts.rate = rate;
+    roomTts.first ||= Date.now();
+  });
+  await phoneCtx.addInitScript(() => {
+    (
+      globalThis as unknown as { __bifrostTtsTap: (c: Uint8Array, r: number) => void }
+    ).__bifrostTtsTap = (c, r) => {
+      let bin = '';
+      for (let i = 0; i < c.length; i++) bin += String.fromCharCode(c[i]);
+      (window as unknown as { __ttsTapB64: (b: string, r: number) => void }).__ttsTapB64(
+        btoa(bin),
+        r
+      );
+    };
+  });
   const reached = new Set<string>();
   const offAp: string[] = [];
   const see = (u: string) => {
@@ -436,46 +457,47 @@ test('trunk rtc: phone ⇄ vps:443 ⇄ box — pair, talk, hear the reply, media
     );
 
     // ---------------------------------------------------------------- R3 the reply, spoken
+    let replyBytes = 0;
     await step(
       'R3',
-      'the reply is spoken back: TTS audio at the phone, its STT matches the reply',
+      'the reply is spoken back over the voice room (not https via the VPS); its STT matches MAIN',
       async () => {
         expect(released, 'needs R2').toBeGreaterThan(0);
         const roots = phone.getByTestId('roots');
         await expect(roots).toHaveAttribute('data-phase', 'speaking', { timeout: 120_000 });
         const speakMs = Date.now() - released;
-        await expect
-          .poll(() => tts.filter((t) => t.status === 200 && t.pcm.length > 0).length, {
-            timeout: 60_000,
-          })
-          .toBeGreaterThan(0);
-        const t = tts.find((x) => x.status === 200 && x.pcm.length > 0)!;
-        expect(t.rate).toBeGreaterThan(0);
-        // the text it spoke is MAIN's reply to that voice turn
+        // the deck plays while the stream still arrives: wait for it to end (the phase moves on)
+        await expect(roots).not.toHaveAttribute('data-phase', 'speaking', { timeout: 120_000 });
+        const pcm = Buffer.concat(roomTts.chunks);
+        replyBytes = pcm.length;
+        expect(pcm.length, 'reply audio arrived over the room').toBeGreaterThan(16_000);
+        expect(roomTts.rate).toBeGreaterThan(0);
+        expect(
+          tts.map((t) => t.status),
+          'no /api/tts/stream (https through the VPS) for the reply'
+        ).toEqual([]);
+        // what arrived is MAIN's reply, spoken: the box's own STT on the received bytes
         const ms = await messages(mainId);
         const at = ms.findIndex((m) => voiceTurn && textOf(m) === textOf(voiceTurn));
         const reply = ms.slice(at + 1).find((m) => m.info.role === 'assistant');
         expect(reply, 'MAIN answered the voice turn').toBeTruthy();
-        const head = words(t.text).slice(0, 3).join(' ');
-        expect(words(textOf(reply!)).join(' ')).toContain(head);
-        // and what arrived is that speech: the box's own STT on the received bytes
         const f = new FormData();
         f.append(
           'file',
-          new Blob([new Uint8Array(wav(t.pcm, t.rate))], { type: 'audio/wav' }),
+          new Blob([new Uint8Array(wav(pcm, roomTts.rate))], { type: 'audio/wav' }),
           'reply.wav'
         );
         const stt = (await (
           await fetch(`${VOICE}/audio/transcriptions`, { method: 'POST', body: f })
         ).json()) as { text: string };
-        writeFileSync(join(STATE, 'reply-received.wav'), wav(t.pcm, t.rate));
-        const want = new Set(words(t.text));
+        writeFileSync(join(STATE, 'reply-received.wav'), wav(pcm, roomTts.rate));
+        const want = new Set(words(textOf(reply!)));
         const got = words(stt.text);
         const hit = got.filter((w) => want.has(w)).length / Math.max(1, got.length);
-        expect(hit, `STT "${stt.text}" vs spoken "${t.text}"`).toBeGreaterThan(0.6);
-        expect(words(stt.text).join(' ')).toMatch(/two plus two/);
-        const sec = t.pcm.length / 2 / t.rate;
-        return `release→speaking ${speakMs} ms · ${t.pcm.length} bytes (${sec.toFixed(1)} s @ ${t.rate} Hz) · STT of the received audio: "${stt.text.slice(0, 80)}" (${Math.round(hit * 100)}% of its words in the reply)`;
+        expect(hit, `STT "${stt.text}" vs MAIN's reply "${textOf(reply!)}"`).toBeGreaterThan(0.6);
+        expect(got.join(' ')).toMatch(/two plus two/);
+        const sec = pcm.length / 2 / roomTts.rate;
+        return `release→speaking ${speakMs} ms · ${pcm.length} bytes over the room (${sec.toFixed(1)} s @ ${roomTts.rate} Hz), 0 via https · STT of the received audio: "${stt.text.slice(0, 70)}" (${Math.round(hit * 100)}% of its words in MAIN's reply)`;
       }
     );
 
@@ -552,6 +574,11 @@ test('trunk rtc: phone ⇄ vps:443 ⇄ box — pair, talk, hear the reply, media
         ).toBeGreaterThan(0);
         const srtpUp = by('srtp').filter((f) => f.dir === 'up');
         expect(srtpUp.length, 'the mic as SRTP').toBeGreaterThan(50);
+        // the spoken reply (a data-channel byte stream) crossed as DTLS application data, down
+        const appDown = by('dtls')
+          .filter((f) => f.dtls === 23 && f.dir === 'down')
+          .reduce((a, f) => a + (f.len || 0), 0);
+        expect(appDown, 'the reply audio as DTLS application data').toBeGreaterThan(replyBytes);
         // nothing on the VPS can decrypt it: no LiveKit secret, no device registry, no DTLS key
         const files: string[] = [];
         const walk = (d: string) => {
@@ -572,7 +599,7 @@ test('trunk rtc: phone ⇄ vps:443 ⇄ box — pair, talk, hear the reply, media
           files.join(' ')
         ).toBe(false);
         const conns = new Set(data.map((f) => f.conn)).size;
-        return `${data.length} frames over ${conns} ICE-TCP connection(s): ${by('stun').length} STUN, ${by('dtls').length} DTLS (${hs.length} handshake), ${by('srtp').length} SRTP/SRTCP, 0 other · VPS files: ${files.map((f) => f.slice(VPS_DIR.length + 1)).join(', ')}`;
+        return `${data.length} frames over ${conns} ICE-TCP connection(s): ${by('stun').length} STUN, ${by('dtls').length} DTLS (${hs.length} handshake), ${by('srtp').length} SRTP/SRTCP, 0 other; ${appDown} bytes of DTLS application data down (the ${replyBytes}-byte reply inside) · VPS files: ${files.map((f) => f.slice(VPS_DIR.length + 1)).join(', ')}`;
       }
     );
 

@@ -227,7 +227,7 @@ pids+=($!)
   exec nsenter --net=/proc/${NS[home]}/ns/net -- env -i PATH="$PATH" HOME="$HOME" \
     HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 LIVEKIT_URL="ws://127.0.0.1:$LKP" \
     LIVEKIT_API_KEY="$LK_KEY" LIVEKIT_API_SECRET="$LK_SECRET" OPENCODE_URL="http://127.0.0.1:$HOMEP" \
-    SPEACHES_URL="http://127.0.0.1:$VOICEP/v1" AGENT_HTTP_PORT=$AGENTP AGENT_TTS=off \
+    SPEACHES_URL="http://127.0.0.1:$VOICEP/v1" AGENT_HTTP_PORT=$AGENTP AGENT_TTS=off APP_URL="http://127.0.0.1:$APP" \
     AGENT_LOAD_THRESHOLD=inf "$AGENT_VENV/bin/python" agent.py start
 ) >"$STATE/agent.log" 2>&1 &
 pids+=($!)

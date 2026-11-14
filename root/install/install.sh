@@ -561,6 +561,8 @@ if on agent; then
       echo "OPENCODE_URL=$BRAIN_URL"
       echo "SPEACHES_URL=$SPEACHES"
       echo "AGENT_HTTP_PORT=$AGENT_PORT"
+      # the phone's TTS over the voice room (through the trunk): the app's /api/tts/stream on loopback
+      echo "APP_URL=http://127.0.0.1:$APP_PORT"
       for k in STT_MODEL TTS_MODEL TTS_VOICE VOICE_MODEL; do v=$(cfg "$k"); [ -n "$v" ] && echo "$k=$v"; done
     } >"$BF_CONF/agent.env.new"
     place_secret "$BF_CONF/agent.env.new" "$BF_CONF/agent.env" bifrost-agent.service "agent env (generated: LiveKit secret)"

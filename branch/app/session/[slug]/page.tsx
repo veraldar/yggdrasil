@@ -9,15 +9,25 @@ import {
   useState,
   useSyncExternalStore,
 } from 'react';
+import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { Room, RoomEvent, Track, createAudioAnalyser } from 'livekit-client';
-import Link from 'next/link';
-import { LineIcon, StopSquare } from '@/components/line-icon';
-import { type Msg, SessionMessage, userProse } from '@/components/session-message';
-import { MessageHistory } from '@/components/message-history';
-import { useSwipeX } from '@/lib/use-swipe-x';
 import { ErrorBox } from '@/components/app/error-box';
+import { LineIcon, StopSquare } from '@/components/line-icon';
+import { MessageHistory } from '@/components/message-history';
+import { type Msg, SessionMessage, userProse } from '@/components/session-message';
+import { shouldAutoSpeak } from '@/lib/auto-speak';
+import { CARD_ST, type TreeRow } from '@/lib/card';
+import { diagEvent } from '@/lib/diag';
+import { lastHeard, markHeard } from '@/lib/heard';
+import '@/lib/labmic';
+import { clearAsked, ensureNotifyPermission, markAsked, notifyReply } from '@/lib/notify';
+import { say, stopLine, unlockLines, useVoiceState, warmLines } from '@/lib/onboard-voice';
+import { PENDING_TTL_MS } from '@/lib/pending-ttl';
+import { markRead } from '@/lib/read';
+import { slugify } from '@/lib/slug';
 import {
+  applyVoiceCommand,
   getSpeech,
   getSpeechServer,
   isEchoTranscript,
@@ -25,21 +35,11 @@ import {
   rateSpeech,
   resumeSpeech,
   seekSpeech,
+  setPlayFailHandler,
   startSpeech,
   stopSpeech,
   subscribeSpeech,
-  setPlayFailHandler,
-  applyVoiceCommand,
 } from '@/lib/speech';
-import { shouldAutoSpeak } from '@/lib/auto-speak';
-import { CARD_ST, type TreeRow } from '@/lib/card';
-import { slugify } from '@/lib/slug';
-import { diagEvent } from '@/lib/diag';
-import '@/lib/labmic';
-import { clearAsked, ensureNotifyPermission, markAsked, notifyReply } from '@/lib/notify';
-import { PENDING_TTL_MS } from '@/lib/pending-ttl';
-import { markRead } from '@/lib/read';
-import { lastHeard, markHeard } from '@/lib/heard';
 import {
   DOOR_KEY,
   FIRST_TURN_KEY,
@@ -52,7 +52,7 @@ import {
   line,
   stripMarkers,
 } from '@/lib/tree-first';
-import { say, stopLine, unlockLines, useVoiceState, warmLines } from '@/lib/onboard-voice';
+import { useSwipeX } from '@/lib/use-swipe-x';
 import {
   ECHO_TAIL_MS,
   agentInRoom,
@@ -60,12 +60,7 @@ import {
   tellDeckState,
   withTimeout,
 } from '@/lib/voice-room';
-import {
-  VOICE_TEST_SLUG,
-  setVoiceTest,
-  voiceTestOn,
-  voiceTestRedirect,
-} from '@/lib/voice-test';
+import { VOICE_TEST_SLUG, setVoiceTest, voiceTestOn, voiceTestRedirect } from '@/lib/voice-test';
 import {
   VOICE_OFF_NOTE,
   isVoiceUnavailable,
@@ -73,6 +68,7 @@ import {
   voiceProbe,
   voiceToken,
 } from '@/lib/voice-token';
+import { voiceRoom } from '@/lib/voice-tts';
 
 type Mode = 'text' | 'free';
 /** the door's last step, in MAIN — the walk-through (UX-CALM 10-27: the
@@ -864,7 +860,10 @@ export default function SessionView({
           }
           // keep optimistic echoes until the server transcript catches up
           const echoes = echoesRef.current.filter(
-            (e) => !fresh.some((m) => m.role === 'user' && (m.text === e.text || userProse(m.text) === e.text))
+            (e) =>
+              !fresh.some(
+                (m) => m.role === 'user' && (m.text === e.text || userProse(m.text) === e.text)
+              )
           );
           setMsgs([...fresh, ...echoes]);
           try {
@@ -1024,7 +1023,9 @@ export default function SessionView({
         diagEvent('busy', `wedge ${slug} after ${sec}s (auto-abort)`);
         setError('no reply — the run seemed stuck, auto-stopped. Send again.');
         setBusy(false); // the aborted prompt never completes on its own
-        void fetch(`/api/session/${slug}/abort`, { method: 'POST', headers: pinHeaders() }).catch(() => {});
+        void fetch(`/api/session/${slug}/abort`, { method: 'POST', headers: pinHeaders() }).catch(
+          () => {}
+        );
       }
       // corpse escape: busy, NO live prompt, and NO opencode stream event for
       // the whole stall window → the run is dead whatever the last message
@@ -1051,7 +1052,9 @@ export default function SessionView({
         );
         setError('no reply — the run seemed stuck, auto-stopped. Send again.');
         setBusy(false);
-        void fetch(`/api/session/${slug}/abort`, { method: 'POST', headers: pinHeaders() }).catch(() => {});
+        void fetch(`/api/session/${slug}/abort`, { method: 'POST', headers: pinHeaders() }).catch(
+          () => {}
+        );
       }
     }, 1000);
     return () => clearInterval(t);
@@ -1108,7 +1111,8 @@ export default function SessionView({
             // the next session/refresh retries hands-free on its own
             // (req 09-30: the mode must survive moving between sessions)
             const denied =
-              e instanceof DOMException && (e.name === 'NotAllowedError' || e.name === 'SecurityError');
+              e instanceof DOMException &&
+              (e.name === 'NotAllowedError' || e.name === 'SecurityError');
             if (denied) {
               try {
                 localStorage.setItem('oz-mode', 'text');
@@ -1279,50 +1283,43 @@ export default function SessionView({
       // `modeRef.current === 'free'` LIVE, exit paths disarm it, retry once.
       const armWatch = () => {
         if (watchTimerRef.current) clearTimeout(watchTimerRef.current);
-        watchTimerRef.current = setTimeout(
-          async () => {
-            watchTimerRef.current = null; // one-shot: never re-arms itself
-            if (roomRef.current === room && modeRef.current === 'free') {
-              // NOREFRESH4: QUIET-ALIVE is not a corpse. 15s with no events
-              // is NORMAL hands-free while the brain works a run (30–90s) —
-              // the room is up and the agent is in it. Only a room with no
-              // agent is SILENT-DEAD: wait one grace window for a laggy join
-              // / dispatch, then (and only then) spend the ONE reconnect.
-              // A quiet room with its agent never gets torn down.
-              const alive = await agentInRoom(room, 5_000);
-              // re-review N1: the grace await is a 5s window — the SDK may
-              // have delivered Disconnected (spending the guard there), or
-              // the user may have left hands-free. Only the still-current
-              // hands-free room may act on the probe's verdict.
-              if (roomRef.current !== room || modeRef.current !== 'free') return;
-              if (
-                alive &&
-                roomRef.current === room &&
-                modeRef.current === 'free'
-              ) {
-                diagEvent('voice', 'room quiet 15s but agent present — staying put');
-                return;
-              }
-              if (norefreshOnceRef.current) {
-                // the one reconnect is already spent — no loop, and no lying
-                // pill: surface the loss (re-review: this branch must stay
-                // REACHABLE — it is the honest answer to a second silent death)
-                diagEvent('voice-fail', 'room dead and reconnect already spent');
-                setBusy(true);
-                setError('voice connection lost — reconnect failed. Hold the mic to retry.');
-                return;
-              }
-              norefreshOnceRef.current = true;
-              diagEvent('voice-fail', 'room silent 15s while hands-free — one reconnect');
-              roomRef.current = null;
-              voicePromiseRef.current = null;
-              setVoiceState('off');
-              void room.disconnect();
-              reconnectVoice();
+        watchTimerRef.current = setTimeout(async () => {
+          watchTimerRef.current = null; // one-shot: never re-arms itself
+          if (roomRef.current === room && modeRef.current === 'free') {
+            // NOREFRESH4: QUIET-ALIVE is not a corpse. 15s with no events
+            // is NORMAL hands-free while the brain works a run (30–90s) —
+            // the room is up and the agent is in it. Only a room with no
+            // agent is SILENT-DEAD: wait one grace window for a laggy join
+            // / dispatch, then (and only then) spend the ONE reconnect.
+            // A quiet room with its agent never gets torn down.
+            const alive = await agentInRoom(room, 5_000);
+            // re-review N1: the grace await is a 5s window — the SDK may
+            // have delivered Disconnected (spending the guard there), or
+            // the user may have left hands-free. Only the still-current
+            // hands-free room may act on the probe's verdict.
+            if (roomRef.current !== room || modeRef.current !== 'free') return;
+            if (alive && roomRef.current === room && modeRef.current === 'free') {
+              diagEvent('voice', 'room quiet 15s but agent present — staying put');
+              return;
             }
-          },
-          15_000
-        );
+            if (norefreshOnceRef.current) {
+              // the one reconnect is already spent — no loop, and no lying
+              // pill: surface the loss (re-review: this branch must stay
+              // REACHABLE — it is the honest answer to a second silent death)
+              diagEvent('voice-fail', 'room dead and reconnect already spent');
+              setBusy(true);
+              setError('voice connection lost — reconnect failed. Hold the mic to retry.');
+              return;
+            }
+            norefreshOnceRef.current = true;
+            diagEvent('voice-fail', 'room silent 15s while hands-free — one reconnect');
+            roomRef.current = null;
+            voicePromiseRef.current = null;
+            setVoiceState('off');
+            void room.disconnect();
+            reconnectVoice();
+          }
+        }, 15_000);
       };
       const lastEvt = () => {
         if (roomRef.current === room && modeRef.current === 'free') armWatch();
@@ -1336,6 +1333,7 @@ export default function SessionView({
       armWatch();
       diagEvent('voice', 'connecting signal…');
       await withTimeout(room.connect(d.serverUrl, d.participantToken), 12_000, 'signal');
+      voiceRoom(room); // the reply's sound may ride this room (lib/voice-tts.ts)
       diagEvent('voice', 'connected, mic stays muted until a mode/handler turns it on');
       // the agent calls this on "over and out": leave hands-free, teardown
       // to keyboard (the final reply lands as text in the session instead
@@ -1495,7 +1493,9 @@ export default function SessionView({
           if (unmountedRef.current || modeRef.current !== 'free') return;
           if (agent || roomRef.current !== room || room.remoteParticipants.size > 0) return;
           diagEvent('voice-fail', 'hands-free: no voice agent in the room after 10s (+re-arm)');
-          setError('voice agent missing from the room — is lk-agent running? tap the mic button to retry');
+          setError(
+            'voice agent missing from the room — is lk-agent running? tap the mic button to retry'
+          );
         }, 10_000);
       }
     } catch (e) {
@@ -1784,8 +1784,7 @@ export default function SessionView({
   const echoHeldRef = useRef(false); // the gate holds the mic down — reopen at its end
   function echoGated(): boolean {
     if (echoGateOffRef.current === null)
-      echoGateOffRef.current =
-        new URLSearchParams(window.location.search).get('echogate') === '0';
+      echoGateOffRef.current = new URLSearchParams(window.location.search).get('echogate') === '0';
     return !echoGateOffRef.current && Date.now() < audibleUntilRef.current;
   }
   useEffect(() => {
@@ -1952,12 +1951,15 @@ export default function SessionView({
     // exit — a bounded wait, then stop the deck and rearm the mic.
     if (live.phase !== 'idle' && freeSpokeMsgRef.current) {
       const stuck = live.phase;
-      const t = setTimeout(() => {
-        if (freeCycleRef.current !== 'processing' || getSpeech().phase !== stuck) return;
-        diagEvent('voice', `hands-free: deck stuck in ${stuck} — mic back`);
-        stopSpeech();
-        freeMicGiveBack();
-      }, stuck === 'paused' ? 30_000 : 20_000);
+      const t = setTimeout(
+        () => {
+          if (freeCycleRef.current !== 'processing' || getSpeech().phase !== stuck) return;
+          diagEvent('voice', `hands-free: deck stuck in ${stuck} — mic back`);
+          stopSpeech();
+          freeMicGiveBack();
+        },
+        stuck === 'paused' ? 30_000 : 20_000
+      );
       return () => clearTimeout(t);
     }
     if (live.phase !== 'idle' || !freeSpokeMsgRef.current) return;
@@ -2305,7 +2307,9 @@ export default function SessionView({
   /** the newest user turn on screen (server time) — "newer than this" is
    *  how the walk knows a turn landed */
   function lastUserTime(): number {
-    return [...msgs].reverse().find((m) => m.role === 'user' && !isOnboardPrompt(m.text))?.time || 0;
+    return (
+      [...msgs].reverse().find((m) => m.role === 'user' && !isOnboardPrompt(m.text))?.time || 0
+    );
   }
   // a held turn can land BEFORE its release: the agent also commits on a
   // spoken "over" mid-hold (keyword turn-taking is armed in every room), and
@@ -3017,29 +3021,29 @@ export default function SessionView({
               : 'empty session'}
           </div>
         )}
-        {logOn &&
-          logMsgs?.map((m, i) => <SessionMessage key={`log${i}`} m={m} routes={routes} />)}
-        {!(logOn && logMsgs) && msgs.map((m, i) => (
-          <SessionMessage
-            key={i}
-            m={m}
-            mi={i}
-            hit={searchOpen && !!query.trim() && hitSet.has(i)}
-            q={searchOpen ? query : ''}
-            routes={routes}
-            // still the newest message while the run is going = sitting in
-            // the agent's queue — badge it until a reply lands after it
-            queued={busy && !!m.queued}
-            // swipe → steps into the past (opens the message BEFORE this
-            // one); swipe ← back toward the present. Out-of-bounds swipes
-            // are "already there" no-ops (newest ← = still no message)
-            onOpenHistory={(mi, dir) => {
-              const next = dir === 'older' ? mi - 1 : mi + 1;
-              if (next < 0 || next >= msgs.length) return;
-              setHistIdx(next);
-            }}
-          />
-        ))}
+        {logOn && logMsgs?.map((m, i) => <SessionMessage key={`log${i}`} m={m} routes={routes} />)}
+        {!(logOn && logMsgs) &&
+          msgs.map((m, i) => (
+            <SessionMessage
+              key={i}
+              m={m}
+              mi={i}
+              hit={searchOpen && !!query.trim() && hitSet.has(i)}
+              q={searchOpen ? query : ''}
+              routes={routes}
+              // still the newest message while the run is going = sitting in
+              // the agent's queue — badge it until a reply lands after it
+              queued={busy && !!m.queued}
+              // swipe → steps into the past (opens the message BEFORE this
+              // one); swipe ← back toward the present. Out-of-bounds swipes
+              // are "already there" no-ops (newest ← = still no message)
+              onOpenHistory={(mi, dir) => {
+                const next = dir === 'older' ? mi - 1 : mi + 1;
+                if (next < 0 || next >= msgs.length) return;
+                setHistIdx(next);
+              }}
+            />
+          ))}
         {/* the cancel only when NO deck is up (req 09-30 live pass): while
             speech plays, the deck's red corner ■ already stops work + audio —
             one stop, not two */}
@@ -3221,7 +3225,9 @@ export default function SessionView({
           {/* the card's edge carries its own lines' voice: loading glides, speaking breathes */}
           <div
             className="oz-rail ftv"
-            data-s={lineVoice === 'loading' ? 'working' : lineVoice === 'speaking' ? 'speaking' : 'idle'}
+            data-s={
+              lineVoice === 'loading' ? 'working' : lineVoice === 'speaking' ? 'speaking' : 'idle'
+            }
             aria-hidden="true"
           />
           {first !== 'in' && (
@@ -3364,7 +3370,10 @@ export default function SessionView({
                  the deck itself says "speaking", the strip stays wordless */
               <span className="oz-bars">
                 {freeLevels.map((l, i) => (
-                  <i key={i} style={{ height: `${Math.min(22, Math.max(3, Math.round(l * 22)))}px` }} />
+                  <i
+                    key={i}
+                    style={{ height: `${Math.min(22, Math.max(3, Math.round(l * 22)))}px` }}
+                  />
                 ))}
               </span>
             )}
@@ -3426,7 +3435,9 @@ export default function SessionView({
             />
             {holding ? (
               <div
-                aria-label={voiceState !== 'ready' ? 'connecting' : micLive ? 'listening' : 'opening the mic'}
+                aria-label={
+                  voiceState !== 'ready' ? 'connecting' : micLive ? 'listening' : 'opening the mic'
+                }
                 role="status"
                 data-live={micLive ? '' : undefined}
                 className={`oz-pill ${
@@ -3447,7 +3458,10 @@ export default function SessionView({
                     <span role="timer" aria-label={`hold ${pttSecs}s`} />
                     <span className="oz-bars">
                       {pttLevels.map((l, i) => (
-                        <i key={i} style={{ height: `${Math.min(22, Math.max(3, Math.round(l * 22)))}px` }} />
+                        <i
+                          key={i}
+                          style={{ height: `${Math.min(22, Math.max(3, Math.round(l * 22)))}px` }}
+                        />
                       ))}
                     </span>
                   </>
@@ -3475,7 +3489,13 @@ export default function SessionView({
                   if (e.key === 'Enter' && !e.shiftKey && !e.altKey) {
                     e.preventDefault();
                     sendText();
-                  } else if (e.key === 'ArrowUp' && !e.shiftKey && !e.altKey && !e.ctrlKey && !e.metaKey) {
+                  } else if (
+                    e.key === 'ArrowUp' &&
+                    !e.shiftKey &&
+                    !e.altKey &&
+                    !e.ctrlKey &&
+                    !e.metaKey
+                  ) {
                     // shell-style recall: caret on the first line → step back
                     // through the user's own sent messages
                     const el = e.currentTarget;
@@ -3484,10 +3504,18 @@ export default function SessionView({
                       e.preventDefault();
                       recall('older');
                     }
-                  } else if (e.key === 'ArrowDown' && !e.shiftKey && !e.altKey && !e.ctrlKey && !e.metaKey) {
+                  } else if (
+                    e.key === 'ArrowDown' &&
+                    !e.shiftKey &&
+                    !e.altKey &&
+                    !e.ctrlKey &&
+                    !e.metaKey
+                  ) {
                     // forward again; past the newest restores the parked draft
                     const el = e.currentTarget;
-                    const onLastLine = !el.value.slice(el.selectionEnd ?? el.value.length).includes('\n');
+                    const onLastLine = !el.value
+                      .slice(el.selectionEnd ?? el.value.length)
+                      .includes('\n');
                     if (onLastLine && histPosRef.current !== null) {
                       e.preventDefault();
                       recall('newer');

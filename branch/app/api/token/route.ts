@@ -7,6 +7,7 @@ import {
   type VideoGrant,
 } from 'livekit-server-sdk';
 import { lookup } from 'node:dns/promises';
+import { bearerOf, cookieOf } from '@/lib/admin';
 import { checkAccess } from '@/lib/devices';
 import { resolveId } from '@/lib/oc';
 import { regionOfReq } from '@/lib/region';
@@ -68,20 +69,11 @@ function whyUnavailable(): string | null {
   return null;
 }
 
-function cookieOf(req: Request, name: string): string {
-  for (const part of (req.headers.get('cookie') || '').split(';')) {
-    const [k, ...v] = part.trim().split('=');
-    if (k === name) return v.join('=');
-  }
-  return '';
-}
-
 /** devices mode: the paired device this request speaks for (the same
  *  credential and region the middleware just checked), or null — the box's own
  *  console and the admin token pass the gate without one, and get no voice. */
 async function deviceOf(req: Request): Promise<string | null> {
-  const raw =
-    req.headers.get('authorization')?.replace(/^Bearer\s+/i, '') || cookieOf(req, 'bifrost_device');
+  const raw = bearerOf(req) || cookieOf(req, 'bifrost_device');
   const gate = await checkAccess(raw, regionOfReq(req));
   return gate.ok ? gate.device.id : null;
 }
