@@ -410,7 +410,7 @@ fn resolve_variant(raw: &str) -> Result<String, String> {
 /// conversation is built. Never in the system prompt / position 0 (cache law:
 /// text turns and the cached prefix stay byte-identical). Independent of the
 /// brain-wide YGG_VOICE / VOICE_PROMPT path below. Editing resets caches once.
-const VOICE_TURN_NOTE: &str = "[voice turn] This reply will be spoken aloud: plain speech, leading with the answer, with no lists, bullets, tables, headers, markdown, or code. Keep it to a few short, concrete sentences — unless the user asked for more (a story, details, something read out): then give what they asked for. They can say stop, pause, faster or slower while it plays.";
+const VOICE_TURN_NOTE: &str = "[voice turn] This reply will be spoken aloud: plain speech, leading with the answer, with no lists, bullets, tables, headers, markdown, or code. Keep it to a few short, concrete sentences — unless the user asked for more (a story, details, something read out): then give what they asked for. They can say stop, pause, faster or slower while it plays. Their words came through speech recognition, which loses case and punctuation: a folder, file or project name you heard is a guess — use the existing one that matches, else lowercase with hyphens (notes-api), and say the exact name you used.";
 
 fn is_voice_turn(msg: &Value) -> bool {
     msg["info"]["modality"] == "voice"
