@@ -440,7 +440,11 @@ async def entrypoint(ctx: JobContext) -> None:
         # turn-taking is keyword-driven in hands-free (see below): turns never
         # auto-commit on silence — speech buffers until "over"/"over and out".
         # Manual is (re-)set after every PTT commit/abort too.
-        vad=silero.VAD.load(min_silence_duration=0.9),
+        # activation 0.35, not silero's 0.5 (voice-fixes 11-14): a soft or breathy voice sat near
+        # 0.5 — a short "Hey!" was never speech, a sentence's start or end fell outside its segment,
+        # and those words never reached the STT (a 37 s dictation lost most of them; the room had
+        # carried every word). 60 s of pink/brown noise at -35 dBFS still makes no segment.
+        vad=silero.VAD.load(min_silence_duration=0.9, activation_threshold=0.35),
         # batch whisper needs 1-2s per segment: with the 0.5s default the
         # turn commits BEFORE the STT final lands (livekit logs "transcript
         # arrives after turn has been committed") and the speech is dropped
