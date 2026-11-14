@@ -538,3 +538,45 @@ session on lab reports to mac, the tap sees WireGuard only for the pair, a rogue
 key is refused by mac), trunk-full-e2e 4e–4h (a third root approved on the phone; the tap where
 the ap hands the links over: 202 mac ↔ lab frames, all WireGuard), join-test.sh (local + docker
 ubuntu:24.04), win/launcher-test.sh (wine).
+
+## The end design in one world (trunk-e2e, 2026-11-14)
+
+`trunk-wg` and `trunk-rtc` merged (no textual conflict: both touched bridge.rs, bridge_main.rs,
+config.rs, trunk-full.spec.ts and root/install/README.md in separate hunks; str0m stays under the
+`bridge` feature, the root build compiles neither the ap nor the bridge). `sim/trunk-e2e.sh` puts
+all of it in one world, tcp 443 only (nftables per namespace): the phone, the VPS (sni-443.py, the
+ap, `vps-eye.py` with the ap's TLS key, the ICE tap), the hub (bridge, app, LiveKit, the real agent
+with whisper-tiny + piper, the hub brain on the mock, the hub's WireGuard node) and two machines
+that join (each its brain on its own mock, its node from the ROOT build, root-dial.py).
+
+- **One utterance does the whole tree.** The phone holds the roots and says "Start a session on
+  mac and have it start a session on lab to say lab done." (a WAV as the mic): LiveKit over
+  ICE-TCP <vps>:443 → the agent's STT → MAIN → `session_start` on mac (WireGuard) → mac's lead
+  starts one on lab (the hub's relay, still WireGuard) → lab reports to mac's session → mac
+  reports home. MAIN's reply is spoken over the room. The mock reads "start a session on <root>
+  and <brief>" as `session_start` (root/mock/mock_upstream.py): what a compliant model would do.
+- **Typical run:** pinned 2.6–3.2 s after the claim, /api over it 225–275 ms per call; QR →
+  approved 2.5–3.2 s, → linked 2.9–5.4 s; hold → talk 2.3–2.9 s; release → transcript in MAIN
+  1.9 s, → the session on mac 1.9–2.2 s, → speaking 2.1–2.8 s, → lab done 2.6–2.9 s, → mac's
+  report home 3.9–4.0 s; revoke → out of the room, channel severed, hub ↛ mac/lab 0.5–1.1 s,
+  mac ↛ lab 17.5–19 s (the directory's 20 s staleness).
+- **What the VPS read** (its own decrypted view): after pairing 52 phone requests, all page loads,
+  `/sw.js` and `POST /offer` — 0 API calls, 0 of 9 app strings in ~2.8 MB; on the root links
+  380–450 binary frames, all WireGuard (110–140 mac ↔ lab), text ops only
+  root-link/ok/ping/pong; the media STUN/DTLS/SRTP only.
+- **A short English reply was spoken in French.** "On its way to mac: → on mac." went to the
+  French voice (the app's language pick), so the room carried French phonemes and the STT heard
+  "I'm going to make a mess." The mock's line is plain English now; the pick on short text with
+  symbols is not fixed.
+- **The first syllables can be lost.** With the speech 0.4 s into the WAV, one run heard "Charge
+  Session on Mac…" and MAIN did not delegate. The fixture leads with 1.5 s of silence; a person
+  who speaks the instant the tone sounds may be clipped the same way (not measured on a phone).
+- **The real installers did not carry the end design** (`sim/own-trunk-e2e.sh` stage a: RED, 9 of
+  12 phone steps). install.sh never started the hub's WireGuard node, and with `plaintext_http`
+  off a joined root reached nothing; now `install.sh --trunk` makes the hub's key, runs
+  `bifrost-wg.service` (BIFROST_WG_* ports) and points the bridge, the brain and the app at it.
+  join.sh's node links libopus (the full release build): the joining machine needs libopus0. And
+  `--skip livekit` still wrote LIVEKIT_* into app.env, so the app minted voice tokens for a LiveKit
+  that never ran (the phone's mic stuck connecting, no calm line): those lines are written only
+  when LiveKit runs. The phone needs `--ignore-certificate-errors` on the test certificate (the
+  service worker). Stage a: GREEN after.
