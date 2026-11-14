@@ -135,9 +135,10 @@ and that the QR's address is the box's real LAN IP. If the box has several addre
 - **Talking from the phone needs https.** Browsers only open the microphone on a secure
   origin, and `http://<LAN IP>` isn't one. On the LAN you can type and hear replies; to talk,
   put the app behind https, for example `tailscale serve`.
-- **LiveKit voice needs `BIFROST_AUTH=tailnet`.** The app's `/api/token` route still refuses
-  in `devices` mode, so LiveKit voice works only with `BIFROST_AUTH=tailnet`. Use that only
-  when the app is reachable solely over tailscale.
+- **LiveKit voice in `devices` mode is for paired phones only.** The app's `/api/token` route
+  mints a voice token for a paired device (the box's own console gets none). Through
+  [your own trunk](../../docs/own-trunk.md#voice-through-the-trunk) the phone's audio rides port
+  443 of the trunk (ICE over TCP) to LiveKit here; on your own Wi-Fi it needs https first (above).
 
 Logs: `journalctl --user -u yggdrasil -u 'bifrost-*' -f`. Status:
 `systemctl --user status yggdrasil 'bifrost-*'`.

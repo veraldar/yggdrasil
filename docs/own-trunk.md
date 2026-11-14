@@ -60,8 +60,9 @@ the whole path. Look for `trunk https://trunk.example.org/pair → 200`.
 ```
 
 A QR code appears in the terminal. Scan it with the phone's camera within 5 minutes. The phone opens
-`https://trunk.example.org` and pairs itself: the first time it walks you through the door (typing — voice
-over the trunk is not wired yet), then it shows your sessions. Add it to the home screen.
+`https://trunk.example.org` and pairs itself: the first time it walks you through the door, then it
+shows your sessions. Add it to the home screen. Hold the tree to talk: voice works through the trunk
+too (see [Voice through the trunk](#voice-through-the-trunk)).
 
 **4. More computers: join them.** On each one (Linux, macOS, Windows with WSL2):
 
@@ -97,6 +98,34 @@ someone else.
 The trunk does **not** hold your model key, your sessions or your files. Those stay at home. On the
 server there is only its own key and certificate and a fingerprint of your home computer's token.
 
+**Your voice is the exception.** The sound from your phone's microphone travels encrypted from the
+phone to your home computer (WebRTC: DTLS-SRTP). The server only passes the encrypted bytes along; it
+has no key for them. Two limits, plainly:
+- The call is set up through the server's encrypted line (LiveKit's signaling), so a server that is
+  *actively* malicious could put itself in the middle of a new call. It cannot listen to a call
+  passively.
+- The spoken reply and its text are app data: they come back like the rest of the app, through the
+  server's line.
+
+## Voice through the trunk
+
+Nothing extra to open: voice uses port 443 too. When you talk, the phone sends its audio over TCP to
+`trunk.example.org:443`. The server recognizes that connection by its first bytes (ICE over TCP, not
+TLS) and passes it, untouched, to your home computer over the line your home computer opened. There,
+LiveKit and the voice agent turn your speech into text for your main session and the reply into
+speech. UDP is not needed.
+
+- **What it needs:** `trunk.sh` from this version on the server (re-run it once:
+  `sudo bash trunk.sh`), and `./install.sh --trunk '<line>'` again at home with voice installed (the
+  default, `LIVEKIT_MODE=binary`).
+- **Behind `sni-443.py`** (a website on the same server): its config needs the line
+  `ice 127.0.0.1:4479`. `trunk.sh` writes it in a new config and warns when an existing one lacks it.
+  Then run `sudo systemctl restart yggdrasil-sni-443`. With nginx's `stream { … }` instead, voice
+  needs `sni-443.py` (nginx cannot tell ICE from other bytes).
+- **Only paired phones** get a voice line. Revoking a phone cuts its call within a second.
+- **Tested** by `sim/trunk-rtc-e2e.sh`: a phone, the server and a home computer, each allowed only
+  TCP 443 to the server, with the real voice agent and speech engines.
+
 ## A website on the same server
 
 If port 443 already serves a website, `trunk.sh` stops and installs nothing. Run it again with
@@ -124,8 +153,8 @@ certificate), but phones refuse the page.
 - **Re-running is safe.** `sudo bash trunk.sh` with no options updates the program and renews the
   certificate when it is due. It keeps the key and the token, so your home computer needs nothing
   new. `./install.sh --trunk '…'` run again keeps your paired phones.
-- **Voice over the trunk is not wired yet.** Typing and reading work from anywhere. Talking still
-  needs your own network (`root/install/README.md`, "Known limits").
+- **Voice over the trunk** works from anywhere ([above](#voice-through-the-trunk)). Slow mobile
+  data adds its delay to every word, both ways.
 - **Moving to another server or name:** run step 2 with the new line. Then pair your phones again
   (the new address is a new website for them), and join other computers again with
   `./join.sh --rejoin --hub https://<new name>`.

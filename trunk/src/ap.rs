@@ -537,6 +537,9 @@ async fn serve(cfg: ApConfig, ready: Option<std::sync::mpsc::Sender<Result<(Sock
     println!("  ap: identity {pin}  (bridge.toml [ap] pin)");
     println!("  ap: bridge channel wss://<host>{} (Bearer, sha-256 admitted)", cfg.channel_path);
     let hub = Arc::new(Hub::default());
+    if let Some(name) = cfg.ice.as_ref().filter(|_| !cfg.proxy_protocol) {
+        println!("  ap: ICE-TCP on this listener → raw stream '{name}' (RFC 4571-framed STUN is not TLS)");
+    }
     for f in &cfg.tcp {
         let l = TcpListener::bind(&f.listen).await.map_err(|e| format!("ap.tcp '{}' {}: {e}", f.name, f.listen))?;
         println!("  ap: tcp '{}' {} — LIVE (raw stream to the bridge)", f.name, l.local_addr().map_err(|e| e.to_string())?);

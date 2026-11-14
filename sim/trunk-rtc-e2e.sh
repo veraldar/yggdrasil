@@ -28,10 +28,10 @@
 #   sim/trunk-rtc-e2e.sh            exit 0 = every step PASS; prints the PASS/FAIL table + latency
 #
 # Needs: root/target/release/yggdrasil + trunk/target/release/bifrost-net (cargo build --release),
-# branch built (npm run build), zbarimg, nft, playwright's chromium, a livekit-server binary
-# (LIVEKIT_BIN; e.g. copied out of the livekit/livekit-server image), the edge voice server with its
-# models (VOICE_DIR: edge/{voice_server.py,get_models.sh} + venv/ + models/), the agent's venv
-# (AGENT_VENV: uv sync in branch/voice, then `agent.py download-files`). Logs: TRUNK_RTC_STATE.
+# branch built (npm run build), zbarimg, nft, tc, playwright's chromium — and, made once by
+# sim/trunk-rtc/setup.sh into TRUNK_RTC_CACHE (~/.cache/trunk-rtc): livekit-server (LIVEKIT_BIN),
+# the edge voice server with its venv + models (VOICE_DIR), the agent's venv (AGENT_VENV).
+# Distances: PHONE_RTT_MS (60) and HOME_RTT_MS (30), netem. State + logs: TRUNK_RTC_STATE.
 set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 if [ -z "${TRUNK_RTC_NS:-}" ]; then
@@ -41,16 +41,17 @@ fi
 
 BIN=${BIFROST_NET_BIN:-$ROOT/trunk/target/release/bifrost-net}
 YGG_BIN=${YGG_BIN:-$ROOT/root/target/release/yggdrasil}
-LK_BIN=${LIVEKIT_BIN:-$(command -v livekit-server || true)}
-VOICE_DIR=${VOICE_DIR:-$HOME/.local/share/bifrost/voice}
-AGENT_VENV=${AGENT_VENV:-$HOME/.local/share/bifrost/agent/venv}
+CACHE=${TRUNK_RTC_CACHE:-$HOME/.cache/trunk-rtc}
+LK_BIN=${LIVEKIT_BIN:-$CACHE/livekit-server}
+VOICE_DIR=${VOICE_DIR:-$CACHE/voice}
+AGENT_VENV=${AGENT_VENV:-$CACHE/agent-venv}
 B=$ROOT/branch
 [ -x "$BIN" ] || { echo "build the trunk first: (cd trunk && cargo build --release)"; exit 2; }
 [ -x "$YGG_BIN" ] || { echo "build the brain first: (cd root && cargo build --release)"; exit 2; }
 [ -f "$B/.next/BUILD_ID" ] || { echo "build the app first: (cd branch && npm run build)"; exit 2; }
-[ -n "$LK_BIN" ] && [ -x "$LK_BIN" ] || { echo "no livekit-server (set LIVEKIT_BIN)"; exit 2; }
-[ -x "$VOICE_DIR/venv/bin/python" ] && [ -d "$VOICE_DIR/models" ] || { echo "no voice server in $VOICE_DIR (VOICE_DIR)"; exit 2; }
-[ -x "$AGENT_VENV/bin/python" ] || { echo "no agent venv at $AGENT_VENV (AGENT_VENV)"; exit 2; }
+[ -x "$LK_BIN" ] || { echo "no livekit-server at $LK_BIN — run sim/trunk-rtc/setup.sh (or set LIVEKIT_BIN)"; exit 2; }
+[ -x "$VOICE_DIR/venv/bin/python" ] && [ -d "$VOICE_DIR/models" ] || { echo "no voice server in $VOICE_DIR — run sim/trunk-rtc/setup.sh"; exit 2; }
+[ -x "$AGENT_VENV/bin/python" ] || { echo "no agent venv at $AGENT_VENV — run sim/trunk-rtc/setup.sh"; exit 2; }
 for t in zbarimg nft nsenter; do command -v $t >/dev/null || { echo "$t missing"; exit 2; }; done
 
 VPS=198.51.100.7 HOMEIP=198.51.100.20 PHONE=198.51.100.50 AP_HOST=ap.tree.test
@@ -219,13 +220,15 @@ pids+=($!)
 ) >"$STATE/app.log" 2>&1 &
 pids+=($!)
 
+# AGENT_LOAD_THRESHOLD=inf: the worker's availability follows this MACHINE's cpu load (other work
+# on it must not decide a deterministic run: "no servers available" = an agent-less room)
 (
   cd "$B/voice"
   exec nsenter --net=/proc/${NS[home]}/ns/net -- env -i PATH="$PATH" HOME="$HOME" \
     HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 LIVEKIT_URL="ws://127.0.0.1:$LKP" \
     LIVEKIT_API_KEY="$LK_KEY" LIVEKIT_API_SECRET="$LK_SECRET" OPENCODE_URL="http://127.0.0.1:$HOMEP" \
     SPEACHES_URL="http://127.0.0.1:$VOICEP/v1" AGENT_HTTP_PORT=$AGENTP AGENT_TTS=off \
-    AGENT_LOAD_THRESHOLD=1.0 "$AGENT_VENV/bin/python" agent.py start
+    AGENT_LOAD_THRESHOLD=inf "$AGENT_VENV/bin/python" agent.py start
 ) >"$STATE/agent.log" 2>&1 &
 pids+=($!)
 
