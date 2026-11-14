@@ -1,0 +1,35 @@
+{
+ "id": "v-dictation",
+ "title": "Voice: a long dictated request with pauses and a self-correction, in one turn",
+ "personas": [
+  {
+   "id": "owner",
+   "persona": "A slow, thoughtful talker who dictates a whole spec in one go, thinking aloud with pauses and 'um's, and corrects themselves mid-way.",
+   "voice": {"voice": "bm_george", "speed": 0.92, "pause_s": 1.6},
+   "phone": {"noiseDb": -50, "noiseColor": "pink", "echo": 0},
+   "goals": [
+    "In ONE long spoken turn (at least six sentences, set \"pauses\": true), dictate this request: a tiny HTTP service in a folder named pingd, Python standard library only; GET /health answers JSON with ok true; GET /time answers JSON with the current unix time as an integer under the key time; any other path is a 404; it listens on port eight thousand — then, still in the same turn, correct yourself: no wait, make that port eight one hundred; and it must come with pytest tests that start the server on a free port.",
+    "Get it built exactly as dictated (port 8100, not 8000).",
+    "At the end, ask how it was tested and finish."
+   ],
+   "script": [
+    "First turn: the whole dictation in one say action with \"pauses\": true, ending with 'over'.",
+    "Then wait for main to come back with the result; ask how it was tested; finish."
+   ]
+  }
+ ],
+ "max_minutes": 25,
+ "max_turns": 6,
+ "checks": [
+  {"name": "port 8100 (the corrected one)", "cmd": "grep -rn '8100' pingd --include=*.py | head -3", "expect": "8100"},
+  {"name": "not the first-said port 8000 as the default", "cmd": "grep -rnE '(PORT|port)\\s*[=:]\\s*8000\\b|, *8000\\)' pingd --include=*.py || echo CLEAN", "expect": "CLEAN"},
+  {"name": "/health and /time served", "cmd": "grep -rlE '/health' pingd --include=*.py && grep -rlE '/time' pingd --include=*.py", "expect": "py"},
+  {"name": "pingd tests pass", "cmd": "cd pingd && python3 -m pytest -q >/tmp/pytest.$$.out 2>&1 && echo PYTEST-OK || tail -5 /tmp/pytest.$$.out", "expect": "PYTEST-OK"}
+ ],
+ "voice_checks": [
+  {"kind": "all_turns_landed", "name": "the long dictation landed as ONE turn"},
+  {"kind": "box_heard_regex", "regex": "8100|eight.one.hundred|81 hundred|eight thousand one hundred", "name": "the box heard the corrected port"},
+  {"kind": "box_wer_max", "value": 0.2, "name": "the box transcribed the dictation (mean box WER <= 0.2)"},
+  {"kind": "every_reply_spoken", "name": "every reply was spoken"}
+ ]
+}

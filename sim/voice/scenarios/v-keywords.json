@@ -1,0 +1,38 @@
+{
+ "id": "v-keywords",
+ "title": "Voice: hands-free keywords over a playing reply — pause, continue, faster, slower, stop",
+ "personas": [
+  {
+   "id": "owner",
+   "persona": "The owner, out walking the dog with earbuds in. Talks casually, a bit impatient, says 'okay' a lot.",
+   "voice": {"voice": "am_michael", "speed": 1.05},
+   "phone": {"noiseDb": -52, "noiseColor": "pink", "echo": 0},
+   "goals": [
+    "Get main to explain out loud how a hash map handles collisions — a proper explanation of about thirty seconds of speech, not a one-liner.",
+    "While main is explaining, drive the speech with your voice: pause it, let it continue, make it faster, then slower again, and finally stop it before the end.",
+    "Then ask one short follow-up question about what you heard and let main answer it to the end."
+   ],
+   "script": [
+    "First turn: ask for the explanation and say you want it properly, about thirty seconds. Plan during_reply exactly: [{\"at_s\":3,\"text\":\"pause\"},{\"at_s\":6,\"text\":\"continue\"},{\"at_s\":9,\"text\":\"faster\"},{\"at_s\":13,\"text\":\"slower\"},{\"at_s\":17,\"text\":\"stop\"}]",
+    "Second turn: one short follow-up about what you heard (no during_reply).",
+    "Then finish."
+   ]
+  }
+ ],
+ "max_minutes": 10,
+ "max_turns": 4,
+ "settle_seconds": 10,
+ "checks": [],
+ "voice_checks": [
+  {"kind": "all_turns_landed", "name": "every spoken turn reached MAIN"},
+  {"kind": "no_command_messages", "name": "no voice command reached MAIN as a message"},
+  {"kind": "command_effect", "name": "'pause' paused the reply", "command_regex": "^pause", "effect": "pause"},
+  {"kind": "command_effect", "name": "'continue' resumed it", "command_regex": "^continue", "effect": "resume"},
+  {"kind": "command_effect", "name": "'faster' sped it up", "command_regex": "^faster", "effect": "rate+"},
+  {"kind": "command_effect", "name": "'slower' slowed it down", "command_regex": "^slower", "effect": "rate-"},
+  {"kind": "command_effect", "name": "'stop' stopped it", "command_regex": "^stop", "effect": "stop"},
+  {"kind": "reply_cut", "name": "the stopped reply did not play to the end", "by": "stop"},
+  {"kind": "every_reply_spoken", "name": "every reply was spoken"},
+  {"kind": "box_wer_max", "value": 0.15, "name": "the box heard the person (mean box WER <= 0.15)"}
+ ]
+}
