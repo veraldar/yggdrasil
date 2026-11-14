@@ -5,6 +5,7 @@ import {
   openSync,
   readFileSync,
   readdirSync,
+  rmSync,
   statSync,
   writeFileSync,
 } from 'fs';
@@ -67,6 +68,8 @@ const PHONE_IP = process.env.PW_PHONE_IP || '';
 const TAP = process.env.PW_TAP || '';
 const VPS_DIR = process.env.PW_VPS_DIR || '';
 const EYE = process.env.PW_EYE || '';
+const MITM = process.env.PW_MITM || '';
+const HUB_SH = process.env.PW_HUB_SH || '';
 const BRIDGE = process.env.PW_BRIDGE || '';
 const HUBWG = process.env.PW_HUBWG || '';
 const CAFILE = process.env.PW_CAFILE || '';
@@ -967,6 +970,118 @@ test('trunk e2e: phone ⇄ vps:443 ⇄ hub ⇄ joined roots — pinned app data,
       }
     );
 
+    // ---------------------------------------------------------------- H1 the hub restarts
+    await step(
+      'H1',
+      'the hub restarts mid-session (brain + bridge + wg node): the pinned channel and both tunnels come back by themselves',
+      async () => {
+        expect(mainId, 'needs W2').toMatch(/^ses_/);
+        await pinned();
+        expect((await get(HUBWG, '/_wg/mac/root')).status, 'hub → mac before').toBe(200);
+        const msgsBefore = (await messages(mainId)).length;
+        const regBefore = JSON.parse(readFileSync(join(STATE, 'roots.json'), 'utf8'));
+        const joinsBefore = ['mac', 'lab'].map((m) =>
+          readFileSync(join(STATE, m, 'join', 'join.json'), 'utf8')
+        );
+        const ups = () =>
+          (readFileSync(join(STATE, 'bridge.log'), 'utf8').match(/channel up/g) || []).length;
+        const upsBefore = ups();
+        // the phone's view, every 100 ms: when it left `pinned`, what it went through, when it came back
+        const seen: Array<[number, string]> = [];
+        let watching = true;
+        const watch = (async () => {
+          while (watching) {
+            const st = await phone
+              .getByTestId('pin-state')
+              .getAttribute('data-state', { timeout: 1_000 })
+              .catch(() => '?');
+            if (!seen.length || seen[seen.length - 1][1] !== st)
+              seen.push([Date.now(), String(st)]);
+            await phone.waitForTimeout(100).catch(() => {});
+          }
+        })();
+        const t0 = Date.now();
+        execFileSync('bash', [HUB_SH, 'restart']);
+        const back: Record<string, number> = { restarted: Date.now() - t0 };
+        const until = async (
+          name: string,
+          fn: () => Promise<boolean> | boolean,
+          timeout: number
+        ) => {
+          await expect.poll(fn, { timeout, intervals: [100, 200, 250] }).toBe(true);
+          back[name] = Date.now() - t0;
+        };
+        try {
+          await until(
+            'brain',
+            async () => (await get(HOME, '/session', 1_000)).status === 200,
+            30_000
+          );
+          await until('ap channel', () => ups() > upsBefore, 30_000);
+          await until(
+            'hub→mac',
+            async () => (await get(HUBWG, '/_wg/mac/root', 1_500)).status === 200,
+            60_000
+          );
+          await until(
+            'hub→lab',
+            async () => (await get(HUBWG, '/_wg/lab/root', 1_500)).status === 200,
+            60_000
+          );
+          await until(
+            'mac→hub',
+            () => at('mac', `${rootWg}/_wg/local/root`, 2).status === 200,
+            60_000
+          );
+          await until(
+            'mac→lab',
+            () => at('mac', `${rootWg}/_wg/lab/root`, 2).status === 200,
+            60_000
+          );
+          // the phone: pinned again (it noticed the drop), and the box's data answers over it
+          await until(
+            'pinned',
+            async () =>
+              seen.some(([, st]) => st !== 'pinned') &&
+              seen[seen.length - 1][1] === 'pinned' &&
+              (await phoneFetch(phone, '/api/session/main').catch(() => ({ via: '', status: 0 })))
+                .via === 'pinned',
+            90_000
+          );
+        } finally {
+          watching = false;
+          await watch;
+        }
+        const states = seen.map(([t, st]) => `${st}@${t - t0}`).join(' → ');
+        expect(
+          seen.filter(([, st]) => st === 'fallback' || st === 'refused'),
+          `the phone fell back to the VPS's TLS: ${states}`
+        ).toEqual([]);
+        // nothing was redone: the same MAIN with its history, the same pins, no new join
+        const m = await phoneFetch(phone, '/api/session/main');
+        expect(m.body.id, 'the same MAIN').toBe(mainId);
+        expect((await messages(mainId)).length).toBeGreaterThanOrEqual(msgsBefore);
+        const reg = JSON.parse(readFileSync(join(STATE, 'roots.json'), 'utf8'));
+        expect(reg.roots.map((r: J) => [r.id, r.wg_pub])).toEqual(
+          regBefore.roots.map((r: J) => [r.id, r.wg_pub])
+        );
+        expect(
+          ['mac', 'lab'].map((x) => readFileSync(join(STATE, x, 'join', 'join.json'), 'utf8'))
+        ).toEqual(joinsBefore);
+        expect(['mac', 'lab'].filter((x) => existsSync(join(STATE, x, 'join', 'error')))).toEqual(
+          []
+        );
+        // and while it came back, the VPS saw no app data either (no API call, no /rtc in its TLS)
+        const lines = eyeRequests(
+          eyeAll().filter((r) => r.t >= t0),
+          PHONE_IP
+        );
+        expect(lines.filter(appCall), 'app calls through the VPS during the restart').toEqual([]);
+        const inRoom = (await lk.listParticipants(ROOM)).some((p) => p.identity === HUMAN);
+        return `restart ${back.restarted} ms (3 processes) → brain ${back.brain} ms · the ap channel ${back['ap channel']} ms · hub→mac ${back['hub→mac']} · hub→lab ${back['hub→lab']} · mac→hub ${back['mac→hub']} · mac→lab ${back['mac→lab']} ms · the phone pinned again ${back.pinned} ms (${states}) · same MAIN, same pins, no re-pair/re-join · 0 app calls via the VPS · voice room: ${inRoom ? 'rejoined' : 'not rejoined (the next hold reconnects)'}`;
+      }
+    );
+
     // ---------------------------------------------------------------- W10 revoke cuts everything
     await step(
       'W10',
@@ -974,10 +1089,7 @@ test('trunk e2e: phone ⇄ vps:443 ⇄ hub ⇄ joined roots — pinned app data,
       async () => {
         expect(deviceId, 'needs W1').toBeTruthy();
         expect(at('mac', `${rootWg}/_wg/lab/root`).status, 'mac → lab before').toBe(200);
-        expect(
-          (await lk.listParticipants(ROOM)).some((p) => p.identity === HUMAN),
-          'the phone is in the voice room before'
-        ).toBe(true);
+        const inRoom = (await lk.listParticipants(ROOM)).some((p) => p.identity === HUMAN);
         await box.goto(`${BASE}/devices`);
         const t0 = Date.now();
         await box.getByTestId(`revoke-${deviceId}`).click();
@@ -991,11 +1103,12 @@ test('trunk e2e: phone ⇄ vps:443 ⇄ hub ⇄ joined roots — pinned app data,
           await expect.poll(fn, { timeout, intervals: [100, 200, 250] }).toBe(true);
           cut[name] = Date.now() - t0;
         };
-        await until(
-          'room',
-          async () => !(await lk.listParticipants(ROOM)).some((p) => p.identity === HUMAN),
-          15_000
-        );
+        if (inRoom)
+          await until(
+            'room',
+            async () => !(await lk.listParticipants(ROOM)).some((p) => p.identity === HUMAN),
+            15_000
+          );
         await until(
           'channel',
           () =>
@@ -1004,38 +1117,137 @@ test('trunk e2e: phone ⇄ vps:443 ⇄ hub ⇄ joined roots — pinned app data,
             ),
           15_000
         );
-        await until(
-          'hub→mac',
-          async () => (await get(HUBWG, '/_wg/mac/root', 3_000)).status !== 200,
-          15_000
-        );
-        await until(
-          'hub→lab',
-          async () => (await get(HUBWG, '/_wg/lab/root', 3_000)).status !== 200,
-          15_000
-        );
+        // the hub cuts both at once; it pushed each of them an empty directory first, so mac and
+        // lab drop each other within the push (the 20 s staleness is only the fallback)
+        const listed = (m: string, other: string) => {
+          // unknown (the node's door did not answer) counts as still listed
+          const r = at(m, `${rootWg}/_wg/_roots`, 2);
+          return r.status !== 200 || (Array.isArray(r.body) && r.body.some((p) => p.id === other));
+        };
+        await Promise.all([
+          until(
+            'hub→mac',
+            async () => (await get(HUBWG, '/_wg/mac/root', 1_000)).status !== 200,
+            15_000
+          ),
+          until(
+            'hub→lab',
+            async () => (await get(HUBWG, '/_wg/lab/root', 1_000)).status !== 200,
+            15_000
+          ),
+          until('mac drops lab', () => !listed('mac', 'lab'), 30_000),
+          until('lab drops mac', () => !listed('lab', 'mac'), 30_000),
+        ]);
         await until(
           'mac→hub',
-          () => at('mac', `${rootWg}/_wg/local/root`, 3).status !== 200,
+          () => at('mac', `${rootWg}/_wg/local/root`, 1).status !== 200,
           15_000
         );
-        // the hub's directory stops vouching for both; a joined node drops a copy older than 20 s
-        await until('mac→lab', () => at('mac', `${rootWg}/_wg/lab/root`, 3).status !== 200, 40_000);
-        await until('lab→mac', () => at('lab', `${rootWg}/_wg/mac/root`, 3).status !== 200, 40_000);
-        let t = { status: 0, via: null as string | null, body: {} as J };
-        for (let i = 0; i < 20 && !t.status; i++) {
-          t = await phoneFetch(phone, '/api/token', { method: 'POST', body: { room: ROOM } }).catch(
-            async () => (await phone.waitForTimeout(250), { status: 0, via: null, body: {} })
-          );
+        await until('mac→lab', () => at('mac', `${rootWg}/_wg/lab/root`, 1).status !== 200, 30_000);
+        await until('lab→mac', () => at('lab', `${rootWg}/_wg/mac/root`, 1).status !== 200, 30_000);
+        expect(
+          Math.max(cut['mac drops lab'], cut['lab drops mac']),
+          'root ↔ root revocation within ~2 s (the push), not the 20 s staleness'
+        ).toBeLessThan(3_000);
+        const told = ['mac', 'lab'].every((m) =>
+          /this root was revoked/.test(readFileSync(join(STATE, m, 'join', 'wg.log'), 'utf8'))
+        );
+        expect(told, "both roots heard it from the hub (wg.log: 'this root was revoked')").toBe(
+          true
+        );
+        let t = { status: 0, via: null as string | null, body: {} as Record<string, unknown> };
+        // the phone passes through `reconnecting` (its channel was cut) until the box's own
+        // answer to its next /offer (401 revoked) settles it: then its calls meet the 401 too
+        const tried: string[] = [];
+        const until401 = Date.now() + 20_000;
+        while (Date.now() < until401) {
+          t = await phoneFetch(phone, '/api/token', { method: 'POST', body: { room: ROOM } })
+            .then((x) => ({
+              status: x.status,
+              via: (x as { via?: string | null }).via ?? null,
+              body: x.body as Record<string, unknown>,
+            }))
+            .catch(() => ({ status: 0, via: null, body: {} }));
+          if (tried[tried.length - 1] !== `${t.status}`) tried.push(`${t.status}`);
+          if (t.status === 401) break;
+          await phone.waitForTimeout(250).catch(() => {});
         }
-        expect(t.status).toBe(401);
+        expect(t.status, `the phone's /api/token answers: ${tried.join(' → ')}`).toBe(401);
         expect(t.body.why).toBe('revoked');
         const peers = (await get(HUBWG, '/_wg')).body as unknown as J[];
         expect(
           Array.isArray(peers) ? peers.filter((p) => p.up) : [],
           'live peers on the hub'
         ).toEqual([]);
-        return `revoke → out of the room ${cut.room} ms · pinned channel severed ${cut.channel} ms · hub↛mac ${cut['hub→mac']} ms · hub↛lab ${cut['hub→lab']} ms · mac↛hub ${cut['mac→hub']} ms (3 s probe timeout) · mac↛lab ${cut['mac→lab']} ms · lab↛mac ${cut['lab→mac']} ms · /api/token 401 revoked`;
+        return `revoke → ${inRoom ? `out of the room ${cut.room} ms · ` : '(not in the voice room) · '}pinned channel severed ${cut.channel} ms · hub↛mac ${cut['hub→mac']} ms · hub↛lab ${cut['hub→lab']} ms · mac drops lab ${cut['mac drops lab']} ms · lab drops mac ${cut['lab drops mac']} ms · mac↛hub ${cut['mac→hub']} ms · mac↛lab ${cut['mac→lab']} · lab↛mac ${cut['lab→mac']} ms (1 s probes) · /api/token ${tried.join(' → ')} (revoked)`;
+      }
+    );
+    // ---------------------------------------------------------------- M1 an active MITM at the VPS
+    await step(
+      'M1',
+      'an active man in the middle at the VPS swaps the box key: a fresh phone refuses, sends nothing',
+      async () => {
+        await phone.close().catch(() => {});
+        writeFileSync(MITM, 'swap the DTLS fingerprints');
+        const evilCtx = await phoneBrowser.newContext({
+          ...devices['Pixel 7'],
+          ignoreHTTPSErrors: true,
+          permissions: ['microphone'],
+          storageState: {
+            cookies: [],
+            origins: [
+              {
+                origin: AP,
+                localStorage: [
+                  { name: 'bifrost-door', value: 'v2' },
+                  { name: 'bifrost-first-turn', value: '1' },
+                ],
+              },
+            ],
+          },
+        });
+        try {
+          const p2 = await evilCtx.newPage();
+          screens.push(['mitm-phone', p2]);
+          await box.goto(`${BASE}/pair`);
+          const qr = box.getByTestId('pair-qr');
+          await expect(qr.locator('svg')).toBeVisible();
+          const png = join(STATE, 'pair-qr-mitm.png');
+          writeFileSync(png, await qr.screenshot());
+          const qrUrl = execFileSync('zbarimg', ['--raw', '-q', png]).toString().trim();
+          const claimed = p2.waitForResponse((r) => r.url().endsWith('/api/pair/claim'));
+          await p2.goto(qrUrl);
+          await claimed;
+          const t1 = Date.now();
+          await p2.waitForURL(`${AP}/`, { timeout: 30_000 });
+          await expect(p2.getByTestId('pin-state')).toHaveAttribute('data-state', 'refused', {
+            timeout: 20_000,
+          });
+          await expect(p2.getByTestId('pin-state')).toHaveText(/mismatch/);
+          const r = await phoneFetch(p2, '/api/session/main');
+          expect(r.status).toBe(503);
+          expect(r.body.error).toBe('pin-refused');
+          const v = await phoneFetch(p2, '/api/token', { method: 'POST', body: { room: ROOM } });
+          expect(v.status, 'no voice token either').toBe(503);
+          await p2.waitForTimeout(1_500);
+          const recs = eyeAll().filter((x) => x.t >= t1);
+          const lines = eyeRequests(recs, PHONE_IP);
+          expect(lines.filter(appCall), 'API calls through the attacking VPS').toEqual([]);
+          const swapped = eyeAll().some(
+            (x) =>
+              x.t >= t1 - 10_000 &&
+              x.src === PHONE_IP &&
+              x.dir === 's2c' &&
+              Buffer.from(x.b64, 'base64').includes('a=fingerprint')
+          );
+          expect(swapped, 'the attack was on the path (the /offer answer crossed it)').toBe(true);
+          return `the VPS swapped the box key in the /offer answer → the phone refused ("${await p2
+            .getByTestId('pin-state')
+            .textContent()}"), /api 503 pin-refused, no voice token, 0 API calls through the VPS`;
+        } finally {
+          rmSync(MITM, { force: true });
+          await evilCtx.close().catch(() => {});
+        }
       }
     );
   } finally {

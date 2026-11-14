@@ -844,15 +844,26 @@ test('trunk rtc: phone ⇄ vps:443 ⇄ box — pair, talk, hear the reply, media
           )
           .toBe(true);
         // its page may be navigating back to pairing right now: ask once it has settled
-        let t = { status: 0, body: {} as Record<string, unknown> };
-        for (let i = 0; i < 20 && !t.status; i++) {
-          t = await phoneFetch(phone, '/api/token', { method: 'POST', body: { room: ROOM } }).catch(
-            async () => (await phone.waitForTimeout(250), { status: 0, body: {} })
-          );
+        let t = { status: 0, via: null as string | null, body: {} as Record<string, unknown> };
+        // the phone passes through `reconnecting` (its channel was cut) until the box's own
+        // answer to its next /offer (401 revoked) settles it: then its calls meet the 401 too
+        const tried: string[] = [];
+        const until401 = Date.now() + 20_000;
+        while (Date.now() < until401) {
+          t = await phoneFetch(phone, '/api/token', { method: 'POST', body: { room: ROOM } })
+            .then((x) => ({
+              status: x.status,
+              via: (x as { via?: string | null }).via ?? null,
+              body: x.body as Record<string, unknown>,
+            }))
+            .catch(() => ({ status: 0, via: null, body: {} }));
+          if (tried[tried.length - 1] !== `${t.status}`) tried.push(`${t.status}`);
+          if (t.status === 401) break;
+          await phone.waitForTimeout(250).catch(() => {});
         }
-        expect(t.status).toBe(401);
+        expect(t.status, `the phone's /api/token answers: ${tried.join(' → ')}`).toBe(401);
         expect(t.body.why).toBe('revoked');
-        return `revoke→out of the room ${goneMs} ms · →ICE-TCP closed at the VPS ${tapMs} ms · →phone pc ${down()!.state} ${pcMs} ms · the pinned channel severed · /api/token 401 revoked`;
+        return `revoke→out of the room ${goneMs} ms · →ICE-TCP closed at the VPS ${tapMs} ms · →phone pc ${down()!.state} ${pcMs} ms · the pinned channel severed · /api/token ${tried.join(' → ')} (revoked)`;
       }
     );
     // ---------------------------------------------------------------- M1 an active MITM at the VPS
