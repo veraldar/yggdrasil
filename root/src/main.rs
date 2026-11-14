@@ -410,7 +410,7 @@ fn resolve_variant(raw: &str) -> Result<String, String> {
 /// conversation is built. Never in the system prompt / position 0 (cache law:
 /// text turns and the cached prefix stay byte-identical). Independent of the
 /// brain-wide YGG_VOICE / VOICE_PROMPT path below. Editing resets caches once.
-const VOICE_TURN_NOTE: &str = "[voice turn] This reply will be spoken aloud: plain speech, leading with the answer, with no lists, bullets, tables, headers, markdown, or code. Keep it to a few short, concrete sentences — unless the user asked for more (a story, details, something read out): then give what they asked for. They can say stop, pause, faster or slower while it plays. Their words came through speech recognition, which loses case and punctuation: a folder, file or project name you heard is a guess — use the existing one that matches, else lowercase with hyphens (notes-api), and say the exact name you used.";
+const VOICE_TURN_NOTE: &str = "[voice turn] This reply will be spoken aloud: plain speech, leading with the answer, with no lists, bullets, tables, headers, markdown, or code. Keep it to a few short, concrete sentences — unless the user asked for more (a story, details, something read out): then give what they asked for. They can say stop, pause, faster or slower while it plays. Their words came through speech recognition, which loses case and punctuation: a folder, file or project name you heard is a guess — use the existing one that matches, else lowercase with hyphens (notes-api), and say the exact name you used. Starting or sending work: say your one short line first, then call the tool — that line is the whole reply.";
 
 fn is_voice_turn(msg: &Value) -> bool {
     msg["info"]["modality"] == "voice"
@@ -2340,12 +2340,27 @@ async fn agent_loop(
             "tool_calls": calls.iter().map(|c| json!({ "id": c.id, "type": "function",
                 "function": { "name": c.name, "arguments": c.arguments } })).collect::<Vec<_>>(),
         }));
+        let mut dispatched = run.voice_note && prof.name == "coordinator" && !text.trim().is_empty();
         for call in calls {
             let output = run_tool(st, id, tx, run, &call).await;
+            dispatched &= is_dispatch(&call.name, &output);
             convo.push(json!({ "role": "tool", "tool_call_id": call.id, "content": output }));
+        }
+        // SPEED (voice-fixes 11-14): a provider call costs ~4 s before its first token. On a voice
+        // turn the door that said its line and then only started / sent work that went through is
+        // done: the second call would only say "on its way" again. Anything else (no line first, a
+        // failed or other tool) runs on as before.
+        if dispatched {
+            eprintln!("LAT-DISPATCH session={id} the line said before the dispatch is the reply — no second call");
+            return Ok(());
         }
     }
     Err(format!("agent loop hit the step cap ({max} upstream calls) without a final reply"))
+}
+
+/// A tree tool call that handed work off and went through (its output says so first).
+fn is_dispatch(tool: &str, output: &str) -> bool {
+    matches!(tool, "session_start" | "session_send") && (output.starts_with("STARTED") || output.starts_with("SENT"))
 }
 
 /// The coordinator session is the one titled `[MAIN]` (same rule as watch-landings resolve_main).
@@ -3883,6 +3898,16 @@ mod image_tests {
     fn a_session_knows_its_size() {
         assert_eq!(context_line(43_210, 200_000), "[context ≈ 43k tokens · rolls up at 200k]");
         assert_eq!(context_line(800, 0), "[context ≈ 800 tokens]");
+    }
+
+    #[test]
+    fn only_work_that_went_through_is_a_dispatch() {
+        assert!(is_dispatch("session_start", "STARTED, NOT DONE YET: id=ses_1 \"x\" (build) is starting on it"));
+        assert!(is_dispatch("session_send", "SENT, NOT DONE YET: \"x\" (id=ses_1) has your instruction"));
+        assert!(!is_dispatch("session_start", "unknown agent \"nope\"; known: build"));
+        assert!(!is_dispatch("sessions_find", "STARTED"));
+        assert!(!is_dispatch("session_read", "SENT"));
+        assert!(VOICE_TURN_NOTE.contains("lowercase with hyphens") && VOICE_TURN_NOTE.contains("line first"));
     }
 
     #[test]
