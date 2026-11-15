@@ -825,8 +825,8 @@ async fn create_session(State(st): State<AppState>, body: Option<Json<Value>>) -
 /// `POST /session {agent?, title?, harness: {kind?, id}, cwd}` — a session that continues a
 /// conversation the owner started in a terminal (`kind`: claude — the default —, opencode or
 /// antigravity) with its full context. The SAME conversation both ways (harness.rs `Attach`): one
-/// bifrost session per conversation — asking again returns the one that exists. The agent must
-/// run on that harness (default: the built-in one for it).
+/// bifrost session per conversation — asking again returns the one that exists. It runs on that
+/// harness whatever its agent (default: the built-in one for it — claude, agy — else the default).
 fn attach_harness(st: &AppState, body: &Value) -> Response {
     let id = body["harness"]["id"].as_str().unwrap_or_default().trim().to_string();
     let Some(kind) = harness::Kind::parse(body["harness"]["kind"].as_str().unwrap_or("claude")) else {
@@ -859,18 +859,16 @@ fn attach_harness(st: &AppState, body: &Value) -> Response {
     if let Some(info) = existing {
         return Json(info).into_response();
     }
+    // the session runs on the conversation's harness whatever its agent (run_turn): the agent
+    // built for that harness when there is one (claude · agy), else the default agent
     let agent_name = match body["agent"].as_str() {
         Some(a) => a.to_string(),
-        None => match harness_agent(st, kind) {
-            Some(a) => a,
-            None => return bad_request(&format!("no agent runs on {what} — make one in the agent editor (runs on: {what})")),
-        },
+        None => harness_agent(st, kind).unwrap_or_else(|| st.config.profiles.read().unwrap().default_agent.clone()),
     };
-    match agent(st, &agent_name) {
-        Some(a) if a.harness.as_deref().and_then(harness::Kind::parse) == Some(kind) => {}
-        Some(_) => return bad_request(&format!("agent {agent_name} does not run on {what} — continue a {what} conversation with an agent that does")),
-        None => return bad_request(&format!("unknown agent {agent_name}")),
-    }
+    let Some(profile) = agent(st, &agent_name) else {
+        return bad_request(&format!("unknown agent {agent_name}"));
+    };
+    let on_kind = profile.harness.as_deref().and_then(harness::Kind::parse) == Some(kind);
     let mut title = body["title"].as_str().map(str::trim).filter(|t| !t.is_empty()).map(String::from);
     if kind == harness::Kind::Claude {
         let path = harness::claude::transcript(cwd, &id);
@@ -887,6 +885,10 @@ fn attach_harness(st: &AppState, body: &Value) -> Response {
     match with_session(st, &sid, |s| {
         s.info["harness"] = json!({ "kind": kind.name(), "id": id, "attached": true });
         s.info["cwd"] = json!(cwd);
+        // an agent made for another engine: the harness's own pick of model, never the agent's
+        if !on_kind && model.is_none() {
+            s.info["model"] = json!({ "id": "default", "providerID": kind.name() });
+        }
         s.info.clone()
     }) {
         Some(info) => {
@@ -2155,7 +2157,12 @@ async fn run_turn(st: &AppState, id: &str, tx: &mpsc::Sender<Event>, queue_ms: u
             .and_then(|m| m["parts"].as_array())
             .is_some_and(|ps| ps.iter().any(|p| p["type"] == "file" && p["mime"].as_str().is_some_and(|t| t.starts_with("image/")))),
     };
-    let harness = session_profile(st, id).harness.as_deref().and_then(harness::Kind::parse);
+    // a terminal's conversation runs on its own harness, whatever the agent; else the agent's
+    let attached = st.sessions.lock().unwrap().get(id).and_then(|s| {
+        let h = &s.info["harness"];
+        (h["attached"] == true).then(|| h["kind"].as_str().and_then(harness::Kind::parse)).flatten()
+    });
+    let harness = attached.or_else(|| session_profile(st, id).harness.as_deref().and_then(harness::Kind::parse));
     let outcome = {
         let fut = async {
             match harness {

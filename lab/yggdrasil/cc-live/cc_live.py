@@ -289,13 +289,15 @@ def harness_list(n=20):
             log(f"{kind} recent(): {e!r}")
     live = LIVE.get()
     seen = {(r["kind"], r["id"]) for r in rows}
-    for key, e in live.items():  # running but not among the newest (a quiet background session)
+    running = {r["sessionId"]: r for r in AGENTS.list()}
+    for key, e in live.items():  # running but not among the newest (quiet, or nothing typed yet)
         kind, sid = key.split(":", 1)
         if kind == "claude" and (kind, sid) not in seen:
             p = claude_find(sid)
-            if p:
-                rows.append({"kind": kind, "id": sid, "cwd": e.get("cwd") or claude_cwd(p), "title": title_of(p),
-                             "modified": int(os.path.getmtime(p) * 1000)})
+            a = running.get(sid, {})
+            rows.append({"kind": kind, "id": sid, "cwd": e.get("cwd") or (claude_cwd(p) if p else ""),
+                         "title": (title_of(p) if p else "") or a.get("name") or "Claude Code session",
+                         "modified": int(os.path.getmtime(p) * 1000) if p else int(a.get("startedAt") or 0)})
     shorts = {r["sessionId"]: r.get("id", "") for r in AGENTS.list() if r.get("kind") == "background"}
     for r in rows:
         e = live.get(f"{r['kind']}:{r['id']}")

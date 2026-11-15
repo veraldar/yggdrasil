@@ -46,6 +46,7 @@ class Agy(unittest.TestCase):
             ev(2, "GENERIC", content="Created At: 2026-11-15T21:00:02+01:00\nCompleted At: 2026-11-15T21:00:02+01:00\nCommand exited with code 2.\n\nCommand output:\nerror"),
             ev(3, "GENERIC", content="all: build"),
             ev(4, "CHECKPOINT"),
+            ev(4, "SYSTEM_MESSAGE", content="[Message] sender=system priority=MESSAGE_PRIORITY_LOW content=[Notice] All your subagents and background tasks have been stopped due to server restart."),
             ev(5, "PLANNER_RESPONSE", content="Fixed the Makefile."),
         ]
         with open(self.log, "w") as f:

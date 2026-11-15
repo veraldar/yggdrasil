@@ -114,7 +114,9 @@ class Parser:
                 code = re.search(r"Command exited with code (\d+)", text)
                 err = e.get("status") == "ERROR" or bool(code and code.group(1) != "0")
                 out.append({"k": "result", "id": self.pending.pop(0), "t": t, "text": T.clip(text, T.RESULT_MAX), "error": err})
-        elif typ == "SYSTEM_MESSAGE":
+        elif typ == "SYSTEM_MESSAGE" and "MESSAGE_PRIORITY_LOW" not in (e.get("content") or ""):
+            # (a low-priority notice — "tasks stopped due to server restart", which every headless
+            # run adds — is the CLI's bookkeeping, not the conversation)
             text = re.sub(r"^The following is a <SYSTEM_MESSAGE>.*?\n+", "", e.get("content") or "", flags=re.S)
             text = re.sub(r"</?SYSTEM_MESSAGE>", "", text).strip()
             if text:
