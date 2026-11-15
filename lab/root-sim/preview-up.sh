@@ -75,6 +75,9 @@ if [ "$NAME" = preview ]; then
   ENVV+=("YGG_EXTENSIONS=librarian=http://127.0.0.1:4310")
 fi
 
+# Claude Code live (11-14): the helper the app's live session view talks to (unsandboxed, loopback)
+PREVIEW=$NAME "$(dirname "$0")/cc-live-up.sh" || echo "cc-live: not started (the app's live view will say so)"
+
 # the preview's agents: the staged overlay's models (fix included)
 python3 - "$UI/agents.json" "$HOME/.cache/root-sim/stage/yggdrasil-profiles.json" <<'PY'
 import json, sys
