@@ -13,13 +13,13 @@ you ⇄ [MAIN] coordinator            the transcript you read: only you + MAIN
           │    ├─ build "lib"         reports go UP to their parent's INBOX,
           │    └─ build "server"      never into anyone's transcript
           ├─ research "rate limits"
-          ├─ claude-code "slugify"    a harness session: Claude Code / opencode / Codex
+          ├─ claude "slugify"         a harness session: Claude Code / Antigravity / opencode / Codex
           └─ build "sales" on lab     a session on another root (proxy here, real there)
 ```
 
 - **Agent = what a session is**: role prompt (+ a short one for lite models), tool permissions
   (opencode ruleset, enforced at dispatch), model, thinking level, step cap, fold, `sessions`
-  (manages others), `harness`. Built in: coordinator · lead · build · fix · research · review · AGI.
+  (manages others), `harness`. Built in: coordinator · lead · build · fix · research · review · claude · agy.
   `YGG_PROFILES` overlays fields and adds agents. Model and thinking: the agent's default, the
   session's explicit choice wins, stamped at creation (the agent too — the list shows `[BUI]`, `[FIX]`…).
 - **One shared prompt, stored once**: every agent reads the same shared system prompt first — the
@@ -52,7 +52,7 @@ you ⇄ [MAIN] coordinator            the transcript you read: only you + MAIN
 `GET /harness/claude/sessions` lists the newest 20 Claude Code sessions on this box
 (`~/.claude/projects/*/*.jsonl`, or `$CLAUDE_CONFIG_DIR`): `{id, cwd, modified, title}` — read from
 metadata lines only (the transcript's `cwd`; custom-title › newest ai-title › summary › the first line
-the owner typed, ≤80 chars, never tool output). `POST /session {agent:"AGI", harness:{id}, cwd}`
+the owner typed, ≤80 chars, never tool output). `POST /session {agent:"claude", harness:{id}, cwd}`
 attaches one: the agent must run on Claude Code, the id must be a uuid, `cwd` must exist on this root
 and `~/.claude/projects/<cwd mangled>/<id>.jsonl` must be there — else 400 saying which. The session is
 `info.harness = {kind:"claude", id, attached:true}` + `info.cwd`, titled "<title, 40> · Claude Code".
@@ -62,13 +62,14 @@ terminal's transcript is never written; the fork's id replaces `harness.id` (`fo
 `origin:<id>`) and later turns `--resume` the fork. An attached session ALWAYS runs
 `--permission-mode auto`, never `--dangerously-skip-permissions` — the owner's guard stays on when a
 guarded conversation continues from the phone. Sessions the brain started itself are unchanged.
-Phone: + new session → "continue a Claude Code session…" → tap one → an [AGI] session.
+Phone: + new session → "continue a Claude Code session…" → tap one → a [CLA] session.
 
 ## Antigravity — Google's harness (11-14)
 
 Google replaced Gemini CLI with **Antigravity CLI** (`agy`); since 2026-06-18 Gemini CLI no longer
-serves personal accounts, so it is gone as a harness. An agent runs on `antigravity` like on
-`claude` / `codex` (agent editor → runs on → Antigravity; no built-in agent). An agent or session
+serves personal accounts, so it is gone as a harness. Built-in `agy` runs on `antigravity` (agy's
+own model pick by default), and custom agents can also pick `antigravity` in the editor
+(agent editor → runs on → Antigravity). An agent or session
 saved on `gemini` loads as `antigravity` (its model kept only if agy runs it; a Gemini CLI session id
 is dropped, so the next turn starts a new agy conversation).
 
@@ -143,8 +144,8 @@ thinking off.
 - Bugs go to `fix` (reproduce → root cause → smallest fix → a test that catches it; never weaken a test);
   the phone's "fix this" starts a `fix` session. Reports for the user land in `YGG_ARTIFACTS_DIR` and
   reach the phone as `[name](/api/artifact/<name>)`.
-- The door has no bash: it no longer launches `agi-run` lanes itself. Heavy coding goes to a `claude-code`
-  session (the visible, reporting successor of a sonnet lane) or a `lead`. Lanes started elsewhere still
+- The door has no bash: it no longer launches `agi-run` lanes itself. Heavy coding goes to a `claude`
+  session (Claude Code, visible and reporting) or a `lead`. Lanes started elsewhere still
   land in MAIN's inbox through the watcher.
 
 ## Env
@@ -160,7 +161,7 @@ What used to be "profiles" is one concept, **agents**. Every agent runs on a har
 model, thinking, system prompt, tools, steps, manages-sessions are all customizable) or `claude` /
 `opencode` / `codex` / `antigravity` (description + model; Claude Code also takes extra instructions via
 `--append-system-prompt`; Antigravity reads the shared prompt on its first message). Built in: coordinator (MAIN's alone, tools locked), lead, build, fix, research,
-review (read-only; writes only its report), **AGI** (Claude Code on Opus). `GET /agent/:name` is the editor's
+review (read-only; writes only its report), **claude** (Claude Code on Opus), **agy** (Antigravity CLI, own model pick). `GET /agent/:name` is the editor's
 detail (incl. `customizable`, `locked`, `models`); `PUT /agent/:name` creates or edits (partial body,
 persisted to `YGG_PROFILES`, live at once); `DELETE` removes agents you made. Switching a session's agent
 stamps the agent's model + thinking (+ harness); the model can be changed afterwards.

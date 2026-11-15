@@ -456,8 +456,8 @@ fn context_prompt(files: &[PathBuf]) -> Option<String> {
 /// default (legacy sessions carry no agent).
 fn profile_name_of(st: &AppState, info: &Value) -> String {
     let agents = st.config.profiles.read().unwrap();
-    if let Some(a) = info["agent"].as_str().filter(|a| agents.get(a).is_some()) {
-        return a.to_string();
+    if let Some(p) = info["agent"].as_str().and_then(|a| agents.get(a)) {
+        return p.name.clone();
     }
     if is_main_title(info["title"].as_str().unwrap_or_default()) {
         return "coordinator".into();
@@ -965,7 +965,7 @@ async fn list_sessions(State(st): State<AppState>) -> Json<Value> {
 
 /// A session made before agents were stamped at birth names the agent it actually runs.
 fn with_agent(st: &AppState, info: &mut Value) {
-    if info["agent"].is_null() {
+    if info["agent"].is_null() || info["agent"].as_str().is_some_and(|a| agent(st, a).is_some_and(|p| p.name != a)) {
         info["agent"] = json!(profile_name_of(st, info));
     }
 }
@@ -1149,7 +1149,7 @@ async fn switch_agent(State(st): State<AppState>, Path(id): Path<String>, Json(b
     };
     let stamp = agent_model_stamp(&st, &target);
     match with_session(&st, &id, |s| {
-        s.info["agent"] = json!(name);
+        s.info["agent"] = json!(target.name);
         s.info["model"] = stamp.clone();
         match &target.harness {
             Some(h) if s.info["harness"]["kind"].as_str() == Some(h.as_str()) => {}
@@ -1275,6 +1275,7 @@ async fn put_agent(State(st): State<AppState>, Path(name): Path<String>, Json(bo
     let res = st.config.profiles.write().unwrap().upsert(&name, &body);
     match res {
         Ok(()) => {
+            let name = profiles::Profiles::resolve(&name).to_string();
             publish(&st, "agent.updated", json!({ "name": name }));
             get_agent(State(st), Path(name)).await
         }
@@ -3134,6 +3135,12 @@ async fn main() {
             // "fix this" from MAIN, 11-13 morning) runs the default agent
             s.info["agent"] = json!(default_agent);
             persist(&data_dir, id, s);
+        } else if let Some(raw) = s.info["agent"].as_str().map(str::to_string) {
+            let resolved = profiles::Profiles::resolve(&raw);
+            if resolved != raw {
+                s.info["agent"] = json!(resolved);
+                persist(&data_dir, id, s);
+            }
         }
     }
     let max_inflight = env_num("YGG_MAX_INFLIGHT", 6).max(1) as usize;
@@ -3919,5 +3926,74 @@ mod image_tests {
         apply_clock_headers(&mut c, SYSTEM_PREAMBLE);
         assert!(c[5]["content"][0]["text"].as_str().unwrap().starts_with("[clock "), "header rides the text part");
         assert!(rollup::est_tokens(&convo) < 2000, "an image counts as ~1.6k tokens, not its bytes");
+    }
+
+    #[test]
+    fn legacy_agi_session_and_new_agy_resolve_cleanly() {
+        let dir = std::env::temp_dir().join(format!("ygg-main-alias-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(dir.join("session"));
+        let profiles = profiles::Profiles::load(None);
+        let http = reqwest::Client::new();
+        let config = Config {
+            base_url: "http://127.0.0.1:1".into(),
+            dialect: Dialect::OpenAi,
+            max_tokens: 1024,
+            api_key: None,
+            model: "glm-5.3".into(),
+            models: vec!["glm-5.3".into()],
+            catalog: json!({"default": {"yggdrasil": {}}}),
+            max_steps: 20,
+            profiles: std::sync::RwLock::new(profiles),
+            tree: tree::TreeCfg { max_depth: 12, max_children: 24, digest_model: None, wake_debounce_ms: 4000, max_wakes: 60 },
+            context_files: Vec::new(),
+            peers: peers::Peers::load(),
+            ext: ext::Extensions::load(),
+            tiers: HashMap::new(),
+            vision: Vec::new(),
+            tools_enabled: true,
+            rollup_tokens: 100_000,
+            rollup_keep_tokens: 25_000,
+            voice: false,
+            voice_max_words: 300,
+            default_variant: "high".into(),
+            think_high: 4096,
+        };
+        let legacy_id = "ses_legacy_agi";
+        let mut legacy_info = json!({ "id": legacy_id, "title": "old", "agent": "AGI" });
+        let st = AppState {
+            sessions: Arc::new(Mutex::new(HashMap::from([(
+                legacy_id.to_string(),
+                Session { info: legacy_info.clone(), messages: Vec::new(), todo: Vec::new(), inbox: Vec::new() },
+            )]))),
+            running: Arc::default(),
+            run_locks: Arc::default(),
+            bus: broadcast::channel(16).0,
+            data_dir: Arc::new(dir.clone()),
+            config: Arc::new(config),
+            http: http.clone(),
+            tools: Arc::new(tools::ToolEnv { project_dir: dir.clone(), bash_timeout: Duration::from_secs(1), http }),
+            upstream: Arc::new(tokio::sync::Semaphore::new(2)),
+            wakes: Arc::default(),
+            harness_slots: Arc::new(tokio::sync::Semaphore::new(2)),
+            harness_models: Arc::new(Mutex::new(HashMap::new())),
+            harness_labels: Arc::new(Mutex::new(HashMap::new())),
+        };
+        assert_eq!(profile_name_of(&st, &legacy_info), "claude");
+        let prof = session_profile(&st, legacy_id);
+        assert_eq!(prof.name, "claude");
+        assert_eq!(prof.harness.as_deref(), Some("claude"));
+        with_agent(&st, &mut legacy_info);
+        assert_eq!(legacy_info["agent"], "claude");
+
+        let from_agi = new_session(&st, "from agi", None, Some("AGI"), None, None);
+        assert_eq!(from_agi["agent"], "claude");
+        assert_eq!(from_agi["harness"]["kind"], "claude");
+        assert_eq!(from_agi["model"]["id"], "opus");
+
+        let from_agy = new_session(&st, "from agy", None, Some("agy"), None, None);
+        assert_eq!(from_agy["agent"], "agy");
+        assert_eq!(from_agy["harness"]["kind"], "antigravity");
+        assert_eq!(from_agy["model"]["id"], "default");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -179,11 +179,13 @@ def main():
         check("automation filed in the inbox", wait(lambda: any(e["from"] == "external" for e in req(HOME_PORT, "GET", f"/session/{main_id}/inbox")), 15))
 
         # 6b. agents: read, create, refuse, switch (model stamped, tools enforced), harness, lock, delete
-        agi = req(HOME_PORT, "GET", "/agent/AGI")
-        check("AGI agent: Claude Code on Opus", agi["harness"] == "claude" and agi["model"] == "opus" and agi["builtin"], {k: agi.get(k) for k in ("harness", "model")})
-        check("AGI offers Claude Code's models", {"opus", "sonnet", "haiku"} <= set(agi["models"]), agi.get("models"))
+        listed_names = [a["name"] for a in req(HOME_PORT, "GET", "/agent")]
+        check("agent list exposes claude and agy, never AGI", "claude" in listed_names and "agy" in listed_names and "AGI" not in listed_names, listed_names)
+        cl = req(HOME_PORT, "GET", "/agent/claude")
+        check("claude agent: Claude Code on Opus", cl["harness"] == "claude" and cl["model"] == "opus" and cl["builtin"], {k: cl.get(k) for k in ("harness", "model")})
+        check("claude offers Claude Code's models", {"opus", "sonnet", "haiku"} <= set(cl["models"]), cl.get("models"))
         try:
-            req(HOME_PORT, "PUT", "/agent/AGI", {"model": "gpt-free-text"})
+            req(HOME_PORT, "PUT", "/agent/claude", {"model": "gpt-free-text"})
             check("a harness model must be one it offers", False, "accepted")
         except urllib.error.HTTPError as e:
             check("a harness model must be one it offers", e.code == 400, e.code)
@@ -203,9 +205,9 @@ def main():
         r = req(HOME_PORT, "POST", f"/session/{sid}/message", {"parts": [{"type": "text", "text": tool([["bash", {"command": "echo hi"}]])}]}, 60)
         out = [p for p in r["parts"] if p["type"] == "tool"][0]["state"]["output"]
         check("the switched agent's tools are enforced", "permission denied" in out, out)
-        req(HOME_PORT, "POST", f"/api/session/{sid}/agent", {"agent": "AGI"})
+        req(HOME_PORT, "POST", f"/api/session/{sid}/agent", {"agent": "claude"})
         info = req(HOME_PORT, "GET", f"/session/{sid}")
-        check("switching to AGI moves the session onto Claude Code", info["model"] == {"id": "opus", "providerID": "claude"} and info["harness"]["kind"] == "claude", (info["model"], info.get("harness")))
+        check("switching to claude moves the session onto Claude Code", info["agent"] == "claude" and info["model"] == {"id": "opus", "providerID": "claude"} and info["harness"]["kind"] == "claude", (info.get("agent"), info["model"], info.get("harness")))
         req(HOME_PORT, "POST", f"/session/{sid}/model".replace("/session/", "/api/session/"), {"model": {"id": "sonnet", "providerID": "claude"}})
         check("a Claude Code session can change model within Claude's", req(HOME_PORT, "GET", f"/session/{sid}")["model"] == {"id": "sonnet", "providerID": "claude"})
         try:
@@ -213,8 +215,8 @@ def main():
             check("…and only within Claude's models", False, "accepted")
         except urllib.error.HTTPError as e:
             check("…and only within Claude's models", e.code == 400, e.code)
-        agi2 = req(HOME_PORT, "GET", "/agent/AGI")
-        check("model labels for the picker", agi2["model_labels"]["claude"]["opus"].startswith("strongest"), agi2.get("model_labels", {}).get("claude"))
+        cl2 = req(HOME_PORT, "GET", "/agent/claude")
+        check("model labels for the picker", cl2["model_labels"]["claude"]["opus"].startswith("strongest"), cl2.get("model_labels", {}).get("claude"))
 
         # 6c. continue a Claude Code session from the phone: the list (metadata only), attach, refusals
         cc_id, cc_cwd = "0f1e2d3c-4b5a-4968-8776-655443322110", os.path.join(tmp, "home", "work", "proj")
@@ -230,8 +232,8 @@ def main():
         row = next((r for r in listed if r["id"] == cc_id), None)
         check("Claude Code's sessions are listed: id, cwd, modified, title", row and row["cwd"] == cc_cwd and row["title"] == "remember the word walrus; reply ok" and row["modified"] > 0 and set(row) == {"id", "cwd", "modified", "title"}, row)
         check("…metadata only, no transcript content", "TOOL-OUTPUT" not in json.dumps(listed) and '"ok"' not in json.dumps(listed))
-        att = req(HOME_PORT, "POST", "/session", {"agent": "AGI", "harness": {"id": cc_id}, "cwd": cc_cwd})
-        check("attach: an AGI session holding the terminal's conversation", att["agent"] == "AGI" and att["harness"] == {"kind": "claude", "id": cc_id, "attached": True} and att["cwd"] == cc_cwd, (att.get("agent"), att.get("harness"), att.get("cwd")))
+        att = req(HOME_PORT, "POST", "/session", {"agent": "claude", "harness": {"id": cc_id}, "cwd": cc_cwd})
+        check("attach: a claude session holding the terminal's conversation", att["agent"] == "claude" and att["harness"] == {"kind": "claude", "id": cc_id, "attached": True} and att["cwd"] == cc_cwd, (att.get("agent"), att.get("harness"), att.get("cwd")))
         check("attach: titled after it · Claude Code", att["title"] == "remember the word walrus; reply ok · Claude Code", att["title"])
         for name, body in (("a non-uuid id", {"harness": {"id": "../../etc/passwd"}, "cwd": cc_cwd}),
                            ("a folder that does not exist", {"harness": {"id": cc_id}, "cwd": cc_cwd + "-gone"}),
@@ -244,8 +246,10 @@ def main():
                 msg = json.loads(e.read() or b"{}").get("error", "")
                 check(f"attach refuses {name} (400, said plainly)", e.code == 400 and len(msg) > 20, (e.code, msg))
 
-        # 6d. Google's harness next to Claude Code's and Codex's: an agent on Antigravity (agy)
-        agy = req(HOME_PORT, "PUT", "/agent/agy", {"harness": "antigravity", "description": "Antigravity"})
+        # 6d. Google's harness next to Claude Code's and Codex's: built-in agy + custom agent on Antigravity
+        agy_bi = req(HOME_PORT, "GET", "/agent/agy")
+        check("built-in agy: Antigravity with its own model pick", agy_bi["harness"] == "antigravity" and agy_bi["model"] is None and agy_bi["builtin"] and agy_bi["customizable"] == ["description", "model"], agy_bi)
+        agy = req(HOME_PORT, "PUT", "/agent/agy-custom", {"harness": "antigravity", "description": "Antigravity"})
         check("an agent can run on Antigravity", agy["harness"] == "antigravity" and agy["customizable"] == ["description", "model"], (agy.get("harness"), agy.get("customizable")))
         mbh = agy["models_by_harness"]
         check("Gemini CLI is no longer a harness", "gemini" not in mbh and set(mbh) == {"root", "claude", "opencode", "codex", "antigravity"}, list(mbh))
@@ -257,13 +261,13 @@ def main():
         if shutil.which("agy"):
             check("…merged with what `agy models` lists (agy on this tree's PATH)", len(am) > 6 or all(not al[m].endswith("needs GEMINI_API_KEY") for m in am), am)
         try:
-            req(HOME_PORT, "PUT", "/agent/agy", {"harness": "gemini"})
+            req(HOME_PORT, "PUT", "/agent/agy-custom", {"harness": "gemini"})
             check("an agent cannot be put on Gemini CLI", False, "accepted")
         except urllib.error.HTTPError as e:
             check("an agent cannot be put on Gemini CLI", e.code == 400, e.code)
-        req(HOME_PORT, "PUT", "/agent/agy", {"model": "gemini-4-hydrogen"})
-        check("an Antigravity agent takes a model of its list", req(HOME_PORT, "GET", "/agent/agy")["model"] == "gemini-4-hydrogen")
-        req(HOME_PORT, "DELETE", "/agent/agy")
+        req(HOME_PORT, "PUT", "/agent/agy-custom", {"model": "gemini-4-hydrogen"})
+        check("an Antigravity agent takes a model of its list", req(HOME_PORT, "GET", "/agent/agy-custom")["model"] == "gemini-4-hydrogen")
+        req(HOME_PORT, "DELETE", "/agent/agy-custom")
         old = req(HOME_PORT, "GET", "/agent/gem-old")
         check("an agent saved on Gemini CLI loads on Antigravity (its model dropped: agy does not run it)", old["harness"] == "antigravity" and old["model"] is None, (old.get("harness"), old.get("model")))
         olds = req(HOME_PORT, "GET", "/session/ses_gemold")
@@ -274,11 +278,12 @@ def main():
             check("the coordinator's tools are locked", False, "accepted")
         except urllib.error.HTTPError as e:
             check("the coordinator's tools are locked", e.code == 400, e.code)
-        try:
-            req(HOME_PORT, "DELETE", "/agent/AGI")
-            check("built-in agents cannot be deleted", False, "accepted")
-        except urllib.error.HTTPError as e:
-            check("built-in agents cannot be deleted", e.code == 400, e.code)
+        for bi in ("claude", "agy", "AGI"):
+            try:
+                req(HOME_PORT, "DELETE", f"/agent/{bi}")
+                check(f"built-in agent {bi} cannot be deleted", False, "accepted")
+            except urllib.error.HTTPError as e:
+                check(f"built-in agent {bi} cannot be deleted", e.code == 400, e.code)
         req(HOME_PORT, "DELETE", "/agent/reader")
         check("a made agent can be deleted", "reader" not in [x["name"] for x in req(HOME_PORT, "GET", "/agent")])
 

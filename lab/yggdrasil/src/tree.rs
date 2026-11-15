@@ -276,7 +276,7 @@ async fn run_remote(st: &AppState, caller: &str, name: &str, input: &Value) -> O
     if name == "session_start" {
         let root = input["root"].as_str().filter(|r| !r.is_empty() && *r != me)?;
         let (title, brief) = (input["title"].as_str().unwrap_or("work"), input["brief"].as_str().unwrap_or_default());
-        let profile = input["agent"].as_str().or(input["profile"].as_str()).unwrap_or("build");
+        let profile = crate::profiles::Profiles::resolve(input["agent"].as_str().or(input["profile"].as_str()).unwrap_or("build").trim());
         if brief.trim().is_empty() {
             return Some(err("brief required".into()));
         }
@@ -386,14 +386,15 @@ fn unique_title(sessions: &HashMap<String, Session>, want: &str) -> String {
 
 fn start(st: &AppState, caller: &str, input: &Value) -> Out {
     let Some(brief) = input["brief"].as_str().filter(|b| !b.trim().is_empty()) else { return err("brief required".into()) };
-    let profile = input["agent"].as_str().or(input["profile"].as_str()).unwrap_or("build").trim().to_string();
-    if profile == "coordinator" {
-        return err("there is one coordinator; pick another agent".into());
-    }
-    if crate::agent(st, &profile).is_none() {
+    let raw = input["agent"].as_str().or(input["profile"].as_str()).unwrap_or("build").trim();
+    let Some(prof) = crate::agent(st, raw) else {
         let agents = st.config.profiles.read().unwrap();
         let known: Vec<&str> = agents.by_name.keys().map(String::as_str).filter(|n| *n != "coordinator").collect();
-        return err(format!("unknown agent {profile:?}; known: {}", known.join(", ")));
+        return err(format!("unknown agent {raw:?}; known: {}", known.join(", ")));
+    };
+    let profile = prof.name;
+    if profile == "coordinator" {
+        return err("there is one coordinator; pick another agent".into());
     }
     let title = {
         let sessions = st.sessions.lock().unwrap();

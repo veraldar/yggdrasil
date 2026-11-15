@@ -17,7 +17,7 @@
 //! into its simple commands (`;` `&&` `||` `|` `&` newlines) and EVERY one must be allowed;
 //! substitutions (`$(`, backticks, `<(`, `>(`) fail closed unless a `*` rule allows bash.
 //!
-//! The built-in agents (coordinator · lead · build · research · review · AGI) are always present; a
+//! The built-in agents (coordinator · lead · build · fix · research · review · claude · agy) are always present; a
 //! `YGG_PROFILES` file overrides fields of built-ins and adds profiles of its own.
 
 use std::collections::BTreeMap;
@@ -84,7 +84,8 @@ task, `fix` for something broken (a bug, an error, a failing test: it reproduces
 proves the fix), `research` for reading/comparing/answering with sources, `review` for analysis, review or audit that must \
 not change anything (it writes only its report), `lead` for a project with two or more parts (an API and a dashboard, a CLI and a \
 server) or one the user wants looped until it passes (\"keep going till all pass\") — `build` is for one \
-concrete piece, and `AGI` (Claude Code on Opus) for the hardest code or when the user asks for it. ONE request = ONE session under you: never split \
+concrete piece, `claude` (Claude Code on Opus) for the hardest code or when the user asks for it, and `agy` \
+(Antigravity) when they want Antigravity. ONE request = ONE session under you: never split \
 one piece of work into several sessions yourself — a project with parts goes to one `lead`, which splits it below \
 itself, keeps it looping and reports the whole. A follow-up of the same kind goes to the session that did the \
 work; a different kind of work on the same project (research, a review, a new feature after a fix) gets its own \
@@ -100,7 +101,7 @@ sentences. Work the user asked for that finished, failed or is blocked ALWAYS ma
 the result is exactly what was expected. If a session asks a question you can answer from the conversation, \
 answer it with `session_send` yourself instead of bothering the user. Only when the reports hold nothing the user \
 asked for or must know (routine progress, a sub-step), reply exactly: (quiet)
-- When the user names an agent (\"use AGI\", \"with Claude Code\") start the session with exactly that agent.
+- When the user names an agent (\"use claude\", \"use agy\", \"with Claude Code\") start the session with exactly that agent.
 - When the user answers a question a session asked, `session_send` the answer to that session.
 - The user cancels or drops a topic: `session_close` (cancel=true if it is still running). Never close sessions \
 to tidy up — finished sessions stay in the tree. Status questions: answer from the [tree] cards; \
@@ -240,10 +241,11 @@ pub fn builtins() -> Vec<Profile> {
         build,
         fix,
         p("research", "reads, fetches and compares; answers with evidence", RESEARCH_PROMPT, 60, false, false, allow_all()),
-        // few agents (user 11-13: "too many agent types"; fix asked for 11-13); opencode / codex / antigravity stay a harness choice
+        // few agents (user 11-13: "too many agent types"; fix asked for 11-13); opencode / codex stay a harness choice
         // for agents you make in the editor
         review_profile(),
-        harness_profile("AGI", "claude", Some("opus"), "the strongest: Claude Code on Opus — hard, long, multi-file work"),
+        harness_profile("claude", "claude", Some("opus"), "Claude Code on Opus — hard, long, multi-file work"),
+        harness_profile("agy", "antigravity", None, "Google's Antigravity CLI — its own pick of model; choose another in the editor"),
     ]
 }
 
@@ -345,7 +347,7 @@ impl Profiles {
                 Ok(v) => {
                     Self::overlay(&mut by_name, &v);
                     raw = v.clone();
-                    if let Some(d) = v["default_agent"].as_str() {
+                    if let Some(d) = v["default_agent"].as_str().map(Self::resolve) {
                         // The coordinator is MAIN's profile, never a session default.
                         if d != "coordinator" {
                             default_agent = d.to_string();
@@ -365,11 +367,23 @@ impl Profiles {
         Profiles { by_name, default_agent, shared, path: path.filter(|p| !p.is_empty()).map(String::from), raw }
     }
 
+    /// Single alias for legacy agent names across lookup, overlay and edits.
+    pub fn resolve(name: &str) -> &str {
+        match name {
+            "AGI" => "claude",
+            other => other,
+        }
+    }
+
     fn overlay(by_name: &mut BTreeMap<String, Profile>, v: &Value) {
         let Some(agents) = v["agent"].as_object() else { return };
-        for (name, a) in agents {
+        for (raw_name, a) in agents {
+            let name = Self::resolve(raw_name);
+            if raw_name != name && agents.contains_key(name) {
+                continue;
+            }
             let base = by_name.get(name).cloned().unwrap_or_else(|| Profile {
-                name: name.clone(),
+                name: name.to_string(),
                 description: String::new(),
                 mode: "primary".into(),
                 prompt: BUILD_PROMPT.into(),
@@ -427,12 +441,12 @@ impl Profiles {
                     p.rules = r;
                 }
             }
-            by_name.insert(name.clone(), p);
+            by_name.insert(name.to_string(), p);
         }
     }
 
     pub fn get(&self, name: &str) -> Option<&Profile> {
-        self.by_name.get(name)
+        self.by_name.get(Self::resolve(name))
     }
 
     /// `GET /agent` shape (opencode): `[{name, mode, description}]`, plus our extras.
@@ -454,12 +468,13 @@ pub const TOOLS: &[&str] = ALL;
 
 impl Profiles {
     fn builtin(name: &str) -> bool {
+        let name = Self::resolve(name);
         builtins().iter().any(|p| p.name == name)
     }
 
     /// Everything the agent editor needs: what it is, what it runs on, what it may do.
     pub fn detail(&self, name: &str) -> Option<Value> {
-        let p = self.by_name.get(name)?;
+        let p = self.get(name)?;
         let root = p.harness.is_none();
         let tools: serde_json::Map<String, Value> = TOOLS.iter().map(|t| ((*t).to_string(), json!(root && p.declared_tools().contains(t)))).collect();
         let simple = p.rules.iter().all(|r| r.pattern == "*");
@@ -479,6 +494,7 @@ impl Profiles {
 
     /// Creates or edits an agent from a partial JSON body; persists. `Err` = what the user must fix.
     pub fn upsert(&mut self, name: &str, body: &Value) -> Result<(), String> {
+        let name = Self::resolve(name);
         let ok_name = !name.is_empty() && name.len() <= 40 && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
         if !ok_name {
             return Err("an agent name is letters, digits, - and _ (40 max)".into());
@@ -542,6 +558,7 @@ impl Profiles {
 
     /// Deletes an agent you made (built-ins are edited, never deleted).
     pub fn remove(&mut self, name: &str) -> Result<(), String> {
+        let name = Self::resolve(name);
         if Self::builtin(name) {
             return Err("built-in agents can be edited, not deleted".into());
         }
@@ -553,6 +570,10 @@ impl Profiles {
     }
 
     fn persist(&mut self, name: &str) -> Result<(), String> {
+        let name = Self::resolve(name);
+        if let Some(a) = self.raw["agent"].as_object_mut() {
+            a.retain(|k, _| k == name || Self::resolve(k) != name);
+        }
         let p = &self.by_name[name];
         let entry = &mut self.raw["agent"][name];
         if !entry.is_object() {
@@ -889,7 +910,10 @@ mod tests {
         let f = dir.join("agents.json");
         std::fs::write(&f, r#"{"keep":"me","agent":{}}"#).unwrap();
         let mut ps = Profiles::load(f.to_str());
-        assert_eq!(ps.detail("AGI").unwrap()["harness"], "claude");
+        assert_eq!(ps.detail("claude").unwrap()["harness"], "claude");
+        assert_eq!(ps.detail("AGI").unwrap()["name"], "claude", "AGI resolves to claude");
+        assert_eq!(ps.detail("agy").unwrap()["harness"], "antigravity");
+        assert_eq!(ps.detail("agy").unwrap()["model"], Value::Null);
         assert!(ps.upsert("coordinator", &json!({"tools": {"bash": true}})).is_err(), "the door stays read-only");
         assert!(ps.upsert("coordinator", &json!({"model": "glm-5.2"})).is_ok());
         ps.upsert("tester", &json!({"description": "runs tests", "tools": {"bash": true, "read": true}, "model": "glm-5.3", "variant": "low"})).unwrap();
@@ -909,8 +933,42 @@ mod tests {
         assert_eq!(again.get("coordinator").unwrap().model.as_deref(), Some("glm-5.2"));
         let raw: Value = serde_json::from_slice(&std::fs::read(&f).unwrap()).unwrap();
         assert_eq!(raw["keep"], "me", "unknown keys survive an edit");
-        assert!(ps.remove("AGI").is_err() && ps.remove("tester").is_ok());
+        assert!(ps.remove("claude").is_err() && ps.remove("agy").is_err() && ps.remove("AGI").is_err() && ps.remove("tester").is_ok());
         assert!(Profiles::load(f.to_str()).get("tester").is_none());
+    }
+
+    #[test]
+    fn builtins_include_claude_and_agy_and_agi_alias() {
+        let ps = Profiles::load(None);
+        let names: Vec<String> = ps.catalog().as_array().unwrap().iter().filter_map(|a| a["name"].as_str().map(String::from)).collect();
+        assert!(names.contains(&"claude".to_string()) && names.contains(&"agy".to_string()));
+        assert!(!names.contains(&"AGI".to_string()), "catalog never exposes legacy AGI");
+        assert_eq!(ps.by_name.values().filter(|p| p.harness.is_some()).count(), 2, "only claude and agy harness built-ins");
+        let cl = ps.get("claude").unwrap();
+        assert_eq!(cl.harness.as_deref(), Some("claude"));
+        assert_eq!(cl.model.as_deref(), Some("opus"));
+        let ag = ps.get("agy").unwrap();
+        assert_eq!(ag.harness.as_deref(), Some("antigravity"));
+        assert_eq!(ag.model, None);
+        assert_eq!(ps.get("AGI").unwrap().name, "claude");
+
+        // agents.json overriding/archiving "AGI" and naming it as default_agent resolves to claude
+        let dir = std::env::temp_dir().join(format!("ygg-agi-alias-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("agents.json");
+        std::fs::write(&f, r#"{"default_agent":"AGI","agent":{"AGI":{"model":"sonnet","mode":"archived"}}}"#).unwrap();
+        let mut ps = Profiles::load(f.to_str());
+        assert_eq!(ps.default_agent, "claude");
+        let resolved = ps.get("AGI").unwrap();
+        assert_eq!(resolved.name, "claude");
+        assert_eq!(resolved.model.as_deref(), Some("sonnet"));
+        assert_eq!(resolved.mode, "archived");
+        assert!(ps.catalog().as_array().unwrap().iter().all(|a| a["name"] != "AGI"));
+        ps.upsert("AGI", &json!({"model": "haiku"})).unwrap();
+        assert_eq!(ps.get("claude").unwrap().model.as_deref(), Some("haiku"));
+        let raw: Value = serde_json::from_slice(&std::fs::read(&f).unwrap()).unwrap();
+        assert!(raw["agent"].get("AGI").is_none() && raw["agent"]["claude"]["model"] == "haiku");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
