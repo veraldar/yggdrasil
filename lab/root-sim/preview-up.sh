@@ -15,7 +15,7 @@ ART="$HOME/Work/root-coord-pwa/artifacts" # lib/artifacts.ts: the worktree's ../
 
 # the running unit's environment (upstream key included) — reused as is, a few keys set
 # (systemd quotes values with spaces, e.g. YGG_ROOT_NOTE: split like a shell would)
-mapfile -t ENVV < <(systemctl --user show "$UNIT" -p Environment --value | python3 -c 'import shlex,sys; print("\n".join(shlex.split(sys.stdin.read())))' | grep -vE '^(YGG_MODELS|YGG_VISION_MODELS|YGG_ARTIFACTS_DIR|YGG_EXTENSIONS|YGG_HARNESS_LIVE|YGG_OPENCODE_XDG_DATA|YGG_OPENCODE_XDG_CONFIG)=')
+mapfile -t ENVV < <(systemctl --user show "$UNIT" -p Environment --value | python3 -c 'import shlex,sys; print("\n".join(shlex.split(sys.stdin.read())))' | grep -vE '^(YGG_MODELS|YGG_VISION_MODELS|YGG_ARTIFACTS_DIR|YGG_EXTENSIONS|YGG_HARNESS_LIVE|YGG_OPENCODE_XDG_DATA|YGG_OPENCODE_XDG_CONFIG|YGG_HARNESS_HELPER|YGG_HARNESS_HELPER_TOKEN)=')
 ENVV+=("YGG_MODELS=glm-5.3-flash,glm-5.3,glm-5.2" "YGG_VISION_MODELS=glm-5.3-flash" "YGG_ARTIFACTS_DIR=$ART")
 [ "${#ENVV[@]}" -gt 10 ] || { echo "no environment read from $UNIT"; exit 1; }
 
@@ -80,6 +80,11 @@ fi
 # in a terminal to $UI/harness-live.json: the brain never runs a turn on those (one writer at a time).
 PREVIEW=$NAME "$(dirname "$0")/cc-live-up.sh" || echo "cc-live: not started (the app's live view will say so)"
 ENVV+=("YGG_HARNESS_LIVE=$UI/harness-live.json")
+# …and the coordinator reaches them through it (sessions_find/read/send/start from=): its address + token
+case "$NAME" in preview) HPORT=4320 ;; ui) HPORT=4321 ;; *) HPORT= ;; esac
+if [ -n "$HPORT" ] && [ -s "$HOME/.cache/root-sim/cc-live.token" ]; then
+  ENVV+=("YGG_HARNESS_HELPER=http://127.0.0.1:$HPORT" "YGG_HARNESS_HELPER_TOKEN=$(cat "$HOME/.cache/root-sim/cc-live.token")")
+fi
 
 # the terminal's conversations, both ways (11-15, the preview you open only): the brain continues
 # them in the folders they run in (~/Work), and its opencode shares the owner's opencode data

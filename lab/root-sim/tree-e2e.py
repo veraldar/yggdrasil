@@ -15,11 +15,48 @@ on scratch ports, sandboxed, and walks the critical paths:
     tree-e2e.py [--bin PATH]     exit 0 = all green
 """
 import argparse
-import time, json, os, shutil, subprocess, sys, tempfile, time, urllib.request
+import time, json, os, shutil, subprocess, sys, tempfile, time, urllib.request, threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 YGG = os.path.join(HERE, "..", "yggdrasil")
-MOCK_PORT, HOME_PORT, LAB_PORT, LIB_PORT = 18197, 4187, 4188, 18310
+MOCK_PORT, HOME_PORT, LAB_PORT, LIB_PORT, HELPER_PORT = 18197, 4187, 4188, 18310, 18321
+
+# A fake live helper (cc-live): the owner's terminal sessions as the coordinator sees them
+HELPER = {"rows": [], "typed": [], "history": {}}
+
+
+class FakeHelper(BaseHTTPRequestHandler):
+    def log_message(self, *a):
+        pass
+
+    def _send(self, code, obj):
+        b = json.dumps(obj).encode()
+        self.send_response(code)
+        self.send_header("content-type", "application/json")
+        self.send_header("content-length", str(len(b)))
+        self.end_headers()
+        self.wfile.write(b)
+
+    def do_GET(self):
+        if self.headers.get("x-cc-live-token") != "helper-token":
+            return self._send(401, {"error": "token"})
+        parts = self.path.split("?")[0].strip("/").split("/")
+        if parts == ["harness"]:
+            return self._send(200, {"sessions": HELPER["rows"], "error": ""})
+        if len(parts) == 4 and parts[0] == "h" and parts[3] == "history":
+            return self._send(200, {"items": HELPER["history"].get(parts[2], []), "cursor": None})
+        self._send(404, {"error": "no such route"})
+
+    def do_POST(self):
+        if self.headers.get("x-cc-live-token") != "helper-token":
+            return self._send(401, {"error": "token"})
+        body = json.loads(self.rfile.read(int(self.headers.get("content-length") or 0)) or b"{}")
+        parts = self.path.strip("/").split("/")
+        if len(parts) == 4 and parts[0] == "h" and parts[3] == "input":
+            HELPER["typed"].append((parts[1], parts[2], body.get("text")))
+            return self._send(200, {"ok": True})
+        self._send(404, {"error": "no such route"})
 LIBRARIAN = os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(YGG))), "extensions", "librarian", "librarian.py")
 FAILS = []
 
@@ -72,6 +109,8 @@ def main():
     ap.add_argument("--bin", default=os.path.join(YGG, "target", "release", "yggdrasil"))
     a = ap.parse_args()
     tmp = tempfile.mkdtemp(prefix="tree-e2e-")
+    helper_srv = ThreadingHTTPServer(("127.0.0.1", HELPER_PORT), FakeHelper)
+    threading.Thread(target=helper_srv.serve_forever, daemon=True).start()
     units = ["tree-e2e-mock", "tree-e2e-home", "tree-e2e-lab", "tree-e2e-librarian"]
     try:
         unit(units[0], ["python3", os.path.join(YGG, "mock", "mock_upstream.py"), str(MOCK_PORT)], {})
@@ -94,7 +133,8 @@ def main():
                                         "model": {"id": "gemini-3.5-flash", "providerID": "gemini"},
                                         "harness": {"kind": "gemini", "id": "5a0c1f9e-2b7d-4c55-9e0a-7f3b2d1c4e5f"}}, "messages": []}, f)
             # home reads Claude Code's sessions from a scratch config dir (one fake terminal session)
-            extra = {"YGG_EXTENSIONS": f"librarian=http://127.0.0.1:{LIB_PORT}", "CLAUDE_CONFIG_DIR": os.path.join(tmp, "claude")} if name == "home" else {}
+            extra = {"YGG_EXTENSIONS": f"librarian=http://127.0.0.1:{LIB_PORT}", "CLAUDE_CONFIG_DIR": os.path.join(tmp, "claude"),
+                     "YGG_HARNESS_HELPER": f"http://127.0.0.1:{HELPER_PORT}", "YGG_HARNESS_HELPER_TOKEN": "helper-token"} if name == "home" else {}
             unit(f"tree-e2e-{name}", [a.bin], dict(base, YGG_LISTEN=f"127.0.0.1:{port}", YGG_DATA_DIR=os.path.join(d, "data"), YGG_PROFILES=os.path.join(d, "agents.json"),
                  YGG_PROJECT_DIR=os.path.join(d, "work"), YGG_ROOT_NAME=name, YGG_PEERS=f"{other}=http://127.0.0.1:{oport}", **extra))
         check("brains up", wait(lambda: req(HOME_PORT, "GET", "/root") and req(LAB_PORT, "GET", "/root"), 10))
@@ -247,6 +287,41 @@ def main():
         # the same conversation both ways (11-15): one bifrost session per conversation, whatever agent asks
         again = req(HOME_PORT, "POST", "/session", {"agent": "build", "harness": {"id": cc_id}, "cwd": cc_cwd})
         check("attach again: the same session (one per conversation)", again["id"] == att["id"], (again.get("id"), att.get("id")))
+
+        # 6c'. the owner's terminal sessions, as the coordinator sees them (11-15): one typable in
+        # tmux, one open in a plain terminal, one (the fake Claude Code conversation above) not open
+        tm_id, ag_id = "6a5b4c3d-2e1f-4a0b-9c8d-7e6f5a4b3c2d", "1b2c3d4e-5f6a-4b7c-8d9e-0f1a2b3c4d5e"
+        HELPER["rows"] = [
+            {"kind": "claude", "id": tm_id, "cwd": cc_cwd, "title": "refactor the parser", "modified": int(time.time() * 1000), "live": "tmux", "canType": True},
+            {"kind": "antigravity", "id": ag_id, "cwd": cc_cwd, "title": "dashboard colours", "modified": int(time.time() * 1000), "live": "cmd", "canType": False},
+            {"kind": "claude", "id": cc_id, "cwd": cc_cwd, "title": "remember the word walrus; reply ok", "modified": int(time.time() * 1000), "live": None, "canType": False},
+        ]
+        HELPER["history"][ag_id] = [{"k": "user", "id": "u0", "t": 1, "text": "make the dashboard blue"},
+                                    {"k": "tool", "id": "c1.0", "t": 2, "name": "edit_file", "title": "edit_file · theme.css"},
+                                    {"k": "assistant", "id": "a2", "t": 3, "text": "Done: the dashboard is blue now (theme.css)."}]
+        def tool_out(r):
+            return [p for p in r["parts"] if p["type"] == "tool"][0]["state"]["output"]
+        out = tool_out(say(tool([["sessions_find", {"query": "my terminal sessions"}]])))
+        check("sessions_find lists the owner's terminal sessions (term: ids, who has them open)",
+              f"term:claude:{tm_id}" in out and f"term:antigravity:{ag_id}" in out and "you can type" in out and "only they can type" in out, out)
+        out = tool_out(say(tool([["session_read", {"id": f"term:antigravity:{ag_id}"}]])))
+        check("session_read reads a terminal session's conversation", "make the dashboard blue" in out and "theme.css" in out and "dashboard is blue" in out, out)
+        out = tool_out(say(tool([["session_send", {"id": f"term:claude:{tm_id}", "message": "also run the tests"}]])))
+        check("session_send types into one open in tmux (both ways)", out.startswith("TYPED") and HELPER["typed"] == [("claude", tm_id, "also run the tests")], (out, HELPER["typed"]))
+        out = tool_out(say(tool([["session_send", {"id": f"term:antigravity:{ag_id}", "message": "make it green"}]])))
+        check("…one open in a plain terminal: said plainly, a copy offered", "only they can type" in out and f"from=term:antigravity:{ag_id}" in out and len(HELPER["typed"]) == 1, out)
+        out = tool_out(say(tool([["session_send", {"id": f"term:claude:{cc_id}", "message": "Reply with exactly: TERM-OK"}]])))
+        check("…one not open anywhere continues here: THE session on that conversation", out.startswith("SENT") and f"id={att['id']}" in out, out)
+        out = tool_out(say(tool([["session_start", {"title": "walrus copy", "agent": "build", "brief": "Reply with exactly: COPY-OK", "from": f"term:claude:{cc_id}"}]])))
+        copy = next((r for r in req(HOME_PORT, "GET", "/tree") if r["title"].startswith("walrus copy")), None)
+        cinfo = req(HOME_PORT, "GET", f"/session/{copy['id']}") if copy else {}
+        check("session_start from=term:… starts a copy under MAIN (fork; the original untouched)",
+              out.startswith("STARTED") and copy and copy["parentID"] == main_id and cinfo.get("harness", {}).get("fork") is True
+              and cinfo["harness"].get("origin") == cc_id, (out, copy, cinfo.get("harness")))
+        HELPER["rows"][2]["live"] = "cmd"
+        out = tool_out(say(tool([["session_send", {"id": att["id"], "message": "hi"}]])))
+        check("a session here whose conversation is open in a plain terminal: not sent, said plainly", "only they can type" in out, out)
+        HELPER["rows"][2]["live"] = None
 
         # 6d. Google's harness next to Claude Code's and Codex's: built-in agy + custom agent on Antigravity
         agy_bi = req(HOME_PORT, "GET", "/agent/agy")

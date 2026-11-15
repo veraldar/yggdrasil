@@ -38,9 +38,12 @@ conversations (running or not), so the phone sees and continues them and the ter
                                       modified, live: "bg" | "cmd" | "here" | null, canType, short}
   GET  /h/<kind>/<id>/history         as /s/… for any kind (kind: claude | antigravity | opencode)
   GET  /h/<kind>/<id>/stream          SSE: hello, history, items, status {live, …}
-`live`: "cmd" open in a terminal (watch only here: one writer at a time), "bg" a Claude Code
+`live`: "cmd" open in a terminal (watch only here: one writer at a time), "tmux" open in a
+terminal inside tmux (typed into from here too, through tmux — both ways), "bg" a Claude Code
 background session (typed into through its PTY), "here" the brain is running a turn on it right
-now, null not open anywhere (the phone continues it through the brain). What is open in a
+now, null not open anywhere (the phone continues it through the brain).
+  POST /h/<kind>/<id>/input {text} · key {key} · answer {n, label}   type into a tmux or
+                                      background session (as /s/… for Claude Code) What is open in a
 terminal is written to --live-file every 2 s for the brain, which never runs a turn on those.
 The agy and opencode conversations are read by harness_agy.py / harness_opencode.py (read only).
 
@@ -57,6 +60,7 @@ import pty
 import queue
 import re
 import secrets
+import shutil
 import signal
 import struct
 import subprocess
@@ -237,9 +241,85 @@ def where(pid):
         return "cmd"
 
 
+TMUX = shutil.which("tmux") or "tmux"
+
+
+def _ppid(pid):
+    try:
+        with open(f"/proc/{pid}/stat") as f:
+            return int(f.read().rsplit(")", 1)[1].split()[1])
+    except (OSError, IndexError, ValueError):
+        return 0
+
+
+def tmux_panes():
+    """pane's process → pane id, for every tmux pane on the box ({} without a tmux server)."""
+    try:
+        out = subprocess.run([TMUX, "list-panes", "-a", "-F", "#{pane_pid} #{pane_id}"], capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.TimeoutExpired):
+        return {}
+    panes = {}
+    for ln in out.stdout.splitlines():
+        a = ln.split()
+        if len(a) == 2 and a[0].isdigit():
+            panes[int(a[0])] = a[1]
+    return panes
+
+
+def pane_of(pid, panes):
+    """The tmux pane a process runs in (it, or one of its parents, is the pane's process)."""
+    p = int(pid or 0)
+    for _ in range(16):
+        if p <= 1:
+            return None
+        if p in panes:
+            return panes[p]
+        p = _ppid(p)
+    return None
+
+
+class TmuxTerm:
+    """A session open in a tmux pane: typed into with tmux itself, so the owner's terminal shows
+    every key as it lands (both ways). Same face as Term for the routes: lines, write, ready."""
+    NAMES = {b"\x1b": "Escape", b"\r": "Enter", b"\x1b[A": "Up", b"\x1b[B": "Down", b"\t": "Tab", b"\x1b[Z": "BTab"}
+
+    def __init__(self, pane):
+        self.pane = pane
+        self.short = pane
+        self.used = time.time()
+
+    def _tmux(self, *a, data=None):
+        subprocess.run([TMUX, *a], input=data, capture_output=True, timeout=10)
+
+    def ready(self, timeout=0):
+        return True
+
+    def lines(self):
+        try:
+            out = subprocess.run([TMUX, "capture-pane", "-p", "-t", self.pane], capture_output=True, text=True, timeout=10)
+        except (OSError, subprocess.TimeoutExpired):
+            return []
+        return out.stdout.rstrip("\n").split("\n") if out.returncode == 0 else []
+
+    def write(self, b):
+        name = self.NAMES.get(b)
+        if name:
+            self._tmux("send-keys", "-t", self.pane, name)
+        else:
+            self._tmux("send-keys", "-t", self.pane, "-l", "--", b.decode(errors="replace"))
+
+    def type(self, text):
+        # a paste (bracketed when the program asked for it): newlines stay in the message
+        self._tmux("load-buffer", "-b", "cclive", "-", data=text.encode())
+        self._tmux("paste-buffer", "-p", "-d", "-b", "cclive", "-t", self.pane)
+        time.sleep(0.3)
+        self._tmux("send-keys", "-t", self.pane, "Enter")
+
+
 def live_all():
-    """Every conversation open right now: {"<kind>:<id>": {how, pid, cwd}}."""
+    """Every conversation open right now: {"<kind>:<id>": {how, pid, cwd, pane?}}."""
     out = {}
+    panes = tmux_panes()
     for r in AGENTS.list():
         bg = r.get("kind") == "background"
         out[f"claude:{r['sessionId']}"] = {"how": "bg" if bg else where(r.get("pid")), "pid": r.get("pid"), "cwd": r.get("cwd", "")}
@@ -249,7 +329,23 @@ def live_all():
                 out[f"{kind}:{sid}"] = {"how": where(v.get("pid")), "pid": v.get("pid"), "cwd": v.get("cwd", "")}
         except Exception as e:  # a reader's bug never takes the helper down
             log(f"{kind} live(): {e!r}")
+    for e in out.values():  # in a tmux pane: typed into from the phone too
+        pane = pane_of(e.get("pid"), panes) if e["how"] == "cmd" and panes else None
+        if pane:
+            e["how"], e["pane"] = "tmux", pane
     return out
+
+
+def can_type(kind, sid, e=None):
+    e = e if e is not None else LIVE.get().get(f"{kind}:{sid}")
+    if not e:
+        return False
+    if e["how"] == "tmux":
+        return True
+    if e["how"] == "bg" and kind == "claude":
+        r = AGENTS.get(sid)
+        return bool(r and SHORT.match(str(r.get("id", ""))))
+    return False
 
 
 class Live:
@@ -309,7 +405,7 @@ def harness_list(n=20):
     for r in rows:
         e = live.get(f"{r['kind']}:{r['id']}")
         r["live"] = e["how"] if e else None
-        r["canType"] = r["live"] == "bg" and bool(SHORT.match(shorts.get(r["id"], "")))
+        r["canType"] = bool(e) and (e["how"] == "tmux" or (e["how"] == "bg" and bool(SHORT.match(shorts.get(r["id"], "")))))
         r["short"] = shorts.get(r["id"], "")
     rows.sort(key=lambda r: (r["live"] is None, -int(r.get("modified") or 0)))
     return rows
@@ -322,7 +418,7 @@ def public(r):
     return {"sessionId": sid, "short": r.get("id", ""), "name": r.get("name", ""), "kind": r.get("kind", ""),
             "status": r.get("status", ""), "state": r.get("state", ""), "cwd": r.get("cwd", ""),
             "startedAt": r.get("startedAt", 0), "title": title_of(p) if p else "", "canType": bg,
-            "transcript": bool(p), "harness": "claude", "live": live_of("claude", sid)}
+            "transcript": bool(p), "harness": "claude", "live": live_of("claude", sid)} | ({"canType": True} if live_of("claude", sid) == "tmux" else {})
 
 
 def live_of(kind, sid):
@@ -562,6 +658,8 @@ CTRL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
 
 def type_text(t, text):
     text = CTRL.sub("", text.replace("\r\n", "\n").replace("\r", "\n")).strip("\n")
+    if isinstance(t, TmuxTerm):
+        return t.type(text)
     if "\n" in text:  # bracketed paste: newlines stay in the message instead of sending it
         t.write(b"\x1b[200~" + text.encode() + b"\x1b[201~")
     else:
@@ -679,26 +777,40 @@ class H(BaseHTTPRequestHandler):
         if not self._auth():
             return
         u, parts = self._route()
-        if len(parts) < 3 or parts[0] != "s":
+        if len(parts) >= 4 and parts[0] == "h":
+            kind, sid, act = parts[1], parts[2], "/".join(parts[3:])
+        elif len(parts) >= 3 and parts[0] == "s":
+            kind, sid, act = "claude", parts[1], "/".join(parts[2:])
+        else:
             return self._send(404, {"error": "no such route"})
+        if kind not in ("claude", *READERS) or not re.match(r"^[A-Za-z0-9_-]{1,80}$", sid):
+            return self._send(404, {"error": "no such session"})
         body = self._body()
         if body is None or not isinstance(body, dict):
             return self._send(400, {"error": "a JSON object, please"})
-        r = self._session(parts[1], fresh=0.5)
-        if r is None:
-            return
-        if r.get("kind") != "background" or not SHORT.match(str(r.get("id", ""))):
-            return self._send(403, {"error": "this is a terminal's own Claude Code session (interactive): watch only — it can't be attached, so nothing can be typed into it from here"})
-        act = "/".join(parts[2:])
-        t = TERMS.get(r)
-        if not t.ready():
-            return self._send(503, {"error": "the session's screen did not come up (claude attach)"})
+        e = LIVE.get(0.5).get(f"{kind}:{sid}")
+        if e and e["how"] == "tmux":
+            t = TmuxTerm(e["pane"])  # open in a terminal inside tmux: both ways
+        elif kind == "claude" and e and e["how"] == "bg":
+            r = self._session(sid, fresh=0.5)
+            if r is None:
+                return
+            if not SHORT.match(str(r.get("id", ""))):
+                return self._send(403, {"error": "this background session has no short id to attach to"})
+            t = TERMS.get(r)
+            if not t.ready():
+                return self._send(503, {"error": "the session's screen did not come up (claude attach)"})
+        else:
+            return self._send(403, {"error": "open in a terminal (not inside tmux): watch only here — type there, or continue it in a new session"
+                                    if e else "not open anywhere: continue it here through bifrost"})
+        if act in ("term", "term/size") and not isinstance(t, Term):
+            return self._send(404, {"error": "the raw terminal is for background sessions"})
         t.used = time.time()
         if act == "input":
             text = body.get("text")
             if not isinstance(text, str) or not text.strip() or len(text) > 20000:
                 return self._send(400, {"error": "text: 1–20000 characters"})
-            pr = parse_prompt(t.lines())
+            pr = parse_prompt(t.lines()) if kind == "claude" else None
             if pr:
                 return self._send(409, {"error": "the session is asking something — answer it first", "prompt": pr})
             type_text(t, text)
@@ -800,6 +912,10 @@ class H(BaseHTTPRequestHandler):
                             moved = m["sessionId"] if m else None
                         if moved:
                             st["moved"] = moved
+                    e = LIVE.get().get(f"claude:{sid}")
+                    st["canType"] = can_type("claude", sid, e)
+                    if e and e["how"] == "tmux":  # its permission prompts, read off the tmux screen
+                        st["prompt"] = parse_prompt(TmuxTerm(e["pane"]).lines())
                     if st != last_status:
                         self._ev("status", st)
                         last_status = st
@@ -834,7 +950,7 @@ class H(BaseHTTPRequestHandler):
         try:
             how = live_of(kind, sid)
             self._ev("hello", {"sessionId": sid, "short": "", "name": kind, "kind": "", "cwd": meta.get("cwd", ""),
-                               "title": meta.get("title", ""), "canType": False, "harness": kind, "live": how})
+                               "title": meta.get("title", ""), "canType": can_type(kind, sid), "harness": kind, "live": how})
             tail = mod.Tail(sid)
             pg = mod.page(sid, want=limit)
             self._ev("history", {"items": pg["items"], "cursor": pg["cursor"]})
@@ -847,7 +963,7 @@ class H(BaseHTTPRequestHandler):
                 now = time.time()
                 if now - t_status > 1.5:
                     t_status = now
-                    st = {"gone": False, "live": live_of(kind, sid)}
+                    st = {"gone": False, "live": live_of(kind, sid), "canType": can_type(kind, sid)}
                     if st != last:
                         self._ev("status", st)
                         last = st

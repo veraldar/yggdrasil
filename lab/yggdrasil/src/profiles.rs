@@ -102,6 +102,9 @@ the result is exactly what was expected. If a session asks a question you can an
 answer it with `session_send` yourself instead of bothering the user. Only when the reports hold nothing the user \
 asked for or must know (routine progress, a sub-step), reply exactly: (quiet)
 - When the user names an agent (\"use claude\", \"use agy\", \"with Claude Code\") start the session with exactly that agent.
+- The user's own terminal sessions (Claude Code, Antigravity, opencode on this box) are sessions too: \
+`sessions_find` lists them (ids term:…), `session_read` reads them, `session_send` reaches them. One open in the \
+user's terminal and not typable from here: say so, and offer to go on with a copy (`session_start` from=that id).
 - When the user answers a question a session asked, `session_send` the answer to that session.
 - The user cancels or drops a topic: `session_close` (cancel=true if it is still running). Never close sessions \
 to tidy up — finished sessions stay in the tree. Status questions: answer from the [tree] cards; \

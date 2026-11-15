@@ -14,6 +14,11 @@
 //! that is open in a terminal right now (main.rs `live_in_terminal`). The harness's own permission
 //! guard stays on (`--permission-mode auto` for Claude Code, agy's own review for Antigravity;
 //! never a skip-permissions flag).
+//!
+//! A FORK ("continue in a new session", 11-15) is for a conversation that is open in a terminal
+//! right now: its first turn copies it (`--resume <id> --fork-session`, opencode `--session <id>
+//! --fork`; agy has no fork — a new conversation that opens with the earlier one, main.rs), the
+//! terminal's conversation is never written, later turns resume the copy.
 
 use std::{path::Path, process::Stdio};
 
@@ -35,6 +40,8 @@ pub enum Kind {
 pub struct Attach {
     /// the conversation came from a terminal: its permission guard stays on
     pub guarded: bool,
+    /// the first turn of a copy: branch off into a new conversation, never write the original
+    pub fork: bool,
 }
 
 impl Kind {
@@ -75,6 +82,9 @@ impl Kind {
                 }
                 if let Some(r) = resume {
                     push(&["--resume", r]);
+                    if attach.fork {
+                        push(&["--fork-session"]);
+                    }
                 }
                 // the agent's own instructions ride on top of Claude Code's (the editor's prompt)
                 if let Some(sys) = system.filter(|s| !s.trim().is_empty()) {
@@ -89,6 +99,9 @@ impl Kind {
                 }
                 if let Some(r) = resume {
                     push(&["--session", r]);
+                    if attach.fork {
+                        push(&["--fork"]);
+                    }
                 }
                 push(&["--", prompt]);
                 (a, false)
@@ -716,7 +729,7 @@ mod tests {
     #[test]
     fn attached_turns_continue_the_same_conversation_with_the_guard_on() {
         let t = "3f2a9c1e-0b4d-4e8f-9a6b-1c2d3e4f5a6b";
-        let g = Attach { guarded: true };
+        let g = Attach { guarded: true, fork: false };
         let (a, stdin) = Kind::Claude.argv(Some("opus"), Some(t), Path::new("/w"), "p", None, g);
         assert!(stdin && pair(&a, "--resume", t), "{a:?}");
         assert!(!a.iter().any(|x| x.contains("fork")), "the same conversation both ways, never a fork: {a:?}");
@@ -725,6 +738,17 @@ mod tests {
         assert!(pair(&a, "--conversation", t) && !a.iter().any(|x| x.contains("dangerously")), "agy's own review decides: {a:?}");
         let (a, _) = Kind::Opencode.argv(None, Some("ses_1"), Path::new("/w"), "p", None, g);
         assert!(pair(&a, "--session", "ses_1") && !a.iter().any(|x| x.contains("fork") || x == "--auto"), "{a:?}");
+    }
+
+    #[test]
+    fn a_copy_branches_off_and_never_writes_the_original() {
+        let t = "3f2a9c1e-0b4d-4e8f-9a6b-1c2d3e4f5a6b";
+        let f = Attach { guarded: true, fork: true };
+        let (a, _) = Kind::Claude.argv(None, Some(t), Path::new("/w"), "p", None, f);
+        assert!(pair(&a, "--resume", t) && a.contains(&"--fork-session".to_string()) && pair(&a, "--permission-mode", "auto"), "{a:?}");
+        let (a, _) = Kind::Opencode.argv(None, Some("ses_1"), Path::new("/w"), "p", None, f);
+        let i = a.iter().position(|x| x == "--fork").expect("opencode --fork");
+        assert!(pair(&a, "--session", "ses_1") && i < a.iter().position(|x| x == "--").unwrap(), "{a:?}");
     }
 
     #[test]

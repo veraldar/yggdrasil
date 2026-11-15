@@ -828,9 +828,42 @@ async fn create_session(State(st): State<AppState>, body: Option<Json<Value>>) -
 /// bifrost session per conversation — asking again returns the one that exists. It runs on that
 /// harness whatever its agent (default: the built-in one for it — claude, agy — else the default).
 fn attach_harness(st: &AppState, body: &Value) -> Response {
-    let id = body["harness"]["id"].as_str().unwrap_or_default().trim().to_string();
-    let Some(kind) = harness::Kind::parse(body["harness"]["kind"].as_str().unwrap_or("claude")) else {
-        return bad_request("harness.kind: claude, opencode or antigravity");
+    let kind = body["harness"]["kind"].as_str().unwrap_or("claude");
+    let id = body["harness"]["id"].as_str().unwrap_or_default();
+    let cwd = body["cwd"].as_str().unwrap_or_default();
+    let opts = AttachOpts {
+        parent: body["parentID"].as_str().map(String::from),
+        agent: body["agent"].as_str().map(String::from),
+        title: body["title"].as_str().map(String::from),
+        model: body["model"].as_str().or(body["model"]["id"].as_str()).map(String::from),
+        fork: body["fork"] == true,
+    };
+    match attach_conversation(st, kind, id, cwd, opts) {
+        Ok(info) => Json(info).into_response(),
+        Err(e) => bad_request(&e),
+    }
+}
+
+/// How a terminal's conversation comes into the tree (`attach_conversation`).
+#[derive(Default)]
+pub(crate) struct AttachOpts {
+    pub parent: Option<String>,
+    pub agent: Option<String>,
+    pub title: Option<String>,
+    pub model: Option<String>,
+    /// a copy ("continue in a new session"): its first turn branches off; the original — open in
+    /// a terminal, say — is never written. One copy per conversation and parent: asking again
+    /// returns it.
+    pub fork: bool,
+}
+
+/// The bifrost session on a terminal's conversation (`kind`: claude, opencode or antigravity):
+/// THE one for that conversation (made once), or a copy of it (`fork`). The phone's attach and
+/// the coordinator's tools (tree.rs) both come through here. Errors are said plainly.
+pub(crate) fn attach_conversation(st: &AppState, kind: &str, id: &str, cwd: &str, o: AttachOpts) -> Result<Value, String> {
+    let id = id.trim().to_string();
+    let Some(kind) = harness::Kind::parse(kind) else {
+        return Err("harness.kind: claude, opencode or antigravity".into());
     };
     let what = harness_label(kind);
     let id_ok = match kind {
@@ -838,65 +871,72 @@ fn attach_harness(st: &AppState, body: &Value) -> Response {
         _ => harness::claude::is_uuid(&id),
     };
     if !id_ok {
-        return bad_request(&format!("{id:?} is not a {what} conversation id"));
+        return Err(format!("{id:?} is not a {what} conversation id"));
     }
-    let Some(raw) = body["cwd"].as_str().map(str::trim).filter(|c| !c.is_empty()) else {
-        return bad_request(&format!("cwd required: the folder the {what} conversation was started in"));
-    };
+    let raw = cwd.trim();
+    if raw.is_empty() {
+        return Err(format!("cwd required: the folder the {what} conversation was started in"));
+    }
     let cwd = match raw.trim_end_matches('/') {
         "" => "/",
         c => c,
     };
     if !std::path::Path::new(cwd).is_absolute() || !std::path::Path::new(cwd).is_dir() {
-        return bad_request(&format!("folder {cwd} does not exist on this root — the {what} conversation runs in the folder it was started in"));
+        return Err(format!("folder {cwd} does not exist on this root — the {what} conversation runs in the folder it was started in"));
     }
-    let mut title = body["title"].as_str().map(str::trim).filter(|t| !t.is_empty()).map(String::from);
+    let mut title = o.title.as_deref().map(str::trim).filter(|t| !t.is_empty()).map(String::from);
     if kind == harness::Kind::Claude {
         let path = harness::claude::transcript(cwd, &id);
         if !path.is_file() {
-            return bad_request(&format!("no Claude Code session {id} was started in {cwd} (looked for {})", path.display()));
+            return Err(format!("no Claude Code session {id} was started in {cwd} (looked for {})", path.display()));
         }
         title = title.or_else(|| harness::claude::meta(&path).and_then(|m| m["title"].as_str().map(String::from)));
     }
-    // already here: the one bifrost session for this conversation
+    // already here: the one bifrost session for this conversation (or this parent's copy of it)
     let existing = st.sessions.lock().unwrap().values().find_map(|s| {
         let h = &s.info["harness"];
-        let same = h["kind"] == kind.name() && (h["id"] == id.as_str() || h["origin"] == id.as_str());
+        let same = h["kind"] == kind.name()
+            && if o.fork {
+                h["fork"] == true && (h["origin"] == id.as_str() || (h["id"] == id.as_str() && h["forked"] != true))
+                    && s.info["parentID"].as_str() == o.parent.as_deref()
+            } else {
+                h["id"] == id.as_str() && h["fork"] != true && h["forked"] != true
+            };
         (same && s.info["archived"] != true).then(|| s.info.clone())
     });
     if let Some(info) = existing {
-        return Json(info).into_response();
+        return Ok(info);
     }
     // the session runs on the conversation's harness whatever its agent (run_turn): the agent
     // built for that harness when there is one (claude · agy), else the default agent
-    let agent_name = match body["agent"].as_str() {
-        Some(a) => a.to_string(),
+    let agent_name = match o.agent {
+        Some(a) => a,
         None => harness_agent(st, kind).unwrap_or_else(|| st.config.profiles.read().unwrap().default_agent.clone()),
     };
     let Some(profile) = agent(st, &agent_name) else {
-        return bad_request(&format!("unknown agent {agent_name}"));
+        return Err(format!("unknown agent {agent_name}"));
     };
     let on_kind = profile.harness.as_deref().and_then(harness::Kind::parse) == Some(kind);
     let title = title.unwrap_or_else(|| format!("{what} session"));
-    let title = format!("{} · {what}", title.chars().take(40).collect::<String>().trim_end());
-    let model = body["model"].as_str().or(body["model"]["id"].as_str());
-    let info = new_session(st, &title, body["parentID"].as_str(), Some(&agent_name), model, None);
+    let title = format!("{} · {what}{}", title.chars().take(40).collect::<String>().trim_end(), if o.fork { " (new)" } else { "" });
+    let info = new_session(st, &title, o.parent.as_deref(), Some(&agent_name), o.model.as_deref(), None);
     let sid = info["id"].as_str().unwrap_or_default().to_string();
-    match with_session(st, &sid, |s| {
-        s.info["harness"] = json!({ "kind": kind.name(), "id": id, "attached": true });
+    let info = with_session(st, &sid, |s| {
+        s.info["harness"] = if o.fork {
+            json!({ "kind": kind.name(), "id": id, "attached": true, "fork": true, "origin": id })
+        } else {
+            json!({ "kind": kind.name(), "id": id, "attached": true })
+        };
         s.info["cwd"] = json!(cwd);
         // an agent made for another engine: the harness's own pick of model, never the agent's
-        if !on_kind && model.is_none() {
+        if !on_kind && o.model.is_none() {
             s.info["model"] = json!({ "id": "default", "providerID": kind.name() });
         }
         s.info.clone()
-    }) {
-        Some(info) => {
-            publish(st, "session.updated", json!({ "info": info }));
-            Json(info).into_response()
-        }
-        None => not_found(&sid),
-    }
+    })
+    .ok_or_else(|| format!("session {sid} vanished"))?;
+    publish(st, "session.updated", json!({ "info": info }));
+    Ok(info)
 }
 
 fn harness_label(kind: harness::Kind) -> &'static str {
@@ -925,6 +965,50 @@ fn harness_agent(st: &AppState, kind: harness::Kind) -> Option<String> {
 /// (cc-live, unsandboxed: it sees the processes) writes what is open to `YGG_HARNESS_LIVE` every
 /// couple of seconds: `{at, live: {"<kind>:<id>": {how: "cmd"|"bg", pid}}}`. No file, or one older
 /// than 15 s (the helper is down): nothing is known to be open.
+/// agy has no fork: a copy of an Antigravity conversation is a new one that opens with what was
+/// said in the earlier one (its requests and replies, the newest kept when it is long), read
+/// from agy's own transcript (~/.gemini/antigravity-cli/brain/<id>/…/transcript.jsonl).
+fn agy_earlier(id: &str) -> String {
+    let home = std::env::var("HOME").unwrap_or_default();
+    let path = format!("{home}/.gemini/antigravity-cli/brain/{id}/.system_generated/logs/transcript.jsonl");
+    let Ok(raw) = std::fs::read_to_string(&path) else {
+        return String::new();
+    };
+    let mut said: Vec<String> = Vec::new();
+    for line in raw.lines() {
+        let Ok(e) = serde_json::from_str::<Value>(line) else { continue };
+        let text = e["content"].as_str().unwrap_or_default();
+        match e["type"].as_str() {
+            Some("USER_INPUT") => {
+                let t = text.split("<USER_REQUEST>").nth(1).and_then(|r| r.split("</USER_REQUEST>").next()).unwrap_or(text).trim();
+                if !t.is_empty() {
+                    said.push(format!("USER: {t}"));
+                }
+            }
+            Some("PLANNER_RESPONSE") if !text.trim().is_empty() => said.push(format!("YOU: {}", text.trim())),
+            _ => {}
+        }
+    }
+    if said.is_empty() {
+        return String::new();
+    }
+    // the newest ~24k characters of it
+    let mut kept: Vec<String> = Vec::new();
+    let mut n = 0;
+    for s in said.into_iter().rev() {
+        n += s.len();
+        if n > 24_000 && !kept.is_empty() {
+            break;
+        }
+        kept.push(s);
+    }
+    kept.reverse();
+    format!(
+        "<earlier_conversation>\nThis continues an earlier conversation of ours (Antigravity conversation {id}) in a new one. What was said there, oldest first:\n\n{}\n</earlier_conversation>\n\n",
+        kept.join("\n\n")
+    )
+}
+
 fn live_in_terminal(kind: harness::Kind, id: &str) -> Option<String> {
     let path = std::env::var("YGG_HARNESS_LIVE").ok().filter(|p| !p.is_empty())?;
     let v: Value = serde_json::from_slice(&std::fs::read(path).ok()?).ok()?;
@@ -2243,16 +2327,23 @@ async fn harness_loop(st: &AppState, id: &str, history: Vec<Value>, tx: &mpsc::S
         let resume = info["harness"]["id"].as_str().filter(|_| info["harness"]["kind"] == kind.name()).map(String::from);
         (model, resume, cwd, dir, info["harness"].clone())
     };
-    // a conversation continued from the terminal: the same one both ways, its guard on
+    // a conversation continued from the terminal: the same one both ways, its guard on — or a
+    // copy of it, whose first turn branches off (the original is never written)
     let attached = h["attached"] == true;
-    let attach = harness::Attach { guarded: attached };
+    let fork_now = attached && h["fork"] == true && h["forked"] != true;
+    let attach = harness::Attach { guarded: attached, fork: fork_now };
+    // agy has no fork: a new conversation that opens with the earlier one
+    let (resume, prompt) = match (fork_now && kind == harness::Kind::Antigravity, resume) {
+        (true, Some(orig)) => (None, format!("{}{prompt}", agy_earlier(&orig))),
+        (_, r) => (r, prompt),
+    };
     // one writer at a time: a conversation open in a terminal right now is typed into there
-    if let Some(how) = resume.as_deref().and_then(|r| live_in_terminal(kind, r)) {
+    if let Some(how) = resume.as_deref().filter(|_| !fork_now).and_then(|r| live_in_terminal(kind, r)) {
         let what = harness_label(kind);
         return Err(if how == "bg" {
             format!("this {what} conversation is running in the background — type into it from its live view")
         } else {
-            format!("this {what} conversation is open in a terminal right now — type there, or close it there and send again here")
+            format!("this {what} conversation is open in a terminal right now — type there (or from its live view, when it runs in tmux), close it there and send again here, or continue it in a new session")
         });
     }
     let cwd = match cwd {
@@ -2283,6 +2374,9 @@ async fn harness_loop(st: &AppState, id: &str, history: Vec<Value>, tx: &mpsc::S
         let mut next = h.clone();
         next["kind"] = json!(kind.name());
         next["id"] = json!(sid);
+        if fork_now {
+            next["forked"] = json!(true);
+        }
         with_session(st, id, |s| s.info["harness"] = next);
     }
     run.text = out.text;
