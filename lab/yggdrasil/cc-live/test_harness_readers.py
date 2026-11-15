@@ -57,6 +57,23 @@ class Agy(unittest.TestCase):
         self.assertEqual(r[0]["cwd"], "/home/u/Work/proj")
         self.assertEqual(r[0]["title"], "fix the build", "no title: the first request")
 
+    def test_a_headless_conversation_has_its_folder_in_its_own_store(self):
+        sid = "55555555-2222-4333-8444-555555555555"
+        log = os.path.join(self.root, "brain", sid, ".system_generated", "logs", "transcript.jsonl")
+        os.makedirs(os.path.dirname(log))
+        with open(log, "w") as f:
+            f.write(json.dumps({"step_index": 0, "type": "USER_INPUT", "created_at": "2026-11-15T21:00:00Z",
+                                "content": "<USER_REQUEST>\nrun from agy -p\n</USER_REQUEST>"}) + "\n")
+        os.makedirs(os.path.join(self.root, "conversations"))
+        c = sqlite3.connect(os.path.join(self.root, "conversations", f"{sid}.db"))
+        c.execute("CREATE TABLE trajectory_metadata_blob (id text, data blob)")
+        c.execute("INSERT INTO trajectory_metadata_blob VALUES ('main', ?)", (b"\n/\n+file:///home/u/Work/headless\x1a\x00\x12",))
+        c.commit()
+        c.close()
+        got = {r["id"]: r for r in A.recent()}
+        self.assertEqual(got[sid]["cwd"], "/home/u/Work/headless", "not in agy's metadata cache: read from its store")
+        self.assertEqual(got[sid]["title"], "run from agy -p")
+
     def test_items_pair_each_output_with_its_call(self):
         its = A.page(SID)["items"]
         self.assertEqual([i["k"] for i in its], ["user", "assistant", "tool", "tool", "assistant"])

@@ -214,7 +214,7 @@ def claude_recent(n=20):
         title = title_of(path)
         if not cwd or not title:  # an empty or bookkeeping-only transcript
             continue
-        if cwd.startswith(os.path.expanduser("~/.cache/")):  # a brain's or a sim's own work, not a terminal's
+        if cwd.startswith((os.path.expanduser("~/.cache/"), os.path.expanduser("~/.local/state/"))):  # a brain's or a sim's own work
             continue
         out.append({"kind": "claude", "id": sid, "cwd": cwd, "title": title, "modified": int(mt * 1000)})
         if len(out) >= n:

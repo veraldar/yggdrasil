@@ -2,7 +2,9 @@
 
 Where agy keeps a conversation (~/.gemini/antigravity-cli, agy 1.5.9, seen 11-15):
   cache/conversation_metadata.json   {conversations: {id: {summary: {ID, Title, Preview, NumSteps,
-                                     UpdatedAt, WorkspaceURIs}}}} — every conversation
+                                     UpdatedAt, WorkspaceURIs}}}} — the ones an interactive agy
+                                     opened (headless ones are missing: their workspace is in
+                                     conversations/<id>.db, trajectory_metadata_blob)
   brain/<id>/.system_generated/logs/transcript.jsonl
                                      one event per line {step_index, source, type, status,
                                      created_at, content | tool_calls}:
@@ -21,13 +23,14 @@ crashed agy leaves the file but no lock).
 import json
 import os
 import re
+import sqlite3
 from datetime import datetime
 
 import transcript as T
 
 KIND = "agy"
 ROOT = os.path.expanduser("~/.gemini/antigravity-cli")
-SKIP_CWD = (os.path.expanduser("~/.cache/"), "/tmp/", "/dev/shm/")
+SKIP_CWD = (os.path.expanduser("~/.cache/"), os.path.expanduser("~/.local/state/"), "/tmp/", "/dev/shm/")  # brains' and sims' own work
 ID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 
 
@@ -164,25 +167,48 @@ def _title(summary, sid):
     return (title.splitlines()[0] if title else "")[:80]
 
 
+def _db_cwd(sid):
+    """The workspace from the conversation's own store (conversations/<id>.db, a protobuf blob
+    holding `file:///…`): agy's metadata cache misses conversations run headless (`agy -p`, the
+    brain's turns)."""
+    try:
+        c = sqlite3.connect(f"file:{os.path.join(ROOT, 'conversations', sid + '.db')}?mode=ro", uri=True, timeout=1)
+        row = c.execute("SELECT data FROM trajectory_metadata_blob WHERE id='main'").fetchone()
+        c.close()
+    except sqlite3.Error:
+        return ""
+    m = re.search(rb"file://(/[^\x00-\x1f\"]*)", (row or [b""])[0] or b"")
+    return m.group(1).decode(errors="replace").rstrip("/") if m else ""
+
+
 def recent(n=20):
+    """The newest conversations with a transcript, by its last write."""
+    meta = _meta()
     rows = []
-    for sid, c in _meta().items():
-        s = c.get("summary") if isinstance(c, dict) else None
-        if not s or not ID.match(sid) or not s.get("NumSteps"):
-            continue
-        cwd = _cwd(s)
-        if not cwd or (cwd + "/").startswith(SKIP_CWD):
-            continue
-        mod = _ms(s.get("UpdatedAt"))
+    try:
+        dirs = [d.name for d in os.scandir(os.path.join(ROOT, "brain")) if ID.match(d.name)]
+    except OSError:
+        dirs = []
+    for sid in dirs:
         try:
-            mod = max(mod, int(os.path.getmtime(_path(sid)) * 1000))
+            mod = int(os.path.getmtime(_path(sid)) * 1000)
         except OSError:
-            pass
-        rows.append((mod, sid, cwd, s))
+            continue
+        rows.append((mod, sid))
     rows.sort(reverse=True)
     out = []
-    for mod, sid, cwd, s in rows[:n]:
-        out.append({"kind": KIND, "id": sid, "cwd": cwd, "title": _title(s, sid) or "Antigravity conversation", "modified": mod})
+    for mod, sid in rows:
+        c = meta.get(sid)
+        s = (c.get("summary") if isinstance(c, dict) else None) or {}
+        cwd = _cwd(s) or _db_cwd(sid)
+        if not cwd or (cwd + "/").startswith(SKIP_CWD):
+            continue
+        title = _title(s, sid)
+        if not title:  # nothing was ever asked
+            continue
+        out.append({"kind": KIND, "id": sid, "cwd": cwd, "title": title, "modified": mod})
+        if len(out) >= n:
+            break
     return out
 
 

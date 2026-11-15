@@ -23,7 +23,7 @@ import sqlite3
 import transcript as T
 
 KIND = "opencode"
-SKIP_CWD = (os.path.expanduser("~/.cache/"), "/tmp/", "/dev/shm/")
+SKIP_CWD = (os.path.expanduser("~/.cache/"), os.path.expanduser("~/.local/state/"), "/tmp/", "/dev/shm/")  # brains' and sims' own work
 NOT_TUI = {"serve", "acp", "mcp", "debug", "upgrade", "uninstall", "providers", "auth", "agent", "completion", "models", "stats", "export", "import", "github", "web", "session"}
 
 
