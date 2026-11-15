@@ -195,6 +195,11 @@ def claude_cwd(path):
     return cwd
 
 
+def own_work(cwd):
+    """A brain's or a sim's own work folder: not a terminal's conversation."""
+    return (cwd or "").startswith((os.path.expanduser("~/.cache/"), os.path.expanduser("~/.local/state/")))
+
+
 def claude_recent(n=20):
     """The newest Claude Code conversations on this box (transcripts by mtime)."""
     rows = []
@@ -214,7 +219,7 @@ def claude_recent(n=20):
         title = title_of(path)
         if not cwd or not title:  # an empty or bookkeeping-only transcript
             continue
-        if cwd.startswith((os.path.expanduser("~/.cache/"), os.path.expanduser("~/.local/state/"))):  # a brain's or a sim's own work
+        if own_work(cwd):
             continue
         out.append({"kind": "claude", "id": sid, "cwd": cwd, "title": title, "modified": int(mt * 1000)})
         if len(out) >= n:
@@ -295,6 +300,8 @@ def harness_list(n=20):
         if kind == "claude" and (kind, sid) not in seen:
             p = claude_find(sid)
             a = running.get(sid, {})
+            if own_work(e.get("cwd") or a.get("cwd")):
+                continue
             rows.append({"kind": kind, "id": sid, "cwd": e.get("cwd") or (claude_cwd(p) if p else ""),
                          "title": (title_of(p) if p else "") or a.get("name") or "Claude Code session",
                          "modified": int(os.path.getmtime(p) * 1000) if p else int(a.get("startedAt") or 0)})
