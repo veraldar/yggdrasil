@@ -15,7 +15,7 @@ ART="$HOME/Work/root-coord-pwa/artifacts" # lib/artifacts.ts: the worktree's ../
 
 # the running unit's environment (upstream key included) — reused as is, a few keys set
 # (systemd quotes values with spaces, e.g. YGG_ROOT_NOTE: split like a shell would)
-mapfile -t ENVV < <(systemctl --user show "$UNIT" -p Environment --value | python3 -c 'import shlex,sys; print("\n".join(shlex.split(sys.stdin.read())))' | grep -vE '^(YGG_MODELS|YGG_VISION_MODELS|YGG_ARTIFACTS_DIR|YGG_EXTENSIONS)=')
+mapfile -t ENVV < <(systemctl --user show "$UNIT" -p Environment --value | python3 -c 'import shlex,sys; print("\n".join(shlex.split(sys.stdin.read())))' | grep -vE '^(YGG_MODELS|YGG_VISION_MODELS|YGG_ARTIFACTS_DIR|YGG_EXTENSIONS|YGG_HARNESS_LIVE|YGG_OPENCODE_XDG_DATA|YGG_OPENCODE_XDG_CONFIG)=')
 ENVV+=("YGG_MODELS=glm-5.3-flash,glm-5.3,glm-5.2" "YGG_VISION_MODELS=glm-5.3-flash" "YGG_ARTIFACTS_DIR=$ART")
 [ "${#ENVV[@]}" -gt 10 ] || { echo "no environment read from $UNIT"; exit 1; }
 
@@ -75,8 +75,20 @@ if [ "$NAME" = preview ]; then
   ENVV+=("YGG_EXTENSIONS=librarian=http://127.0.0.1:4310")
 fi
 
-# Claude Code live (11-14): the helper the app's live session view talks to (unsandboxed, loopback)
+# Claude Code live (11-14): the helper the app's live session view talks to (unsandboxed, loopback).
+# Since 11-15 it follows every harness (Claude Code, Antigravity, opencode) and writes what is open
+# in a terminal to $UI/harness-live.json: the brain never runs a turn on those (one writer at a time).
 PREVIEW=$NAME "$(dirname "$0")/cc-live-up.sh" || echo "cc-live: not started (the app's live view will say so)"
+ENVV+=("YGG_HARNESS_LIVE=$UI/harness-live.json")
+
+# the terminal's conversations, both ways (11-15, the preview you open only): the brain continues
+# them in the folders they run in (~/Work), and its opencode shares the owner's opencode data
+# (backup before the first run: ~/.cache/root-sim/backups/opencode-pre-two-way.db)
+BINDS=()
+if [ "$NAME" = preview ]; then
+  BINDS=(-p "BindPaths=$HOME/Work" -p "BindPaths=-$HOME/.local/share/opencode" -p "BindPaths=-$HOME/.config/opencode")
+  ENVV+=("YGG_OPENCODE_XDG_DATA=$HOME/.local/share" "YGG_OPENCODE_XDG_CONFIG=$HOME/.config")
+fi
 
 # the preview's agents: the staged overlay's models (fix included)
 python3 - "$UI/agents.json" "$HOME/.cache/root-sim/stage/yggdrasil-profiles.json" <<'PY'
@@ -93,7 +105,7 @@ mkdir -p "$ART"
 args=(--user --unit "$UNIT" --collect -p ProtectHome=tmpfs
   -p "BindPaths=$UI" -p "BindPaths=$ART" -p "BindReadOnlyPaths=$HOME/.cache/root-sim/_venv"
   -p "BindPaths=$HOME/.claude" -p "BindPaths=$HOME/.claude.json" -p "BindPaths=$HOME/.gemini" -p "BindReadOnlyPaths=$HOME/.local/share/mise"
-  -p "BindReadOnlyPaths=-$HOME/.local/bin/agy"
+  -p "BindReadOnlyPaths=-$HOME/.local/bin/agy" "${BINDS[@]}"
   -p "StandardOutput=append:$UI/brain.log" -p "StandardError=append:$UI/brain.log")
 for e in "${ENVV[@]}"; do args+=(--setenv="$e"); done
 systemd-run "${args[@]}" "$UI/bin/yggdrasil" >/dev/null

@@ -25,7 +25,7 @@ systemctl --user stop "$UNIT" 2>/dev/null || true
 systemctl --user reset-failed "$UNIT" 2>/dev/null || true
 systemd-run --user --unit "$UNIT" --collect -q -p "StandardOutput=append:$LOG" -p "StandardError=append:$LOG" \
   --setenv=HOME="$HOME" --setenv=PATH="$(dirname "$CLAUDE_BIN"):/usr/local/bin:/usr/bin:/bin" \
-  python3 "$HERE/cc_live.py" --port "$PORT" --token-file "$TOK" --claude "$CLAUDE_BIN"
+  python3 "$HERE/cc_live.py" --port "$PORT" --token-file "$TOK" --claude "$CLAUDE_BIN" --live-file "$HOME/.cache/root-sim/$NAME/harness-live.json"
 for _ in $(seq 1 30); do
   [ -s "$TOK" ] && curl -sf -m 3 -H "x-cc-live-token: $(cat "$TOK")" "http://127.0.0.1:$PORT/sessions" >/dev/null && break
   sleep 0.3

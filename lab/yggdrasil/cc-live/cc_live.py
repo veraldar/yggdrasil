@@ -32,7 +32,19 @@ outside the brain's sandbox; the app reads it):
                                       would leave this session for the agent view)
   POST /s/<id>/term/size {cols, rows}
 
-Run: cc_live.py --port 4320 --token-file ~/.cache/root-sim/cc-live.token [--claude PATH]
+Every harness (11-15) — Claude Code, Antigravity (agy), opencode — the same way, any of their
+conversations (running or not), so the phone sees and continues them and the terminal does too:
+  GET  /harness                       the newest conversations of each: {kind, id, cwd, title,
+                                      modified, live: "bg" | "cmd" | "here" | null, canType, short}
+  GET  /h/<kind>/<id>/history         as /s/… for any kind (kind: claude | antigravity | opencode)
+  GET  /h/<kind>/<id>/stream          SSE: hello, history, items, status {live, …}
+`live`: "cmd" open in a terminal (watch only here: one writer at a time), "bg" a Claude Code
+background session (typed into through its PTY), "here" the brain is running a turn on it right
+now, null not open anywhere (the phone continues it through the brain). What is open in a
+terminal is written to --live-file every 2 s for the brain, which never runs a turn on those.
+The agy and opencode conversations are read by harness_agy.py / harness_opencode.py (read only).
+
+Run: cc_live.py --port 4320 --token-file ~/.cache/root-sim/cc-live.token [--claude PATH] [--live-file F]
 Standard library only.
 """
 import argparse
@@ -59,8 +71,16 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import transcript as T  # noqa: E402
 import vt  # noqa: E402
 
+READERS = {}  # brain harness kind → reader module (recent, live, page, Tail)
+for _kind, _mod in (("antigravity", "harness_agy"), ("opencode", "harness_opencode")):
+    try:
+        READERS[_kind] = __import__(_mod)
+    except ImportError:
+        pass
+
 CLAUDE = "claude"
 TOKEN = ""
+LIVE_FILE = ""
 PROJECTS = os.path.expanduser("~/.claude/projects")
 UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 SHORT = re.compile(r"^[0-9a-z][0-9a-z-]{0,40}$")
@@ -140,6 +160,152 @@ def title_of(path):
     return title
 
 
+def claude_find(sid):
+    """A Claude Code transcript by session id, wherever it was started (running or not)."""
+    try:
+        for d in os.scandir(PROJECTS):
+            p = os.path.join(d.path, f"{sid}.jsonl")
+            if d.is_dir() and os.path.isfile(p):
+                return p
+    except OSError:
+        pass
+    return None
+
+
+_cwds = {}
+
+
+def claude_cwd(path):
+    """The folder a transcript's session runs in (its events carry `cwd`)."""
+    hit = _cwds.get(path)
+    if hit:
+        return hit
+    cwd = ""
+    try:
+        with open(path, "rb") as f:
+            for ln in f.read(256 * 1024).split(b"\n"):
+                if b'"cwd"' in ln:
+                    cwd = (T._parse(ln) or {}).get("cwd") or ""
+                    if cwd:
+                        break
+    except OSError:
+        pass
+    if cwd:
+        _cwds[path] = cwd
+    return cwd
+
+
+def claude_recent(n=20):
+    """The newest Claude Code conversations on this box (transcripts by mtime)."""
+    rows = []
+    try:
+        for d in os.scandir(PROJECTS):
+            if not d.is_dir():
+                continue
+            for f in os.scandir(d.path):
+                if f.name.endswith(".jsonl") and UUID.match(f.name[:-6]) and f.is_file():
+                    rows.append((f.stat().st_mtime, f.path, f.name[:-6]))
+    except OSError:
+        pass
+    rows.sort(reverse=True)
+    out = []
+    for mt, path, sid in rows[: n * 2]:
+        cwd = claude_cwd(path)
+        title = title_of(path)
+        if not cwd or not title:  # an empty or bookkeeping-only transcript
+            continue
+        if cwd.startswith(os.path.expanduser("~/.cache/")):  # a brain's or a sim's own work, not a terminal's
+            continue
+        out.append({"kind": "claude", "id": sid, "cwd": cwd, "title": title, "modified": int(mt * 1000)})
+        if len(out) >= n:
+            break
+    return out
+
+
+def where(pid):
+    """Who has a conversation open: "here" when the process is the brain's own turn (it runs in a
+    rootsim-* unit), else "cmd" (a terminal)."""
+    try:
+        with open(f"/proc/{int(pid)}/cgroup") as f:
+            return "here" if "rootsim-" in f.read() else "cmd"
+    except (OSError, ValueError, TypeError):
+        return "cmd"
+
+
+def live_all():
+    """Every conversation open right now: {"<kind>:<id>": {how, pid, cwd}}."""
+    out = {}
+    for r in AGENTS.list():
+        bg = r.get("kind") == "background"
+        out[f"claude:{r['sessionId']}"] = {"how": "bg" if bg else where(r.get("pid")), "pid": r.get("pid"), "cwd": r.get("cwd", "")}
+    for kind, mod in READERS.items():
+        try:
+            for sid, v in (mod.live() or {}).items():
+                out[f"{kind}:{sid}"] = {"how": where(v.get("pid")), "pid": v.get("pid"), "cwd": v.get("cwd", "")}
+        except Exception as e:  # a reader's bug never takes the helper down
+            log(f"{kind} live(): {e!r}")
+    return out
+
+
+class Live:
+    """live_all(), cached for a moment (the stream and the list share it); the writer thread
+    keeps --live-file fresh for the brain."""
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.at = 0.0
+        self.v = {}
+
+    def get(self, fresh=1.5):
+        with self.lock:
+            if time.time() - self.at > fresh:
+                self.v = live_all()
+                self.at = time.time()
+            return dict(self.v)
+
+    def write_loop(self, path):
+        while True:
+            try:
+                v = {k: e for k, e in self.get(1.0).items() if e["how"] != "here"}
+                tmp = f"{path}.tmp"
+                with open(tmp, "w") as f:
+                    json.dump({"at": int(time.time() * 1000), "live": v}, f)
+                os.replace(tmp, path)
+            except Exception as e:
+                log(f"live file: {e!r}")
+            time.sleep(2)
+
+
+LIVE = Live()
+
+
+def harness_list(n=20):
+    """The newest conversations of every harness, open ones first."""
+    rows = claude_recent(n)
+    for kind, mod in READERS.items():
+        try:
+            rows += [dict(r, kind=kind) for r in mod.recent(n)]
+        except Exception as e:
+            log(f"{kind} recent(): {e!r}")
+    live = LIVE.get()
+    seen = {(r["kind"], r["id"]) for r in rows}
+    for key, e in live.items():  # running but not among the newest (a quiet background session)
+        kind, sid = key.split(":", 1)
+        if kind == "claude" and (kind, sid) not in seen:
+            p = claude_find(sid)
+            if p:
+                rows.append({"kind": kind, "id": sid, "cwd": e.get("cwd") or claude_cwd(p), "title": title_of(p),
+                             "modified": int(os.path.getmtime(p) * 1000)})
+    shorts = {r["sessionId"]: r.get("id", "") for r in AGENTS.list() if r.get("kind") == "background"}
+    for r in rows:
+        e = live.get(f"{r['kind']}:{r['id']}")
+        r["live"] = e["how"] if e else None
+        r["canType"] = r["live"] == "bg" and bool(SHORT.match(shorts.get(r["id"], "")))
+        r["short"] = shorts.get(r["id"], "")
+    rows.sort(key=lambda r: (r["live"] is None, -int(r.get("modified") or 0)))
+    return rows
+
+
 def public(r):
     sid = r["sessionId"]
     p = T.path_for(PROJECTS, r.get("cwd", ""), sid)
@@ -147,7 +313,12 @@ def public(r):
     return {"sessionId": sid, "short": r.get("id", ""), "name": r.get("name", ""), "kind": r.get("kind", ""),
             "status": r.get("status", ""), "state": r.get("state", ""), "cwd": r.get("cwd", ""),
             "startedAt": r.get("startedAt", 0), "title": title_of(p) if p else "", "canType": bg,
-            "transcript": bool(p)}
+            "transcript": bool(p), "harness": "claude", "live": live_of("claude", sid)}
+
+
+def live_of(kind, sid):
+    e = LIVE.get().get(f"{kind}:{sid}")
+    return e["how"] if e else None
 
 
 # ---- what the attached screen shows -----------------------------------------------------------
@@ -431,13 +602,18 @@ class H(BaseHTTPRequestHandler):
         except ValueError:
             return None
 
-    def _session(self, sid, fresh=1.5):
+    def _session(self, sid, fresh=1.5, read=False):
         if not UUID.match(sid):
             self._send(400, {"error": "not a session id"})
             return None
         r = AGENTS.get(sid, fresh)
         if r is None:
             r = AGENTS.get(sid, 0)  # just started? ask again once
+        if r is None and read:
+            # not running: its transcript still reads (the phone may continue it through the brain)
+            p = claude_find(sid)
+            if p:
+                return {"sessionId": sid, "cwd": claude_cwd(p), "kind": "", "id": "", "name": "", "status": "", "state": ""}
         if r is None:
             self._send(404, {"error": "that Claude Code session is not running on this box", "code": "gone"})
             return None
@@ -453,13 +629,23 @@ class H(BaseHTTPRequestHandler):
             return
         u, parts = self._route()
         qs = parse_qs(u.query)
+        if parts == ["harness"]:
+            return self._send(200, {"sessions": harness_list(), "error": AGENTS.err})
+        if len(parts) == 4 and parts[0] == "h":
+            kind, sid, what = parts[1], parts[2], parts[3]
+            if kind == "claude":
+                parts = ["s", sid, what]  # the Claude Code routes below, read-only ones
+            elif kind in READERS and what in ("history", "stream") and re.match(r"^[A-Za-z0-9_-]{1,80}$", sid):
+                return self._reader(kind, sid, what, qs)
+            else:
+                return self._send(404, {"error": f"no such harness or route ({kind})"})
         if parts == ["sessions"]:
             rows = AGENTS.list()
             out = [public(r) for r in rows]
             out.sort(key=lambda r: (r["kind"] != "background", -int(r["startedAt"] or 0)))
             return self._send(200, {"sessions": out, "error": AGENTS.err})
         if len(parts) >= 3 and parts[0] == "s":
-            r = self._session(parts[1])
+            r = self._session(parts[1], read=parts[2] in ("history", "stream"))
             if r is None:
                 return
             if parts[2] == "history":
@@ -586,7 +772,7 @@ class H(BaseHTTPRequestHandler):
                 if now - t_status > 1.5:
                     t_status = now
                     cur = AGENTS.get(sid)
-                    st = {"gone": cur is None}
+                    st = {"gone": cur is None, "live": live_of("claude", sid)}
                     if cur:
                         st.update(status=cur.get("status", ""), state=cur.get("state", ""), kind=cur.get("kind", ""))
                         bg = cur.get("kind") == "background" and SHORT.match(str(cur.get("id", "")))
@@ -621,6 +807,45 @@ class H(BaseHTTPRequestHandler):
                     t_ping = now
                     self._ev("ping", {"t": int(now)})
                 time.sleep(0.25)
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            return
+
+    def _reader(self, kind, sid, what, qs):
+        """history / stream of an agy or opencode conversation (watch, or continue via the brain)."""
+        mod = READERS[kind]
+        limit = max(1, min(400, int(qs.get("limit", ["200"])[0] or 200)))
+        meta = next((dict(r, kind=kind) for r in mod.recent(200) if r["id"] == sid), None)
+        if meta is None:
+            return self._send(404, {"error": f"no {kind} conversation {sid} on this box", "code": "gone"})
+        if what == "history":
+            before = qs.get("before", [None])[0]
+            pg = mod.page(sid, before=before if before not in (None, "") else None, want=limit)
+            return self._send(200, {"items": pg["items"], "cursor": pg["cursor"]})
+        self._sse_open()
+        try:
+            how = live_of(kind, sid)
+            self._ev("hello", {"sessionId": sid, "short": "", "name": kind, "kind": "", "cwd": meta.get("cwd", ""),
+                               "title": meta.get("title", ""), "canType": False, "harness": kind, "live": how})
+            tail = mod.Tail(sid)
+            pg = mod.page(sid, want=limit)
+            self._ev("history", {"items": pg["items"], "cursor": pg["cursor"]})
+            last = None
+            t_status = t_ping = 0.0
+            while True:
+                new = tail.read()
+                if new:
+                    self._ev("items", {"items": T.merge(new)})
+                now = time.time()
+                if now - t_status > 1.5:
+                    t_status = now
+                    st = {"gone": False, "live": live_of(kind, sid)}
+                    if st != last:
+                        self._ev("status", st)
+                        last = st
+                if now - t_ping > 15:
+                    t_ping = now
+                    self._ev("ping", {"t": int(now)})
+                time.sleep(0.5)
         except (BrokenPipeError, ConnectionResetError, OSError):
             return
 
@@ -696,13 +921,14 @@ class Server(ThreadingHTTPServer):
 
 
 def main():
-    global CLAUDE, TOKEN, PROJECTS
+    global CLAUDE, TOKEN, PROJECTS, LIVE_FILE
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--port", type=int, default=4320)
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--token-file", required=True)
     ap.add_argument("--claude", default="claude")
     ap.add_argument("--projects", default=PROJECTS)
+    ap.add_argument("--live-file", default="", help="where to write what is open in a terminal (for the brain)")
     a = ap.parse_args()
     if a.host not in ("127.0.0.1", "::1", "localhost"):
         sys.exit("cc-live listens on loopback only")
@@ -716,7 +942,10 @@ def main():
     if len(TOKEN) < 16:
         sys.exit("token file: at least 16 characters")
     srv = Server((a.host, a.port), H)
-    log(f"cc-live on {a.host}:{a.port} · claude {CLAUDE}")
+    if a.live_file:
+        LIVE_FILE = os.path.expanduser(a.live_file)
+        threading.Thread(target=LIVE.write_loop, args=(LIVE_FILE,), daemon=True).start()
+    log(f"cc-live on {a.host}:{a.port} · claude {CLAUDE} · readers {sorted(READERS)} · live file {LIVE_FILE or '-'}")
     srv.serve_forever()
 
 
