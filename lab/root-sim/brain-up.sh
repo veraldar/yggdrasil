@@ -50,6 +50,8 @@ if [ "${SIM_HARNESS:-0}" = 1 ]; then
     for _ in $(seq 1 40); do [ -S "$SBUS" ] && break; sleep 0.1; done
     HARNESS_PROPS+=(--setenv=DBUS_SESSION_BUS_ADDRESS="unix:path=$SBUS" --setenv=AGY_CLI_DISABLE_AUTO_UPDATE=1)
   fi
+  # SIM_BINDS="dir …": the owner's folders a sim's harness sessions continue in (read-write)
+  for b in ${SIM_BINDS:-}; do HARNESS_PROPS+=(-p "BindPaths=$b"); done
   HPATH="$HOME/.local/share/mise/installs/claude/latest:$HOME/.local/share/mise/installs/opencode/latest:$HOME/.local/share/mise/installs/codex/latest/bin:$HOME/.local/bin:"
 fi
 systemctl --user stop "$UNIT" 2>/dev/null || true
@@ -68,6 +70,8 @@ systemd-run --user --unit="$UNIT" --collect -q \
   ${SIM_PROFILES:+--setenv=YGG_PROFILES=$SIM_PROFILES} ${SIM_EXTENSIONS:+--setenv=YGG_EXTENSIONS=$SIM_EXTENSIONS} \
   ${YGG_ROOT_NAME:+--setenv=YGG_ROOT_NAME=$YGG_ROOT_NAME} ${YGG_PEERS:+--setenv=YGG_PEERS=$YGG_PEERS} \
   ${YGG_PEER_TOKEN:+--setenv=YGG_PEER_TOKEN=$YGG_PEER_TOKEN} ${YGG_ROOT_NOTE:+"--setenv=YGG_ROOT_NOTE=$YGG_ROOT_NOTE"} \
+  ${YGG_HARNESS_HELPER:+--setenv=YGG_HARNESS_HELPER=$YGG_HARNESS_HELPER} ${YGG_HARNESS_HELPER_TOKEN:+--setenv=YGG_HARNESS_HELPER_TOKEN=$YGG_HARNESS_HELPER_TOKEN} \
+  ${YGG_HARNESS_LIVE:+--setenv=YGG_HARNESS_LIVE=$YGG_HARNESS_LIVE} \
   --setenv=HOME="$SIMHOME" --setenv=PATH="$HPATH$HOME/.cache/root-sim/_venv/bin:/usr/local/bin:/usr/bin:/bin" --setenv=VIRTUAL_ENV="$HOME/.cache/root-sim/_venv" \
   "$ROOT/bin/yggdrasil"
 for i in $(seq 1 40); do curl -sf -m 1 "http://127.0.0.1:$PORT/session" >/dev/null && { echo "brain $NAME up on :$PORT ($ROOT)"; exit 0; }; sleep 0.25; done

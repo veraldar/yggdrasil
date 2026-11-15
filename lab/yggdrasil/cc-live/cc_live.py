@@ -85,6 +85,7 @@ for _kind, _mod in (("antigravity", "harness_agy"), ("opencode", "harness_openco
 CLAUDE = "claude"
 TOKEN = ""
 LIVE_FILE = ""
+CWD_PREFIX = ""  # --cwd-prefix: only conversations in this folder (a sim's helper, never the owner's others)
 PROJECTS = os.path.expanduser("~/.claude/projects")
 UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 SHORT = re.compile(r"^[0-9a-z][0-9a-z-]{0,40}$")
@@ -200,8 +201,12 @@ def claude_cwd(path):
 
 
 def own_work(cwd):
-    """A brain's or a sim's own work folder: not a terminal's conversation."""
-    return (cwd or "").startswith((os.path.expanduser("~/.cache/"), os.path.expanduser("~/.local/state/")))
+    """A brain's or a sim's own work folder: not a terminal's conversation (and, for a sim's
+    helper, anything outside its --cwd-prefix)."""
+    cwd = cwd or ""
+    if CWD_PREFIX and not (cwd + "/").startswith(CWD_PREFIX.rstrip("/") + "/"):
+        return True
+    return cwd.startswith((os.path.expanduser("~/.cache/"), os.path.expanduser("~/.local/state/")))
 
 
 def claude_recent(n=20):
@@ -218,7 +223,7 @@ def claude_recent(n=20):
         pass
     rows.sort(reverse=True)
     out = []
-    for mt, path, sid in rows[: n * 2]:
+    for mt, path, sid in rows if CWD_PREFIX else rows[: n * 2]:
         cwd = claude_cwd(path)
         title = title_of(path)
         if not cwd or not title:  # an empty or bookkeeping-only transcript
@@ -329,6 +334,8 @@ def live_all():
                 out[f"{kind}:{sid}"] = {"how": where(v.get("pid")), "pid": v.get("pid"), "cwd": v.get("cwd", "")}
         except Exception as e:  # a reader's bug never takes the helper down
             log(f"{kind} live(): {e!r}")
+    if CWD_PREFIX:
+        out = {k: e for k, e in out.items() if not own_work(e.get("cwd"))}
     for e in out.values():  # in a tmux pane: typed into from the phone too
         pane = pane_of(e.get("pid"), panes) if e["how"] == "cmd" and panes else None
         if pane:
@@ -385,7 +392,7 @@ def harness_list(n=20):
     rows = claude_recent(n)
     for kind, mod in READERS.items():
         try:
-            rows += [dict(r, kind=kind) for r in mod.recent(n)]
+            rows += [dict(r, kind=kind) for r in mod.recent(n * 3 if CWD_PREFIX else n) if not (CWD_PREFIX and own_work(r.get("cwd")))]
         except Exception as e:
             log(f"{kind} recent(): {e!r}")
     live = LIVE.get()
@@ -1046,7 +1053,7 @@ class Server(ThreadingHTTPServer):
 
 
 def main():
-    global CLAUDE, TOKEN, PROJECTS, LIVE_FILE
+    global CLAUDE, TOKEN, PROJECTS, LIVE_FILE, CWD_PREFIX
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--port", type=int, default=4320)
     ap.add_argument("--host", default="127.0.0.1")
@@ -1054,10 +1061,11 @@ def main():
     ap.add_argument("--claude", default="claude")
     ap.add_argument("--projects", default=PROJECTS)
     ap.add_argument("--live-file", default="", help="where to write what is open in a terminal (for the brain)")
+    ap.add_argument("--cwd-prefix", default="", help="only conversations in this folder (a sim's helper)")
     a = ap.parse_args()
     if a.host not in ("127.0.0.1", "::1", "localhost"):
         sys.exit("cc-live listens on loopback only")
-    CLAUDE, PROJECTS = a.claude, a.projects
+    CLAUDE, PROJECTS, CWD_PREFIX = a.claude, a.projects, os.path.expanduser(a.cwd_prefix) if a.cwd_prefix else ""
     tf = os.path.expanduser(a.token_file)
     if not os.path.exists(tf):
         fd = os.open(tf, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
