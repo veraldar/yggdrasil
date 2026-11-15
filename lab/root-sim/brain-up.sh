@@ -6,7 +6,7 @@
 set -euo pipefail
 NAME=${1:?name}; PORT=${2:?port|down}
 ROOT="$HOME/.cache/root-sim/$NAME"; UNIT="rootsim-$NAME"
-if [ "$PORT" = down ]; then systemctl --user stop "$UNIT" 2>/dev/null || true; exit 0; fi
+if [ "$PORT" = down ]; then systemctl --user stop "$UNIT" "$UNIT-secrets" 2>/dev/null || true; exit 0; fi
 BIN=${3:-$HOME/Work/root-coord/lab/yggdrasil/target/release/yggdrasil}
 mkdir -p "$ROOT/data/session" "$ROOT/work/artifacts" "$ROOT/bin"
 cp -f "$BIN" "$ROOT/bin/yggdrasil"           # frozen copy: a rebuild never swaps a running sim
@@ -34,6 +34,22 @@ if [ "${SIM_HARNESS:-0}" = 1 ]; then
     -p "BindReadOnlyPaths=-$HOME/.local/bin/agy"
     --setenv=XDG_CONFIG_HOME="$ROOT/xdgc" --setenv=XDG_CACHE_HOME="$ROOT/xdg-cache" --setenv=XDG_STATE_HOME="$ROOT/xdg-state")
   SIMHOME="$HOME"
+  # agy's Google sign-in: a filtered D-Bus proxy that reads THAT keyring item only (as preview-up.sh)
+  SS=org.freedesktop.secrets SP=/org/freedesktop/secrets SBUS="$ROOT/secrets.bus"
+  systemctl --user stop "$UNIT-secrets" 2>/dev/null || true; systemctl --user reset-failed "$UNIT-secrets" 2>/dev/null || true
+  rm -f "$SBUS"
+  AGY_ITEM=$(busctl --user --json=short call "$SS" "$SP/aliases/default" org.freedesktop.Secret.Collection SearchItems 'a{ss}' 2 service gemini username antigravity 2>/dev/null |
+    python3 -c 'import json,sys; d=json.load(sys.stdin)["data"][0]; print(d[0] if d else "")' 2>/dev/null || true)
+  if [ -n "$AGY_ITEM" ]; then
+    mkdir -p "$ROOT"
+    systemd-run --user --unit "$UNIT-secrets" --collect -q \
+      xdg-dbus-proxy "${DBUS_SESSION_BUS_ADDRESS:-unix:path=/run/user/$(id -u)/bus}" "$SBUS" --filter \
+      --call="$SS=org.freedesktop.DBus.Properties.Get@$SP" --call="$SS=org.freedesktop.Secret.Service.OpenSession@$SP" \
+      --call="$SS=org.freedesktop.Secret.Service.Unlock@$SP" --call="$SS=org.freedesktop.Secret.Collection.SearchItems@$SP/aliases/default" \
+      --call="$SS=org.freedesktop.Secret.Item.GetSecret@$AGY_ITEM" --call="$SS=org.freedesktop.Secret.Session.Close@$SP/session/*"
+    for _ in $(seq 1 40); do [ -S "$SBUS" ] && break; sleep 0.1; done
+    HARNESS_PROPS+=(--setenv=DBUS_SESSION_BUS_ADDRESS="unix:path=$SBUS" --setenv=AGY_CLI_DISABLE_AUTO_UPDATE=1)
+  fi
   HPATH="$HOME/.local/share/mise/installs/claude/latest:$HOME/.local/share/mise/installs/opencode/latest:$HOME/.local/share/mise/installs/codex/latest/bin:$HOME/.local/bin:"
 fi
 systemctl --user stop "$UNIT" 2>/dev/null || true

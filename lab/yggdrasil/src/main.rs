@@ -850,6 +850,14 @@ fn attach_harness(st: &AppState, body: &Value) -> Response {
     if !std::path::Path::new(cwd).is_absolute() || !std::path::Path::new(cwd).is_dir() {
         return bad_request(&format!("folder {cwd} does not exist on this root — the {what} conversation runs in the folder it was started in"));
     }
+    let mut title = body["title"].as_str().map(str::trim).filter(|t| !t.is_empty()).map(String::from);
+    if kind == harness::Kind::Claude {
+        let path = harness::claude::transcript(cwd, &id);
+        if !path.is_file() {
+            return bad_request(&format!("no Claude Code session {id} was started in {cwd} (looked for {})", path.display()));
+        }
+        title = title.or_else(|| harness::claude::meta(&path).and_then(|m| m["title"].as_str().map(String::from)));
+    }
     // already here: the one bifrost session for this conversation
     let existing = st.sessions.lock().unwrap().values().find_map(|s| {
         let h = &s.info["harness"];
@@ -869,14 +877,6 @@ fn attach_harness(st: &AppState, body: &Value) -> Response {
         return bad_request(&format!("unknown agent {agent_name}"));
     };
     let on_kind = profile.harness.as_deref().and_then(harness::Kind::parse) == Some(kind);
-    let mut title = body["title"].as_str().map(str::trim).filter(|t| !t.is_empty()).map(String::from);
-    if kind == harness::Kind::Claude {
-        let path = harness::claude::transcript(cwd, &id);
-        if !path.is_file() {
-            return bad_request(&format!("no Claude Code session {id} was started in {cwd} (looked for {})", path.display()));
-        }
-        title = title.or_else(|| harness::claude::meta(&path).and_then(|m| m["title"].as_str().map(String::from)));
-    }
     let title = title.unwrap_or_else(|| format!("{what} session"));
     let title = format!("{} · {what}", title.chars().take(40).collect::<String>().trim_end());
     let model = body["model"].as_str().or(body["model"]["id"].as_str());

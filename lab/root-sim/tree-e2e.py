@@ -237,14 +237,16 @@ def main():
         check("attach: titled after it · Claude Code", att["title"] == "remember the word walrus; reply ok · Claude Code", att["title"])
         for name, body in (("a non-uuid id", {"harness": {"id": "../../etc/passwd"}, "cwd": cc_cwd}),
                            ("a folder that does not exist", {"harness": {"id": cc_id}, "cwd": cc_cwd + "-gone"}),
-                           ("a session not started in that folder", {"harness": {"id": cc_id}, "cwd": os.path.join(tmp, "home", "work")}),
-                           ("an agent that does not run on Claude Code", {"agent": "build", "harness": {"id": cc_id}, "cwd": cc_cwd})):
+                           ("a session not started in that folder", {"harness": {"id": cc_id}, "cwd": os.path.join(tmp, "home", "work")})):
             try:
                 req(HOME_PORT, "POST", "/session", body)
                 check(f"attach refuses {name}", False, "accepted")
             except urllib.error.HTTPError as e:
                 msg = json.loads(e.read() or b"{}").get("error", "")
                 check(f"attach refuses {name} (400, said plainly)", e.code == 400 and len(msg) > 20, (e.code, msg))
+        # the same conversation both ways (11-15): one bifrost session per conversation, whatever agent asks
+        again = req(HOME_PORT, "POST", "/session", {"agent": "build", "harness": {"id": cc_id}, "cwd": cc_cwd})
+        check("attach again: the same session (one per conversation)", again["id"] == att["id"], (again.get("id"), att.get("id")))
 
         # 6d. Google's harness next to Claude Code's and Codex's: built-in agy + custom agent on Antigravity
         agy_bi = req(HOME_PORT, "GET", "/agent/agy")
@@ -254,19 +256,22 @@ def main():
         mbh = agy["models_by_harness"]
         check("Gemini CLI is no longer a harness", "gemini" not in mbh and set(mbh) == {"root", "claude", "opencode", "codex", "antigravity"}, list(mbh))
         am = mbh["antigravity"]
-        check("Antigravity's picker: its own pick first, then Google's current models strongest first",
-              am[:4] == ["default", "gemini-4-carbon", "gemini-4-argon", "gemini-4-hydrogen"] and "gemini-3.8-flash" in am, am)
         al = agy["model_labels"]["antigravity"]
-        check("…each with a label", all(al.get(m) for m in am) and al["gemini-4-carbon"].startswith("Gemini 4 Carbon — strongest"), {m: al.get(m) for m in am[:3]})
         if shutil.which("agy"):
-            check("…merged with what `agy models` lists (agy on this tree's PATH)", len(am) > 6 or all(not al[m].endswith("needs GEMINI_API_KEY") for m in am), am)
+            # 11-14: exactly what `agy models` lists, its own pick first
+            listed = [l.split("\t")[0] for l in subprocess.run(["agy", "models"], capture_output=True, text=True, timeout=60).stdout.splitlines() if "\t" in l]
+            check("Antigravity's picker: its own pick, then exactly what `agy models` lists", am[0] == "default" and am[1:] == listed, (am, listed))
+        else:
+            check("Antigravity's picker: its own pick first, then Google's current models strongest first",
+                  am[:4] == ["default", "gemini-4-carbon", "gemini-4-argon", "gemini-4-hydrogen"] and "gemini-3.8-flash" in am, am)
+        check("…each with a label", all(al.get(m) for m in am), {m: al.get(m) for m in am[:3]})
         try:
             req(HOME_PORT, "PUT", "/agent/agy-custom", {"harness": "gemini"})
             check("an agent cannot be put on Gemini CLI", False, "accepted")
         except urllib.error.HTTPError as e:
             check("an agent cannot be put on Gemini CLI", e.code == 400, e.code)
-        req(HOME_PORT, "PUT", "/agent/agy-custom", {"model": "gemini-4-hydrogen"})
-        check("an Antigravity agent takes a model of its list", req(HOME_PORT, "GET", "/agent/agy-custom")["model"] == "gemini-4-hydrogen")
+        req(HOME_PORT, "PUT", "/agent/agy-custom", {"model": am[1]})
+        check("an Antigravity agent takes a model of its list", req(HOME_PORT, "GET", "/agent/agy-custom")["model"] == am[1])
         req(HOME_PORT, "DELETE", "/agent/agy-custom")
         old = req(HOME_PORT, "GET", "/agent/gem-old")
         check("an agent saved on Gemini CLI loads on Antigravity (its model dropped: agy does not run it)", old["harness"] == "antigravity" and old["model"] is None, (old.get("harness"), old.get("model")))
