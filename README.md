@@ -39,7 +39,7 @@ Other computers (additional roots: Linux, macOS, Windows via WSL2)
 ## What you need
 
 **To use at home (same Wi-Fi):**
-- One Linux computer (`x86_64` or `aarch64`) with systemd user sessions (or `--direct` without systemd), Node.js ≥ 20 + `npm`, Python ≥ 3.10 with `venv` (for voice), `libopus0`, `curl`, and ~3 GB of free disk space (Rust is only needed if building from source instead of using release binaries).
+- One Linux `x86_64` computer with a systemd user session, `curl`, `ssh-keygen` (to check the release signature), `libopus0`, Python ≥ 3.10 with `venv` (for voice) and about 1 GB of free disk. The release brings everything else prebuilt, its own Node included — no git, compilers or npm. (macOS and `aarch64` build from a checkout for now.)
 - A phone on the same Wi-Fi.
 - An AI model key or local model server: any OpenAI-compatible `/v1` API (OpenAI, OpenRouter, Ollama, `llama.cpp`, vLLM) or Anthropic-style API (Anthropic, Z.ai), plus optional Claude Code or Antigravity CLI installs.
 - Optional speech upgrade: a Mac on the same LAN serving MLX speech (`SPEACHES_URL`). Without it, `bifrost-voice` runs local CPU speech (`sherpa-onnx`, ~200 MB of models downloaded on first start).
@@ -50,12 +50,14 @@ Other computers (additional roots: Linux, macOS, Windows via WSL2)
 
 ## How to install
 
-Releases provide one signed download per machine (`install.sh` and `join.sh` also fall back to building locally with Cargo when needed).
+Each machine gets one script from a release. Before anything runs, the script checks the release's signed checksums against the yggdrasil release key written into the script ([RELEASE-KEY.pub](RELEASE-KEY.pub)), then the archive against them; anything that does not match is refused. Secrets (your model key, the trunk's connect line) are asked for and pasted — never typed on a command line.
 
-1. **On your rented VPS (optional, for remote access):** run `trunk.sh` from `trunk/install/`. It sets up the access point on port 443, gets a Let's Encrypt certificate, and prints a one-time connect line for your home computer.
-2. **At home:** run `install.sh` from `root/install/` (pass `--trunk` with that connect line to connect your home computer to the VPS).
-3. **On your phone:** run `install.sh pair` at home and scan the QR code with your phone's camera (or open `/pair` directly on the home computer on your LAN).
-4. **On a second computer (optional):** run `join.sh` from `root/install/` (or `win/Veraldar-Setup.exe` on Windows/WSL2) and approve its QR code on your paired phone.
+1. **On your rented VPS (optional, for remote access):** `trunk.sh` sets up the access point on port 443, its Let's Encrypt certificate, the firewall, security updates and a weekly signed update, then prints the connect line for your home computer.
+2. **At home:** `install.sh` (with `--trunk` it asks you to paste that connect line).
+3. **On your phone:** `install.sh pair` shows a QR code on the home computer; scan it.
+4. **On a second computer (optional):** `join.sh --hub https://<your trunk>`, then approve its QR code on your paired phone.
+
+`--uninstall` undoes each of them. The exact commands are in [root/install/README.md](root/install/README.md) (home, phone, second computer) and [docs/own-trunk.md](docs/own-trunk.md) (the VPS). Windows (WSL2) has a launcher in `win/` that has not yet been run on a real Windows PC.
 
 Read [root/install/README.md](root/install/README.md) for home and multi-machine installation options, and [docs/own-trunk.md](docs/own-trunk.md) for setting up your VPS trunk (including sharing port 443 with an existing website).
 
