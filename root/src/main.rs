@@ -410,7 +410,7 @@ fn resolve_variant(raw: &str) -> Result<String, String> {
 /// conversation is built. Never in the system prompt / position 0 (cache law:
 /// text turns and the cached prefix stay byte-identical). Independent of the
 /// brain-wide YGG_VOICE / VOICE_PROMPT path below. Editing resets caches once.
-const VOICE_TURN_NOTE: &str = "[voice turn] This reply will be spoken aloud: plain speech, leading with the answer, with no lists, bullets, tables, headers, markdown, or code. Keep it to a few short, concrete sentences — unless the user asked for more (a story, details, something read out): then give what they asked for. They can say stop, pause, faster or slower while it plays. Their words came through speech recognition, which loses case and punctuation: a folder, file or project name you heard is a guess — use the existing one that matches, else lowercase with hyphens (notes-api), and say the exact name you used. Starting or sending work: say your one short line first, then call the tool — that line is the whole reply.";
+const VOICE_TURN_NOTE: &str = "[voice turn] This reply will be spoken aloud: plain speech, leading with the answer, with no lists, bullets, tables, headers, markdown, or code. Keep it to a few short, concrete sentences — unless the user asked for more (a story, details, something read out): then give what they asked for. They can say stop, pause, faster or slower while it plays. Their words came through speech recognition, which loses case and punctuation: a folder, file or project name you heard is a guess — use the existing one that matches, else lowercase with hyphens (notes-api), and say the exact name you used. A word that makes no sense where it stands was most likely misheard (\"add a delight command\" for a notes tool → delete): act on the word that fits and say in a few words which you understood. Starting or sending work: say your one short line first, then call the tool — that line is the whole reply.";
 
 fn is_voice_turn(msg: &Value) -> bool {
     msg["info"]["modality"] == "voice"
@@ -1070,6 +1070,23 @@ async fn close_session(State(st): State<AppState>, Path(id): Path<String>, body:
 /// A woken manager's "nothing worth saying" reply.
 fn is_quiet(text: &str) -> bool {
     text.trim().trim_matches(|c: char| c == '.' || c == '*').eq_ignore_ascii_case("(quiet)")
+}
+
+/// "(quiet)" is a whole reply or nothing: a marker beside a real answer (its own line, or tacked
+/// on the end) never reaches the user — the phone read one aloud as "Quiet" (voice sim, 11-16).
+fn strip_quiet_marker(text: &str) -> String {
+    if is_quiet(text) {
+        return text.to_string();
+    }
+    let mut out: Vec<&str> = text.lines().filter(|l| !is_quiet(l)).collect();
+    if let Some(last) = out.last_mut() {
+        let t = last.trim_end();
+        if t.len() > 7 && t[t.len() - 7..].eq_ignore_ascii_case("(quiet)") {
+            *last = t[..t.len() - 7].trim_end();
+        }
+    }
+    let joined = out.join("\n");
+    if joined.trim().is_empty() { text.to_string() } else if joined.len() == text.len() { text.to_string() } else { joined.trim_end().to_string() }
 }
 
 /// Does the newest user turn of an upstream conversation contain `needle`?
@@ -2131,7 +2148,7 @@ impl Run {
 
     /// Lands the streamed text of the current step as a text part.
     fn flush_text(&mut self, voice: Option<(bool, usize)>) {
-        let text = std::mem::take(&mut self.text);
+        let text = strip_quiet_marker(&std::mem::take(&mut self.text));
         if !text.is_empty() {
             let text = match voice {
                 Some((true, max)) => sanitize_for_speech(&text, max),
@@ -4100,6 +4117,11 @@ mod image_tests {
     #[test]
     fn a_quiet_answer_to_an_outcome_is_recognised() {
         assert!(is_quiet(" (quiet). ") && is_quiet("**(Quiet)**") && !is_quiet("(quiet) but done"));
+        // a stray marker beside a real answer is dropped; a whole-quiet reply stays as it is
+        assert_eq!(strip_quiet_marker("Got it, saving that: backups go to ~/backups every night.\n(quiet)"), "Got it, saving that: backups go to ~/backups every night.");
+        assert_eq!(strip_quiet_marker("Saved. (quiet)"), "Saved.");
+        assert_eq!(strip_quiet_marker("(quiet)"), "(quiet)");
+        assert_eq!(strip_quiet_marker("All 18 tests pass."), "All 18 tests pass.");
         let wake = format!("[inbox] ... (done) ...\n{}", crate::tree::OUTCOME_ASK);
         let parts = vec![json!({"role": "user", "content": [{"type": "text", "text": wake}]}), json!({"role": "assistant", "content": "(quiet)"})];
         assert!(last_user_has(&parts, crate::tree::OUTCOME_ASK));
