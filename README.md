@@ -1,209 +1,104 @@
-# yggdrasil — the tree: your computer, working for you
+# yggdrasil — your personal AI tree
+
+Run your own AI assistant at home, reach it from your phone anywhere, and keep your files, models, and conversations on hardware you control.
 
 ```
-veraldar/            the world: all your trees            → veraldar.org
-└─ yggdrasil/        the tree: your computer, working for you   (this repository)
-   ├─ root/          the brain: thinks, remembers — your AI key, or a model at home
-   │  └─ extensions/ what plugs into the brain without touching it (the librarian: memory)
-   ├─ trunk/         the private line: carries your words, never public (bifrost-net: bridge, pairing, relay, root-link)
-   └─ branch/        bifrost, the app in your hand — you talk; it listens (the app + its voice agent)
+veraldar/              all your trees                         → veraldar.org
+└─ yggdrasil/          the tree: your computers working for you (this repository)
+   ├─ root/            the brain on each computer (Rust binary `yggdrasil`)
+   │  ├─ extensions/   optional plugins outside the core (such as `librarian` memory)
+   │  └─ install/      home and multi-machine installers (`install.sh`, `join.sh`)
+   ├─ trunk/           your private line (Rust binary `bifrost-net`)
+   └─ branch/          bifrost, the phone app (Next.js PWA) + `branch/voice/` agent
 ```
 
-| folder | what lives there |
-|---|---|
-| `root/` | the brain (Rust): one door (MAIN) that runs a tree of sessions and agents, several roots as peers, the extension interface — see `root/ROOT-COORD.md`; `root/extensions/` (spec in `root/extensions/README.md`) |
-| `trunk/` | bifrost-net (Rust): the bridge the phone pairs with by QR, the relay, the root-link between roots; `trunk/deploy/` the LiveKit media config |
-| `branch/` | bifrost, the phone app (PWA); `branch/voice/` its voice agent (speech in, the brain's words out) |
-| `sim/` | human simulations (an LLM plays you and only talks to MAIN) and the deterministic tree test |
-| `scripts/`, `skills/`, `docs/` | install, release and operating the box; the install skill; history and specs |
+In plain words: **root** thinks and runs tools on your home computer, **branch** (`bifrost`) is the app in your hand that lets you type or talk to it, and **trunk** (`bifrost-net`) is a tiny relay you run on a rented server so your phone and extra computers can find home without opening ports on your home router or needing a third-party VPN.
 
-**Reach your tree from anywhere:** rent a small server, run one script on it, paste the line it prints
-at home, scan a QR with your phone — [your own trunk](docs/own-trunk.md) (no Tailscale, no open port at home).
-
-This repository was `veraldar/bifrost` until 2026-11-13; every old link and clone URL redirects.
-
-## Bifrost — talk to your coding agent from your phone
-
-A voice-controlled opencode: speak or type on your phone (PWA), a LiveKit
-voice agent bridges your words to a local [opencode](https://github.com/anomalyco/opencode)
-server, and you get the answer back as text **and speech** — with markdown,
-attachments, multi-session support, and frontend diagnostics.
-
-## Easiest install: let an agent do it (Omarchy, Arch, Debian, any Linux box)
-
-Open your coding agent (opencode, Claude Code, Codex, …) in an empty folder
-and give it this one line:
+## How the pieces fit
 
 ```
-https://raw.githubusercontent.com/veraldar/bifrost/v0.6.0/skills/install/SKILL.md set it up
+Phone (branch: bifrost PWA)
+  │
+  │  WebRTC data channel (QR-pinned DTLS) + LiveKit ICE-TCP voice
+  ▼  all over TCP 443 through your rented VPS
+VPS (trunk: bifrost-net ap)  ── only relays bytes it cannot read after pairing
+  ▲
+  │  dials OUT (no open port at home)
+  │
+Home computer (root: yggdrasil + bifrost-net bridge/wg + app + voice)
+  ▲
+  │  WireGuard inside the root-link (through the trunk)
+  │
+Other computers (additional roots: Linux, macOS, Windows via WSL2)
 ```
 
-That's the whole instruction. The agent fetches the skill, clones this repo,
-checks prerequisites (Node ≥ 22, docker for voice), mints every secret,
-starts LiveKit + opencode + the voice agent + the PWA, verifies each layer,
-and prints a verdict + the URL to open. Already cloned? Say instead:
-*"follow skills/install/SKILL.md and set it up"*. One manual step remains
-afterwards: `opencode auth login` (your LLM provider key — nothing may mint
-that for you). Prefer manual setup? Keep reading.
+- **root (`root/`, binary `yggdrasil`)** — A coordinator called `MAIN` that you talk to through one conversation. When work takes multiple steps, `MAIN` starts and follows child sessions (`lead`, `build`, `fix`, `research`, `review`), or delegates to coding harnesses (`claude` for Claude Code, `agy` for Antigravity, `opencode`, `codex`). Multiple machines form one tree of roots.
+- **trunk (`trunk/`, binary `bifrost-net`)** — An access point on a small VPS with only TCP port 443 open (plus port 80 for Let's Encrypt certificate checks). Your home computer dials out to it. Once paired, your phone connects straight to your home bridge over WebRTC whose DTLS key is pinned by the pairing QR code, and roots talk to each other over WireGuard (`bifrost-net wg`). The VPS forwards encrypted bytes it cannot read.
+- **branch (`branch/`)** — The phone web app (Next.js 15 PWA) served from your home computer. Its `/api/*` proxy is the single seam to the brain, which never listens publicly. `branch/voice/` runs a Python `livekit-agents` worker (speech-to-text → `yggdrasil` → text-to-speech, push-to-talk and hands-free).
 
-[![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https%3A%2F%2Fgithub.com%2Fveraldar%2Fbifrost&root-directory=pwa&env=LIVEKIT_URL%2CLIVEKIT_API_KEY%2CLIVEKIT_API_SECRET%2COPENCODE_URL)
+## What you need
 
-> One-click Vercel deploy of the PWA: after cloning, set the env vars
-> `LIVEKIT_URL`, `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET` (see
-> `branch/.env.example`). Text-mode needs `OPENCODE_URL` reachable from the
-> deployment — keep opencode private (Tailscale), it has shell access!
+**To use at home (same Wi-Fi):**
+- One Linux computer (`x86_64` or `aarch64`) with systemd user sessions (or `--direct` without systemd), Node.js ≥ 20 + `npm`, Python ≥ 3.10 with `venv` (for voice), `libopus0`, `curl`, and ~3 GB of free disk space (Rust is only needed if building from source instead of using release binaries).
+- A phone on the same Wi-Fi.
+- An AI model key or local model server: any OpenAI-compatible `/v1` API (OpenAI, OpenRouter, Ollama, `llama.cpp`, vLLM) or Anthropic-style API (Anthropic, Z.ai), plus optional Claude Code or Antigravity CLI installs.
+- Optional speech upgrade: a Mac on the same LAN serving MLX speech (`SPEACHES_URL`). Without it, `bifrost-voice` runs local CPU speech (`sherpa-onnx`, ~200 MB of models downloaded on first start).
 
-## Using other AIs (Claude Code, Codex, …)
+**To reach your tree from anywhere (mobile data or other Wi-Fi):**
+- A small rented VPS (Debian 12+ or Ubuntu 22.04+, 1 CPU / 512 MB RAM is enough) with a domain name pointing to it and TCP ports 443 and 80 open.
+- Optional extra computers (Linux, macOS, or Windows with WSL2) to join as additional roots on your tree.
 
-bifrost drives **opencode** natively — sessions, voice, queue, transcript.
-Other AI CLIs are one sentence away, not one integration: from any session,
-just ask — *"ask claude to review this diff"* or *"have codex write tests
-for X"* — and the [delegate skill](skills/delegate/SKILL.md) runs them as
-sub-tools, relays their output into your transcript, and works by voice too.
-No config, no second login flow beyond the CLI's own auth.
+## How to install
 
-## Your voice, your identity
+Releases provide one signed download per machine (`install.sh` and `join.sh` also fall back to building locally with Cargo when needed).
 
-Bifrost is built to run speech **on your own hardware** — your voice never
-has to leave your machines. That's the setup we push. But you choose: local
-models (CPU or MLX), or any cloud API for LLM and voice — American, Chinese,
-European, open weights. The AI is yours to pick; the identity stays yours.
+1. **On your rented VPS (optional, for remote access):** run `trunk.sh` from `trunk/install/`. It sets up the access point on port 443, gets a Let's Encrypt certificate, and prints a one-time connect line for your home computer.
+2. **At home:** run `install.sh` from `root/install/` (pass `--trunk` with that connect line to connect your home computer to the VPS).
+3. **On your phone:** run `install.sh pair` at home and scan the QR code with your phone's camera (or open `/pair` directly on the home computer on your LAN).
+4. **On a second computer (optional):** run `join.sh` from `root/install/` (or `win/Veraldar-Setup.exe` on Windows/WSL2) and approve its QR code on your paired phone.
 
-## Architecture
+Read [root/install/README.md](root/install/README.md) for home and multi-machine installation options, and [docs/own-trunk.md](docs/own-trunk.md) for setting up your VPS trunk (including sharing port 443 with an existing website).
 
-**Hardware** — 3 nodes, one Tailscale tailnet (no public exposure):
+## What it does today
 
-| Node | Role |
-|---|---|
-| Phone | PWA client (mic + UI), joins the tailnet |
-| omarchy (Linux desktop) | all server layers: PWA, LiveKit, voice agent, opencode |
-| Mac Studio (M3 Ultra) | local speech models via MLX/GPU on the LAN |
+- **One conversation, managed work behind it:** Talk or type to `MAIN`; it answers simple questions directly, starts sub-sessions with role-scoped tool rules (`build`, `fix`, `research`, `review`, `lead`), and summarizes finished or blocked reports back to you.
+- **Multiple AI engines and editable agents:** Built-in `yggdrasil` tool loop plus `claude` (Claude Code), `agy` (Antigravity), `opencode`, and `codex` harnesses; edit agent prompts, models, thinking levels, and shared instructions in the app.
+- **Terminal sessions both ways (`root/cc-live/`, `branch/app/cc/[id]/`):** Browse and watch active terminal conversations (Claude Code, Antigravity, `opencode`) from your phone, send input into `tmux` or Claude Code background sessions (including answering interactive prompts), or continue closed sessions through the brain with single-writer safety.
+- **Multi-machine trees over WireGuard:** Join extra Linux, macOS, or Windows (WSL2) machines via phone-approved QR (`docs/spec-join.md`). `MAIN` can start sessions on any linked root (`session_start … root=<name>`), and root-to-root brain traffic travels inside WireGuard (`boringtun` + `smoltcp`) without opening ports or needing root privileges.
+- **End-to-end encrypted trunk transport:** After QR pairing, `/api/*` app traffic (outside `/api/pair/*`) and `/rtc` LiveKit signaling ride a DTLS-pinned WebRTC data channel (`branch/lib/pinned.ts`); voice media rides LiveKit ICE-TCP over port 443 with end-to-end DTLS-SRTP.
+- **Push-to-talk and hands-free voice:** Speak and hear replies with barge-in echo filtering, session-pinned TTS language, spoken playback controls (`stop`, `faster`, `slower`, `pause`, `resume`), and local CPU or LAN MLX speech models.
+- **Phone PWA and extensions:** Streaming markdown transcripts, image/file attachments, sandboxed HTML artifact previews, per-device revocation and emergency kill-switch (`/devices`), and process-isolated extensions (`root/extensions/librarian/` for SQLite FTS5 cross-session search and memory).
 
-**Software layers** (top = user, bottom = model):
+## What it does not do yet
 
-```
-Phone (PWA: Next.js)                        Omarchy desktop
-┌──────────────────────────┐                ┌──────────────────────────────────┐
-│ sessions UI / transcript │   REST         │  opencode serve :4096            │
-│ text + attachments  ─────┼───────────────►│  (sessions, prompts, streaming)  │
-│                          │                │        ▲                         │
-│ WebRTC media (mic/speech)│                │        │ llm.LLM adapter         │
-│   ▼                      │                │  Python voice agent (livekit-    │
-│ LiveKit server :7880 ◄───┼───WebRTC───────┤  agents)                         │
-│ (docker, host net)       │                │   STT ⇄ opencode ⇄ TTS           │
-└──────────────────────────┘                └───────┬─────────────┬───────────┘
-        ▲                                           │ LAN         │ fallback
-   tailscale serve                         Mac Studio :8001    speaches :8000
-   (tailnet-only TLS)                      (MLX, GPU)          (docker, CPU)
-```
+- **No phone microphone over plain LAN HTTP:** Browsers block microphone access on insecure `http://<LAN IP>` origins; typing and hearing replies work on LAN HTTP, while speaking from the phone requires HTTPS (such as your own trunk).
+- **The VPS still serves the web app shell and sees pairing:** Your rented VPS terminates TLS for the web page HTML/JS, the pairing exchange (`/api/pair/*`), and WebRTC `POST /offer` signaling. See [SECURITY.md](SECURITY.md) for the exact trust boundary.
+- **First-contact WebRTC fallback:** If a strict network blocks WebRTC on initial page load before the pinned channel connects, the app falls back to the trunk's TLS (`via the trunk's TLS`). Once pinned in a session, a dropped connection pauses in `reconnecting` rather than falling back.
+- **No direct root-to-root UDP leg:** WireGuard packets between roots travel inside the WebSocket root-link through the hub's relay (TCP inside TCP), so lossy paths can stack retransmits.
+- **Phone-to-root `/branch` turns:** Direct phone turns targeting a specific joined root via `/branch` still cross the hub's bridge as frames rather than inside the WireGuard tunnel.
+- **No per-root revoke UI or key rotation yet:** Revoking the approving phone cuts its joined roots' WireGuard tunnels within ~1–2 s, while revoking or rotating an individual root uses `roots.json` / `join.sh --rejoin` (`docs/spec-join.md`).
+- **Single-user and platform scope:** Designed for one owner per tree (no multi-user accounts); prebuilt release binaries focus on Linux `x86_64` (other Linux architectures and macOS compile with Cargo; Windows joins via WSL2); mobile OS background/screen-off microphone limits vary by device; short replies containing symbols can occasionally misdetect TTS language.
 
-**Local models** (no cloud speech APIs):
+## How it is tested
 
-| Layer | Primary | Fallback |
-|---|---|---|
-| STT | Qwen3-ASR (MLX, Mac :8001) | speaches faster-whisper (CPU, :8000) |
-| TTS | Qwen3-TTS (MLX, Mac :8001) | speaches Kokoro (CPU, :8000) |
-| LLM | opencode's configured model (`VOICE_MODEL`) | — |
+Verification relies on deterministic simulations and isolated network-namespace suites in `sim/` alongside crate and Playwright tests:
 
-Everything is systemd-managed on omarchy (`lk-pwa`, `lk-agent`,
-`opencode-serve`) + docker compose — reboots self-heal.
+- `sim/trunk-e2e.sh` — Full end-design world in private Linux namespaces (`unshare` + `nftables` blocking all UDP so only TCP 443 reaches the simulated VPS): tests QR pairing, pinned app data, voice over ICE-TCP, multi-root WireGuard delegation, hub restarts, active MITM rejection, traffic inspection at the VPS (`vps-eye.py`), and ~1 s revocation.
+- `sim/trunk-rtc-e2e.sh` & `sim/trunk-full-e2e.sh` — Isolated WebRTC voice-over-trunk and full phone→VPS→hub→joined-root Playwright runs (`branch/e2e/trunk-*.spec.ts`).
+- `sim/trunk-roots-e2e.py` — Multi-root WireGuard relay, directory push, replay/tamper/impostor rejection, rekeying, and revocation checks.
+- `sim/own-trunk-e2e.sh` — Boots clean Debian 12 and Ubuntu 24.04 systemd containers with Pebble (test ACME) and runs the real `trunk.sh`, `install.sh`, `join.sh`, and a Chromium phone.
+- `sim/tree-e2e.py`, `sim/hsim.py`, & `sim/voice/` — Deterministic coordinator tree tests, LLM-persona end-to-end runs, and voice persona barge-in/echo/latency suites (`sim/voice/suite.py`).
+- Unit & suite checks: `cargo test` in `root/` and `trunk/`, `root/verify.sh`, `branch/` Playwright e2e specs.
 
-- **PWA (`branch/`)** — Next.js 15 + Tailwind 4. Sessions list, transcript with
-  markdown (Streamdown), image/file attachments, sandboxed HTML preview,
-  pixel-art UI (pixelarticons), push-to-talk & hands-free voice modes.
-- **Proxy (`branch/app/api/*`)** — the phone never talks to opencode directly;
-  the Next server proxies sessions/messages/tokens and stays the single
-  auth/seam point. Also receives frontend diagnostics (`/api/diag`), log-only.
-- **Agent (`agent/`)** — Python `livekit-agents` worker. Custom `llm.LLM`
-  adapter maps LiveKit room → opencode session (room name = session slug),
-  so voice turns land in the same transcript as text.
-- **Deploy (`deploy/`)** — docker compose: LiveKit (host network, ICE pinned
-  to tailnet + LAN IPs so phone media flows over Tailscale) + speaches STT/TTS.
-- **Diagnostics** — the PWA records console errors, crashes, network timings,
-  and taps, uploads them in batches, and they are logged server-side
-  (`journalctl` + `branch/.diag/*.log`). Log-only by design: no automatic fix
-  sessions (a past auto-`autofix` experiment was removed as a bad idea).
+## Further reading
 
-## One-click install (self-host)
-
-> **Minimum hardware:** ONE Linux box (any machine that runs Docker + Node) +
-> your phone. No Mac needed — the CPU speech fallback (speaches, in the
-> compose) works out of the box; a Mac Studio running MLX speech models is an
-> optional quality upgrade (see `branch/voice/.env.example` → `SPEACHES_URL`).
-> Everything below runs on that one box; nothing needs to be public —
-> Tailscale is the only network requirement (install it on box + phone).
-
-```bash
-git clone https://github.com/veraldar/bifrost.git && cd bifrost
-scripts/selfhost-check.sh   # one-command check: can this box run the PWA? (clone→build→boot→probe)
-
-# 0. opencode itself (the coding agent this whole thing drives)
-#    install: curl -fsSL https://opencode.ai/install | bash   (or your package manager)
-opencode auth login                          # configure your LLM provider key
-opencode serve --port 4096 &                 # REST server on 127.0.0.1:4096
-
-# 1. LiveKit + speech stack (cp example → real; edit .env LIVEKIT_KEYS and
-#    livekit.yaml ICE IPs for your network — see trunk/deploy/livekit.yaml.example;
-#    `tailscale ip` on the box gives the tailnet IP to pin)
-cd trunk/deploy && cp livekit.yaml.example livekit.yaml && docker compose up -d && cd ../..
-
-# 2. Voice agent
-cd branch/voice && uv sync && cp .env.example .env  # edit values (SPEACHES_URL empty = CPU fallback)
-uv run agent.py dev                          # or a systemd unit
-
-# 3. PWA
-cd .. && npm install && cp .env.example .env.local    # edit values (from branch/voice up to branch/)
-npx web-push generate-vapid-keys --json      # paste into .env.local for push notifications
-npm run build && npm start                   # :8080
-tailscale serve --bg 8080                    # tailnet-only HTTPS
-```
-
-Or deploy just the PWA to Vercel with the button above and point it at your
-LiveKit (and a network-reachable opencode).
-
-## Env vars
-
-| Var | Where | Purpose |
-|---|---|---|
-| `LIVEKIT_URL` | pwa / agent | signal URL (`wss://…` for web, `ws://127.0.0.1:7880` local) |
-| `LIVEKIT_API_KEY/SECRET` | pwa / agent | token minting / worker auth |
-| `OPENCODE_URL` | pwa / agent | opencode REST (`http://127.0.0.1:4096`) |
-| `VOICE_MODEL` | agent | opencode model for spoken replies |
-| `SPEACHES_URL`, `STT_MODEL`, `TTS_MODEL`, `TTS_VOICE` | agent | speech stack fallbacks |
-
-## Roadmap
-
-One structural change per version; each is gated (`scripts/gate.py`) and lives on
-daily use before the next. Every version is a frozen release you can switch back to
-in about a minute (`scripts/promote.sh --list / --switch / --rollback`). Full contract:
-`docs/STABLE.md`.
-
-| version | the one change |
-|---|---|
-| v0.6.1 | releases carry their own env; switch/rollback between any built version |
-| v0.6.2 | speech-to-text in-process in the voice agent (no STT service) |
-| v0.7 | yggdrasil becomes the brain (opencode-compatible, light prompt) |
-| v0.8 | bifrost-net bridge as a second transport + an Android app as its first client |
-| v0.9 | bridge-first: no tailnet needed |
-
-`docs/plan.md` keeps the working board; `docs/environments.md` records installs and test runs.
-
-## Support
-
-Want to be part of the journey? Veraldar is free and stays free — but it
-isn't free to build.
-
-- GitHub Sponsors: `github.com/sponsors/veraldar` *(pending activation)*
-- OpenCollective: `opencode Collective pending — transparent public ledger`
-
-Every franc goes to hardware, hosting, and keeping the voice local.
+- [SECURITY.md](SECURITY.md) — Trust boundaries, token storage, key pinning, revocation, and vulnerability reporting.
+- [VERSIONS.md](VERSIONS.md) — Release changelog (`v0.8.0`, `v0.8.1`, and `Unreleased (v0.9.0)`).
+- [docs/own-trunk.md](docs/own-trunk.md) & [root/install/README.md](root/install/README.md) — Step-by-step installation and VPS setup.
+- [root/ROOT-COORD.md](root/ROOT-COORD.md) & [root/extensions/README.md](root/extensions/README.md) — Coordinator tree model, harnesses, and extension protocol.
 
 ## License
 
-Bifrost is [AGPL-3.0](LICENSE) — copyleft including network use: modified
-versions offered as a service must make their source available. Talking to
-bifrost over its API does not make your app a derivative; interop stays free.
+yggdrasil is licensed under [AGPL-3.0](LICENSE) — copyleft including network use: modified versions offered as a network service must make their source code available. Talking to yggdrasil over its API does not make your client a derivative work.
 
-Attributions: PWA derives from
-[livekit-examples/agent-starter-react](https://github.com/livekit-examples/agent-starter-react)
-(Apache-2.0). Icons: [pixelarticons](https://github.com/halfmage/pixelarticons) (MIT).
+Attributions: the web app in `branch/` derives from [livekit-examples/agent-starter-react](https://github.com/livekit-examples/agent-starter-react) (MIT, see [branch/LICENSE](branch/LICENSE)); icons from [pixelarticons](https://github.com/halfmage/pixelarticons) (MIT).
