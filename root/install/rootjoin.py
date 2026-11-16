@@ -42,6 +42,8 @@ MANAGED = ("YGG_LISTEN", "YGG_DATA_DIR", "YGG_PROJECT_DIR", "YGG_ROOT_NAME", "YG
 WG_KEY = re.compile(r"^[A-Za-z0-9+/]{43}=$")
 # The yggdrasil release key (RELEASE-KEY.pub in the repo), as an allowed_signers line: a release's SHA256SUMS
 # must carry its signature (ssh-keygen -Y sign -n yggdrasil-release) before anything from it is installed.
+YGG_RELEASE=''        # stamped by scripts/release.sh ('' = a checkout)
+YGG_RELEASE_TEST=''   # '1' = a test release (a throwaway key): only then (or a checkout) YGG_RELEASE_TEST_SIGNERS counts
 YGG_SIGNER = 'release@yggdrasil namespaces="yggdrasil-release" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIJyKwTSmRf3Cy1cHpzKHl3teRvCQtgK8/dcFRvlNCDJg'
 
 
@@ -503,6 +505,9 @@ def verify_sums(sums, sig):
         fail("ssh-keygen is needed to check the release signature — Debian/Ubuntu: sudo apt install openssh-client")
     signers = YGG_SIGNER + "\n"
     test = os.environ.get("YGG_RELEASE_TEST_SIGNERS")
+    if test and YGG_RELEASE and YGG_RELEASE_TEST != "1":
+        fail("YGG_RELEASE_TEST_SIGNERS is set, but this is the v%s release's rootjoin.py: it trusts only the yggdrasil "
+             "release key. Unset it — it is for tests, from a checkout." % YGG_RELEASE, 64)
     if test:
         print("!!  TEST ONLY: trusting the release signers in %s, not the built-in key" % test, file=sys.stderr)
         with open(test) as f:
