@@ -1,0 +1,13 @@
+{
+ "id": "v-all-agents",
+ "port_of": "all-agents",
+ "title": "Voice: a real working session, one door, every kind of agent (hsim 'all-agents', spoken)",
+ "voice": {"voice": "am_adam", "speed": 1.1},
+ "phone": {"noiseDb": -48, "noiseColor": "pink", "echo": 0.1},
+ "voice_checks": [
+  {"kind": "all_turns_landed", "name": "every spoken turn reached MAIN"},
+  {"kind": "every_reply_spoken", "name": "every reply was spoken"},
+  {"kind": "box_wer_max", "value": 0.2, "name": "the box heard the person (mean box WER <= 0.2)"},
+  {"kind": "reply_wer_max", "value": 0.25, "name": "the person heard main (mean reply WER <= 0.25)"}
+ ]
+}

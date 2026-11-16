@@ -1,0 +1,58 @@
+{
+ "id": "v-bargein",
+ "title": "Voice: barge-in over a playing reply, with the echo a working phone AEC leaves (−30 dB residual)",
+ "personas": [
+  {
+   "id": "owner",
+   "persona": "A busy owner who changes their mind quickly and talks over the AI when an answer goes the wrong way.",
+   "voice": {
+    "voice": "af_bella",
+    "speed": 1.1
+   },
+   "phone": {
+    "noiseDb": -55,
+    "noiseColor": "pink",
+    "echo": 0.03
+   },
+   "goals": [
+    "Ask main to tell you, in about thirty seconds, the story of how the Python language got its name and its early history.",
+    "A few seconds into that answer, interrupt it (barge in) with a different question: what is three hundred and forty two times seven. Plan it in during_reply: [{\"at_s\":5,\"text\":\"actually forget that, just tell me what three hundred forty two times seven is, over\"}]",
+    "Hear the answer to the new question (2394), then finish."
+   ],
+   "script": [
+    "First turn: the history request with the during_reply barge-in above.",
+    "If you heard the number, finish; otherwise ask once more."
+   ]
+  }
+ ],
+ "max_minutes": 10,
+ "max_turns": 4,
+ "settle_seconds": 10,
+ "checks": [
+  {
+   "name": "main answered 2394",
+   "kind": "main_says",
+   "regex": "2[,. ]?394|two thousand three hundred ninety"
+  }
+ ],
+ "voice_checks": [
+  {
+   "kind": "barge_in",
+   "name": "the barge-in was heard by the box and answered out loud"
+  },
+  {
+   "kind": "reply_cut",
+   "name": "the interrupted reply stopped early",
+   "by": "over"
+  },
+  {
+   "kind": "heard_regex",
+   "regex": "2[,. ]?394|two thousand,? three hundred (and )?ninety",
+   "name": "the person heard 2394"
+  },
+  {
+   "kind": "no_echo_messages",
+   "name": "the echo of the reply never reached MAIN as words"
+  }
+ ]
+}

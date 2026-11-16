@@ -330,7 +330,10 @@ fn card_line(st: &AppState, id: &str, s: &Session, indent: usize) -> String {
     let status = if running { "running" } else { card["status"].as_str().unwrap_or(if is_archived(s) { "archived" } else { "idle" }) };
     let head = card["headline"].as_str().or(card["summary"].as_str()).or(card["brief"].as_str()).unwrap_or_default();
     let needs = card["needs"].as_str().filter(|n| !n.is_empty()).map(|n| format!(" NEEDS: {}", one_line(n, 160))).unwrap_or_default();
-    let on = s.info["remote"]["root"].as_str().map(|r| format!(" on {r}")).unwrap_or_default();
+    // where it runs (a proxy: on that root) or who asked for it (a session another root started here)
+    let on = s.info["remote"]["root"].as_str().map(|r| format!(" on {r}"))
+        .or_else(|| s.info["report_to"]["root"].as_str().map(|r| format!(" for root {r}")))
+        .unwrap_or_default();
     format!(
         "{}- \"{}\" [{}{on}, {}, {} ago] {}{} (id={id})",
         "  ".repeat(indent),
@@ -592,9 +595,18 @@ pub fn snapshot(st: &AppState, caller: &str) -> String {
             })
             .collect();
         other.sort_by_key(|(_, s)| std::cmp::Reverse(s.info["time"]["updated"].as_u64().unwrap_or(0)));
-        if !other.is_empty() {
+        // a session another root started here is that root's person's work, not this user's:
+        // listed apart, so this door starts its own work instead of borrowing it
+        let (asked, own): (Vec<_>, Vec<_>) = other.into_iter().partition(|(_, s)| s.info["report_to"]["root"].is_string());
+        if !own.is_empty() {
             lines.push("other sessions active in the last 2 days (the user's own):".into());
-            for (id, s) in other.into_iter().take(10) {
+            for (id, s) in own.into_iter().take(10) {
+                lines.push(card_line(st, id, s, 1));
+            }
+        }
+        if !asked.is_empty() {
+            lines.push("work other roots asked this machine for (theirs — never reuse it for this user):".into());
+            for (id, s) in asked.into_iter().take(5) {
                 lines.push(card_line(st, id, s, 1));
             }
         }
@@ -808,8 +820,12 @@ pub enum Target {
     Peer { root: String, proxy: String },
 }
 
-/// Its managing parent, else the root that asked for it (`info.report_to`), else the turn's
-/// origin when that one manages sessions.
+/// Its managing parent, else the turn's origin when that one manages sessions here, else the
+/// root that asked for it (`info.report_to`). The origin beats `report_to` (voice-fixes 11-14):
+/// a session another root started can still be handed work by THIS root's door — that turn's
+/// answer belongs to the person who asked here, not to the other root's MAIN (the lab's backup
+/// request went to the home root's session and its result went home). The asking root's own
+/// turns arrive with no origin (`origin=none`), so they keep reporting home.
 pub fn report_target(st: &AppState, sid: &str, origin: Option<&str>) -> Option<Target> {
     let sessions = st.sessions.lock().unwrap();
     let manages = |id: &str| sessions.get(id).is_some_and(|s| crate::agent(st, &crate::profile_name_of(st, &s.info)).is_some_and(|p| p.sessions));
@@ -817,10 +833,13 @@ pub fn report_target(st: &AppState, sid: &str, origin: Option<&str>) -> Option<T
     if let Some(p) = parent_of(s).filter(|p| manages(p)) {
         return Some(Target::Local(p));
     }
+    if let Some(o) = origin.filter(|o| manages(o)) {
+        return Some(Target::Local(o.into()));
+    }
     if let (Some(root), Some(proxy)) = (s.info["report_to"]["root"].as_str(), s.info["report_to"]["session"].as_str()) {
         return Some(Target::Peer { root: root.into(), proxy: proxy.into() });
     }
-    origin.filter(|o| manages(o)).map(|o| Target::Local(o.into()))
+    None
 }
 
 /// A peer root reported a turn of the session behind proxy `proxy`: card the proxy, then
