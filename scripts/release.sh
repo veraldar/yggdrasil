@@ -225,6 +225,11 @@ ssh-keygen -Y verify -f "$ROOT/allowed_signers" -I release@yggdrasil -n yggdrasi
 (cd "$OUT" && sha256sum -c --quiet SHA256SUMS) || die "SHA256SUMS does not match dist"
 echo
 (cd "$OUT" && for f in *; do printf '    %8s  %s\n' "$(du -k "$f" | cut -f1)K" "$f"; done)
+# the lay guides name the release in their download lines: say so when they name another one
+for d in docs/own-trunk.md root/install/README.md; do
+  other=$(grep -o 'releases/download/v[0-9][0-9A-Za-z.+-]*/' "$ROOT/$d" | grep -v "/v$VERSION/" | sort -u | tr '\n' ' ' || true)
+  [ -z "$other" ] || printf '\033[1;33m!!\033[0m  %s still downloads from %s— point it at v%s before publishing\n' "$d" "$other" "$VERSION"
+done
 cat <<EOF
 
   dist/$VERSION is signed (SHA256SUMS.sig, key $(ssh-keygen -lf "$KEY" | awk '{print $2}')).
