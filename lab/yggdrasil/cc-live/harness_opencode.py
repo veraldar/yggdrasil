@@ -128,14 +128,21 @@ def page(sid, before=None, want=200):
 
 class Tail:
     """Parts and messages written or rewritten since the last read (same ids: a re-sent part
-    replaces its copy)."""
+    replaces its copy). It re-reads a short window behind the newest time it has seen — a part
+    stamped a little earlier than one already read (written later, stamped first) is not lost —
+    and sends each (part, update) once."""
+
+    WINDOW = 5000  # ms
 
     def __init__(self, sid):
         self.sid = sid
         self.at = 0
+        self.sent = {}  # part id → the time_updated last sent
         try:
             c = _db()
             self.at = c.execute("SELECT MAX(time_updated) FROM part WHERE session_id=?", (sid,)).fetchone()[0] or 0
+            for pid, pu in c.execute("SELECT id, time_updated FROM part WHERE session_id=? AND time_updated > ?", (sid, self.at - self.WINDOW)):
+                self.sent[pid] = pu
             c.close()
         except sqlite3.Error:
             pass
@@ -145,14 +152,19 @@ class Tail:
             c = _db()
             rows = c.execute(
                 "SELECT p.id, p.message_id, p.time_created, p.time_updated, p.data, m.data FROM part p JOIN message m ON m.id = p.message_id "
-                "WHERE p.session_id=? AND p.time_updated > ? ORDER BY p.time_updated, p.id", (self.sid, self.at)).fetchall()
+                "WHERE p.session_id=? AND p.time_updated > ? ORDER BY p.time_updated, p.id", (self.sid, self.at - self.WINDOW)).fetchall()
             c.close()
         except sqlite3.Error:
             return []
         out = []
         for pid, mid, pt, pu, data, mdata in rows:
             self.at = max(self.at, pu)
+            if self.sent.get(pid) == pu:
+                continue
+            self.sent[pid] = pu
             out += _part_items(pid, mid, _j(mdata).get("role"), pt, _j(data))
+        if len(self.sent) > 4000:  # only recent parts can come back
+            self.sent = {k: v for k, v in self.sent.items() if v > self.at - self.WINDOW}
         return out
 
 

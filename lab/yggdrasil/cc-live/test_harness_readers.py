@@ -182,6 +182,13 @@ class Opencode(unittest.TestCase):
         new = t.read()
         self.assertEqual([(i["id"], i["text"]) for i in new], [("prt_4", "One test fails: fixed it.")])
         self.assertEqual(t.read(), [])
+        # written after, stamped a little before the newest one read: not lost
+        c = sqlite3.connect(O.db_path())
+        c.execute("INSERT INTO part VALUES ('prt_5','msg_2','ses_a',390,390,?)", (json.dumps({"type": "text", "text": "Also: the docs."}),))
+        c.commit()
+        c.close()
+        self.assertEqual([(i["id"], i["text"]) for i in t.read()], [("prt_5", "Also: the docs.")])
+        self.assertEqual(t.read(), [])
 
     def test_live_from_processes(self):
         real = O._procs
