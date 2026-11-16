@@ -6,7 +6,9 @@
   rootjoin.py brain-env --state DIR --out FILE --listen ADDR --data DIR --project DIR --peer-port P [--upstream FILE]
   rootjoin.py wg-config --state DIR --out FILE --brain-port B --peer-port P   this root's WireGuard node config
                                            (prints changed|unchanged; exit 5 = the approval had no tunnel)
-  rootjoin.py fetch-net --base URL --arch A --out FILE   the bifrost-net release asset, checked against SHA256SUMS
+  rootjoin.py fetch-net --base URL --arch A --out FILE   the bifrost-net release asset: SHA256SUMS signed by the
+                                           yggdrasil release key (YGG_SIGNER below, ssh-keygen -Y verify), the asset
+                                           checked against it
   rootjoin.py dial  --state DIR            KEY=value lines for the dialer: TLS HOST PORT PATH
   rootjoin.py get   --state DIR KEY        one non-secret field of root.json (root_id hub name rootlink_url hub_name)
   rootjoin.py qr    TEXT [--png P]         the QR in the terminal (and as a PNG)
@@ -38,6 +40,9 @@ SAFE_TOKEN = re.compile(r"^[!-~]{8,4096}$")          # printable, no whitespace:
 MANAGED = ("YGG_LISTEN", "YGG_DATA_DIR", "YGG_PROJECT_DIR", "YGG_ROOT_NAME", "YGG_PEERS", "YGG_PEER_TOKEN",
            "YGG_PEERS_FROM", "YGG_PEERS_VIA")
 WG_KEY = re.compile(r"^[A-Za-z0-9+/]{43}=$")
+# The yggdrasil release key (RELEASE-KEY.pub in the repo), as an allowed_signers line: a release's SHA256SUMS
+# must carry its signature (ssh-keygen -Y sign -n yggdrasil-release) before anything from it is installed.
+YGG_SIGNER = 'release@yggdrasil namespaces="yggdrasil-release" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIJyKwTSmRf3Cy1cHpzKHl3teRvCQtgK8/dcFRvlNCDJg'
 
 
 def wg_fingerprint(pub):
@@ -490,10 +495,33 @@ def cmd_wg_config(o):
     return 0
 
 
+def verify_sums(sums, sig):
+    """True iff SIG is the yggdrasil release key's signature over SUMS (ssh-keygen -Y verify; the key is
+    YGG_SIGNER, embedded here). YGG_RELEASE_TEST_SIGNERS=FILE: tests only, their own throwaway key."""
+    import tempfile
+    if not shutil.which("ssh-keygen"):
+        fail("ssh-keygen is needed to check the release signature — Debian/Ubuntu: sudo apt install openssh-client")
+    signers = YGG_SIGNER + "\n"
+    test = os.environ.get("YGG_RELEASE_TEST_SIGNERS")
+    if test:
+        print("!!  TEST ONLY: trusting the release signers in %s, not the built-in key" % test, file=sys.stderr)
+        with open(test) as f:
+            signers = f.read()
+    with tempfile.TemporaryDirectory() as d:
+        a, sg = os.path.join(d, "allowed_signers"), os.path.join(d, "SHA256SUMS.sig")
+        with open(a, "w") as f:
+            f.write(signers)
+        with open(sg, "wb") as f:
+            f.write(sig)
+        r = subprocess.run(["ssh-keygen", "-Y", "verify", "-f", a, "-I", "release@yggdrasil", "-n", "yggdrasil-release",
+                            "-s", sg], input=sums, capture_output=True)
+        return r.returncode == 0
+
+
 def cmd_fetch_net(o):
-    """The release's bifrost-net for linux-<arch> (BASE/SHA256SUMS names it), checked, mode 755: the root
-    build bifrost-net-root-<ver>-linux-<arch> when the release has one (no libopus needed), else the full
-    bifrost-net-<ver>-linux-<arch>."""
+    """The release's bifrost-net for linux-<arch> (BASE/SHA256SUMS names it), mode 755: SHA256SUMS signed by
+    the release key, the asset checked against it. The root build bifrost-net-root-<ver>-linux-<arch> when
+    the release has one (no libopus needed), else the full bifrost-net-<ver>-linux-<arch>."""
     import hashlib
     base = o.base.rstrip("/")
 
@@ -504,8 +532,14 @@ def cmd_fetch_net(o):
             with urllib.request.urlopen(req, timeout=120, context=ctx) as r:
                 return r.read()
         except (urllib.error.URLError, OSError) as e:
+            if url.endswith(".sig"):
+                fail("the release at %s has no signature (SHA256SUMS.sig) — refusing it" % base)
             fail("cannot download %s: %s" % (url, getattr(e, "reason", e)))
-    sums = get(base + "/SHA256SUMS").decode(errors="replace")
+    raw = get(base + "/SHA256SUMS")
+    sig = get(base + "/SHA256SUMS.sig")
+    if not verify_sums(raw, sig):
+        fail("the SHA256SUMS at %s is NOT signed by the yggdrasil release key — refusing it" % base)
+    sums = raw.decode(errors="replace")
     hit = None
     for kind in ("root-", ""):
         pat = re.compile(r"^([0-9a-f]{64})  (bifrost-net-%s[0-9][0-9A-Za-z.+-]*-linux-%s)$" % (kind, re.escape(o.arch)))

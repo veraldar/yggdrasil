@@ -5,8 +5,8 @@ import { type BrowserContext, type Page, devices, expect, test } from '@playwrig
 
 /**
  * YOUR OWN TRUNK, AS A LAY USER GETS IT — run by sim/own-trunk-e2e.sh, which builds the world in
- * docker: a fresh Debian "VPS" that ran trunk/install/trunk.sh, a fresh "home" computer that ran
- * root/install/install.sh --trunk '<the line trunk.sh printed>' (brain on the mock model), and a
+ * docker: a fresh Debian "VPS" that ran trunk.sh, a fresh "home" computer that ran the release's
+ * install.sh --trunk (the line trunk.sh printed, pasted when asked; brain on the mock model), and a
  * third machine for join.sh. This file is the phone (Chromium, Pixel 7) plus the lay user's hands
  * on those machines (`docker exec` of the commands the guide tells them to type).
  *
@@ -38,7 +38,10 @@ const HOME_C = process.env.OT_HOME || 'ot-home';
 const MAC_C = process.env.OT_MAC || 'ot-mac';
 const PHONE_IP = process.env.OT_PHONE_IP || '';
 const HUB_NAME = process.env.OT_HUB_NAME || '';
-const INSTALL = '/repo/root/install';
+// what the lay user types on the home computer (the release's install.sh) and on the third machine
+const INSTALL_CMD = process.env.OT_INSTALL_CMD || '/repo/root/install/install.sh';
+const HOME_USER = process.env.OT_HOME_USER || 'node';
+const JOIN_CMD = process.env.OT_JOIN_CMD || 'cd /repo/root/install && ./join.sh --brain-bin /opt/bin/yggdrasil';
 
 test.skip(!AP || !STATE, 'run by sim/own-trunk-e2e.sh (the docker world)');
 test.use({
@@ -84,7 +87,7 @@ const on = (container: string, cmd: string, user = 'node') =>
     encoding: 'utf8',
     timeout: 180_000,
   });
-const home = (cmd: string) => on(HOME_C, cmd);
+const home = (cmd: string) => on(HOME_C, cmd, HOME_USER);
 const mac = (cmd: string) => on(MAC_C, cmd, 'ubuntu');
 /** the hub's own processes, read on the hub (never the phone) */
 const hubGet = (port: number, path: string): J & J[] =>
@@ -186,7 +189,7 @@ test('own trunk: a lay user pairs a phone, talks to MAIN, joins a root, delegate
   try {
     // ---------------------------------------------------------------- 1 pair
     await step('1', '`install.sh pair phone` on the hub → QR → the phone pairs through the trunk', async () => {
-      const out = home(`${INSTALL}/install.sh pair phone --png /sim/${qrPng.split('/').pop()}`);
+      const out = home(`${INSTALL_CMD} pair phone --png /sim/${qrPng.split('/').pop()}`);
       expect(out).toContain(`opens ${AP}/pair`);
       const qrUrl = execFileSync('zbarimg', ['--raw', '-q', qrPng]).toString().trim();
       expect(qrUrl.startsWith(`${AP}/pair#`), qrUrl).toBe(true);
@@ -249,8 +252,8 @@ test('own trunk: a lay user pairs a phone, talks to MAIN, joins a root, delegate
           'docker',
           [
             'exec', '-u', 'ubuntu', MAC_C, 'bash', '-c',
-            `cd ${INSTALL} && ./join.sh --hub ${AP} --cacert /sim/trunk-ca.pem --name mac ` +
-              '--upstream-env /home/ubuntu/model.env --brain-bin /opt/bin/yggdrasil ' +
+            `${JOIN_CMD} --hub ${AP} --cacert /sim/trunk-ca.pem --name mac ` +
+              '--upstream-env /home/ubuntu/model.env ' +
               '--supervisor nohup --qr-png /sim/join-qr.png >/sim/join.log 2>&1; echo "exit $?" >>/sim/join.log',
           ],
           { stdio: 'ignore' }
@@ -356,9 +359,9 @@ test('own trunk: a lay user pairs a phone, talks to MAIN, joins a root, delegate
     // ---------------------------------------------------------------- 6 revoke
     await step('6', '`install.sh pair --revoke <id>` on the hub → the phone is refused through the trunk', async () => {
       expect(deviceId, 'needs step 1').toBeTruthy();
-      const listed = home(`${INSTALL}/install.sh pair --list`);
+      const listed = home(`${INSTALL_CMD} pair --list`);
       expect(listed).toContain(deviceId);
-      expect(home(`${INSTALL}/install.sh pair --revoke ${deviceId}`)).toContain(`revoked ${deviceId}`);
+      expect(home(`${INSTALL_CMD} pair --revoke ${deviceId}`)).toContain(`revoked ${deviceId}`);
       await phone.goto(`${AP}/session/main?id=${mainId}`);
       await phone.waitForURL(/\/pair\?unpaired=1/, { timeout: 30_000 });
       const ping = await phoneFetch(phone, '/api/ping');
@@ -374,7 +377,7 @@ test('own trunk: a lay user pairs a phone, talks to MAIN, joins a root, delegate
         });
         expect(r.status).toBe(401);
       }
-      expect(home(`${INSTALL}/install.sh pair --list`)).toMatch(new RegExp(`${deviceId}.*revoked`));
+      expect(home(`${INSTALL_CMD} pair --list`)).toMatch(new RegExp(`${deviceId}.*revoked`));
     });
   } finally {
     await step('∀', `the phone only ever talked to ${AP}`, async () => {

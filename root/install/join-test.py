@@ -5,7 +5,8 @@ The fake hub speaks the join contract over HTTPS with its own test CA (join.sh -
   POST /api/roots/join · GET <poll_url> (x-join-secret) · POST /api/roots/<id>/tokens (x-root-secret)
 It learns the machine's WireGuard key (wg_pub) and grants the tunnel (`wg`: its key + addresses), so
 join.sh writes and runs this root's `bifrost-net wg` node; and it serves a fake GitHub release
-(/releases/latest/download/SHA256SUMS + bifrost-net-<ver>-linux-x86_64) for the download path.
+(/releases/latest/download/SHA256SUMS + .sig + bifrost-net-<ver>-linux-x86_64) for the download path,
+signed by a throwaway test key that the scripts trust through YGG_RELEASE_TEST_SIGNERS (tests only).
 and serves the trunk's root link on wss://localhost:<port>/rootlink: it checks the single-use link
 token, answers root-link.ok, sends root.ping and waits for root.pong — which the REAL root-dial.py only
 sends after its probe exec reached this root's brain. So a recorded pong = brain up + dialer linked.
@@ -790,12 +791,33 @@ def run_tests(hub, new_env, tmp):
     full = open(os.path.join(trunk, "release", "bifrost-net"), "rb").read()
     full_asset = "bifrost-net-0.9.9-test-linux-x86_64"
     root_path = os.path.join(trunk, "root", "release", "bifrost-net")     # where join.sh builds the root build
-    sums = lambda d: "".join("%s  %s\n" % (hashlib.sha256(v).hexdigest(), k) for k, v in d.items()).encode()
-    hub.release = {full_asset: full}
-    hub.release["SHA256SUMS"] = sums(hub.release)
+    sign, signers = test_key(tmp)
+    tenv = dict(os.environ, YGG_RELEASE_TEST_SIGNERS=signers)
+
+    def publish(assets):   # the release as release.sh makes it: the assets, SHA256SUMS, its signature
+        rel = {k: v for k, v in assets.items() if not k.startswith("SHA256SUMS")}
+        rel["SHA256SUMS"] = "".join("%s  %s\n" % (hashlib.sha256(v).hexdigest(), k) for k, v in rel.items()).encode()
+        rel["SHA256SUMS.sig"] = sign(rel["SHA256SUMS"])
+        hub.release = rel
+    publish({full_asset: full})
     out = os.path.join(tmp, "fetched")
-    fetch = lambda o: subprocess.run([sys.executable, HELPER, "fetch-net", "--base", hub.base + "/releases/latest/download",
-                                      "--arch", "x86_64", "--out", o, "--cacert", hub_ca(tmp)], capture_output=True, text=True)
+    fetch = lambda o, env=tenv: subprocess.run([sys.executable, HELPER, "fetch-net", "--base", hub.base + "/releases/latest/download",
+                                                "--arch", "x86_64", "--out", o, "--cacert", hub_ca(tmp)], capture_output=True, text=True, env=env)
+    fr = fetch(out, os.environ)
+    check("release: SHA256SUMS signed by a key that is not the release key (the built-in one) is refused, nothing installed",
+          fr.returncode == 1 and "NOT signed by the yggdrasil release key" in fr.stderr and not os.path.exists(out), fr.stderr)
+    good = hub.release
+    forged = bytearray(good["SHA256SUMS"])
+    forged[0] = ord("1") if forged[0] == ord("0") else ord("0")      # one hash, one digit off
+    hub.release = dict(good, SHA256SUMS=bytes(forged))
+    fr = fetch(out)
+    check("release: a SHA256SUMS changed after signing is refused (the signature no longer matches)",
+          fr.returncode == 1 and "NOT signed" in fr.stderr and not os.path.exists(out), fr.stderr)
+    hub.release = {k: v for k, v in good.items() if k != "SHA256SUMS.sig"}
+    fr = fetch(out)
+    check("release: an unsigned release (no SHA256SUMS.sig) is refused",
+          fr.returncode == 1 and "no signature" in fr.stderr and not os.path.exists(out), fr.stderr)
+    hub.release = good
     fr = fetch(out)
     check("release: fetch-net takes the asset SHA256SUMS names, checks it, installs it mode 755",
           fr.returncode == 0 and fr.stdout.strip() == full_asset and open(out, "rb").read() == full and mode(out) == 0o755,
@@ -803,14 +825,12 @@ def run_tests(hub, new_env, tmp):
     asset, data = full_asset, full
     if os.path.exists(root_path):   # a release that also ships the root build: joined roots take that one
         asset, data = "bifrost-net-root-0.9.9-test-linux-x86_64", open(root_path, "rb").read()
-        hub.release = {asset: data, full_asset: full}
-        hub.release["SHA256SUMS"] = sums(hub.release)
+        publish({asset: data, full_asset: full})
         fr = fetch(out)
         check("release: with a root build in it (bifrost-net-root-…), fetch-net takes that one (no libopus needed)",
               fr.returncode == 0 and fr.stdout.strip() == asset and open(out, "rb").read() == data, fr.stdout + fr.stderr)
     hub.release[asset] = data[:-1] + bytes([data[-1] ^ 1])
-    fr = subprocess.run([sys.executable, HELPER, "fetch-net", "--base", hub.base + "/releases/latest/download",
-                         "--arch", "x86_64", "--out", out + "2", "--cacert", hub_ca(tmp)], capture_output=True, text=True)
+    fr = fetch(out + "2")
     check("release: a tampered asset is refused (does not match SHA256SUMS), nothing installed",
           fr.returncode == 1 and "does not match SHA256SUMS" in fr.stderr and not os.path.exists(out + "2"), fr.stderr)
     hub.release[asset] = data
@@ -836,6 +856,23 @@ def run_tests(hub, new_env, tmp):
 
 def hub_ca(tmp):
     return os.path.join(tmp, "ca.pem")
+
+
+def test_key(tmp):
+    """A throwaway release key for the fake release: (sign(bytes) -> sig bytes, allowed_signers path)."""
+    key = os.path.join(tmp, "release-test-key")
+    if not os.path.exists(key):
+        subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", "release@yggdrasil", "-f", key], check=True)
+        with open(key + ".pub") as f:
+            pub = " ".join(f.read().split()[:2])
+        with open(os.path.join(tmp, "test-allowed-signers"), "w") as f:
+            f.write('release@yggdrasil namespaces="yggdrasil-release" %s\n' % pub)
+
+    def sign(data, k=key):
+        r = subprocess.run(["ssh-keygen", "-q", "-Y", "sign", "-f", k, "-n", "yggdrasil-release"], input=data, capture_output=True)
+        assert r.returncode == 0, r.stderr
+        return r.stdout
+    return sign, os.path.join(tmp, "test-allowed-signers")
 
 
 def bootstrap_test(hub, new_env, tmp):
@@ -882,7 +919,8 @@ def bootstrap_test(hub, new_env, tmp):
 
     def boot_run(args, home=None):
         # the sparse clone has no trunk/target: join.sh downloads bifrost-net from the (fake) release
-        e = w.env(WSL_DISTRO_NAME="Ubuntu", JOIN_RELEASES=hub.base + "/releases")
+        e = w.env(WSL_DISTRO_NAME="Ubuntu", JOIN_RELEASES=hub.base + "/releases",
+                  YGG_RELEASE_TEST_SIGNERS=os.path.join(tmp, "test-allowed-signers"))
         if home:
             e["HOME"] = home
         with open(w.log, "a") as f:

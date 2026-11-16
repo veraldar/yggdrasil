@@ -1,33 +1,38 @@
 #!/usr/bin/env bash
 # own-trunk-e2e.sh — YOUR OWN TRUNK, the lay procedure (docs/own-trunk.md) end to end in docker: fresh machines,
-# the real scripts, a simulated phone. No real Let's Encrypt (Pebble, its test server), nothing public.
+# the SIGNED release (scripts/release.sh), a simulated phone. No real Let's Encrypt (Pebble, its test server),
+# nothing public.
 #
 #   "internet" 172.31.250.0/24 (docker network ot-net, OT_SUBNET; the phone = this machine at .1)
-#     ot-files   .5   a fake GitHub (release assets + SHA256SUMS, raw files) and an outside client (curl)
+#     ot-files   .5   a fake GitHub: the release dist/VERSION (signed SHA256SUMS), tampered copies of it, a
+#                     newer one for the weekly update — and an outside client (curl)
 #     ot-pebble  .6   Let's Encrypt's test ACME server (HTTP-01 on port 80, like the real one)
-#     ot-vps-a   .10  trunk.tree.test     Debian 12 + systemd + ufw: trunk.sh --self-signed, binary from the
-#                                         fake release (sha256 checked), :443 direct
+#     ot-vps-a   .10  trunk.tree.test     Debian 12 + systemd: the release's trunk.sh --self-signed — refuses the
+#                                         tampered releases, turns the firewall on, security updates + the weekly
+#                                         signed update, :443 direct; at the end --update and --uninstall
 #     ot-vps-b   .11  trunk-le.tree.test  Debian 12 + systemd + ufw: trunk.sh with Pebble, certbot standalone on :80
 #     ot-vps-c   .12  trunk-px.tree.test  Debian 12 + systemd + an nginx website (www.tree.test) on :80 + :443:
 #                     www.tree.test       trunk.sh --behind-proxy, Pebble through nginx's webroot, then :443 shared by
 #                                         name with sni-443.py (option A) and nginx stream (option B)
-#     ot-home    .20  the home computer (Debian 12 + Node 24): install.sh --trunk '<line>' on the mock model
-#     ot-mac     .30  another computer (Ubuntu 24.04): join.sh --hub https://trunk.tree.test, approved on the phone
+#     ot-home    .20  the home computer: plain debian:12 (no node, no cargo, no git): the release's install.sh
+#                     --trunk, the line pasted at its prompt in an interactive shell (never on a command line)
+#     ot-mac     .30  another computer (Ubuntu 24.04): the release's join.sh --hub https://trunk.tree.test,
+#                     approved on the phone
 #   the phone: Chromium (Playwright, Pixel 7) on this machine — branch/e2e/own-trunk.spec.ts
 #
 #   sim/own-trunk-e2e.sh                 every stage; exit 0 = all PASS (the table at the end)
-#   OT_STAGES=a,b,c (subset) · OT_REAL_RELEASE=1 adds stage r: trunk.sh fetching the REAL v0.8.0 from GitHub
+#   OT_STAGES=a,b,c,u (subset) · OT_REAL_RELEASE=1 adds stage r: trunk.sh against the REAL GitHub release
 #   OT_KEEP=1 leaves the containers up · OT_STATE=DIR keeps state + logs there
+#   OT_VERSION (0.9.0) · OT_DIST (dist/OT_VERSION; made with scripts/release.sh OT_VERSION --dirty when missing)
+#   OT_RELEASE_KEY (~/.config/yggdrasil-release/release_ed25519: signs the sim's other releases)
 #
 # Needs: docker (privileged containers: systemd inside), the internet for apt in the fresh containers and the
-# images, zbarimg, branch/ built (npm run build) with node_modules (Playwright + its chromium).
-# Binaries: built for Debian 12 in docker (sim/own-trunk/build.Dockerfile → trunk/target-bookworm,
-# root/target-bookworm), or OT_TRUNK_BIN / OT_YGG_BIN.
+# images, zbarimg, ssh-keygen, branch/node_modules (Playwright + its chromium) for the phone.
 set -uo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 HERE=$ROOT/sim/own-trunk
 STATE=${OT_STATE:-$(mktemp -d /tmp/own-trunk.XXXXXX)}
-STAGES=,${OT_STAGES:-a,b,c},; [ "${OT_REAL_RELEASE:-0}" = 1 ] && STAGES="${STAGES}r,"
+STAGES=,${OT_STAGES:-a,b,c,u},; [ "${OT_REAL_RELEASE:-0}" = 1 ] && STAGES="${STAGES}r,"
 mkdir -p "$STATE"/{files,sim,log} && chmod 755 "$STATE" "$STATE/sim"
 RESULTS=$STATE/results.tsv; : >"$RESULTS"; : >"$STATE/steps.tsv"
 # a private /24 (docker's own DNS forwarder serves 172.16/12 networks; the sim needs it for apt)
@@ -35,7 +40,13 @@ NET=ot-net SUBNET=${OT_SUBNET:-172.31.250.0/24}; P=${SUBNET%.*}
 PHONE_IP=$P.1 IP_FILES=$P.5 IP_PEBBLE=$P.6 IP_A=$P.10 IP_B=$P.11 IP_C=$P.12 IP_R=$P.13 IP_HOME=$P.20 IP_MAC=$P.30
 A=trunk.tree.test B=trunk-le.tree.test C=trunk-px.tree.test WWW=www.tree.test
 ALL=(ot-files ot-pebble ot-vps-a ot-vps-b ot-vps-c ot-vps-r ot-home ot-mac)
-VER=0.8.0
+VER=${OT_VERSION:-0.9.0}
+DIST=${OT_DIST:-$ROOT/dist/$VER}
+KEY=${OT_RELEASE_KEY:-${YGG_RELEASE_KEY:-$HOME/.config/yggdrasil-release/release_ed25519}}
+HU=ana HH=/home/ana                       # the home computer's user
+FILES_URL=http://files.tree.test:8000
+REL="TRUNK_RELEASES=$FILES_URL/releases"  # trunk.sh / install.sh / join.sh: the fake GitHub's releases
+HREL="YGG_RELEASES=$FILES_URL/releases"
 
 say()  { printf '\033[1m==>\033[0m %s\n' "$*"; }
 note() { printf '    %s\n' "$*"; }
@@ -46,11 +57,13 @@ check() { # ID WHAT CMD… — PASS when CMD exits 0
   if "$@" >>"$STATE/log/checks.log" 2>&1; then pass "$id" "$what"; else fail "$id" "$what" "(see log/checks.log)"; fi
 }
 stage() { case $STAGES in *,"$1",*) return 0 ;; esac; return 1; }
+up() { [ -n "$(docker ps -q -f "name=^$1\$")" ]; }
 dx() { docker exec "$@"; }
-vps() { local c=$1; shift; docker exec "$c" bash -c "$*"; }          # as the VPS admin (root)
-homesh() { docker exec -u node ot-home bash -c "$*"; }               # as the home computer's user
+vps() { local c=$1; shift; docker exec "$c" bash -c "$*"; }          # as the VPS admin (sudo)
+homesh() { docker exec -u "$HU" ot-home bash -c "$*"; }              # as the home computer's user
 outside() { docker exec ot-files bash -c "$*"; }                      # somebody on the internet
 export -f dx vps homesh outside
+export HU
 
 cleanup() {
   [ "${OT_KEEP:-0}" = 1 ] && { say "kept: containers ${ALL[*]} · network $NET"; return; }
@@ -62,43 +75,56 @@ trap cleanup EXIT
 # ------------------------------------------------------------------------------------ prerequisites
 command -v docker >/dev/null || { echo "docker is needed"; exit 2; }
 command -v zbarimg >/dev/null || { echo "zbarimg is needed (zbar)"; exit 2; }
-[ -f "$ROOT/branch/.next/BUILD_ID" ] || { echo "build the app first: (cd branch && npm ci && npm run build)"; exit 2; }
-# the home computer mounts the repo read-only: install.sh must find the build current (its own test, same files)
-STALE=$(cd "$ROOT/branch" && find app components hooks lib styles public middleware.ts next.config.ts package.json package-lock.json server.mjs -newer .next/BUILD_ID -print -quit 2>/dev/null)
-[ -z "$STALE" ] || { echo "branch/$STALE is newer than the app build: (cd branch && npm run build)"; exit 2; }
+command -v ssh-keygen >/dev/null || { echo "ssh-keygen is needed (openssh)"; exit 2; }
+[ -d "$ROOT/branch/node_modules/@playwright/test" ] || { echo "the phone needs Playwright: (cd branch && npm ci && npx playwright install chromium)"; exit 2; }
+[ -f "$KEY" ] || { echo "no release key at $KEY (scripts/release.sh makes it; OT_RELEASE_KEY=…)"; exit 2; }
+if [ ! -f "$DIST/SHA256SUMS.sig" ]; then
+  say "no release in $DIST: scripts/release.sh $VER --dirty"
+  DIST=$ROOT/dist/$VER "$ROOT/scripts/release.sh" "$VER" --dirty >"$STATE/log/release.log" 2>&1 || { tail -20 "$STATE/log/release.log"; exit 2; }
+fi
+ssh-keygen -Y verify -f "$ROOT/allowed_signers" -I release@yggdrasil -n yggdrasil-release -s "$DIST/SHA256SUMS.sig" \
+  <"$DIST/SHA256SUMS" >/dev/null 2>&1 || { echo "$DIST/SHA256SUMS is not signed by the release key (allowed_signers)"; exit 2; }
+TGZ=yggdrasil-$VER-linux-x86_64.tar.gz
 docker rm -f "${ALL[@]}" >/dev/null 2>&1 || true
 docker network rm "$NET" >/dev/null 2>&1 || true
 say "images"
 docker build -q -t ot-vps:12 -f "$HERE/vps.Dockerfile" "$HERE" >/dev/null || exit 2
-docker image inspect node:24 >/dev/null 2>&1 || docker pull -q node:24 >/dev/null
-docker image inspect ubuntu:24.04 >/dev/null 2>&1 || docker pull -q ubuntu:24.04 >/dev/null
-docker image inspect ghcr.io/letsencrypt/pebble:latest >/dev/null 2>&1 || docker pull -q ghcr.io/letsencrypt/pebble:latest >/dev/null
-TRUNK_BIN=${OT_TRUNK_BIN:-} YGG_BIN=${OT_YGG_BIN:-}
-if [ -z "$TRUNK_BIN" ] || [ -z "$YGG_BIN" ]; then
-  say "binaries for Debian 12 (cargo in docker: trunk/target-bookworm, root/target-bookworm)"
-  docker build -q -t ot-build:bookworm -f "$HERE/build.Dockerfile" "$HERE" >/dev/null || exit 2
-  for c in trunk root; do
-    docker run --rm --user "$(id -u):$(id -g)" -e CARGO_HOME=/cargo -e HOME=/tmp -v "$HOME/.cargo/registry:/cargo/registry" \
-      -v "$ROOT:/src" -w "/src/$c" ot-build:bookworm bash -c \
-      "CARGO_TARGET_DIR=/src/$c/target-bookworm cargo build --release --locked --offline -q 2>/dev/null || CARGO_TARGET_DIR=/src/$c/target-bookworm cargo build --release --locked -q" \
-      || { echo "cargo build of $c/ failed"; exit 2; }
-  done
-  TRUNK_BIN=${TRUNK_BIN:-$ROOT/trunk/target-bookworm/release/bifrost-net}
-  YGG_BIN=${YGG_BIN:-$ROOT/root/target-bookworm/release/yggdrasil}
-fi
-mkdir -p "$STATE/bin" && cp "$TRUNK_BIN" "$STATE/bin/bifrost-net" && cp "$YGG_BIN" "$STATE/bin/yggdrasil"
+for i in node:24 debian:12 ubuntu:24.04 ghcr.io/letsencrypt/pebble:latest; do
+  docker image inspect "$i" >/dev/null 2>&1 || docker pull -q "$i" >/dev/null
+done
+# the binaries the release built (stage b/c pass the trunk's own file with --binary)
+mkdir -p "$STATE/bin"
+tar -xzf "$DIST/$TGZ" -C "$STATE/bin" --strip-components=2 "yggdrasil-$VER/bin/bifrost-net" "yggdrasil-$VER/bin/yggdrasil"
 
-# ---- the fake GitHub: release assets (one honest, one tampered) + raw files
+# ---- the fake GitHub: the release as published, plus the releases an attacker (or a newer version) would serve
 R=$STATE/files/releases
-mkdir -p "$R/download/v$VER" "$R/latest/download" "$R/download/v9.9.9" "$STATE/files/raw/main/trunk/deploy"
-cp "$STATE/bin/bifrost-net" "$R/download/v$VER/bifrost-net-$VER-linux-x86_64"
-(cd "$R/download/v$VER" && sha256sum "bifrost-net-$VER-linux-x86_64" >SHA256SUMS)
-cp "$R/download/v$VER/"* "$R/latest/download/"
-cp "$STATE/bin/bifrost-net" "$R/download/v9.9.9/bifrost-net-9.9.9-linux-x86_64"
-printf 'x' >>"$R/download/v9.9.9/bifrost-net-9.9.9-linux-x86_64"   # one byte more than SHA256SUMS says
-sed "s/$VER/9.9.9/" "$R/download/v$VER/SHA256SUMS" >"$R/download/v9.9.9/SHA256SUMS"
-cp "$ROOT/trunk/deploy/sni-443.py" "$STATE/files/raw/main/trunk/deploy/"
-chmod -R a+rX "$STATE/files"
+mkrel() { # VERSION MODE — releases/download/vVERSION from dist (assets renamed to VERSION, trunk.sh stamped
+  #         with it), SHA256SUMS signed with the release key; MODE: good | sums (SHA256SUMS changed after
+  #         signing) | asset (the binary + archive changed after) | nosig | otherkey (signed by another key)
+  local v=$1 mode=$2 d=$R/download/v$1 f
+  mkdir -p "$d"
+  for f in "$DIST"/*; do
+    case $(basename "$f") in SHA256SUMS|SHA256SUMS.sig) continue ;; esac
+    cp "$f" "$d/$(basename "$f" | sed "s/$VER/$v/g")"
+  done
+  sed -i "s/^YGG_RELEASE='[^']*'/YGG_RELEASE='$v'/" "$d/trunk.sh" "$d/install.sh" "$d/join.sh"
+  (cd "$d" && sha256sum -- * | LC_ALL=C sort -k2 >SHA256SUMS)
+  if [ "$mode" = otherkey ]; then
+    ssh-keygen -q -t ed25519 -N '' -C release@yggdrasil -f "$STATE/otherkey" <<<y >/dev/null 2>&1 || true
+    ssh-keygen -q -Y sign -f "$STATE/otherkey" -n yggdrasil-release "$d/SHA256SUMS" </dev/null
+  elif [ "$mode" != nosig ]; then
+    ssh-keygen -q -Y sign -f "$KEY" -n yggdrasil-release "$d/SHA256SUMS" </dev/null
+  fi
+  case $mode in
+    sums) sed -i -E '1s/^0/X/; 1s/^[1-9a-f]/0/; 1s/^X/1/' "$d/SHA256SUMS" ;;   # one hash, one digit off
+    asset) printf 'x' >>"$d/bifrost-net-$v-linux-x86_64"; printf 'x' >>"$d/yggdrasil-$v-linux-x86_64.tar.gz" ;;
+  esac
+}
+latest() { rm -rf "$R/latest"; mkdir -p "$R/latest"; cp -r "$R/download/v$1" "$R/latest/download"; chmod -R a+rX "$STATE/files"; }
+mkdir -p "$R/download/v$VER" && cp "$DIST"/* "$R/download/v$VER/"   # the release exactly as release.sh made it
+mkrel 9.9.1 sums; mkrel 9.9.2 asset; mkrel 9.9.3 nosig; mkrel 9.9.4 otherkey
+mkrel 0.9.1-test good; mkrel 0.9.2-test sums                       # the weekly update: a newer one, a forged one
+latest "$VER"
 
 # ---- Pebble: HTTP-01 on port 80 like Let's Encrypt; no random nonce rejects, no sleeps (deterministic)
 cat >"$STATE/pebble.json" <<'JSON'
@@ -126,64 +152,117 @@ new_vps() { # NAME IP ALIAS… — a fresh Debian 12 server with systemd as PID 
     --tmpfs /run --tmpfs /run/lock ot-vps:12 >/dev/null
   for _ in $(seq 30); do s=$(dx "$n" systemctl is-system-running 2>/dev/null || true); case $s in running|degraded) break ;; esac; sleep 1; done
 }
-pin_of() { sed -n "s/.*--trunk 'wss:[^#]*#pin=\([0-9A-F:]*\),token=.*/\1/p" "$1" | tail -1; }
-line_of() { sed -n "s/.*--trunk '\(wss:[^']*\)'.*/\1/p" "$1" | tail -1; }
+# the connect line trunk.sh prints on a line of its own (and its pin)
+line_of() { grep -o 'wss://[^ ]*#pin=[0-9A-F:]*,token=[0-9a-f]*' "$1" | tail -1; }
+pin_of() { line_of "$1" | sed -n 's/.*#pin=\([0-9A-F:]*\),token=.*/\1/p'; }
 reg_sum() { homesh 'sha256sum < ~/.local/state/bifrost/devices.json' | cut -c1-16; }
-trunk_code() { # URL [CAFILE] → the HTTP status an outsider gets for URL/pair
-  outside "curl -s -o /dev/null -m 10 -w '%{http_code}' ${2:+--cacert $2} ${2:--k} $1/pair" 2>/dev/null || echo 000
-}
 run_phone() { # SCOPE AP_URL AP_IP STEPS_FILE
   ( cd "$ROOT/branch" && OT_SCOPE=$1 OT_AP_URL=$2 OT_AP_IP=$3 OT_STATE="$STATE/sim" OT_STEPS=$4 OT_PHONE_IP=$PHONE_IP \
-      OT_HUB_NAME=home-pc PW_BASE_URL=$2 npx playwright test e2e/own-trunk.spec.ts --reporter=list ) >>"$STATE/log/phone.log" 2>&1
+      OT_HUB_NAME=home-pc OT_HOME_USER=$HU OT_INSTALL_CMD="bash $HH/install.sh" \
+      OT_JOIN_CMD="$HREL bash /home/ubuntu/join.sh" \
+      PW_BASE_URL=$2 npx playwright test e2e/own-trunk.spec.ts --reporter=list ) >>"$STATE/log/phone.log" 2>&1
 }
-install_home() { # LOGNAME LINE [more install.sh args] — the hub's one command
-  local log=$1 line=$2; shift 2
-  homesh "cd /repo/root/install && YGG_UPSTREAM_BASE_URL=http://127.0.0.1:18397 YGG_UPSTREAM_STYLE=anthropic \
-    YGG_UPSTREAM_API_KEY=mock YGG_UPSTREAM_MODEL=mock YGG_BINARY=/opt/bin/yggdrasil BRIDGE_BINARY=/opt/bin/bifrost-net \
-    ./install.sh --direct --skip voice,livekit,agent --trunk '$line' $*" >"$STATE/log/$log" 2>&1
+INSTALL_ARGS="--direct --skip voice,livekit,agent --upstream-env ~/model.env"
+install_home() { # LOGNAME LINE — again: the line on stdin (a script, not a terminal), never in an argument
+  local log=$1 line=$2
+  printf '%s\n' "$line" | docker exec -i -u "$HU" ot-home bash -c "cd ~ && $HREL bash install.sh $INSTALL_ARGS --trunk" >"$STATE/log/$log" 2>&1
+}
+lay_install() { # LOGNAME LINE — the lay user at the home computer's terminal: an interactive shell on a tty;
+  #               types the command, waits for the prompt, pastes the line. The shell keeps its history.
+  local log=$STATE/log/$1 line=$2
+  : >"$log"; rm -f "$STATE/sim/lay.done"
+  ( while [ ! -e "$STATE/sim/lay.done" ]; do docker exec ot-home ps -eo args 2>/dev/null | grep -c 'token=' >>"$STATE/log/home-ps-samples.txt"; sleep 0.3; done ) &
+  local sampler=$!
+  {
+    printf '%s\n' "cd ~ && $HREL bash install.sh $INSTALL_ARGS --trunk; echo \"INSTALL-EXIT=\$?\""
+    for _ in $(seq 600); do grep -q 'connect line (not shown)' "$log" 2>/dev/null && break; sleep 0.5; done
+    sleep 0.5; printf '%s\n' "$line"
+    for _ in $(seq 900); do grep -q 'INSTALL-EXIT=[0-9]' "$log" 2>/dev/null && break; sleep 1; done
+    printf 'exit\n'; sleep 3
+  } | docker exec -i -u "$HU" -e HOME="$HH" ot-home script -qefc 'bash -i' /dev/null >"$log" 2>&1
+  : >"$STATE/sim/lay.done"; wait "$sampler" 2>/dev/null
+  sed -n 's/.*INSTALL-EXIT=\([0-9]*\).*/\1/p' "$log" | tail -1 | grep -qx 0
 }
 
 # =========================================================================================== stage a
 LINE_A=''
 if stage a; then
-  say "stage a: a fresh VPS, trunk.sh --self-signed (the binary from the release, sha256-checked), ufw on"
+  say "stage a: a fresh VPS, the release's trunk.sh --self-signed (signed, checked), firewall + updates on"
   new_vps ot-vps-a "$IP_A" "$A"
-  vps ot-vps-a 'DEBIAN_FRONTEND=noninteractive apt-get update -qq && apt-get install -y -qq ufw >/dev/null && ufw allow 22/tcp >/dev/null && ufw --force enable >/dev/null && ufw status | head -1' >"$STATE/log/a-ufw.log" 2>&1
-  docker cp "$ROOT/trunk/install/trunk.sh" ot-vps-a:/root/trunk.sh >/dev/null   # the one file a user downloads
-  REL="TRUNK_RELEASES=http://files.tree.test:8000/releases"
-  vps ot-vps-a "cd /root && $REL bash trunk.sh --name $A --self-signed --version v9.9.9" >"$STATE/log/a0-tampered.log" 2>&1; rc=$?
-  check a0 "a tampered release binary is refused (sha256 ≠ SHA256SUMS), nothing installed" \
-    bash -c "[ $rc != 0 ] && grep -q 'does not match SHA256SUMS' '$STATE/log/a0-tampered.log' && ! docker exec ot-vps-a test -e /usr/local/lib/yggdrasil-trunk/bifrost-net"
-  vps ot-vps-a "cd /root && $REL bash trunk.sh --name $A --self-signed --version v$VER" >"$STATE/log/a1-trunk.log" 2>&1; rc=$?
+  docker cp "$DIST/trunk.sh" ot-vps-a:/root/trunk.sh >/dev/null   # the one file a user downloads
+  for v in 9.9.1 9.9.3 9.9.4; do
+    vps ot-vps-a "cd /root && $REL bash trunk.sh --name $A --self-signed --version v$v -y" >"$STATE/log/a0-$v.log" 2>&1; echo "rc=$?" >>"$STATE/log/a0-$v.log"
+  done
+  check a0 "a forged release is refused before anything runs: SHA256SUMS changed / unsigned / another key, nothing installed" \
+    bash -c "grep -q 'NOT signed by the yggdrasil release key' '$STATE/log/a0-9.9.1.log' && grep -q 'rc=1' '$STATE/log/a0-9.9.1.log' && \
+      grep -q 'has no signature (SHA256SUMS.sig)' '$STATE/log/a0-9.9.3.log' && grep -q 'rc=1' '$STATE/log/a0-9.9.3.log' && \
+      grep -q 'NOT signed by the yggdrasil release key' '$STATE/log/a0-9.9.4.log' && grep -q 'rc=1' '$STATE/log/a0-9.9.4.log' && \
+      ! docker exec ot-vps-a test -e /usr/local/lib/yggdrasil-trunk/bifrost-net && ! docker exec ot-vps-a test -e /etc/yggdrasil-trunk"
+  vps ot-vps-a "cd /root && $REL bash trunk.sh --name $A --self-signed --version v9.9.2 -y" >"$STATE/log/a0-9.9.2.log" 2>&1; rc=$?
+  check a0b "a release whose binary was changed after signing: signature OK, sha256 refused, nothing installed" \
+    bash -c "[ $rc != 0 ] && grep -q 'signature OK' '$STATE/log/a0-9.9.2.log' && grep -q 'does not match SHA256SUMS' '$STATE/log/a0-9.9.2.log' && \
+      ! docker exec ot-vps-a test -e /usr/local/lib/yggdrasil-trunk/bifrost-net"
+  vps ot-vps-a "cd /root && $REL bash trunk.sh --name $A --self-signed" >"$STATE/log/a1-trunk.log" 2>&1; rc=$?
   LINE_A=$(line_of "$STATE/log/a1-trunk.log"); PIN_A=$(pin_of "$STATE/log/a1-trunk.log")
-  check a1 "trunk.sh --name $A --self-signed --version v$VER → exit 0, ONE connect line" \
-    bash -c "[ $rc = 0 ] && [ -n '$LINE_A' ] && [ \$(grep -c -- \"--trunk 'wss://\" '$STATE/log/a1-trunk.log') = 1 ]"
+  check a1 "trunk.sh --name $A --self-signed (pinned to v$VER) → exit 0, ONE connect line, no command holding it" \
+    bash -c "[ $rc = 0 ] && [ -n '$LINE_A' ] && [ \$(grep -c 'token=' '$STATE/log/a1-trunk.log') = 1 ] && \
+      ! grep -q -- \"--trunk '\" '$STATE/log/a1-trunk.log' && grep -q 'bash install.sh --trunk\$' '$STATE/log/a1-trunk.log' && \
+      grep -q 'binary: .*bifrost-net-$VER-linux-x86_64' '$STATE/log/a1-trunk.log'"
   check a2 "the service runs as a dynamic user (not root), key 600 root, ap.toml holds only the token's sha256" \
     vps ot-vps-a "systemctl is-active -q yggdrasil-trunk && [ \"\$(ps -o user= -C bifrost-net)\" != root ] && \
       [ \"\$(stat -c '%a %U' /etc/yggdrasil-trunk/key.pem)\" = '600 root' ] && \
       ! grep -rq '${LINE_A##*token=}' /etc/yggdrasil-trunk/ && grep -q \"\$(printf %s '${LINE_A##*token=}' | sha256sum | cut -c1-64)\" /etc/yggdrasil-trunk/ap.toml"
-  check a3 "ufw was active: trunk.sh opened 443/tcp (the outside reaches the trunk: 503, no hub yet)" \
-    bash -c "docker exec ot-vps-a ufw status | grep -q '^443/tcp.*ALLOW' && [ \"\$(outside \"curl -sk -o /dev/null -w '%{http_code}' https://$A/\")\" = 503 ]"
+  check a3 "ufw was off: trunk.sh turned it on — 22 + 443 open, 80 not (self-signed); the outside reaches the trunk (503)" \
+    bash -c "docker exec ot-vps-a ufw status | grep -q '^Status: active' && docker exec ot-vps-a ufw status | grep -q '^22/tcp.*ALLOW' && \
+      docker exec ot-vps-a ufw status | grep -q '^443/tcp.*ALLOW' && ! docker exec ot-vps-a ufw status | grep -q '^80/tcp' && \
+      [ \"\$(outside \"curl -sk -o /dev/null -w '%{http_code}' https://$A/\")\" = 503 ]"
+  check a3u "updates on: unattended-upgrades (apt's daily timers) + the weekly signed trunk update timer" \
+    vps ot-vps-a "grep -q '^APT::Periodic::Unattended-Upgrade \"1\";' /etc/apt/apt.conf.d/20auto-upgrades && \
+      dpkg-query -W -f '\${Status}' unattended-upgrades | grep -q 'ok installed' && systemctl is-enabled -q apt-daily-upgrade.timer && \
+      systemctl is-enabled -q yggdrasil-trunk-update.timer && systemctl is-active -q yggdrasil-trunk-update.timer && \
+      grep -q 'ExecStart=/usr/local/sbin/yggdrasil-trunk --update' /etc/systemd/system/yggdrasil-trunk-update.service"
   check a4 "the pin is the SPKI of the key (bifrost-net ap-pin of the served cert = the line's pin)" \
     vps ot-vps-a "[ \"\$(/usr/local/lib/yggdrasil-trunk/bifrost-net ap-pin /etc/yggdrasil-trunk/cert.pem)\" = 'pin = \"sha-256 $PIN_A\"' ]"
   KEYSUM=$(vps ot-vps-a 'sha256sum </etc/yggdrasil-trunk/key.pem')
   vps ot-vps-a "cd /root && $REL bash trunk.sh" >"$STATE/log/a5-rerun.log" 2>&1; rc=$?
-  check a5 "re-run (no options, latest release): exit 0, same key + pin + token, no new connect line" \
+  check a5 "re-run (no options): exit 0, same key + pin + token, no new connect line, binary unchanged" \
     bash -c "[ $rc = 0 ] && [ \"\$(docker exec ot-vps-a bash -c 'sha256sum </etc/yggdrasil-trunk/key.pem')\" = '$KEYSUM' ] && \
-      grep -q 'token kept' '$STATE/log/a5-rerun.log' && ! grep -q -- \"--trunk 'wss\" '$STATE/log/a5-rerun.log' && \
+      grep -q 'token kept' '$STATE/log/a5-rerun.log' && ! grep -q 'token=' '$STATE/log/a5-rerun.log' && \
       grep -q 'pin: sha-256 $PIN_A' '$STATE/log/a5-rerun.log' && grep -q 'binary: .*unchanged' '$STATE/log/a5-rerun.log'"
   docker cp ot-vps-a:/etc/yggdrasil-trunk/cert.pem "$STATE/sim/trunk-ca.pem" >/dev/null; chmod 644 "$STATE/sim/trunk-ca.pem"
 
   # ------------------------------------------------------------------------------- the home computer
-  say "stage a: a fresh home computer, install.sh --trunk '<the line>'"
+  say "stage a: a plain Debian 12 home computer — the release's install.sh, the line pasted at its prompt"
   docker run -d --name ot-home --hostname home-pc --network "$NET" --ip "$IP_HOME" \
-    -v "$ROOT:/repo:ro" -v "$STATE/bin:/opt/bin:ro" -v "$STATE/sim:/sim" node:24 sleep infinity >/dev/null
-  # what root/install/README.md tells you to install first (Debian): node is in this image already
-  dx ot-home bash -c 'apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq libopus0 iproute2 >/dev/null' >"$STATE/log/home-apt.log" 2>&1
-  homesh 'mkdir -p ~/mock && cd ~/mock && (setsid nohup python3 /repo/root/mock/mock_upstream.py 18397 >mock.log 2>&1 &)'
-  install_home h1-install.log "$LINE_A"; rc=$?
-  check h1 "install.sh --trunk '<line>' (fresh box): exit 0, health 'trunk https://$A/pair → 200'" \
-    bash -c "[ $rc = 0 ] && grep -q 'trunk   https://$A/pair → 200' '$STATE/log/h1-install.log'"
+    -v "$ROOT/root/mock:/mock:ro" -v "$STATE/sim:/sim" debian:12 sleep infinity >/dev/null
+  # what root/install/README.md says to install first (+ the test's own eyes: iproute2 for ss, procps for ps)
+  dx ot-home bash -c 'apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
+      curl ca-certificates openssh-client libopus0 python3 iproute2 procps >/dev/null && useradd -m -s /bin/bash '"$HU" >"$STATE/log/home-apt.log" 2>&1
+  docker cp "$DIST/install.sh" ot-home:"$HH/install.sh" >/dev/null && dx ot-home chown "$HU:$HU" "$HH/install.sh"   # the one file downloaded
+  homesh 'mkdir -p ~/mock && cd ~/mock && (setsid nohup python3 /mock/mock_upstream.py 18397 >mock.log 2>&1 &) &&
+    printf "YGG_UPSTREAM_BASE_URL=http://127.0.0.1:18397\nYGG_UPSTREAM_STYLE=anthropic\nYGG_UPSTREAM_API_KEY=mock\nYGG_UPSTREAM_MODEL=mock\n" >~/model.env'
+  check h0 "the home computer has no node, npm, cargo, rustc or git (the release brings what it needs)" \
+    homesh '! command -v node && ! command -v npm && ! command -v cargo && ! command -v rustc && ! command -v git'
+  for v in 9.9.1 9.9.2; do
+    printf '%s\n' "$LINE_A" | docker exec -i -u "$HU" ot-home bash -c "cd ~ && $HREL bash install.sh --version $v $INSTALL_ARGS --trunk" >"$STATE/log/h0-$v.log" 2>&1
+    echo "rc=$?" >>"$STATE/log/h0-$v.log"
+  done
+  check h0t "install.sh refuses a forged release: SHA256SUMS changed (signature) / the archive changed (sha256); nothing unpacked" \
+    bash -c "grep -q 'NOT signed by the yggdrasil release key' '$STATE/log/h0-9.9.1.log' && grep -q 'rc=1' '$STATE/log/h0-9.9.1.log' && \
+      grep -q 'does not match SHA256SUMS' '$STATE/log/h0-9.9.2.log' && grep -q 'rc=1' '$STATE/log/h0-9.9.2.log' && \
+      ! docker exec ot-home test -e $HH/.local/share/yggdrasil/release/9.9.2 && ! docker exec ot-home test -e $HH/.config/bifrost"
+  lay_install h1-install.log "$LINE_A"; rc=$?
+  check h1 "bash install.sh --trunk (typed), the line pasted at the prompt: exit 0, health 'trunk https://$A/pair → 200'" \
+    bash -c "[ $rc = 0 ] && grep -q 'trunk   https://$A/pair → 200' '$STATE/log/h1-install.log' && grep -q 'signature OK' '$STATE/log/h1-install.log'"
+  TOK=${LINE_A##*token=}
+  check h1s "no secret on a command line: not in ~/.bash_history, not in ps (sampled all along), not on the screen" \
+    bash -c "docker exec -u $HU ot-home grep -q 'install.sh .*--trunk' $HH/.bash_history && ! docker exec -u $HU ot-home grep -q 'token=' $HH/.bash_history && \
+      [ -s '$STATE/log/home-ps-samples.txt' ] && ! grep -q '^[1-9]' '$STATE/log/home-ps-samples.txt' && \
+      ! docker exec ot-home ps -eo args | grep -q 'token=' && ! grep -q '$TOK' '$STATE/log/h1-install.log'"
+  check h1r "installed from the release: unpacked + checked (.verified), the app on the release's own node 24" \
+    bash -c "docker exec ot-home test -f $HH/.local/share/yggdrasil/release/$VER/.verified && \
+      docker exec ot-home ps -eo args | grep -q '^$HH/.local/share/yggdrasil/release/$VER/bin/node server.mjs' && \
+      docker exec -u $HU ot-home grep -q 'yggdrasil $VER' $HH/.config/bifrost/install-manifest.txt"
   check h2 "bridge.toml [ap] url+pin+token+upstream, root-link on; app: devices, https://$A, loopback only" \
     homesh "c=~/.config/bifrost; grep -q '^url = \"wss://$A/ap\"' \$c/bridge.toml && grep -q '^pin = \"sha-256 $PIN_A\"' \$c/bridge.toml && \
       grep -q '^upstream = \"127.0.0.1:8082\"' \$c/bridge.toml && grep -q '^enabled = true' \$c/bridge.toml && \
@@ -202,22 +281,27 @@ if stage a; then
 
   # ------------------------------------------------------------------------------- the third machine
   docker run -d --name ot-mac --hostname mac-studio --network "$NET" --ip "$IP_MAC" \
-    -v "$ROOT:/repo:ro" -v "$STATE/bin:/opt/bin:ro" -v "$STATE/sim:/sim" ubuntu:24.04 sleep infinity >/dev/null
-  dx ot-mac bash -c 'apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends python3 ca-certificates curl libopus0 >/dev/null && (id ubuntu >/dev/null 2>&1 || useradd -m ubuntu)' >"$STATE/log/mac-apt.log" 2>&1
-  dx -u ubuntu ot-mac bash -c 'mkdir -p ~/mock && cd ~/mock && (setsid nohup python3 /repo/root/mock/mock_upstream.py 18397 >mock.log 2>&1 &) &&
+    -v "$ROOT/root/mock:/mock:ro" -v "$STATE/sim:/sim" ubuntu:24.04 sleep infinity >/dev/null
+  dx ot-mac bash -c 'apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends python3 ca-certificates curl openssh-client procps >/dev/null && (id ubuntu >/dev/null 2>&1 || useradd -m ubuntu)' >"$STATE/log/mac-apt.log" 2>&1
+  docker cp "$DIST/join.sh" ot-mac:/home/ubuntu/join.sh >/dev/null && dx ot-mac chown ubuntu:ubuntu /home/ubuntu/join.sh
+  dx -u ubuntu ot-mac bash -c 'mkdir -p ~/mock && cd ~/mock && (setsid nohup python3 /mock/mock_upstream.py 18397 >mock.log 2>&1 &) &&
     printf "YGG_UPSTREAM_BASE_URL=http://127.0.0.1:18397\nYGG_UPSTREAM_STYLE=anthropic\nYGG_UPSTREAM_API_KEY=mock\nYGG_UPSTREAM_MODEL=mock\n" >~/model.env'
 
   # ------------------------------------------------------------------------------------------ phone
   say "stage a: the phone (Chromium) — pair, MAIN, join + approve, delegate, report home, revoke"
   run_phone full "https://$A" "$IP_A" "$STATE/sim/steps.tsv"; rc=$?
   check p "the phone walk through https://$A (table below; playwright exit $rc)" bash -c "[ $rc = 0 ]"
+  check m1 "the third machine joined from the release alone: its brain + root build unpacked and checked, no compiler" \
+    bash -c "grep -q 'signature OK' '$STATE/sim/join.log' && docker exec ot-mac test -f /home/ubuntu/.local/share/yggdrasil/release/$VER/.verified && \
+      docker exec ot-mac cmp -s /home/ubuntu/.local/share/yggdrasil-root/bin/bifrost-net /home/ubuntu/.local/share/yggdrasil/release/$VER/bin/bifrost-net-root && \
+      ! docker exec ot-mac sh -c 'command -v cargo || command -v cc || command -v git'"
 
   # ------------------------------------------------------------------------- idempotency + rotation
   say "stage a: re-runs — install.sh --trunk twice, trunk.sh --rotate-token"
   SUM=$(reg_sum); BPID=$(homesh 'cat ~/.local/state/bifrost/run/yggdrasil.service.pid')
   install_home h5-again.log "$LINE_A"; rc=$?
-  check h5 "install.sh --trunk (same line) again: exit 0, device registry unchanged, brain not restarted" \
-    bash -c "[ $rc = 0 ] && [ '$(reg_sum)' = '$SUM' ] && [ \"\$(docker exec -u node ot-home cat /home/node/.local/state/bifrost/run/yggdrasil.service.pid)\" = '$BPID' ] && \
+  check h5 "install.sh --trunk (the same line on stdin) again: exit 0, device registry unchanged, brain not restarted" \
+    bash -c "[ $rc = 0 ] && [ '$(reg_sum)' = '$SUM' ] && [ \"\$(docker exec -u $HU ot-home cat $HH/.local/state/bifrost/run/yggdrasil.service.pid)\" = '$BPID' ] && \
       grep -q 'trunk   https://$A/pair → 200' '$STATE/log/h5-again.log'"
   vps ot-vps-a "cd /root && $REL bash trunk.sh --rotate-token" >"$STATE/log/a6-rotate.log" 2>&1; rc=$?
   LINE_A2=$(line_of "$STATE/log/a6-rotate.log")
@@ -226,8 +310,35 @@ if stage a; then
     bash -c "[ $rc = 0 ] && [ -n '$LINE_A2' ] && [ '$LINE_A2' != '$LINE_A' ] && [ '$(pin_of "$STATE/log/a6-rotate.log")' = '$PIN_A' ] && \
       [ \"\$(outside \"curl -sk -o /dev/null -w '%{http_code}' https://$A/pair\")\" = 503 ]"
   install_home h6-rotated.log "$LINE_A2"; rc=$?
-  check h6 "install.sh --trunk '<the new line>': connected again (200), device registry unchanged" \
+  check h6 "install.sh --trunk (the new line): connected again (200), device registry unchanged" \
     bash -c "[ $rc = 0 ] && grep -q 'trunk   https://$A/pair → 200' '$STATE/log/h6-rotated.log' && [ '$(reg_sum)' = '$SUM' ]"
+
+  homesh "cd ~ && $HREL bash install.sh --update $INSTALL_ARGS" >"$STATE/log/h9-update.log" 2>&1 </dev/null; rc=$?
+  check h9 "home: install.sh --update — the newest signed release is this one: says so, re-runs, still connected (200)" \
+    bash -c "[ $rc = 0 ] && grep -q 'signature OK' '$STATE/log/h9-update.log' && grep -q 'update: $VER is the newest release' '$STATE/log/h9-update.log' && \
+      grep -q 'trunk   https://$A/pair → 200' '$STATE/log/h9-update.log'"
+
+  # ---------------------------------------------------------------------- the weekly signed update
+  say "stage a: the weekly update — nothing newer; a newer signed release; a forged one"
+  vps ot-vps-a 'systemctl start yggdrasil-trunk-update.service; journalctl -u yggdrasil-trunk-update -o cat --no-pager' >"$STATE/log/a7-update-none.log" 2>&1
+  check a7 "the update timer's unit, nothing newer: 'the newest release — nothing to do'" \
+    bash -c "grep -q 'signature OK' '$STATE/log/a7-update-none.log' && grep -q '$VER is the newest release' '$STATE/log/a7-update-none.log'"
+  latest 0.9.1-test
+  vps ot-vps-a 'systemctl start yggdrasil-trunk-update.service; journalctl -u yggdrasil-trunk-update -o cat --no-pager' >"$STATE/log/a8-update.log" 2>&1
+  sleep 2
+  check a8 "a newer SIGNED release: updated by itself to 0.9.1-test (its own trunk.sh, checked), same pin, the hub still connected" \
+    bash -c "grep -q 'update: $VER → 0.9.1-test' '$STATE/log/a8-update.log' && \
+      docker exec ot-vps-a grep -qx 'BINARY=bifrost-net-0.9.1-test-linux-x86_64' /etc/yggdrasil-trunk/trunk.conf && \
+      docker exec ot-vps-a grep -qx \"YGG_RELEASE='0.9.1-test'\" /usr/local/sbin/yggdrasil-trunk && \
+      docker exec ot-vps-a systemctl is-active -q yggdrasil-trunk && grep -q 'pin: sha-256 $PIN_A' '$STATE/log/a8-update.log' && \
+      [ \"\$(outside \"curl -sk -o /dev/null -w '%{http_code}' https://$A/pair\")\" = 200 ]"
+  latest 0.9.2-test
+  vps ot-vps-a 'systemctl start yggdrasil-trunk-update.service; journalctl -u yggdrasil-trunk-update -o cat --no-pager -n 30' >"$STATE/log/a9-update-forged.log" 2>&1
+  check a9 "a forged 'newer' release: the update refuses it (not signed), 0.9.1-test stays, the hub still connected" \
+    bash -c "grep -q 'NOT signed by the yggdrasil release key' '$STATE/log/a9-update-forged.log' && \
+      docker exec ot-vps-a grep -qx 'BINARY=bifrost-net-0.9.1-test-linux-x86_64' /etc/yggdrasil-trunk/trunk.conf && \
+      [ \"\$(outside \"curl -sk -o /dev/null -w '%{http_code}' https://$A/pair\")\" = 200 ]"
+  latest "$VER"
 fi
 
 # =========================================================================================== stage b
@@ -235,13 +346,13 @@ if stage b; then
   say "stage b: Let's Encrypt (Pebble) — certbot standalone on :80, from the trunk's own key"
   new_vps ot-vps-b "$IP_B" "$B"
   vps ot-vps-b 'DEBIAN_FRONTEND=noninteractive apt-get update -qq && apt-get install -y -qq ufw >/dev/null && ufw allow 22/tcp >/dev/null && ufw --force enable >/dev/null' >"$STATE/log/b-ufw.log" 2>&1
-  docker cp "$ROOT/trunk/install/trunk.sh" ot-vps-b:/root/trunk.sh >/dev/null
+  docker cp "$DIST/trunk.sh" ot-vps-b:/root/trunk.sh >/dev/null
   docker cp "$STATE/bin/bifrost-net" ot-vps-b:/root/bifrost-net >/dev/null
   docker cp "$STATE/sim/pebble-acme-ca.pem" ot-vps-b:/root/pebble-acme-ca.pem >/dev/null
   PEB="REQUESTS_CA_BUNDLE=/root/pebble-acme-ca.pem"
   vps ot-vps-b "cd /root && $PEB bash trunk.sh --name $B --acme-server https://pebble:14000/dir --binary /root/bifrost-net" >"$STATE/log/b1-trunk.log" 2>&1; rc=$?
   LINE_B=$(line_of "$STATE/log/b1-trunk.log"); PIN_B=$(pin_of "$STATE/log/b1-trunk.log")
-  check b1 "trunk.sh --acme-server <Pebble>: exit 0, a certificate from the ACME server, ufw 80 + 443 opened" \
+  check b1 "trunk.sh --acme-server <Pebble>: exit 0, a certificate from the ACME server, ufw (already on) 80 + 443 opened" \
     bash -c "[ $rc = 0 ] && [ -n '$LINE_B' ] && docker exec ot-vps-b openssl x509 -in /etc/yggdrasil-trunk/cert.pem -noout -issuer | grep -qi pebble && \
       docker exec ot-vps-b ufw status | grep -q '^80/tcp.*ALLOW' && docker exec ot-vps-b ufw status | grep -q '^443/tcp.*ALLOW' && \
       docker exec ot-vps-b systemctl is-enabled -q yggdrasil-trunk-cert.timer"
@@ -256,7 +367,7 @@ if stage b; then
   vps ot-vps-b 'systemctl start yggdrasil-trunk-cert.service' >"$STATE/log/b4-timer.log" 2>&1; rc=$?
   check b4 "the timer's unit runs clean: not due yet, nothing to do" \
     bash -c "[ $rc = 0 ] && docker exec ot-vps-b journalctl -u yggdrasil-trunk-cert -o cat --no-pager | grep -q 'nothing to do'"
-  if [ -n "$(docker ps -q -f name=^ot-home$)" ]; then
+  if up ot-home; then
     SUM=$(reg_sum)
     install_home h7-le.log "$LINE_B"; rc=$?
     check h7 "the hub moves to the Pebble trunk: health 200; an outsider gets /pair 200 with full chain validation" \
@@ -282,10 +393,10 @@ NGX
   docker cp ot-vps-c:/etc/nginx/www.crt "$STATE/sim/www.crt" >/dev/null; chmod 644 "$STATE/sim/www.crt"
   check c0 "the website answers on :443 and :80 before anything" \
     outside "curl -s -m 5 --cacert /sim/www.crt https://$WWW/ | grep -q '^WEBSITE OK' && curl -s -m 5 http://$WWW/ | grep -q '^WEBSITE OK (http)'"
-  docker cp "$ROOT/trunk/install/trunk.sh" ot-vps-c:/root/trunk.sh >/dev/null       # the single file again
+  docker cp "$DIST/trunk.sh" ot-vps-c:/root/trunk.sh >/dev/null       # the single file again
   docker cp "$STATE/bin/bifrost-net" ot-vps-c:/root/bifrost-net >/dev/null
   docker cp "$STATE/sim/pebble-acme-ca.pem" ot-vps-c:/root/pebble-acme-ca.pem >/dev/null
-  ENVC="REQUESTS_CA_BUNDLE=/root/pebble-acme-ca.pem TRUNK_RAW=http://files.tree.test:8000/raw"
+  ENVC="REQUESTS_CA_BUNDLE=/root/pebble-acme-ca.pem $REL"   # sni-443.py comes from the signed release
   vps ot-vps-c "cd /root && $ENVC bash trunk.sh --name $C --acme-server https://pebble:14000/dir --binary /root/bifrost-net" >"$STATE/log/c1-busy.log" 2>&1; rc=$?
   check c1 "without --behind-proxy: refused (443 is nginx's), says --behind-proxy, nothing installed (not even a package), website up" \
     bash -c "[ $rc != 0 ] && grep -q 'taken by .nginx' '$STATE/log/c1-busy.log' && grep -q -- '--behind-proxy' '$STATE/log/c1-busy.log' && \
@@ -298,7 +409,12 @@ NGX
     bash -c "[ $rc = 0 ] && [ -n '$LINE_C' ] && grep -q 'CERTIFICATE PENDING' '$STATE/log/c2-behind.log' && grep -q 'nginx holds port 80' '$STATE/log/c2-behind.log' && \
       docker exec ot-vps-c grep -qx 'listen = \"127.0.0.1:4443\"' /etc/yggdrasil-trunk/ap.toml && docker exec ot-vps-c grep -qx 'proxy_protocol = true' /etc/yggdrasil-trunk/ap.toml && \
       docker exec ot-vps-c test -x /usr/local/lib/yggdrasil-trunk/sni-443.py && \
+      [ \"\$(docker exec ot-vps-c sha256sum /usr/local/lib/yggdrasil-trunk/sni-443.py | cut -c1-64)\" = \"\$(sha256sum <'$DIST/sni-443.py' | cut -c1-64)\" ] && \
       [ \"\$(docker exec ot-files curl -s -m 5 --cacert /sim/www.crt https://$WWW/ | cut -c1-10)\" = 'WEBSITE OK' ]"
+  check c2f "a server with a website: ufw on with ssh, 80 + 443 open — the website still reachable from outside" \
+    bash -c "docker exec ot-vps-c ufw status | grep -q '^Status: active' && docker exec ot-vps-c ufw status | grep -q '^22/tcp.*ALLOW' && \
+      docker exec ot-vps-c ufw status | grep -q '^80/tcp.*ALLOW' && docker exec ot-vps-c ufw status | grep -q '^443/tcp.*ALLOW' && \
+      [ \"\$(docker exec ot-files curl -s -m 5 http://$WWW/ | cut -c1-10)\" = 'WEBSITE OK' ]"
   # the user does what it printed: the server block into nginx, reload, re-run with --webroot
   awk '/nginx holds port 80/{f=1} f&&/^ *server \{/{p=1} p{print} p&&/^ *\}$/{exit}' "$STATE/log/c2-behind.log" | sed 's/^ *//' >"$STATE/sim/acme-snippet.conf"
   docker cp "$STATE/sim/acme-snippet.conf" ot-vps-c:/etc/nginx/conf.d/yggdrasil-trunk-acme.conf >/dev/null
@@ -313,7 +429,7 @@ NGX
   check c4 "option A (sni-443.py on :443): the website still answers (its own cert), the trunk answers by name" \
     bash -c "[ $rc = 0 ] && [ \"\$(docker exec ot-files curl -s -m 5 --cacert /sim/www.crt https://$WWW/ | cut -c1-10)\" = 'WEBSITE OK' ] && \
       [ \"\$(docker exec ot-files curl -s -o /dev/null -w '%{http_code}' --cacert /sim/pebble-root.pem https://$C/)\" = 503 ]"
-  if [ -n "$(docker ps -q -f name=^ot-home$)" ]; then
+  if up ot-home; then
     SUM=$(reg_sum)
     install_home h8-px.log "$LINE_C"; rc=$?
     check h8 "the hub on the trunk behind the router: health 200, registry unchanged" \
@@ -334,19 +450,59 @@ NGX
     check c5 "option B (nginx stream, the printed block): website answers with the client's real address; the trunk too (PROXY v1)" \
       bash -c "[ $rc = 0 ] && docker exec ot-files curl -s -m 5 --cacert /sim/www.crt https://$WWW/ | grep -qx 'WEBSITE OK $IP_FILES' && \
         printf '%s' '$CLAIM' | grep -q '\"accessToken\":\"bfnd-' && \
-        docker exec -u node ot-home cat /home/node/.local/state/bifrost/devices.json | python3 -c 'import json,sys; d=[x for x in json.load(sys.stdin)[\"devices\"] if x[\"name\"]==\"via-nginx\"]; sys.exit(0 if d and d[-1][\"region\"]==\"lan:$P.0/24\" else 1)'"
+        docker exec -u $HU ot-home cat $HH/.local/state/bifrost/devices.json | python3 -c 'import json,sys; d=[x for x in json.load(sys.stdin)[\"devices\"] if x[\"name\"]==\"via-nginx\"]; sys.exit(0 if d and d[-1][\"region\"]==\"lan:$P.0/24\" else 1)'"
+  fi
+fi
+
+# =========================================================================================== stage u
+if stage u; then
+  say "stage u: --uninstall — the home computer, the third machine, the trunk: nothing left behind"
+  if up ot-home; then
+    homesh "bash ~/install.sh --uninstall" >"$STATE/log/u0-home-ask.log" 2>&1 </dev/null; rc0=$?
+    homesh "bash ~/install.sh --uninstall -y" >"$STATE/log/u1-home.log" 2>&1; rc=$?
+    sleep 1
+    check u1 "home: install.sh --uninstall lists what goes and asks (no tty, no -y: refuses); -y removes it all — no unit, file, process" \
+      bash -c "[ $rc0 = 64 ] && grep -q 'your chats' '$STATE/log/u0-home-ask.log' && [ $rc = 0 ] && grep -q 'removed' '$STATE/log/u1-home.log' && \
+        docker exec -u $HU ot-home bash -c 'for p in ~/.config/bifrost ~/.config/yggdrasil ~/.config/systemd/user/bifrost-* ~/.config/systemd/user/yggdrasil.service \
+          ~/.local/share/yggdrasil ~/.local/share/bifrost ~/.local/state/bifrost ~/.local/bin/yggdrasil ~/.local/bin/bifrost-net ~/.local/bin/livekit-server; do [ -e \$p ] && exit 1; done; exit 0' && \
+        ! docker exec ot-home ps -eo stat=,args= | grep -v '^Z' | grep -E 'bifrost-net|yggdrasil|server\.mjs'"
+  fi
+  if up ot-mac; then
+    dx -u ubuntu ot-mac bash -c "$HREL bash ~/join.sh --uninstall -y" >"$STATE/log/u2-mac.log" 2>&1; rc=$?
+    sleep 1
+    check u2 "the third machine: join.sh --uninstall -y — its root, units and the unpacked release gone, nothing running" \
+      bash -c "[ $rc = 0 ] && ! docker exec ot-mac test -e /home/ubuntu/.local/share/yggdrasil-root && \
+        ! docker exec ot-mac test -e /home/ubuntu/.local/share/yggdrasil && \
+        ! docker exec ot-mac sh -c 'ls /home/ubuntu/.config/systemd/user/yggdrasil-root-* 2>/dev/null | grep -q .' && \
+        ! docker exec ot-mac ps -eo stat=,args= | grep -v '^Z' | grep -E 'yggdrasil|bifrost-net|root-dial'"
+  fi
+  if up ot-vps-a; then
+    vps ot-vps-a "/usr/local/sbin/yggdrasil-trunk --uninstall -y" >"$STATE/log/u3-trunk.log" 2>&1; rc=$?
+    check u3 "the trunk: trunk.sh --uninstall -y — no unit, key, config, binary left; ufw still on, ssh open, 443 closed again" \
+      bash -c "[ $rc = 0 ] && ! docker exec ot-vps-a sh -c 'ls /etc/systemd/system/yggdrasil-* 2>/dev/null | grep -q .' && \
+        ! docker exec ot-vps-a test -e /etc/yggdrasil-trunk && ! docker exec ot-vps-a test -e /usr/local/lib/yggdrasil-trunk && \
+        ! docker exec ot-vps-a test -e /usr/local/sbin/yggdrasil-trunk && ! docker exec ot-vps-a test -e /var/lib/yggdrasil-trunk && \
+        ! docker exec ot-vps-a pgrep -x bifrost-net && docker exec ot-vps-a ufw status | grep -q '^Status: active' && \
+        docker exec ot-vps-a ufw status | grep -q '^22/tcp.*ALLOW' && ! docker exec ot-vps-a ufw status | grep -q '^443/tcp'"
   fi
 fi
 
 # =========================================================================================== stage r
 if stage r; then
-  say "stage r: the REAL release from github.com/veraldar/yggdrasil (v$VER), sha256-checked"
+  RV=${OT_REAL_VERSION:-0.8.0}
+  say "stage r: the REAL release from github.com/veraldar/yggdrasil (v$RV) — signed: installed; unsigned: refused"
   new_vps ot-vps-r "$IP_R" trunk-gh.tree.test
-  docker cp "$ROOT/trunk/install/trunk.sh" ot-vps-r:/root/trunk.sh >/dev/null
-  vps ot-vps-r "cd /root && bash trunk.sh --name trunk-gh.tree.test --self-signed --version v$VER" >"$STATE/log/r1-github.log" 2>&1; rc=$?
-  check r1 "trunk.sh --version v$VER downloads bifrost-net-$VER-linux-x86_64 from GitHub, checks SHA256SUMS, runs it" \
-    bash -c "[ $rc = 0 ] && grep -q 'binary: /usr/local/lib/yggdrasil-trunk/bifrost-net ← bifrost-net-$VER-linux-x86_64' '$STATE/log/r1-github.log' && \
-      [ \"\$(docker exec ot-files curl -sk -o /dev/null -w '%{http_code}' https://trunk-gh.tree.test/)\" = 503 ]"
+  docker cp "$DIST/trunk.sh" ot-vps-r:/root/trunk.sh >/dev/null
+  vps ot-vps-r "cd /root && bash trunk.sh --name trunk-gh.tree.test --self-signed --version v$RV -y" >"$STATE/log/r1-github.log" 2>&1; rc=$?
+  if grep -q 'has no signature' "$STATE/log/r1-github.log"; then
+    check r1 "trunk.sh --version v$RV: the real release has no SHA256SUMS.sig — refused, nothing installed" \
+      bash -c "[ $rc = 1 ] && ! docker exec ot-vps-r test -e /usr/local/lib/yggdrasil-trunk/bifrost-net"
+  else
+    check r1 "trunk.sh --version v$RV downloads bifrost-net-$RV-linux-x86_64 from GitHub, signature + sha256 checked, runs it" \
+      bash -c "[ $rc = 0 ] && grep -q 'signature OK' '$STATE/log/r1-github.log' && \
+        grep -q 'binary: /usr/local/lib/yggdrasil-trunk/bifrost-net ← bifrost-net-$RV-linux-x86_64' '$STATE/log/r1-github.log' && \
+        [ \"\$(docker exec ot-files curl -sk -o /dev/null -w '%{http_code}' https://trunk-gh.tree.test/)\" = 503 ]"
+  fi
 fi
 
 # ====================================================================================== the table

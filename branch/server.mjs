@@ -21,7 +21,19 @@
  * Env: PORT (8095), HOST (0.0.0.0), BIFROST_TRUST_PROXY.
  */
 import next from 'next';
+import { existsSync, readFileSync } from 'node:fs';
 import { createServer } from 'node:http';
+import path from 'node:path';
+
+// A release ships Next's standalone output (scripts/release.sh): no next.config.ts and no webpack next to
+// this file. The build's resolved config is in .next/required-server-files.json — hand it to Next the way
+// its own standalone server.js does, so loading the config needs nothing the release leaves out.
+const serverFiles = path.join(process.cwd(), '.next', 'required-server-files.json');
+if (!existsSync(path.join(process.cwd(), 'next.config.ts')) && existsSync(serverFiles)) {
+  process.env.__NEXT_PRIVATE_STANDALONE_CONFIG ??= JSON.stringify(
+    JSON.parse(readFileSync(serverFiles, 'utf8')).config
+  );
+}
 
 const port = Number(process.env.PORT || 8095);
 const hostname = process.env.HOST || '0.0.0.0';
