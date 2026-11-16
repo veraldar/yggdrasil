@@ -31,7 +31,8 @@
 #   --no-auto-updates    no automatic security updates, no weekly trunk update (both on by default)
 #   -y                   don't ask (packages with apt, --uninstall)
 #
-# Debian 12+ / Ubuntu 22.04+ with systemd. Runs as the admin user (sudo). Files:
+# Linux x86_64 with systemd and glibc 2.31+ (Debian 11+, Ubuntu 20.04+; tested on Debian 12). Runs as the admin
+# user (sudo). Files:
 #   /etc/yggdrasil-trunk/key.pem      the access point's private key (600): made ONCE, kept forever — the pin
 #                                     your hub trusts is its fingerprint, so certificate renewals never break it
 #   /etc/yggdrasil-trunk/cert.pem     the certificate (Let's Encrypt, made from that key with certbot --csr)
@@ -48,11 +49,29 @@ umask 022
 # scripts/release.sh stamps YGG_RELEASE with the release this file belongs to ('' = from a source checkout:
 # the latest release). YGG_SIGNER is the release key's allowed_signers line (RELEASE-KEY.pub in the repo).
 YGG_RELEASE=''
+YGG_RELEASE_TEST=''
 YGG_SIGNER='release@yggdrasil namespaces="yggdrasil-release" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIJyKwTSmRf3Cy1cHpzKHl3teRvCQtgK8/dcFRvlNCDJg'
+# A test release (signed by a throwaway key) is marked YGG_RELEASE_TEST=1 by scripts/release.sh: only it, or an
+# unstamped script from a checkout, may be pointed at other signers. A real release's script refuses, loudly.
+if [ -n "${YGG_RELEASE_TEST_SIGNERS:-}" ] && [ -n "$YGG_RELEASE" ] && [ "$YGG_RELEASE_TEST" != 1 ]; then
+  printf '\033[1;31mxx\033[0m  %s\n' "YGG_RELEASE_TEST_SIGNERS is set, but this is the v$YGG_RELEASE release's installer: it trusts only the yggdrasil release key. Unset it — it is for tests, from a checkout." >&2
+  exit 64
+fi
 
 say()  { printf '\033[1m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m!!\033[0m  %s\n' "$*" >&2; }
 die()  { printf '\033[1;31mxx\033[0m  %s\n' "$1" >&2; exit "${2:-1}"; }
+# never a silent stop: say where — and once this run has replaced the running trunk, put the previous one back
+# shellcheck disable=SC2329  # the ERR trap below calls it
+on_err() {
+  local rc=$?
+  printf '\033[1;31mxx\033[0m  trunk.sh stopped at line %s: %s\n' "$1" "$2" >&2
+  if [ "${HAVE_PREV:-0}" = 1 ] && [ "${CHANGED:-0}" = 1 ] && [ "${ROLLING:-0}" = 0 ]; then
+    ROLLING=1; rollback && warn "the previous trunk is back and answering"
+  fi
+  exit "$rc"
+}
+trap 'on_err $LINENO "$BASH_COMMAND"' ERR
 
 ARGS=("$@")
 NAME='' VERSION='' BINARY='' PORT='' BEHIND='' CERTMODE='' WEBROOT='' EMAIL='' ACME=''
@@ -129,7 +148,7 @@ if [ $UNINSTALL = 1 ]; then
     case $a in y|Y|yes|YES) ;; *) die "nothing removed" ;; esac
   fi
   for u in "${UNITS_ALL[@]}"; do systemctl disable --now --quiet "$u" 2>/dev/null || true; done
-  for u in "${UNITS_ALL[@]}"; do rm -f "/etc/systemd/system/$u"; done
+  for u in "${UNITS_ALL[@]}"; do rm -rf "/etc/systemd/system/$u" "/etc/systemd/system/$u.d"; done
   systemctl daemon-reload; systemctl reset-failed "${UNITS_ALL[@]}" 2>/dev/null || true
   if [ -n "$FW_RULES" ] && command -v ufw >/dev/null; then
     for r in $FW_RULES; do ufw delete allow "$r" >/dev/null 2>&1 || true; done
@@ -181,6 +200,15 @@ apt_need() { # PKG… — install what is missing (asks first unless -y or not a
   DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends "${miss[@]}" >/dev/null
 }
 
+probe_ap() { # → the HTTP status the access point gives a pinned request on its port (000: nothing answers in 10 s)
+  local b64 c=000 p
+  b64=$(openssl pkey -in "$KEY" -pubout -outform DER 2>/dev/null | openssl dgst -sha256 -binary | base64)
+  p=(curl -sk -o /dev/null -m 5 -w '%{http_code}' --pinnedpubkey "sha256//$b64" --resolve "$NAME:$PORT:127.0.0.1" "https://$NAME:$PORT/")
+  [ "$BEHIND" = 1 ] && p=("${p[@]:0:7}" --haproxy-protocol "${p[@]:7}")
+  for _ in $(seq 20); do c=$("${p[@]}" 2>/dev/null || true); [ "$c" != 000 ] && break; sleep 0.5; done
+  echo "$c"
+}
+
 # ------------------------------------------------------------------- the release: signed, checked
 fetch() { curl -fsSL --retry 3 --proto '=https,http' -o "$2" "$1"; }
 REL_DIR=''
@@ -211,7 +239,16 @@ release_get() { # BASE ASSET OUT — download ASSET, check it against the verifi
 }
 release_base() { if [ -n "$1" ]; then echo "$RELEASES/download/v${1#v}"; else echo "$RELEASES/latest/download"; fi; }
 installed_version() { confget BINARY | sed -n 's/^bifrost-net-\([0-9][0-9A-Za-z.+-]*\)-linux-.*/\1/p'; }
-newer() { [ "$1" != "$2" ] && [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | tail -1)" = "$1" ]; }   # A newer than B?
+newer() { # A B — is version A newer than B? A pre-release is OLDER than its release: 0.9.1-rc.1 < 0.9.1
+  [ "$1" = "$2" ] && return 1
+  local a=${1%%-*} b=${2%%-*}
+  if [ "$a" != "$b" ]; then [ "$(printf '%s\n%s\n' "$a" "$b" | sort -V | tail -1)" = "$a" ]; return; fi
+  case $1/$2 in
+    *-*/*-*) [ "$(printf '%s\n%s\n' "${1#*-}" "${2#*-}" | sort -V | tail -1)" = "${1#*-}" ] ;;
+    *-*/*) return 1 ;;
+    *) return 0 ;;
+  esac
+}
 
 # ------------------------------------------------------------------------- --update (the timer)
 # The newest signed release: when it is newer than the one installed, its own trunk.sh (checked against
@@ -383,7 +420,14 @@ say "yggdrasil trunk for $NAME ($( [ "$BEHIND" = 1 ] && echo "behind your :443 r
 # in a subshell: os-release defines NAME and VERSION, which are ours here
 # shellcheck disable=SC1091
 OS=$( . /etc/os-release 2>/dev/null; printf '%s|%s' " ${ID:-} ${ID_LIKE:-} " "${PRETTY_NAME:-unknown}" )
-case ${OS%%|*} in *" debian "*|*" ubuntu "*) ;; *) warn "made for Debian 12+ / Ubuntu 22.04+; this is ${OS#*|} — trying anyway" ;; esac
+case ${OS%%|*} in *" debian "*|*" ubuntu "*) ;; *) warn "made for Debian 11+ / Ubuntu 20.04+; this is ${OS#*|} — trying anyway" ;; esac
+# the release's bifrost-net is built on Debian 11: glibc 2.31 or newer, checked before anything is installed
+if [ -z "$BINARY" ]; then
+  GLIBC=$(ldd --version 2>&1 | head -1 | grep -o '[0-9][0-9]*\.[0-9][0-9]*$' || true)
+  if [ -z "$GLIBC" ] || [ "$(printf '%s\n%s\n' 2.31 "$GLIBC" | sort -V | head -1)" != 2.31 ]; then
+    die "this server's C library is ${GLIBC:+glibc }${GLIBC:-not glibc}: the release needs glibc 2.31 or newer (Debian 11+, Ubuntu 20.04+). Nothing was installed."
+  fi
+fi
 case $(uname -m) in x86_64|amd64) ARCH=x86_64 ;; aarch64|arm64) ARCH=aarch64 ;; *) ARCH=$(uname -m) ;; esac
 # -------------------------------------------------------------------------------- 1. ports first
 # before anything is installed: a port taken by someone else stops here (ss comes with iproute2)
@@ -432,6 +476,11 @@ else
   fi
   BASE=$(release_base "$WANTV")
   release_sums "$BASE"
+  # this very script, when it belongs to the release it installs: the one the release signed, or stop here
+  if [ -n "$YGG_RELEASE" ] && [ "$WANTV" = "$YGG_RELEASE" ] && [ -f "$0" ] && [ -n "$(sum_of trunk.sh)" ] &&
+     [ "$(sha256sum <"$0" | cut -c1-64)" != "$(sum_of trunk.sh)" ]; then
+    die "this trunk.sh is not the one release v$YGG_RELEASE signed (its sha256 is not in SHA256SUMS) — download it again: $BASE/trunk.sh"
+  fi
   if [ -n "$WANTV" ]; then ASSET=bifrost-net-$WANTV-linux-$ARCH
   else ASSET=$(sed -n "s/^[0-9a-f]\{64\}  \(bifrost-net-[0-9][0-9A-Za-z.+-]*-linux-$ARCH\)\$/\1/p" "$REL_DIR/SHA256SUMS" | head -1); fi
   WANT=$(sum_of "$ASSET")
@@ -447,15 +496,44 @@ else
 fi
 install -d -m 755 "$ETC" "$LIB"
 install -d -m 711 "$VAR"   # 711: a web server may reach $VAR/acme (--webroot), nobody may list
+# The trunk as it ran before this run (binary, router, config, unit, this script) is kept in $VAR/previous:
+# when what this run installs does not start or answer, it goes back in place and restarts (--update's net).
+PREV=$VAR/previous HAVE_PREV=0
+if [ -x "$BIN" ] && [ -f "$CONF" ]; then
+  rm -rf "$PREV.new"; install -d -m 700 "$PREV.new"
+  for f in "$BIN" "$LIB/sni-443.py" "$APTOML" "$CONF" "$UNIT_FILE" "$SELF"; do
+    if [ -f "$f" ]; then cp -p "$f" "$PREV.new/$(basename "$f")"; fi
+  done
+  rm -rf "$PREV"; mv "$PREV.new" "$PREV"; HAVE_PREV=1
+fi
+rollback() { # put the previous trunk back and restart it → 0 when it answers again
+  [ "$HAVE_PREV" = 1 ] || return 1
+  warn "putting back the trunk that ran before this run ($(sed -n 's/^BINARY=//p' "$PREV/trunk.conf" 2>/dev/null))"
+  install -m 755 "$PREV/bifrost-net" "$BIN.new" && mv -f "$BIN.new" "$BIN"
+  if [ -f "$PREV/sni-443.py" ]; then install -m 755 "$PREV/sni-443.py" "$LIB/sni-443.py"; fi
+  if [ -f "$PREV/ap.toml" ]; then install -m 644 "$PREV/ap.toml" "$APTOML"; fi
+  if [ -f "$PREV/trunk.conf" ]; then install -m 644 "$PREV/trunk.conf" "$CONF"; fi
+  if [ -f "$PREV/$UNIT" ]; then install -m 644 "$PREV/$UNIT" "$UNIT_FILE"; fi
+  if [ -f "$PREV/yggdrasil-trunk" ]; then install -m 755 "$PREV/yggdrasil-trunk" "$SELF"; fi
+  systemctl daemon-reload; systemctl reset-failed $UNIT 2>/dev/null || true   # a crash loop may have hit the start limit
+  systemctl restart $UNIT
+  [ "$(probe_ap)" != 000 ]
+}
 if [ "$NEWBIN" != "$BIN" ] && ! { [ -f "$BIN" ] && [ "$(sha256sum <"$NEWBIN")" = "$(sha256sum <"$BIN")" ]; }; then
   install -m 755 "$NEWBIN" "$BIN.new" && mv -f "$BIN.new" "$BIN"; CHANGED=1
   say "binary: $BIN ← $GOTVER"
 else
   say "binary: $BIN ($GOTVER, unchanged)"
 fi
-MISSING=$(ldd "$BIN" 2>/dev/null | sed -n 's/^[[:space:]]*\([^ ]*\) => not found.*/\1/p' | tr '\n' ' ')
-[ -z "$MISSING" ] || die "bifrost-net needs libraries this server lacks: $MISSING"
-"$BIN" ap-token >/dev/null 2>&1 || die "$BIN does not run here (too old a release, or the wrong architecture?)"
+MISSING=$(ldd "$BIN" 2>/dev/null | sed -n 's/^[[:space:]]*\([^ ]*\) => not found.*/\1/p' | tr '\n' ' ' || true)
+if [ -n "$MISSING" ]; then
+  if [ "$CHANGED" = 1 ] && rollback; then die "$GOTVER needs libraries this server lacks: $MISSING— the previous trunk is back and running"; fi
+  die "bifrost-net needs libraries this server lacks: $MISSING"
+fi
+if ! "$BIN" ap-token >/dev/null 2>&1; then
+  if [ "$CHANGED" = 1 ] && rollback; then die "$GOTVER does not run here — the previous binary is back and running"; fi
+  die "$BIN does not run here (too old a release, or the wrong architecture?)"
+fi
 
 # ------------------------------------------------------------------------------ 3. the key: once
 if [ -s "$KEY" ]; then
@@ -623,12 +701,18 @@ RestartSec=2
 [Install]
 WantedBy=multi-user.target
 UNIT
-# this script, for the timers (they read trunk.conf) — never replaced by an OLDER release's trunk.sh
+# this script, for the timers (they read trunk.conf): the release's own trunk.sh, checked against its signed
+# SHA256SUMS (this file when it is that one, else the release's copy) — never an OLDER release's
+SELF_SRC=$0
+if [ -n "$REL_DIR" ] && [ -n "$(sum_of trunk.sh)" ] && [ "$(sha256sum <"$0" | cut -c1-64)" != "$(sum_of trunk.sh)" ]; then
+  release_get "$BASE" trunk.sh "$REL_DIR/trunk.sh"; SELF_SRC=$REL_DIR/trunk.sh
+fi
 SELFV=$(sed -n "s/^YGG_RELEASE='\(.*\)'\$/\1/p" "$SELF" 2>/dev/null | head -1 || true)
-if ! { [ -f "$SELF" ] && [ "$(sha256sum <"$0")" = "$(sha256sum <"$SELF")" ]; }; then
-  if [ -n "$SELFV" ] && { [ -z "$YGG_RELEASE" ] || newer "$SELFV" "$YGG_RELEASE"; }; then
-    say "kept $SELF (release $SELFV, newer than this script's ${YGG_RELEASE:-checkout})"
-  else install -m 755 "$0" "$SELF"; fi
+NEWSELFV=$(sed -n "s/^YGG_RELEASE='\(.*\)'\$/\1/p" "$SELF_SRC" | head -1 || true)
+if ! { [ -f "$SELF" ] && [ "$(sha256sum <"$SELF_SRC")" = "$(sha256sum <"$SELF")" ]; }; then
+  if [ -n "$SELFV" ] && { [ -z "$NEWSELFV" ] || newer "$SELFV" "$NEWSELFV"; }; then
+    say "kept $SELF (release $SELFV, newer than ${NEWSELFV:-a checkout copy})"
+  else install -m 755 "$SELF_SRC" "$SELF"; fi
 fi
 # weekly: a newer signed release, if there is one (trunk.sh --update: the same checks as by hand)
 if [ "$AUTOUPD" = 1 ] && [ "$SOURCE" = release ]; then
@@ -777,13 +861,12 @@ else
 fi
 
 # the access point answers on its port with THIS key (curl pins it)
-B64PIN=$(openssl pkey -in "$KEY" -pubout -outform DER 2>/dev/null | openssl dgst -sha256 -binary | base64)
-PROBE=(curl -sk -o /dev/null -m 5 -w '%{http_code}' --pinnedpubkey "sha256//$B64PIN" --resolve "$NAME:$PORT:127.0.0.1" "https://$NAME:$PORT/")
-[ "$BEHIND" = 1 ] && PROBE=(curl -sk -o /dev/null -m 5 -w '%{http_code}' --haproxy-protocol --pinnedpubkey "sha256//$B64PIN" --resolve "$NAME:$PORT:127.0.0.1" "https://$NAME:$PORT/")
-code=000
-for _ in $(seq 20); do code=$("${PROBE[@]}" 2>/dev/null || true); [ "$code" != 000 ] && break; sleep 0.5; done
+code=$(probe_ap)
 if [ "$code" = 000 ]; then
   journalctl -u $UNIT -n 15 --no-pager -o cat >&2 || true
+  if [ "$CHANGED" = 1 ] && rollback; then
+    die "$GOTVER does not answer on 127.0.0.1:$PORT (log above) — the previous trunk is back and answering"
+  fi
   die "the access point does not answer on 127.0.0.1:$PORT (log above)"
 fi
 case $code in 503) STATE="answering — no hub connected yet" ;; *) STATE="answering — a hub is connected (HTTP $code)" ;; esac
