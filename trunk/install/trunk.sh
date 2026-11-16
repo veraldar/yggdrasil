@@ -3,12 +3,19 @@
 # computers reach. Your home computer (the hub) dials OUT to it; nothing at home opens a port.
 #
 #   sudo bash trunk.sh --name trunk.example.org   first run: install, certificate, start, print the CONNECT LINE
-#   sudo bash trunk.sh                             re-run: upgrade the binary, renew the certificate if due, keep
+#   sudo bash trunk.sh                             re-run: same release, renew the certificate if due, keep
 #                                                  the key (= the pin your hub trusts) and the hub's token
 #   sudo bash trunk.sh --rotate-token              a NEW connect line (the old token stops working at once)
+#   sudo bash trunk.sh --update                    the newest release, if newer (what the weekly timer runs)
+#   sudo bash trunk.sh --uninstall                 remove the trunk (lists what goes, asks first; -y: no question)
+#
+# Every download is checked before it runs: the release's SHA256SUMS must be signed by the yggdrasil
+# release key (embedded below as YGG_SIGNER, never fetched), and each file must match its line in it.
+# Safe defaults on the server: the firewall (ufw) on with only ssh, 443 (+ 80 for Let's Encrypt) open,
+# Debian's automatic security updates on, and a weekly timer that installs a newer signed release.
 #
 #   --name NAME          the server's DNS name (an A/AAAA record pointing at this server). Needed once.
-#   --version vX.Y.Z     which release of github.com/veraldar/yggdrasil (default: the latest)
+#   --version vX.Y.Z     which release of github.com/veraldar/yggdrasil (default: this script's own)
 #   --binary FILE        use this bifrost-net binary instead of downloading one
 #   --port N             where the access point listens: 443 (default) — or, with --behind-proxy, the
 #                        loopback port your :443 router forwards to (default 4443)
@@ -20,7 +27,9 @@
 #   --email ADDR         tell Let's Encrypt who you are (expiry mails). Default: no address.
 #   --acme-server URL    another ACME server (default Let's Encrypt production; tests use Pebble)
 #   --renew [--force]    certificate only (what the daily timer runs)
-#   -y                   don't ask before installing packages with apt
+#   --no-firewall        leave the firewall alone (default: ufw on; it stays off when other services listen)
+#   --no-auto-updates    no automatic security updates, no weekly trunk update (both on by default)
+#   -y                   don't ask (packages with apt, --uninstall)
 #
 # Debian 12+ / Ubuntu 22.04+ with systemd. Runs as the admin user (sudo). Files:
 #   /etc/yggdrasil-trunk/key.pem      the access point's private key (600): made ONCE, kept forever — the pin
@@ -31,16 +40,23 @@
 #   /usr/local/lib/yggdrasil-trunk/   bifrost-net (+ sni-443.py with --behind-proxy)
 #   yggdrasil-trunk.service           the access point (DynamicUser; gets a copy of the key in its private /run dir)
 #   yggdrasil-trunk-cert.timer        daily: renews the certificate when a third of its life is left
+#   yggdrasil-trunk-update.timer      weekly: trunk.sh --update (a newer signed release, the same checks)
 set -euo pipefail
 umask 022
 
+# ------------------------------------------------------------------------------ the release key
+# scripts/release.sh stamps YGG_RELEASE with the release this file belongs to ('' = from a source checkout:
+# the latest release). YGG_SIGNER is the release key's allowed_signers line (RELEASE-KEY.pub in the repo).
+YGG_RELEASE=''
+YGG_SIGNER='release@yggdrasil namespaces="yggdrasil-release" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIJyKwTSmRf3Cy1cHpzKHl3teRvCQtgK8/dcFRvlNCDJg'
+
 say()  { printf '\033[1m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m!!\033[0m  %s\n' "$*" >&2; }
-die()  { printf '\033[1;31mxx\033[0m  %s\n' "$*" >&2; exit "${2:-1}"; }
+die()  { printf '\033[1;31mxx\033[0m  %s\n' "$1" >&2; exit "${2:-1}"; }
 
 ARGS=("$@")
 NAME='' VERSION='' BINARY='' PORT='' BEHIND='' CERTMODE='' WEBROOT='' EMAIL='' ACME=''
-ROTATE=0 RENEW=0 FORCE=0 YES=0
+ROTATE=0 RENEW=0 FORCE=0 YES=0 UPDATE=0 UNINSTALL=0 FIREWALL='' AUTOUPD=''
 need() { [ $# -ge 2 ] && [ -n "$2" ] || die "$1 needs a value" 64; }
 while [ $# -gt 0 ]; do
   case $1 in
@@ -58,6 +74,10 @@ while [ $# -gt 0 ]; do
     --rotate-token) ROTATE=1 ;;
     --renew) RENEW=1 ;;
     --force) FORCE=1 ;;
+    --update) UPDATE=1 ;;
+    --uninstall) UNINSTALL=1 ;;
+    --no-firewall) FIREWALL=0 ;;
+    --no-auto-updates) AUTOUPD=0 ;;
     -y|--yes) YES=1 ;;
     -h|--help) awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$0"; exit 0 ;;
     *) die "unknown option: $1 (see --help)" 64 ;;
@@ -83,11 +103,42 @@ BIN=$LIB/bifrost-net
 SELF=/usr/local/sbin/yggdrasil-trunk
 UNIT=yggdrasil-trunk.service
 UNIT_FILE=/etc/systemd/system/$UNIT
-RELEASES=${TRUNK_RELEASES:-https://github.com/veraldar/yggdrasil/releases}
-RAW=${TRUNK_RAW:-https://raw.githubusercontent.com/veraldar/yggdrasil}
 CHANGED=0
+UNITS_ALL=(yggdrasil-trunk.service yggdrasil-trunk-cert.timer yggdrasil-trunk-cert.service
+  yggdrasil-trunk-update.timer yggdrasil-trunk-update.service yggdrasil-sni-443.service)
 
 confget() { [ -f "$CONF" ] && sed -n "s/^$1=//p" "$CONF" | tail -1 || true; }
+# where releases come from (a mirror or a test server is remembered for the timers; signed all the same)
+RELEASES=${TRUNK_RELEASES:-$(confget RELEASES)}; RELEASES=${RELEASES:-https://github.com/veraldar/yggdrasil/releases}
+
+# ---------------------------------------------------------------------------------- --uninstall
+if [ $UNINSTALL = 1 ]; then
+  GONE=()
+  for u in "${UNITS_ALL[@]}"; do [ -e "/etc/systemd/system/$u" ] && GONE+=("/etc/systemd/system/$u  (unit)"); done
+  for p in "$ETC" "$LIB" "$VAR" /var/log/yggdrasil-trunk "$SELF"; do [ -e "$p" ] && GONE+=("$p"); done
+  FW_RULES=$(confget FIREWALL_RULES)
+  if [ ${#GONE[@]} = 0 ]; then say "no yggdrasil trunk on this server — nothing to remove"; exit 0; fi
+  echo "This removes the yggdrasil trunk from this server:"
+  printf '    %s\n' "${GONE[@]}"
+  [ -e "$KEY" ] && echo "    (the key in $ETC is your hub's pin: a new install makes a new one and a new connect line)"
+  [ -n "$FW_RULES" ] && echo "    firewall rules trunk.sh added: $FW_RULES (ufw itself stays on, ssh stays open)"
+  echo "    kept: the packages it installed (certbot, ufw, unattended-upgrades — the security updates stay on)"
+  if [ $YES = 0 ]; then
+    [ -t 0 ] || die "--uninstall asks first: add -y to remove without a question" 64
+    read -r -p "remove all of this? [y/N] " a
+    case $a in y|Y|yes|YES) ;; *) die "nothing removed" ;; esac
+  fi
+  for u in "${UNITS_ALL[@]}"; do systemctl disable --now --quiet "$u" 2>/dev/null || true; done
+  for u in "${UNITS_ALL[@]}"; do rm -f "/etc/systemd/system/$u"; done
+  systemctl daemon-reload; systemctl reset-failed "${UNITS_ALL[@]}" 2>/dev/null || true
+  if [ -n "$FW_RULES" ] && command -v ufw >/dev/null; then
+    for r in $FW_RULES; do ufw delete allow "$r" >/dev/null 2>&1 || true; done
+  fi
+  rm -rf "$ETC" "$LIB" "$VAR" /var/log/yggdrasil-trunk "$SELF"
+  say "removed. At home: bash install.sh --trunk off (or bash install.sh --uninstall) — the hub's line to this server is gone."
+  exit 0
+fi
+
 NAME=${NAME:-$(confget NAME)}
 [ -n "$NAME" ] || die "which name? sudo bash trunk.sh --name trunk.example.org  (a DNS name that points at this server)" 64
 NAME=$(printf '%s' "$NAME" | tr '[:upper:]' '[:lower:]')
@@ -129,6 +180,62 @@ apt_need() { # PKG… — install what is missing (asks first unless -y or not a
   DEBIAN_FRONTEND=noninteractive apt-get update -qq >/dev/null
   DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends "${miss[@]}" >/dev/null
 }
+
+# ------------------------------------------------------------------- the release: signed, checked
+fetch() { curl -fsSL --retry 3 --proto '=https,http' -o "$2" "$1"; }
+REL_DIR=''
+release_sums() { # BASE — BASE/SHA256SUMS into $REL_DIR, verified: signed by YGG_SIGNER, else stop here
+  local base=$1 signers
+  [ -n "$REL_DIR" ] || { REL_DIR=$(mktemp -d); trap 'rm -rf "$REL_DIR"' EXIT; }
+  command -v ssh-keygen >/dev/null || apt_need openssh-client
+  say "release: $base/SHA256SUMS (+ its signature)"
+  fetch "$base/SHA256SUMS" "$REL_DIR/SHA256SUMS" || die "cannot download $base/SHA256SUMS — check the network and that the release exists"
+  fetch "$base/SHA256SUMS.sig" "$REL_DIR/SHA256SUMS.sig" || die "the release at $base has no signature (SHA256SUMS.sig) — refusing it"
+  signers=$REL_DIR/allowed_signers
+  printf '%s\n' "$YGG_SIGNER" >"$signers"
+  if [ -n "${YGG_RELEASE_TEST_SIGNERS:-}" ]; then # tests only: their own throwaway release key
+    warn "TEST ONLY: trusting the release signers in $YGG_RELEASE_TEST_SIGNERS (YGG_RELEASE_TEST_SIGNERS), not the built-in key"
+    cat "$YGG_RELEASE_TEST_SIGNERS" >"$signers"
+  fi
+  ssh-keygen -Y verify -f "$signers" -I release@yggdrasil -n yggdrasil-release -s "$REL_DIR/SHA256SUMS.sig" \
+    <"$REL_DIR/SHA256SUMS" >/dev/null 2>&1 \
+    || die "the SHA256SUMS at $base is NOT signed by the yggdrasil release key — refusing it (a tampered or foreign release)"
+  say "release: signature OK (the yggdrasil release key)"
+}
+sum_of() { sed -n "s/^\([0-9a-f]\{64\}\)  $1\$/\1/p" "$REL_DIR/SHA256SUMS" | head -1; }   # ASSET → its sha256
+release_get() { # BASE ASSET OUT — download ASSET, check it against the verified SHA256SUMS
+  local want; want=$(sum_of "$2")
+  [ -n "$want" ] || die "the release has no $2"
+  fetch "$1/$2" "$3" || die "cannot download $1/$2"
+  [ "$(sha256sum <"$3" | cut -c1-64)" = "$want" ] || { rm -f "$3"; die "$2 does not match SHA256SUMS — refusing to install it"; }
+}
+release_base() { if [ -n "$1" ]; then echo "$RELEASES/download/v${1#v}"; else echo "$RELEASES/latest/download"; fi; }
+installed_version() { confget BINARY | sed -n 's/^bifrost-net-\([0-9][0-9A-Za-z.+-]*\)-linux-.*/\1/p'; }
+newer() { [ "$1" != "$2" ] && [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | tail -1)" = "$1" ]; }   # A newer than B?
+
+# ------------------------------------------------------------------------- --update (the timer)
+# The newest signed release: when it is newer than the one installed, its own trunk.sh (checked against
+# the signed SHA256SUMS) re-runs with --version — the same install, the same checks, the key + token kept.
+if [ $UPDATE = 1 ]; then
+  [ -f "$CONF" ] || die "no trunk installed here (no $CONF) — run trunk.sh --name … first"
+  [ "$(confget SOURCE)" = file ] && { say "update: the binary is your own file (--binary) — nothing to update"; exit 0; }
+  release_sums "$(release_base "$VERSION")"
+  NEWV=${VERSION#v}
+  [ -n "$NEWV" ] || NEWV=$(sed -n 's/^[0-9a-f]\{64\}  bifrost-net-\([0-9][0-9A-Za-z.+-]*\)-linux-[a-z0-9_]*$/\1/p' "$REL_DIR/SHA256SUMS" | head -1)
+  [ -n "$NEWV" ] || die "the release names no bifrost-net version"
+  HAVE=$(installed_version)
+  if [ -n "$HAVE" ] && ! newer "$NEWV" "$HAVE"; then
+    if [ "$NEWV" = "$HAVE" ]; then say "update: $HAVE is the newest release — nothing to do"
+    else warn "update: the release offered ($NEWV) is OLDER than the one installed ($HAVE) — refusing to go back"; fi
+    exit 0
+  fi
+  [ -n "$VERSION" ] || release_sums "$(release_base "$NEWV")"   # that release's own signed list (not "latest")
+  release_get "$(release_base "$NEWV")" trunk.sh "$REL_DIR/trunk.sh"
+  say "update: ${HAVE:-?} → $NEWV (its trunk.sh, checked against the signed SHA256SUMS)"
+  install -d -m 711 "$VAR" && install -m 700 "$REL_DIR/trunk.sh" "$VAR/trunk-update.sh"
+  rm -rf "$REL_DIR"
+  exec bash "$VAR/trunk-update.sh" --version "v$NEWV" -y
+fi
 
 # ---------------------------------------------------------------------------- the certificate
 pin_of_key() { # the hub's pin: sha-256 of the public key (SPKI), "sha-256 AA:BB:…"
@@ -294,16 +401,18 @@ if [ "$BEHIND" = 0 ] && [ -z "$(port_owner t 443)" ] && [ "$PORT" != 443 ]; then
   warn "port 443 is free but the trunk will listen on $PORT — phones then need https://$HOSTPORT"
 fi
 
-PKGS=(ca-certificates curl openssl iproute2 libopus0)
+FIREWALL=${FIREWALL:-$(confget FIREWALL)}; FIREWALL=${FIREWALL:-1}
+AUTOUPD=${AUTOUPD:-$(confget AUTO_UPDATES)}; AUTOUPD=${AUTOUPD:-1}
+PKGS=(ca-certificates curl openssl iproute2 libopus0 openssh-client)   # openssh-client: ssh-keygen checks the release
 [ "$BEHIND" = 1 ] && PKGS+=(python3)
+[ "$FIREWALL" = 1 ] && PKGS+=(ufw)
+[ "$AUTOUPD" = 1 ] && PKGS+=(unattended-upgrades)
 apt_need "${PKGS[@]}"
 
 # ------------------------------------------------------------------------------ 2. the binary
-install -d -m 755 "$ETC" "$LIB"
-install -d -m 711 "$VAR"   # 711: a web server may reach $VAR/acme (--webroot), nobody may list
-fetch() { curl -fsSL --retry 3 --proto '=https,http' -o "$2" "$1"; }
 NEWBIN=''
 SOURCE=$(confget SOURCE)
+BASE=''
 if [ -n "$BINARY" ]; then
   [ -x "$BINARY" ] || die "--binary $BINARY: not an executable file"
   NEWBIN=$BINARY GOTVER="local file $(basename "$BINARY")" SOURCE=file
@@ -314,23 +423,30 @@ elif [ "$SOURCE" = file ] && [ -z "$VERSION" ] && [ -x "$BIN" ]; then
 else
   SOURCE=release
   [ "$ARCH" = x86_64 ] || die "no release binary for $ARCH yet — build bifrost-net (cargo build --release in trunk/) and pass --binary FILE"
-  T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
-  if [ -n "$VERSION" ]; then BASE=$RELEASES/download/$VERSION; else BASE=$RELEASES/latest/download; fi
-  say "binary: $BASE/SHA256SUMS"
-  fetch "$BASE/SHA256SUMS" "$T/SHA256SUMS" || die "cannot download $BASE/SHA256SUMS — check the network${VERSION:+ and that release $VERSION exists}"
-  ASSET=$(sed -n "s/^[0-9a-f]\{64\}  \(bifrost-net-[0-9][0-9A-Za-z.+-]*-linux-$ARCH\)\$/\1/p" "$T/SHA256SUMS" | head -1)
-  [ -n "$ASSET" ] || die "the release has no bifrost-net for linux-$ARCH"
-  WANT=$(grep "  $ASSET\$" "$T/SHA256SUMS" | head -1 | cut -c1-64)
+  # which release: --version, else this script's own (stamped), else the latest — never older than installed
+  WANTV=${VERSION#v}; WANTV=${WANTV:-$YGG_RELEASE}
+  HAVE=$(installed_version)
+  if [ -z "$VERSION" ] && [ -n "$HAVE" ] && { [ -z "$WANTV" ] || newer "$HAVE" "$WANTV"; }; then
+    [ -n "$WANTV" ] && say "binary: $HAVE is installed, newer than this script's $WANTV — keeping $HAVE"
+    WANTV=$HAVE
+  fi
+  BASE=$(release_base "$WANTV")
+  release_sums "$BASE"
+  if [ -n "$WANTV" ]; then ASSET=bifrost-net-$WANTV-linux-$ARCH
+  else ASSET=$(sed -n "s/^[0-9a-f]\{64\}  \(bifrost-net-[0-9][0-9A-Za-z.+-]*-linux-$ARCH\)\$/\1/p" "$REL_DIR/SHA256SUMS" | head -1); fi
+  WANT=$(sum_of "$ASSET")
+  [ -n "$ASSET" ] && [ -n "$WANT" ] || die "the release${WANTV:+ v$WANTV} has no bifrost-net for linux-$ARCH (signed SHA256SUMS)"
   if [ -x "$BIN" ] && [ "$(sha256sum <"$BIN" | cut -c1-64)" = "$WANT" ]; then
     NEWBIN=$BIN
   else
     say "binary: $BASE/$ASSET"
-    fetch "$BASE/$ASSET" "$T/$ASSET" || die "cannot download $BASE/$ASSET"
-    [ "$(sha256sum <"$T/$ASSET" | cut -c1-64)" = "$WANT" ] || die "$ASSET does not match SHA256SUMS — refusing to install it"
-    chmod 755 "$T/$ASSET"; NEWBIN=$T/$ASSET
+    release_get "$BASE" "$ASSET" "$REL_DIR/$ASSET"
+    chmod 755 "$REL_DIR/$ASSET"; NEWBIN=$REL_DIR/$ASSET
   fi
   GOTVER=$ASSET
 fi
+install -d -m 755 "$ETC" "$LIB"
+install -d -m 711 "$VAR"   # 711: a web server may reach $VAR/acme (--webroot), nobody may list
 if [ "$NEWBIN" != "$BIN" ] && ! { [ -f "$BIN" ] && [ "$(sha256sum <"$NEWBIN")" = "$(sha256sum <"$BIN")" ]; }; then
   install -m 755 "$NEWBIN" "$BIN.new" && mv -f "$BIN.new" "$BIN"; CHANGED=1
   say "binary: $BIN ← $GOTVER"
@@ -365,15 +481,59 @@ if [ $IS_IP = 0 ]; then
   fi
 fi
 CERT_RC=0
-command -v ufw >/dev/null && ufw status 2>/dev/null | grep -q '^Status: active' && UFW=1 || UFW=0
-if [ "$UFW" = 1 ]; then
+# the firewall: ufw on, open only ssh + what the trunk needs (443; 80 for Let's Encrypt; a website's 80/443).
+# A server where OTHER services listen publicly keeps its firewall as it is (they would be cut off) — said
+# loudly, with what to do. --no-firewall: leave it alone (remembered).
+FW_RULES=$(confget FIREWALL_RULES)   # the rules trunk.sh added (--uninstall takes them away again)
+FW_STATE=off
+fw_has() { ufw show added 2>/dev/null | grep -Eq "^ufw (allow|limit) $1( |\$)"; }
+fw_allow() { # RULE COMMENT [mine] — allow RULE (443/tcp) unless an equal rule exists; "mine": --uninstall removes it
+  fw_has "$1" && return 0
   # (no apostrophe in a ufw comment: ufw refuses the whole rule)
-  if [ "$BEHIND" = 0 ]; then
-    if ufw allow "$PORT/tcp" comment 'yggdrasil trunk' >/dev/null; then say "ufw: allow $PORT/tcp"; else warn "ufw would not open $PORT/tcp — open it yourself"; fi
-  fi
-  if [ "$CERTMODE" = acme ] && [ -z "$WEBROOT" ]; then
-    if ufw allow 80/tcp comment 'yggdrasil trunk: Lets Encrypt check' >/dev/null; then say "ufw: allow 80/tcp (Let's Encrypt checks the server there)"
-    else warn "ufw would not open 80/tcp — open it yourself (Let's Encrypt checks the server there)"; fi
+  if ufw allow "$1" comment "$2" >/dev/null; then
+    say "firewall: allow $1 ($2)"
+    if [ "${3:-}" = mine ]; then case " $FW_RULES " in *" $1 "*) ;; *) FW_RULES="${FW_RULES:+$FW_RULES }$1" ;; esac; fi
+  else warn "ufw would not open $1 — open it yourself"; fi
+  return 0
+}
+listeners() { # every public (not loopback) listening socket: "tcp 22 sshd" lines
+  ss -Hlntup 2>/dev/null | awk '{ a = $5; p = a; sub(/.*:/, "", p); sub(/:[^:]*$/, "", a)
+      if (a ~ /^(127\.|\[::1\]|\[::ffff:127\.)/ || a ~ /%lo$/) next
+      n = "?"; if (match($0, /users:\(\("[^"]*"/)) n = substr($0, RSTART + 9, RLENGTH - 10)
+      print $1, p, n }' | sort -u
+}
+if [ "$FIREWALL" = 1 ]; then
+  SSH_PORTS=" 22 "   # 22 always, every port sshd listens on, and the one this session came in on
+  while read -r proto p n; do
+    if [ "$proto" = tcp ]; then case $n/$SSH_PORTS in sshd*/*" $p "*) ;; sshd*) SSH_PORTS="$SSH_PORTS$p " ;; esac; fi
+  done < <(listeners)
+  sp=$(printf '%s' "${SSH_CONNECTION:-}" | awk '{print $4}')
+  if [ -n "$sp" ]; then case $SSH_PORTS in *" $sp "*) ;; *) SSH_PORTS="$SSH_PORTS$sp " ;; esac; fi
+  WEB=''   # who serves 80/443 here besides us (a website: it stays reachable)
+  OTHER=''
+  while read -r proto p n; do
+    case $proto/$p in udp/68|udp/546) continue ;; esac            # DHCP replies: ufw lets them in already
+    if [ "$proto" = tcp ]; then case $SSH_PORTS in *" $p "*) continue ;; esac; fi
+    case $n in bifrost-net) continue ;; esac                      # the trunk itself
+    if [ "$proto" = tcp ] && { [ "$p" = 80 ] || [ "$p" = 443 ]; }; then WEB="$WEB $p"; continue; fi
+    OTHER="$OTHER $proto/$p($n)"
+  done < <(listeners)
+  if ufw status 2>/dev/null | grep -q '^Status: active'; then FW_STATE=active
+  elif [ -n "$OTHER" ]; then
+    FW_STATE=skipped
+    warn "firewall NOT turned on: other services listen here and would be cut off:$OTHER"
+    warn "  open them first (sudo ufw allow PORT/tcp), then re-run — or keep it off for good: --no-firewall"
+  else FW_STATE=enable; fi
+  if [ "$FW_STATE" != skipped ]; then
+    if [ "$FW_STATE" = enable ]; then for p in $SSH_PORTS; do fw_allow "$p/tcp" 'ssh: kept open by yggdrasil trunk'; done; fi
+    if [ "$BEHIND" = 0 ]; then fw_allow "$PORT/tcp" 'yggdrasil trunk' mine
+    else fw_allow 443/tcp 'https: the website and the yggdrasil trunk' mine; fi
+    if [ "$CERTMODE" = acme ]; then fw_allow 80/tcp 'yggdrasil trunk: Lets Encrypt check' mine; fi
+    for p in $WEB; do fw_allow "$p/tcp" 'the website on this server' mine; done
+    if [ "$FW_STATE" = enable ]; then
+      if ufw --force enable >/dev/null; then FW_STATE=on; say "firewall: on (ufw) — incoming: ssh ($(printf '%s' "$SSH_PORTS" | xargs)) and the rules above, nothing else"
+      else warn "ufw would not turn on — the firewall stays off"; fi
+    fi
   fi
 fi
 ensure_cert || CERT_RC=$?
@@ -463,8 +623,35 @@ RestartSec=2
 [Install]
 WantedBy=multi-user.target
 UNIT
-# this script, for the renewal timer (it reads trunk.conf)
-if ! { [ -f "$SELF" ] && [ "$(sha256sum <"$0")" = "$(sha256sum <"$SELF")" ]; }; then install -m 755 "$0" "$SELF"; fi
+# this script, for the timers (they read trunk.conf) — never replaced by an OLDER release's trunk.sh
+SELFV=$(sed -n "s/^YGG_RELEASE='\(.*\)'\$/\1/p" "$SELF" 2>/dev/null | head -1 || true)
+if ! { [ -f "$SELF" ] && [ "$(sha256sum <"$0")" = "$(sha256sum <"$SELF")" ]; }; then
+  if [ -n "$SELFV" ] && { [ -z "$YGG_RELEASE" ] || newer "$SELFV" "$YGG_RELEASE"; }; then
+    say "kept $SELF (release $SELFV, newer than this script's ${YGG_RELEASE:-checkout})"
+  else install -m 755 "$0" "$SELF"; fi
+fi
+# weekly: a newer signed release, if there is one (trunk.sh --update: the same checks as by hand)
+if [ "$AUTOUPD" = 1 ] && [ "$SOURCE" = release ]; then
+  put_unit /etc/systemd/system/yggdrasil-trunk-update.service <<UNIT
+[Unit]
+Description=update the yggdrasil trunk ($NAME) to a newer SIGNED release, if there is one
+After=network-online.target
+Wants=network-online.target
+[Service]
+Type=oneshot
+ExecStart=$SELF --update
+UNIT
+  put_unit /etc/systemd/system/yggdrasil-trunk-update.timer <<UNIT
+[Unit]
+Description=weekly: update the yggdrasil trunk to a newer signed release
+[Timer]
+OnCalendar=weekly
+RandomizedDelaySec=6h
+Persistent=true
+[Install]
+WantedBy=timers.target
+UNIT
+fi
 if [ "$CERTMODE" = acme ]; then
   put_unit /etc/systemd/system/yggdrasil-trunk-cert.service <<UNIT
 [Unit]
@@ -489,16 +676,23 @@ fi
 
 # ---------------------------------------------------------- 7. --behind-proxy: the :443 router
 if [ "$BEHIND" = 1 ]; then
+  # the router: from the signed release (the one just checked), else next to this script (a checkout or an
+  # unpacked release), else the one installed before
   SRC=''
-  for c in "$HERE/../deploy/sni-443.py" "$HERE/sni-443.py"; do [ -f "$c" ] && { SRC=$c; break; }; done
+  if [ -n "$REL_DIR" ] && [ -n "$(sum_of sni-443.py)" ]; then
+    release_get "$BASE" sni-443.py "$REL_DIR/sni-443.py"; SRC=$REL_DIR/sni-443.py
+  fi
+  [ -n "$SRC" ] || for c in "$HERE/../deploy/sni-443.py" "$HERE/sni-443.py"; do [ -f "$c" ] && { SRC=$c; break; }; done
   [ -z "$SRC" ] && [ -f "$LIB/sni-443.py" ] && SRC=$LIB/sni-443.py   # a re-run: keep the one installed
   if [ -z "$SRC" ]; then
-    TAG=${VERSION:-$(sed -n 's/^bifrost-net-\([0-9][0-9A-Za-z.+-]*\)-linux-.*/v\1/p' <<<"${ASSET:-}")}
-    [ -n "$TAG" ] || TAG=main
-    T3=$(mktemp); fetch "$RAW/$TAG/trunk/deploy/sni-443.py" "$T3" || die "cannot download sni-443.py from $RAW/$TAG — run trunk.sh from a clone of the repository"
-    SRC=$T3
+    WANTV=${VERSION#v}; WANTV=${WANTV:-$YGG_RELEASE}
+    BASE=$(release_base "$WANTV"); release_sums "$BASE"
+    release_get "$BASE" sni-443.py "$REL_DIR/sni-443.py"; SRC=$REL_DIR/sni-443.py
   fi
-  [ "$SRC" = "$LIB/sni-443.py" ] || { install -m 755 "$SRC" "$LIB/sni-443.py.new" && mv -f "$LIB/sni-443.py.new" "$LIB/sni-443.py"; }
+  if [ "$SRC" != "$LIB/sni-443.py" ] && ! { [ -f "$LIB/sni-443.py" ] && [ "$(sha256sum <"$SRC")" = "$(sha256sum <"$LIB/sni-443.py")" ]; }; then
+    install -m 755 "$SRC" "$LIB/sni-443.py.new" && mv -f "$LIB/sni-443.py.new" "$LIB/sni-443.py"
+    systemctl is-active --quiet yggdrasil-sni-443 2>/dev/null && SNI_RESTART=1
+  fi
   if [ ! -f "$ETC/sni-443.conf" ]; then
     cat >"$ETC/sni-443.conf" <<EOF
 # sni-443.conf — who gets which TLS name on :443 (yggdrasil-sni-443.service). Re-read on restart.
@@ -556,13 +750,31 @@ ACME_SERVER=$ACME
 CA_BUNDLE=$CA_BUNDLE
 BINARY=$GOTVER
 SOURCE=$SOURCE
+RELEASES=$( [ "$RELEASES" = https://github.com/veraldar/yggdrasil/releases ] || printf '%s' "$RELEASES")
+FIREWALL=$FIREWALL
+FIREWALL_RULES=$FW_RULES
+AUTO_UPDATES=$AUTOUPD
 EOF
 chmod 644 "$CONF.new"; mv -f "$CONF.new" "$CONF"
 systemctl daemon-reload
 systemctl enable --quiet $UNIT
 if [ $OURS = 0 ] || [ $CHANGED = 1 ]; then systemctl restart $UNIT; say "started $UNIT"; else say "running $UNIT (unchanged)"; fi
+if [ "${SNI_RESTART:-0}" = 1 ]; then systemctl restart yggdrasil-sni-443; say "restarted yggdrasil-sni-443 (a new sni-443.py)"; fi
 if [ "$CERTMODE" = acme ]; then systemctl enable --quiet --now yggdrasil-trunk-cert.timer
 else systemctl disable --quiet --now yggdrasil-trunk-cert.timer 2>/dev/null || true; fi
+# automatic updates: Debian's security updates (unattended-upgrades) + the weekly signed trunk update
+if [ "$AUTOUPD" = 1 ]; then
+  AU=/etc/apt/apt.conf.d/20auto-upgrades
+  if ! grep -qs '^APT::Periodic::Unattended-Upgrade "1";' "$AU" || ! grep -qs '^APT::Periodic::Update-Package-Lists "1";' "$AU"; then
+    printf 'APT::Periodic::Update-Package-Lists "1";\nAPT::Periodic::Unattended-Upgrade "1";\n' >"$AU"
+  fi
+  systemctl enable --quiet --now apt-daily.timer apt-daily-upgrade.timer 2>/dev/null || warn "could not enable apt's daily timers"
+  if [ "$SOURCE" = release ]; then systemctl enable --quiet --now yggdrasil-trunk-update.timer
+  else systemctl disable --quiet --now yggdrasil-trunk-update.timer 2>/dev/null || true; fi
+  say "updates: security updates daily (unattended-upgrades)$( [ "$SOURCE" = release ] && echo ", the trunk weekly (a newer signed release)")"
+else
+  systemctl disable --quiet --now yggdrasil-trunk-update.timer 2>/dev/null || true
+fi
 
 # the access point answers on its port with THIS key (curl pins it)
 B64PIN=$(openssl pkey -in "$KEY" -pubout -outform DER 2>/dev/null | openssl dgst -sha256 -binary | base64)
@@ -630,17 +842,21 @@ if [ -n "$TOKEN" ]; then
   cat <<EOF
  Your trunk is up: https://$HOSTPORT
 
- On your home computer (the hub), in the folder yggdrasil/root/install, run:
+ On your home computer (the hub), run the installer with --trunk:
 
-   ./install.sh --trunk '$LINE'
+     bash install.sh --trunk
 
- This line holds a secret: the token that lets your hub in. It is shown ONCE — this
- server keeps only its SHA-256. Lost it, or want a new one? sudo bash trunk.sh --rotate-token
- prints a new line; the old one stops working, so re-run install.sh --trunk with it.
+ and when it asks, paste this connect line (it is not shown while you paste):
+
+$LINE
+
+ The line holds a secret, the token that lets your hub in: paste it only there, never
+ into a command. It is shown ONCE — this server keeps only its SHA-256. Lost it, or want
+ a new one? sudo bash trunk.sh --rotate-token prints a new line (the old one stops working).
 EOF
   line
   rm -f "$UNSHOWN"
-  [ $ROTATE = 1 ] && [ -n "$OLDHASH" ] && warn "the previous token no longer works — your hub reconnects once you run install.sh --trunk with the line above"
+  [ $ROTATE = 1 ] && [ -n "$OLDHASH" ] && warn "the previous token no longer works — your hub reconnects once you run install.sh --trunk again and paste the line above"
 else
   echo " The trunk is up: https://$HOSTPORT · token kept (your hub's connect line still works)."
   echo " Need the connect line again? It is not stored here: sudo bash trunk.sh --rotate-token prints a new one."
