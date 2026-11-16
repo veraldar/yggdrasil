@@ -12,8 +12,9 @@ other computers ─────────┘  (they dial out too, and join you
 
 ## What you need
 
-- **A small server (VPS)** from a provider you choose, in the country you choose. Debian 12 or newer,
-  or Ubuntu 22.04 or newer. The smallest plan is enough (1 CPU, 512 MB). You need its admin access
+- **A small server (VPS)** from a provider you choose, in the country you choose: Linux x86_64 with
+  systemd and glibc 2.31 or newer — Debian 11 or newer, or Ubuntu 20.04 or newer (tested on Debian 12).
+  `trunk.sh` checks this before it installs anything. The smallest plan is enough (1 CPU, 512 MB). You need its admin access
   (`sudo`).
 - **A name for it**, for example `trunk.example.org`: a DNS record (type A, plus AAAA if the server
   has IPv6) on a domain you own, pointing at the server's address.
@@ -83,7 +84,7 @@ A QR code appears in the terminal. Scan it with the phone's camera within 5 minu
 shows your sessions. Add it to the home screen. Hold the tree to talk: voice works through the trunk
 too (see [Voice through the trunk](#voice-through-the-trunk)).
 
-**4. More computers: join them.** On each one (Linux, or Windows with WSL2):
+**4. More computers: join them.** On each one (Linux; Windows is untested in this release):
 
 ```sh
 curl -fsSLO https://github.com/veraldar/yggdrasil/releases/download/v0.9.0/join.sh
@@ -188,8 +189,9 @@ certificate), but phones refuse the page.
   run again keeps your paired phones.
 - **Updates.** The server installs Debian's security updates every day, and once a week it checks for
   a newer yggdrasil release: only one signed by the release key is installed, never an older one.
-  `sudo bash trunk.sh --update` does the same check right away. At home: `bash install.sh --update`.
-  To manage this yourself, run trunk.sh once with `--no-auto-updates`.
+  `sudo bash trunk.sh --update` does the same check right away. The trunk that ran before is kept:
+  if the new one does not start or answer, it is put back and restarted by itself. At home:
+  `bash install.sh --update`. To manage this yourself, run trunk.sh once with `--no-auto-updates`.
 - **The firewall.** If it was off, `trunk.sh` turns it on (ufw) with only ssh and the trunk's ports
   open. If other services listen on the server, it leaves the firewall alone and tells you which ones.
   `--no-firewall` leaves it alone for good.

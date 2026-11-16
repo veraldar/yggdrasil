@@ -27,10 +27,15 @@ Then it downloads the release archive and checks it against the list. Anything t
 is refused before it runs. The archive brings everything prebuilt: the brain, the bridge, LiveKit,
 the app and its own Node 24. It is unpacked in `~/.local/share/yggdrasil/release/<version>/`.
 
-**You need:** Linux x86_64 with a systemd user session, curl, ssh-keygen, libopus, python ≥ 3.10
-with venv (for voice), and about 1 GB of disk. On Debian/Ubuntu:
-`sudo apt install curl ca-certificates openssh-client libopus0 python3-venv`. On Arch:
-`sudo pacman -S curl openssh opus python`.
+**You need:** Linux x86_64 with glibc 2.31 or newer (Debian 11+, Ubuntu 20.04+) and a systemd user
+session, curl, ssh-keygen, libopus, bzip2, python ≥ 3.10 with venv for voice (Debian 12+, Ubuntu
+22.04+; older systems: `--skip voice,agent`), and about 2 GB of free disk with voice (about 0.5 GB
+without: measured on Debian 12, the install takes 1.9 GB: the release 310 MB, the voice agent 720 MB, speech models 360 MB, the speech server 160 MB, pip cache 260 MB, binaries 80 MB). On Debian/Ubuntu:
+`sudo apt install curl ca-certificates openssh-client libopus0 python3-venv bzip2`. On Arch:
+`sudo pacman -S curl openssh opus python bzip2`. `install.sh` checks all of this before it downloads
+anything and prints the line to run when something is missing. It also turns on lingering
+(`loginctl enable-linger`), so the services keep running after you log out and start at boot; when it
+may not, it says so (`sudo loginctl enable-linger $USER` does it).
 
 **Developers** (a git checkout): `./install.sh` in `root/install` uses what is built there
 (`yggdrasil`, `bifrost-net`, the app's `.next`). With nothing built it installs the signed release
@@ -178,7 +183,7 @@ curl -s http://127.0.0.1:4100/session        # 200 + a JSON list
 
 ## Join an existing tree
 
-`join.sh` makes another machine (Linux, WSL2 Ubuntu or macOS) one more **root** of a tree that
+`join.sh` makes another machine (Linux; macOS from a checkout) one more **root** of a tree that
 already runs: the hub is up and your phone is paired with it. The new root only **dials out**,
 to the hub's public access point (`wss://<hub>/rootlink`). It needs no open port, no public IP
 and no certificate, and the phone doesn't have to be on the same Wi-Fi. No sudo.
@@ -248,10 +253,10 @@ asks first; `-y` skips the question). Other options: `--name` (default: the host
 `$HOME`), `--no-start`, `--build`. `--cacert` is only for tests against a self-signed hub.
 Exit codes: `0` joined and running · `3` refused on the phone · `4` expired · `64` usage · `1` other.
 
-**Windows:** `win/Veraldar-Setup.exe` (see `win/README.txt`). Its launcher checks for WSL2 (if it's
-missing, it prints `wsl --install -d Ubuntu` and stops). It asks for the hub once, clones this
-repo inside WSL (branch `BRANCH` in `launcher.bat`) and runs `join.sh`, which takes the brain and the
-node from the signed release (nothing is compiled). The QR lands on the
+**Windows: not part of v0.9.0, untested.** `win/Veraldar-Setup.exe` (see `win/README.txt`) has never
+run on a real Windows PC, and its launcher still clones this repository inside WSL (branch `BRANCH`
+in `launcher.bat`) instead of fetching the signed release; the `join.sh` it runs then takes the brain
+and the node from the signed release. The QR lands on the
 Windows Desktop and opens there. `keepalive.vbs` keeps WSL and the root running, and starts them
 at logon.
 
@@ -270,6 +275,7 @@ Upgrade: `bash install.sh --update`. It fetches the newest release, checks it li
 and chats are kept.
 
 Uninstall: `bash install.sh --uninstall`. It lists everything it removes (the units, the binaries,
-`~/.config/{bifrost,yggdrasil}`, `~/.local/share/{bifrost,yggdrasil}` with your chats and the
-releases, `~/.local/state/bifrost` with the paired phones and keys) and asks first; `-y` skips the
-question. A computer that also joined another tree keeps that join (`bash join.sh --uninstall`).
+`~/.config/{bifrost,yggdrasil}`, `~/.local/share/{bifrost,yggdrasil}` with your chats,
+`~/.local/state/bifrost` with the paired phones and keys) and asks first; `-y` skips the question.
+The unpacked release (`~/.local/share/yggdrasil/release/`: the app, its Node, the scripts) goes too —
+to install again, download `install.sh` again. A computer that also joined another tree keeps that join (`bash join.sh --uninstall`).

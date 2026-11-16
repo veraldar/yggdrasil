@@ -29,7 +29,7 @@ Home computer (root: yggdrasil + bifrost-net bridge/wg + app + voice)
   ▲
   │  WireGuard inside the root-link (through the trunk)
   │
-Other computers (additional roots: Linux, macOS, Windows via WSL2)
+Other computers (additional roots: Linux; macOS from a checkout)
 ```
 
 - **root (`root/`, binary `yggdrasil`)** — A coordinator called `MAIN` that you talk to through one conversation. When work takes multiple steps, `MAIN` starts and follows child sessions (`lead`, `build`, `fix`, `research`, `review`), or delegates to coding harnesses (`claude` for Claude Code, `agy` for Antigravity, `opencode`, `codex`). Multiple machines form one tree of roots.
@@ -39,14 +39,14 @@ Other computers (additional roots: Linux, macOS, Windows via WSL2)
 ## What you need
 
 **To use at home (same Wi-Fi):**
-- One Linux `x86_64` computer with a systemd user session, `curl`, `ssh-keygen` (to check the release signature), `libopus0`, Python ≥ 3.10 with `venv` (for voice) and about 1 GB of free disk. The release brings everything else prebuilt, its own Node included — no git, compilers or npm. (macOS and `aarch64` build from a checkout for now.)
+- One Linux `x86_64` computer with glibc 2.31 or newer (Debian 11+, Ubuntu 20.04+; voice needs Python ≥ 3.10 with `venv`: Debian 12+, Ubuntu 22.04+), a systemd user session, `curl`, `ssh-keygen` (to check the release signature), `libopus0`, `bzip2` and about 2 GB of free disk with voice (about 0.5 GB without). The release brings everything else prebuilt, its own Node included — no git, compilers or npm. (macOS and `aarch64` build from a checkout for now.)
 - A phone on the same Wi-Fi.
 - An AI model key or local model server: any OpenAI-compatible `/v1` API (OpenAI, OpenRouter, Ollama, `llama.cpp`, vLLM) or Anthropic-style API (Anthropic, Z.ai), plus optional Claude Code or Antigravity CLI installs.
 - Optional speech upgrade: a Mac on the same LAN serving MLX speech (`SPEACHES_URL`). Without it, `bifrost-voice` runs local CPU speech (`sherpa-onnx`, ~200 MB of models downloaded on first start).
 
 **To reach your tree from anywhere (mobile data or other Wi-Fi):**
-- A small rented VPS (Debian 12+ or Ubuntu 22.04+, 1 CPU / 512 MB RAM is enough) with a domain name pointing to it and TCP ports 443 and 80 open.
-- Optional extra computers (Linux, macOS, or Windows with WSL2) to join as additional roots on your tree.
+- A small rented VPS (Linux `x86_64` with systemd and glibc 2.31+: Debian 11+ or Ubuntu 20.04+, tested on Debian 12; 1 CPU / 512 MB RAM is enough) with a domain name pointing to it and TCP ports 443 and 80 open.
+- Optional extra computers (Linux; macOS from a checkout) to join as additional roots on your tree.
 
 ## How to install
 
@@ -57,7 +57,7 @@ Each machine gets one script from a release. Before anything runs, the script ch
 3. **On your phone:** `install.sh pair` shows a QR code on the home computer; scan it.
 4. **On a second computer (optional):** `join.sh --hub https://<your trunk>`, then approve its QR code on your paired phone.
 
-`--uninstall` undoes each of them. The exact commands are in [root/install/README.md](root/install/README.md) (home, phone, second computer) and [docs/own-trunk.md](docs/own-trunk.md) (the VPS). Windows (WSL2) has a launcher in `win/` that has not yet been run on a real Windows PC.
+`--uninstall` undoes each of them. The exact commands are in [root/install/README.md](root/install/README.md) (home, phone, second computer) and [docs/own-trunk.md](docs/own-trunk.md) (the VPS). **Windows is not part of v0.9.0:** the launcher in `win/` has never run on a real Windows PC and still clones the repository instead of fetching the signed release — untested, use at your own risk.
 
 Read [root/install/README.md](root/install/README.md) for home and multi-machine installation options, and [docs/own-trunk.md](docs/own-trunk.md) for setting up your VPS trunk (including sharing port 443 with an existing website).
 
@@ -66,7 +66,7 @@ Read [root/install/README.md](root/install/README.md) for home and multi-machine
 - **One conversation, managed work behind it:** Talk or type to `MAIN`; it answers simple questions directly, starts sub-sessions with role-scoped tool rules (`build`, `fix`, `research`, `review`, `lead`), and summarizes finished or blocked reports back to you.
 - **Multiple AI engines and editable agents:** Built-in `yggdrasil` tool loop plus `claude` (Claude Code), `agy` (Antigravity), `opencode`, and `codex` harnesses; edit agent prompts, models, thinking levels, and shared instructions in the app.
 - **Terminal sessions both ways (`root/cc-live/`, `branch/app/cc/[id]/`):** Browse and watch active terminal conversations (Claude Code, Antigravity, `opencode`) from your phone, send input into `tmux` or Claude Code background sessions (including answering interactive prompts), or continue closed sessions through the brain with single-writer safety.
-- **Multi-machine trees over WireGuard:** Join extra Linux, macOS, or Windows (WSL2) machines via phone-approved QR (`docs/spec-join.md`). `MAIN` can start sessions on any linked root (`session_start … root=<name>`), and root-to-root brain traffic travels inside WireGuard (`boringtun` + `smoltcp`) without opening ports or needing root privileges.
+- **Multi-machine trees over WireGuard:** Join extra Linux (or, from a checkout, macOS) machines via phone-approved QR (`docs/spec-join.md`). `MAIN` can start sessions on any linked root (`session_start … root=<name>`), and root-to-root brain traffic travels inside WireGuard (`boringtun` + `smoltcp`) without opening ports or needing root privileges.
 - **End-to-end encrypted trunk transport:** After QR pairing, `/api/*` app traffic (outside `/api/pair/*`) and `/rtc` LiveKit signaling ride a DTLS-pinned WebRTC data channel (`branch/lib/pinned.ts`); voice media rides LiveKit ICE-TCP over port 443 with end-to-end DTLS-SRTP.
 - **Push-to-talk and hands-free voice:** Speak and hear replies with barge-in echo filtering, session-pinned TTS language, spoken playback controls (`stop`, `faster`, `slower`, `pause`, `resume`), and local CPU or LAN MLX speech models.
 - **Phone PWA and extensions:** Streaming markdown transcripts, image/file attachments, sandboxed HTML artifact previews, per-device revocation and emergency kill-switch (`/devices`), and process-isolated extensions (`root/extensions/librarian/` for SQLite FTS5 cross-session search and memory).
@@ -79,7 +79,7 @@ Read [root/install/README.md](root/install/README.md) for home and multi-machine
 - **No direct root-to-root UDP leg:** WireGuard packets between roots travel inside the WebSocket root-link through the hub's relay (TCP inside TCP), so lossy paths can stack retransmits.
 - **Phone-to-root `/branch` turns:** Direct phone turns targeting a specific joined root via `/branch` still cross the hub's bridge as frames rather than inside the WireGuard tunnel.
 - **No per-root revoke UI or key rotation yet:** Revoking the approving phone cuts its joined roots' WireGuard tunnels within ~1–2 s, while revoking or rotating an individual root uses `roots.json` / `join.sh --rejoin` (`docs/spec-join.md`).
-- **Single-user and platform scope:** Designed for one owner per tree (no multi-user accounts); prebuilt release binaries focus on Linux `x86_64` (other Linux architectures and macOS compile with Cargo; Windows joins via WSL2); mobile OS background/screen-off microphone limits vary by device; short replies containing symbols can occasionally misdetect TTS language.
+- **Single-user and platform scope:** Designed for one owner per tree (no multi-user accounts); prebuilt release binaries focus on Linux `x86_64` (other Linux architectures and macOS compile with Cargo; Windows via WSL2 is untested); mobile OS background/screen-off microphone limits vary by device; short replies containing symbols can occasionally misdetect TTS language.
 
 ## How it is tested
 

@@ -59,6 +59,12 @@ All stored tokens in `devices.json` and `roots.json` are **SHA-256 hashes only**
 | Joined root `~/.local/share/yggdrasil-root/` | dir `700` | `wg.key`, `link-tokens` (20 single-use 6 h tokens), `brain.env` (`600`), `root.json` (`root_secret`, `hub_name`) |
 | VPS `/etc/yggdrasil-trunk/key.pem` & `ap.toml` | `600` / `644` | VPS TLS private key (`root`-owned, copied into private systemd tmpfs `/run`) and `bridge_token_sha256` (no raw hub token on the VPS) |
 
+## Releases & the release key
+
+- **Who holds the release key:** the maintainer; see `RELEASE-KEY.pub` (and `allowed_signers`) in the repository. Every installer (`install.sh`, `join.sh`, `trunk.sh`, `rootjoin.py`) embeds that public key and refuses a release whose `SHA256SUMS` it did not sign, then checks every file against that list. Test releases are signed with throwaway keys and are trusted only by scripts marked as test releases.
+- **Revocation:** there is no automatic revocation yet. If the release key leaked, a new key means new installers: everything signed by the old key must be treated as suspect, and the scripts already installed (the trunk's weekly `--update`, a saved `install.sh`) keep trusting the old key until they are replaced by hand.
+- **The first download:** the first `install.sh` / `join.sh` / `trunk.sh` you fetch is only as trustworthy as HTTPS to GitHub; check it by hand against `allowed_signers` (`docs/own-trunk.md`) if that matters to you.
+
 ## Honest limits
 
 - **An untrusted or compromised VPS can serve malicious frontend code:** Because the VPS hosts the web origin (`https://<trunk>`), a malicious operator could alter the HTML/JS sent to your phone before requests reach the pinned WebRTC channel. Always run your own VPS under your own account, never someone else's.
