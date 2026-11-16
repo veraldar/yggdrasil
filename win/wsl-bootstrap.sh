@@ -4,9 +4,9 @@
 #   wsl-bootstrap.sh --hub URL [--branch main] [--repo URL] [--qr-win 'C:\Users\me\Desktop\Veraldar-Join-QR.png']
 #                    [--checkout DIR] [--rejoin] [-- more join.sh options]
 #
-# 1. checks what join.sh needs: git, python3, CA certificates — and, while no brain binary exists yet,
-#    curl + a C toolchain + Rust to build one. Offers to install what is missing (sudo apt-get, rustup),
-#    or prints the exact commands and stops.
+# 1. checks what join.sh needs: git, python3, CA certificates, curl + ssh-keygen (join.sh fetches the SIGNED
+#    release's prebuilt brain and node and checks them — nothing is compiled here). Offers to install what is
+#    missing (sudo apt-get), or prints the exact command and stops.
 # 2. clones the repo (sparse: root/ + trunk/scripts) into ~/veraldar/yggdrasil, or updates it (fast-forward
 #    to the branch; local changes are left alone).
 # 3. runs root/install/join.sh --hub URL, with the QR picture on the Windows Desktop (wslpath) and opened.
@@ -45,24 +45,12 @@ missing=()
 command -v git >/dev/null || missing+=(git)
 command -v python3 >/dev/null || missing+=(python3)
 [ -s /etc/ssl/certs/ca-certificates.crt ] || missing+=(ca-certificates)
-# the root's WireGuard node (bifrost-net, the release binary) links libopus
+# the root's WireGuard node (bifrost-net, an older release's full binary) links libopus
 # (no `| grep -q` under pipefail: grep quits at the first match and ldconfig dies of SIGPIPE)
 case "$(ldconfig -p 2>/dev/null || /sbin/ldconfig -p 2>/dev/null || true)" in *libopus.so.0*) ;; *) missing+=(libopus0) ;; esac
-have_brain() {
-  local a
-  for a in "$@"; do [ "$a" = --brain-bin ] && return 0; done
-  [ -n "${YGG_BINARY:-}" ] || [ -x "$HOME/.local/share/yggdrasil-root/bin/yggdrasil" ] \
-    || [ -x "$CHECKOUT/root/target/release/yggdrasil" ] || [ -x "$HOME/.local/bin/yggdrasil" ] || command -v yggdrasil >/dev/null
-}
-# shellcheck disable=SC1091
-[ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
-NEED_RUST=0
-if ! have_brain "$@"; then
-  command -v cc >/dev/null || missing+=(build-essential)
-  command -v pkg-config >/dev/null || missing+=(pkg-config)
-  command -v curl >/dev/null || missing+=(curl)
-  command -v cargo >/dev/null || NEED_RUST=1
-fi
+# join.sh fetches the signed release (prebuilt brain + node) and checks its signature with ssh-keygen
+command -v curl >/dev/null || missing+=(curl)
+command -v ssh-keygen >/dev/null || missing+=(openssh-client)
 if [ ${#missing[@]} -gt 0 ]; then
   command -v apt-get >/dev/null || die "missing: ${missing[*]} — install them with your distribution's package manager, then run Veraldar again"
   cmd="sudo apt-get update && sudo apt-get install -y ${missing[*]}"
@@ -72,18 +60,6 @@ if [ ${#missing[@]} -gt 0 ]; then
   else
     die "run this in Ubuntu, then double-click Veraldar again:
       $cmd"
-  fi
-fi
-if [ $NEED_RUST = 1 ]; then
-  rustup_cmd="curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal"
-  say "the brain is built from source once; that needs Rust (user-level, no sudo, ~1 GB)"
-  if ask "Install Rust with rustup now?"; then
-    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
-    # shellcheck disable=SC1091
-    . "$HOME/.cargo/env"
-  else
-    die "run this in Ubuntu, then double-click Veraldar again:
-      $rustup_cmd"
   fi
 fi
 
