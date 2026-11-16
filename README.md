@@ -80,6 +80,8 @@ Read [root/install/README.md](root/install/README.md) for home and multi-machine
 - **Phone-to-root `/branch` turns:** Direct phone turns targeting a specific joined root via `/branch` still cross the hub's bridge as frames rather than inside the WireGuard tunnel.
 - **No per-root revoke UI or key rotation yet:** Revoking the approving phone cuts its joined roots' WireGuard tunnels within ~1–2 s, while revoking or rotating an individual root uses `roots.json` / `join.sh --rejoin` (`docs/spec-join.md`).
 - **Single-user and platform scope:** Designed for one owner per tree (no multi-user accounts); prebuilt release binaries focus on Linux `x86_64` (other Linux architectures and macOS compile with Cargo; Windows via WSL2 is untested); mobile OS background/screen-off microphone limits vary by device; short replies containing symbols can occasionally misdetect TTS language.
+- **Not yet run on a real phone over a real trunk.** Every phone in the tests below is a simulated one (Chromium as a Pixel 7) and every VPS a container or a namespace; the end design has not yet run on a real VPS with a real iPhone or Android over mobile data. iOS Safari (home-screen app, WebRTC data channel) is the biggest unknown.
+- **Voice rough edges** (seen in the voice persona suite): a long spoken reply is cut after about 60 s; a report can be read twice; code in a reply is read as it is written (`delete N` → "delete-end"); in one run of two, phrases of a soft, breathy voice were lost before speech recognition (not reproduced since, also not under CPU load).
 
 ## How it is tested
 

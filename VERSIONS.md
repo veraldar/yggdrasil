@@ -24,6 +24,7 @@ Adds the end-design trunk, voice fixes, two-way terminal sessions, and `claude` 
 ### Voice fixes & simulation (`branch/voice/`, `branch/`, `sim/voice/`)
 - **Barge-in & echo handling:** Filtered TTS playback echo while preserving user speech that starts over playback and finishes after; tuned Silero VAD activation (`0.35`) for softer voices.
 - **Hands-free & TTS reliability:** `MAIN` inbox reports are read aloud in hands-free mode, TTS language is pinned to the session rather than guessed from short replies, paused browser TTS playback recovers cleanly, and spoken session names match existing names safely without extra upstream calls before dispatch.
+- **What MAIN says out loud:** a stray `(quiet)` marker beside a real answer is dropped (it was read aloud as "Quiet"); in a voice turn, a word that makes no sense where it stands is taken as misheard (`delight a note` → delete) and MAIN says which word it understood.
 - **Voice persona simulation (`sim/voice/`):** Automated multi-turn voice test suite (`suite.py`, `vsim.py`) measuring WER, barge-in cut latency, echo bleed, and first-audio timing.
 
 ### Terminal sessions both ways (`root/cc-live/`, `branch/app/cc/[id]/`)
