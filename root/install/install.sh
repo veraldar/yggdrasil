@@ -1,47 +1,87 @@
 #!/usr/bin/env bash
-# Install bifrost as systemd user services — native, no docker, no root. Idempotent: safe to re-run.
+# install.sh — yggdrasil on your home computer: the brain, the app, the bridge, voice — systemd user services,
+# no docker, no admin rights. Idempotent: safe to re-run.
 #
-#   ./install.sh                  FULL STACK (default): brain + app + bridge + voice + livekit + agent,
-#                                 then enable, (re)start what changed, and health-check every piece
-#   ./install.sh --no-start       full stack, but enable/start nothing
-#   ./install.sh --direct         full stack on a box WITHOUT a systemd user session (containers, WSL):
-#                                 runs each unit's own command with nohup; logs in ~/.local/state/bifrost/log/
-#   ./install.sh --skip voice,agent   leave components out: brain app bridge voice livekit agent
-#   ./install.sh --brain-only [--now] the brain alone, as before (it starts only with --now)
-#   ./install.sh --trunk 'wss://NAME/ap#pin=…,token=…'   connect to YOUR trunk (the line trunk.sh printed on your
-#                                 VPS): phones and other roots then reach this box at https://NAME, from anywhere.
-#                                 Kept in bifrost.env (BIFROST_TRUNK) for every later run; --trunk off removes it.
-#   ./install.sh pair [NAME]      a one-time pairing QR for a phone, in this terminal (pair.sh --help: list, revoke)
+#   bash install.sh                  FULL STACK (default): brain + app + bridge + voice + livekit + agent,
+#                                    then enable, (re)start what changed, and health-check every piece
+#   bash install.sh --trunk          connect to YOUR trunk: paste the line trunk.sh printed when it asks (not
+#                                    shown, never on a command line). Phones and your other computers then reach
+#                                    this box at https://<your trunk>, from anywhere. --trunk off removes it.
+#   bash install.sh pair [NAME]      a one-time pairing QR for a phone, in this terminal (pair --help: list, revoke)
+#   bash install.sh --update         the newest signed release, if newer — then the same install
+#   bash install.sh --uninstall      remove it all from this computer (lists what goes, asks first; -y: no question)
+#
+#   --upstream-env FILE   the model: YGG_UPSTREAM_BASE_URL / _API_KEY / _MODEL / _STYLE lines. Without it, the
+#                         first run asks in the terminal (the key is not shown) — or takes those variables
+#                         from the environment. Kept in ~/.config/yggdrasil/yggdrasil.env (mode 600).
+#   --no-start            install, but enable/start nothing
+#   --direct              no systemd user session here (containers, WSL): run each piece with nohup;
+#                         logs in ~/.local/state/bifrost/log/
+#   --skip voice,agent    leave components out: brain app bridge voice livekit agent
+#   --brain-only [--now]  the brain alone (it starts only with --now)
+#   --version vX.Y.Z      another release than this script's own
+#   --from-source         developers, in a git checkout: build what is missing (cargo, npm, Node 24)
+#
+# The script you download is small: it fetches the release it belongs to, checks it — SHA256SUMS must be
+# signed by the yggdrasil release key embedded below (YGG_SIGNER, never fetched), the archive must match
+# SHA256SUMS — and only then unpacks it (~/.local/share/yggdrasil/release/<version>) and runs it. The
+# release brings everything prebuilt: no git, cargo, npm or Node needed here.
+# Needs: Linux x86_64 with a systemd user session, curl, ssh-keygen (openssh-client), libopus0, python3 + venv
+# (voice). Debian/Ubuntu: sudo apt install curl ca-certificates openssh-client libopus0 python3-venv
 #
 # Config, created once (mode 600) and never overwritten — install.sh re-reads them on every run:
 #   ~/.config/bifrost/bifrost.env       the stack: ports, LAN IP, pairing, voice, LIVEKIT_MODE=binary|cloud
 #   ~/.config/yggdrasil/yggdrasil.env   the brain: your OpenAI/Anthropic-compatible upstream + key
-# Seed either from the environment on the first run, e.g.
-#   YGG_UPSTREAM_BASE_URL=https://api.openai.com/v1 YGG_UPSTREAM_API_KEY=sk-… ./install.sh
 # Every file, unit, env key NAME and network call is listed in ~/.config/bifrost/install-manifest.txt.
 # Paths: BIN_DIR (~/.local/bin), XDG_CONFIG_HOME, XDG_DATA_HOME, XDG_STATE_HOME, BIFROST_ROOT (the repo).
-set -euo pipefail
+set -eEuo pipefail
 trap 'printf "\033[1;31mxx\033[0m  install.sh stopped at line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
 
-MODE=full NOW=0 START=1 DIRECT=0 SKIP=, TRUNK_ARG=
-[ "${1:-}" = pair ] && { shift; exec bash "$(dirname "$0")/pair.sh" "$@"; }
+# ------------------------------------------------------------------------------ the release key
+# scripts/release.sh stamps YGG_RELEASE with the release this file belongs to ('' = a source checkout).
+# YGG_SIGNER is the release key's allowed_signers line (RELEASE-KEY.pub in the repo).
+YGG_RELEASE=''
+YGG_SIGNER='release@yggdrasil namespaces="yggdrasil-release" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIJyKwTSmRf3Cy1cHpzKHl3teRvCQtgK8/dcFRvlNCDJg'
+
+say()  { printf '\033[1m==>\033[0m %s\n' "$*"; }
+warn() { printf '\033[1;33m!!\033[0m  %s\n' "$*" >&2; }
+die()  { printf '\033[1;31mxx\033[0m  %s\n' "$1" >&2; exit "${2:-1}"; }
+
+MODE=full NOW=0 START=1 DIRECT=0 SKIP=, TRUNK_ARG='' ASK_TRUNK=0 PAIR=0 UPDATE=0 UNINSTALL=0 YES=0
+WANT_VERSION='' FROM_SOURCE=0 UPSTREAM_FILE=''
+PASS=()   # the arguments a release's own install.sh gets (all but --update / --version)
 while [ $# -gt 0 ]; do
   case $1 in
+    pair) PAIR=1; PAIR_ARGS=("${@:2}"); PASS+=("$@"); break ;;
     --brain-only) MODE=brain ;;
     --now) NOW=1 ;;
     --no-start) START=0 ;;
     --direct) DIRECT=1 ;;
-    --skip) shift; SKIP="$SKIP${1:-},," ;;
+    --skip) PASS+=("$1"); shift; SKIP="$SKIP${1:-},," ;;
     --skip=*) SKIP="$SKIP${1#--skip=}," ;;
-    --trunk) shift; TRUNK_ARG=${1:-}; [ -n "$TRUNK_ARG" ] || { echo "--trunk needs the connect line trunk.sh printed (or: off)" >&2; exit 64; } ;;
+    --trunk) # the line itself is pasted when asked; a value here (old style) still works, and says why not
+      case ${2:-} in ''|-*) ASK_TRUNK=1 ;; *) PASS+=("$1"); shift; TRUNK_ARG=$1 ;; esac ;;
     --trunk=*) TRUNK_ARG=${1#--trunk=} ;;
-    -h|--help) sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
-    *) echo "unknown option: $1" >&2; exit 64 ;;
+    --upstream-env) [ -n "${2:-}" ] || die "--upstream-env needs a FILE" 64; PASS+=("$1"); shift; UPSTREAM_FILE=$1 ;;
+    --update) UPDATE=1; shift; continue ;;
+    --version) [ -n "${2:-}" ] || die "--version needs vX.Y.Z" 64; WANT_VERSION=${2#v}; shift 2; continue ;;
+    --from-source) FROM_SOURCE=1 ;;
+    --uninstall) UNINSTALL=1 ;;
+    -y|--yes) YES=1 ;;
+    -h|--help) sed -n '2,36p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    *) die "unknown option: $1 (see --help)" 64 ;;
   esac
+  PASS+=("$1")
   shift
 done
+if [ -n "$UPSTREAM_FILE" ]; then
+  case $UPSTREAM_FILE in /*) ;; *) UPSTREAM_FILE=$PWD/$UPSTREAM_FILE ;; esac
+  [ -r "$UPSTREAM_FILE" ] || die "--upstream-env $UPSTREAM_FILE: not readable" 64
+  for i in "${!PASS[@]}"; do [ "${PASS[$i]}" = --upstream-env ] && PASS[i+1]=$UPSTREAM_FILE; done
+fi
 
 HERE=$(cd "$(dirname "$0")" && pwd)
+SELF_PATH=$HERE/$(basename "$0")
 CRATE=$(dirname "$HERE")
 BIN_DIR=${BIN_DIR:-$HOME/.local/bin}
 CONFIG_HOME=${XDG_CONFIG_HOME:-$HOME/.config}
@@ -52,10 +92,10 @@ UNIT_DIR=$CONFIG_HOME/systemd/user
 DATA_DIR=$DATA_HOME/yggdrasil
 ENV_FILE=$CONF_DIR/yggdrasil.env
 UNIT=$UNIT_DIR/yggdrasil.service
+REL_HOME=$DATA_DIR/release   # unpacked releases: <version>/ each, the newest two kept
+RELEASES=${YGG_RELEASES:-https://github.com/veraldar/yggdrasil/releases}
+LAUNCHER=${YGG_LAUNCHER:-$SELF_PATH}   # what the user runs again (the downloaded install.sh), for the messages
 
-say()  { printf '\033[1m==>\033[0m %s\n' "$*"; }
-warn() { printf '\033[1;33m!!\033[0m  %s\n' "$*" >&2; }
-die()  { printf '\033[1;31mxx\033[0m  %s\n' "$*" >&2; exit 1; }
 # same FILE FILE: identical content (cmp is not on every minimal box)
 same() { [ -f "$1" ] && [ -f "$2" ] && [ "$(sha256sum <"$1")" = "$(sha256sum <"$2")" ]; }
 # envset FILE KEY VALUE: replace the first uncommented KEY= line, or append it (values pass through ENVIRON: no escapes)
@@ -73,19 +113,215 @@ if [ "$UNIT_DIR" = "$REAL_HOME/.config/systemd/user" ] && systemctl --user show-
   SYSTEMD_SEES=1
 fi
 
+# ---------------------------------------------------------------------------------- --uninstall
+# Before anything else, and offline: whatever this or any earlier install.sh put on this computer.
+if [ $UNINSTALL = 1 ]; then
+  BF_STATE=$STATE_HOME/bifrost
+  UN=() UNITS_GONE=()
+  for u in "$UNIT_DIR"/yggdrasil.service "$UNIT_DIR"/bifrost-*.service; do [ -e "$u" ] && UNITS_GONE+=("$(basename "$u")") && UN+=("$u  (unit)"); done
+  for f in "$BIN_DIR/yggdrasil" "$BIN_DIR/bifrost-net" "$BIN_DIR/livekit-server"; do [ -e "$f" ] && UN+=("$f"); done
+  for d in "$CONFIG_HOME/bifrost:config, keys, admin token" "$CONF_DIR:the brain's config and your model key" \
+           "$DATA_DIR:your chats (sessions) and the unpacked releases" "$DATA_HOME/bifrost:voice models, the agent's venv" \
+           "$BF_STATE:paired phones, the bridge + WireGuard keys, logs"; do
+    [ -e "${d%%:*}" ] && UN+=("${d%%:*}/  (${d#*:})")
+  done
+  if [ ${#UN[@]} = 0 ]; then say "nothing of yggdrasil's here — nothing to remove"; exit 0; fi
+  echo "This removes yggdrasil from this computer:"
+  printf '    %s\n' "${UN[@]}"
+  [ -d "$DATA_HOME/yggdrasil-root" ] && echo "    (not this computer's join to another tree, $DATA_HOME/yggdrasil-root: join.sh --uninstall)"
+  if [ $YES = 0 ]; then
+    [ -t 0 ] || die "--uninstall asks first: add -y to remove without a question" 64
+    read -r -p "remove all of this — including your chats and paired phones? [y/N] " a
+    case $a in y|Y|yes|YES) ;; *) die "nothing removed" ;; esac
+  fi
+  if [ $SYSTEMD_SEES = 1 ] && [ ${#UNITS_GONE[@]} -gt 0 ]; then systemctl --user disable --now "${UNITS_GONE[@]}" >/dev/null 2>&1 || true; fi
+  for p in "$BF_STATE"/run/*.pid; do [ -f "$p" ] && { kill -- "-$(cat "$p")" 2>/dev/null || kill "$(cat "$p")" 2>/dev/null || true; }; done
+  for u in "${UNITS_GONE[@]}"; do rm -f "$UNIT_DIR/$u"; done
+  [ $SYSTEMD_SEES = 1 ] && { systemctl --user daemon-reload; systemctl --user reset-failed >/dev/null 2>&1 || true; }
+  rm -f "$BIN_DIR/yggdrasil" "$BIN_DIR/bifrost-net" "$BIN_DIR/livekit-server"
+  rm -rf "$CONFIG_HOME/bifrost" "$CONF_DIR" "$DATA_DIR" "$DATA_HOME/bifrost" "$BF_STATE"
+  say "removed. On your trunk (if you had one): sudo bash trunk.sh --uninstall"
+  exit 0
+fi
+
+# ------------------------------------------------------------------ the release: signed, checked
+fetch() { curl -fsSL --retry 3 --proto '=https,http' -o "$2" "$1"; }
+REL_DIR=''
+release_sums() { # BASE — BASE/SHA256SUMS into $REL_DIR, verified: signed by YGG_SIGNER, else stop here
+  local base=$1 signers
+  [ -n "$REL_DIR" ] || { REL_DIR=$(mktemp -d); trap 'rm -rf "$REL_DIR"' EXIT; }
+  say "release: $base/SHA256SUMS (+ its signature)"
+  fetch "$base/SHA256SUMS" "$REL_DIR/SHA256SUMS" || die "cannot download $base/SHA256SUMS — check the network and that the release exists"
+  fetch "$base/SHA256SUMS.sig" "$REL_DIR/SHA256SUMS.sig" || die "the release at $base has no signature (SHA256SUMS.sig) — refusing it"
+  signers=$REL_DIR/allowed_signers
+  printf '%s\n' "$YGG_SIGNER" >"$signers"
+  if [ -n "${YGG_RELEASE_TEST_SIGNERS:-}" ]; then # tests only: their own throwaway release key
+    warn "TEST ONLY: trusting the release signers in $YGG_RELEASE_TEST_SIGNERS (YGG_RELEASE_TEST_SIGNERS), not the built-in key"
+    cat "$YGG_RELEASE_TEST_SIGNERS" >"$signers"
+  fi
+  ssh-keygen -Y verify -f "$signers" -I release@yggdrasil -n yggdrasil-release -s "$REL_DIR/SHA256SUMS.sig" \
+    <"$REL_DIR/SHA256SUMS" >/dev/null 2>&1 \
+    || die "the SHA256SUMS at $base is NOT signed by the yggdrasil release key — refusing it (a tampered or foreign release)"
+  say "release: signature OK (the yggdrasil release key)"
+}
+sum_of() { sed -n "s/^\([0-9a-f]\{64\}\)  $1\$/\1/p" "$REL_DIR/SHA256SUMS" | head -1; }   # ASSET → its sha256
+release_get() { # BASE ASSET OUT — download ASSET, check it against the verified SHA256SUMS
+  local want; want=$(sum_of "$2")
+  [ -n "$want" ] || die "the release has no $2"
+  fetch "$1/$2" "$3" || die "cannot download $1/$2"
+  [ "$(sha256sum <"$3" | cut -c1-64)" = "$want" ] || { rm -f "$3"; die "$2 does not match SHA256SUMS — refusing to install it"; }
+}
+release_base() { if [ -n "$1" ]; then echo "$RELEASES/download/v${1#v}"; else echo "$RELEASES/latest/download"; fi; }
+newer() { [ "$1" != "$2" ] && [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | tail -1)" = "$1" ]; }   # A newer than B?
+unpacked() { # the release versions unpacked here (checked when they were), oldest first
+  local d; for d in "$REL_HOME"/*/.verified; do if [ -f "$d" ]; then basename "$(dirname "$d")"; fi; done | sort -V
+}
+run_release() { # VERSION — hand over to that release's own install.sh, with our arguments
+  [ -n "$REL_DIR" ] && rm -rf "$REL_DIR"
+  YGG_LAUNCHER=$LAUNCHER exec bash "$REL_HOME/$1/root/install/install.sh" ${PASS[@]+"${PASS[@]}"}
+}
+bootstrap() { # the signed release (--version, else max(this script's, the newest unpacked); --update: the newest)
+  local want base tgz newest
+  case $(uname -s)/$(uname -m) in
+    Linux/x86_64|Linux/amd64) ;;
+    *) die "no prebuilt release for $(uname -s) $(uname -m) yet — developers: a git checkout and ./install.sh --from-source" ;;
+  esac
+  for t in curl ssh-keygen sha256sum tar; do
+    command -v $t >/dev/null || die "$t is needed to fetch and check the release — Debian/Ubuntu: sudo apt install curl ca-certificates openssh-client"
+  done
+  newest=$(unpacked | tail -1)
+  want=$WANT_VERSION
+  if [ -z "$want" ] && [ $UPDATE = 0 ]; then
+    want=$YGG_RELEASE
+    if [ -n "$newest" ] && { [ -z "$want" ] || newer "$newest" "$want"; }; then want=$newest; fi
+  fi
+  if [ -n "$want" ] && [ -f "$REL_HOME/$want/.verified" ]; then run_release "$want"; fi
+  base=$(release_base "$want")
+  release_sums "$base"
+  [ -n "$want" ] || want=$(sed -n 's/^[0-9a-f]\{64\}  yggdrasil-\([0-9][0-9A-Za-z.+-]*\)-linux-x86_64\.tar\.gz$/\1/p' "$REL_DIR/SHA256SUMS" | head -1)
+  tgz=yggdrasil-$want-linux-x86_64.tar.gz
+  [ -n "$want" ] && [ -n "$(sum_of "$tgz")" ] || die "the release${want:+ v$want} has no $tgz (signed SHA256SUMS)"
+  if [ $UPDATE = 1 ] && [ -n "$newest" ] && ! newer "$want" "$newest"; then
+    if [ "$want" = "$newest" ]; then say "update: $newest is the newest release"
+    else warn "update: the release offered ($want) is OLDER than yours ($newest) — keeping $newest"; fi
+    run_release "$newest"
+  fi
+  if [ ! -f "$REL_HOME/$want/.verified" ]; then
+    say "release: $base/$tgz"
+    release_get "$base" "$tgz" "$REL_DIR/$tgz"
+    mkdir -p "$REL_HOME"; chmod 700 "$DATA_DIR"
+    rm -rf "$REL_HOME/.$want.new"; mkdir -p "$REL_HOME/.$want.new"
+    tar -xzf "$REL_DIR/$tgz" -C "$REL_HOME/.$want.new" --strip-components=1 --no-same-owner || die "could not unpack $tgz"
+    grep -qx "yggdrasil $want" "$REL_HOME/.$want.new/RELEASE" 2>/dev/null || die "$tgz holds another release than $want — refusing it"
+    sum_of "$tgz" >"$REL_HOME/.$want.new/.verified"
+    rm -rf "${REL_HOME:?}/$want"; mv "$REL_HOME/.$want.new" "$REL_HOME/$want"
+    say "release: $want unpacked in $REL_HOME/$want (signature + sha256 checked)"
+  fi
+  run_release "$want"
+}
+
+# where this script runs: alone (downloaded: fetch the release), in an unpacked release, or in a git checkout
+ROOT=${BIFROST_ROOT:-}
+if [ -z "$ROOT" ] && [ -f "$HERE/yggdrasil.service" ]; then
+  d=$HERE; while [ "$d" != / ]; do [ -f "$d/branch/package.json" ] && { ROOT=$d; break; }; d=$(dirname "$d"); done
+fi
+IN_RELEASE=0; [ -n "$ROOT" ] && [ -f "$ROOT/RELEASE" ] && IN_RELEASE=1
+if [ -z "$ROOT" ] || [ $UPDATE = 1 ] || { [ -n "$WANT_VERSION" ] && [ "$(sed -n '1s/^yggdrasil //p' "$ROOT/RELEASE" 2>/dev/null)" != "$WANT_VERSION" ]; }; then
+  [ $FROM_SOURCE = 0 ] || die "--from-source needs a git checkout of the repository (this is the release installer)" 64
+  bootstrap
+fi
+if [ $IN_RELEASE = 1 ] && [ $FROM_SOURCE = 1 ]; then die "--from-source: this is a release, not a git checkout" 64; fi
+[ $PAIR = 1 ] && { exec bash "$HERE/pair.sh" ${PAIR_ARGS[@]+"${PAIR_ARGS[@]}"}; }
+
+# ------------------------------------------------------------------------- what is here, prebuilt
+on() { case ,$SKIP, in *,"$1",*) return 1 ;; esac; return 0; }
+brain_src() { # the yggdrasil binary to install: given, next to this script, the release's, a checkout's build
+  local c
+  for c in "${YGG_BINARY:-}" "$HERE/yggdrasil" "$ROOT/bin/yggdrasil" "$CRATE/target/release/yggdrasil"; do
+    [ -n "$c" ] && [ -x "$c" ] && { echo "$c"; return; }
+  done; return 0
+}
+net_src() { # the bifrost-net binary (bridge + WireGuard node), the same way
+  local c
+  for c in "${BRIDGE_BINARY:-}" "$HERE/bifrost-net" "$ROOT/bin/bifrost-net" "$ROOT/trunk/target/release/bifrost-net"; do
+    [ -n "$c" ] && [ -x "$c" ] && { echo "$c"; return; }
+  done; return 0
+}
+app_built() { # the app is built and current: a release always is; a checkout when nothing changed since its build
+  local pwa=$ROOT/branch
+  [ -f "$pwa/.next/BUILD_ID" ] && [ -d "$pwa/node_modules" ] || return 1
+  [ $IN_RELEASE = 1 ] && return 0
+  [ "${BIFROST_REBUILD:-0}" = 1 ] && return 1
+  [ -z "$(cd "$pwa" && find app components hooks lib styles public middleware.ts next.config.ts package.json package-lock.json server.mjs -newer .next/BUILD_ID -print -quit 2>/dev/null)" ]
+}
+if [ $IN_RELEASE = 0 ] && [ $FROM_SOURCE = 0 ]; then
+  # a git checkout: what is built is used; building is for developers (--from-source). Nothing built →
+  # the signed release, so a plain clone installs without Rust or npm.
+  MISSING=()
+  [ -n "$(brain_src)" ] || MISSING+=(yggdrasil)
+  if [ $MODE = full ]; then
+    on bridge && [ -z "$(net_src)" ] && MISSING+=(bifrost-net)
+    on app && ! app_built && MISSING+=("the app")
+  fi
+  if [ ${#MISSING[@]} -gt 0 ]; then
+    warn "this checkout has no current build of: ${MISSING[*]} — installing the signed release instead"
+    warn "  (developers: ./install.sh --from-source builds them here with cargo + npm)"
+    bootstrap
+  fi
+fi
+
+# ------------------------------------------------------------------------------------- the model
+# Asked once, in the terminal, when the brain has none yet: the key is read without echo and written only to
+# yggdrasil.env (600) — never a command line. --upstream-env FILE or the YGG_UPSTREAM_* variables instead.
+UP_KEYS=(YGG_UPSTREAM_BASE_URL YGG_UPSTREAM_API_KEY YGG_UPSTREAM_MODEL YGG_UPSTREAM_STYLE YGG_MAX_TOKENS YGG_LISTEN)
+if [ -n "$UPSTREAM_FILE" ]; then
+  while IFS= read -r l || [ -n "$l" ]; do # KEY=value lines, "export " and surrounding quotes allowed; nothing expanded
+    l=${l%$'\r'}; l=${l#export }
+    case $l in YGG_UPSTREAM_*=*|YGG_MAX_TOKENS=*) ;; *) continue ;; esac
+    k=${l%%=*} v=${l#*=}
+    case $v in \"*\") v=${v#\"}; v=${v%\"} ;; \'*\') v=${v#\'}; v=${v%\'} ;; esac
+    printf -v "$k" '%s' "$v"
+  done <"$UPSTREAM_FILE"
+fi
+if [ -z "${YGG_UPSTREAM_BASE_URL:-}" ] && ! grep -q '^YGG_UPSTREAM_BASE_URL=.' "$ENV_FILE" 2>/dev/null && [ -t 0 ]; then
+  echo "The brain needs a model to think with: any OpenAI- or Anthropic-compatible API (or a local one)."
+  read -r -p "  Base URL [https://api.openai.com/v1]: " YGG_UPSTREAM_BASE_URL
+  YGG_UPSTREAM_BASE_URL=${YGG_UPSTREAM_BASE_URL:-https://api.openai.com/v1}
+  st=openai; case $YGG_UPSTREAM_BASE_URL in *anthropic*) st=anthropic ;; esac
+  read -r -p "  Dialect openai|anthropic [$st]: " YGG_UPSTREAM_STYLE; YGG_UPSTREAM_STYLE=${YGG_UPSTREAM_STYLE:-$st}
+  read -r -p "  Model [gpt-4o-mini]: " YGG_UPSTREAM_MODEL; YGG_UPSTREAM_MODEL=${YGG_UPSTREAM_MODEL:-gpt-4o-mini}
+  # shellcheck disable=SC2034  # read through ${!k} (UP_KEYS) when the env file is written
+  read -r -s -p "  API key (not shown; empty for a local server): " YGG_UPSTREAM_API_KEY; echo
+fi
+
+# ---------------------------------------------------------------------------- your trunk's line
+# Pasted when asked (not shown) or read from stdin when not a terminal: the token in it never lands in a
+# command line, the shell's history or ps. The old way (--trunk '<line>') still works, with a warning.
+if [ $ASK_TRUNK = 1 ]; then
+  if [ -t 0 ]; then
+    echo "Paste the connect line your trunk printed (wss://…#pin=…,token=…) and press Enter."
+    read -r -s -p "  connect line (not shown): " TRUNK_ARG; echo
+  else
+    IFS= read -r TRUNK_ARG || true
+  fi
+  # whatever came around it: spaces, quotes, a copied "./install.sh --trunk '…'" — the wss://… part counts
+  TRUNK_ARG=$(printf '%s' "$TRUNK_ARG" | tr -d '\r' | grep -o "wss://[^' \"]*" | head -1 || true)
+  [ -n "$TRUNK_ARG" ] || die "no connect line (wss://…#pin=…,token=…) — copy the line trunk.sh printed, run install.sh --trunk again, paste it" 64
+elif [ -n "$TRUNK_ARG" ] && [ "$TRUNK_ARG" != off ] && [ "$TRUNK_ARG" != none ]; then
+  warn "the connect line was on the command line: it is now in your shell history. Next time: install.sh --trunk, then paste it"
+fi
+
 # ---------------------------------------------------------------------------------------- brain
 install_brain() {
   local SRC
-  if [ -n "${YGG_BINARY:-}" ]; then
-    SRC=$YGG_BINARY
-  elif [ -x "$HERE/yggdrasil" ]; then
-    SRC=$HERE/yggdrasil
-  else
+  SRC=$(brain_src)
+  if [ -z "$SRC" ]; then
+    [ $FROM_SOURCE = 1 ] || die "no prebuilt yggdrasil here — use the release installer, or --from-source in a checkout"
     if ! command -v cargo >/dev/null; then
       # shellcheck disable=SC1091
       [ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
     fi
-    command -v cargo >/dev/null || die "no prebuilt yggdrasil and no cargo. Put the binary next to install.sh, or install Rust (pacman -S rust) and re-run"
+    command -v cargo >/dev/null || die "--from-source: no cargo (install Rust with your package manager, e.g. pacman -S rust) and re-run"
     say "building release binary (cargo build --release --locked)"
     cargo build --release --locked --manifest-path "$CRATE/Cargo.toml"
     SRC=$CRATE/target/release/yggdrasil
@@ -97,14 +333,18 @@ install_brain() {
   chmod 700 "$CONF_DIR" "$DATA_DIR"
   install_bin "$SRC" yggdrasil yggdrasil.service
 
-  # env file: create once. Your upstream URL and key survive re-runs. YGG_* in the environment seed it.
+  # env file: create once. Your upstream URL and key survive re-runs. The model asked above (or --upstream-env,
+  # or YGG_* in the environment) seeds it — and fills it in later when it still has no upstream.
   if [ -e "$ENV_FILE" ]; then
-    say "config  $ENV_FILE (kept)"
+    if ! grep -q '^YGG_UPSTREAM_BASE_URL=.' "$ENV_FILE" && [ -n "${YGG_UPSTREAM_BASE_URL:-}" ]; then
+      for k in "${UP_KEYS[@]}"; do if [ -n "${!k:-}" ]; then envset "$ENV_FILE" "$k" "${!k}"; fi; done
+      say "config  $ENV_FILE (the model set)"; CHANGED="${CHANGED}yggdrasil.service "
+    else say "config  $ENV_FILE (kept)"; fi
   else
     sed "s|@DATA@|$DATA_DIR|" "$HERE/yggdrasil.env.example" >"$ENV_FILE.new"
     chmod 600 "$ENV_FILE.new"
-    for k in YGG_UPSTREAM_BASE_URL YGG_UPSTREAM_API_KEY YGG_UPSTREAM_MODEL YGG_UPSTREAM_STYLE YGG_MAX_TOKENS YGG_LISTEN; do
-      [ -n "${!k:-}" ] && envset "$ENV_FILE.new" "$k" "${!k}"
+    for k in "${UP_KEYS[@]}"; do
+      if [ -n "${!k:-}" ]; then envset "$ENV_FILE.new" "$k" "${!k}"; fi
     done
     mv "$ENV_FILE.new" "$ENV_FILE"
     say "config  $ENV_FILE (new$(grep -q '^YGG_UPSTREAM_BASE_URL=.' "$ENV_FILE" || echo '; set YGG_UPSTREAM_BASE_URL'))"
@@ -167,11 +407,7 @@ RUN_DIR=$BF_STATE/run
 LOG_DIR=$BF_STATE/log
 NET=() FILES=() UNITS=() OFF=() SOFT=() CHANGED=" "
 
-ROOT=${BIFROST_ROOT:-}
-if [ -z "$ROOT" ]; then d=$HERE; while [ "$d" != / ]; do [ -f "$d/branch/package.json" ] && { ROOT=$d; break; }; d=$(dirname "$d"); done; fi
-[ -n "$ROOT" ] && [ -f "$ROOT/branch/package.json" ] || die "bifrost repo not found above $HERE (set BIFROST_ROOT=/path/to/bifrost)"
-
-on() { case ,$SKIP, in *,"$1",*) return 1 ;; esac; return 0; }
+[ -n "$ROOT" ] && [ -f "$ROOT/branch/package.json" ] || die "no app found above $HERE (set BIFROST_ROOT=/path/to/yggdrasil)"
 need_libs() { # binary — every shared library it links must be on this box (a clean Arch lacks libopus)
   local miss; miss=$(ldd "$1" 2>/dev/null | sed -n 's/^[[:space:]]*\([^ ]*\) => not found.*/\1/p' | tr '\n' ' ' || true)
   [ -z "$miss" ] && return 0
@@ -344,12 +580,12 @@ fi
 
 # ------------------------------------------------------------------------------------ 2. bridge
 if on bridge; then
-  if [ -n "${BRIDGE_BINARY:-}" ]; then SRC=$BRIDGE_BINARY
-  elif [ -x "$HERE/bifrost-net" ]; then SRC=$HERE/bifrost-net
-  elif [ -x "$ROOT/trunk/target/release/bifrost-net" ]; then SRC=$ROOT/trunk/target/release/bifrost-net
-  else
+  SRC=$(net_src)
+  if [ -z "$SRC" ]; then
+    [ $FROM_SOURCE = 1 ] || die "no prebuilt bifrost-net here — use the release installer, or --from-source in a checkout"
+    # shellcheck disable=SC1091
     command -v cargo >/dev/null || { [ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"; }
-    command -v cargo >/dev/null || die "no prebuilt bifrost-net and no cargo. Put the binary next to install.sh, or install Rust (pacman -S rust) and re-run"
+    command -v cargo >/dev/null || die "--from-source: no cargo (install Rust with your package manager, e.g. pacman -S rust) and re-run"
     say "building the bridge (cargo build --release --locked)"
     cargo build --release --locked --manifest-path "$ROOT/trunk/Cargo.toml"
     SRC=$ROOT/trunk/target/release/bifrost-net
@@ -434,12 +670,23 @@ fi
 
 # ------------------------------------------------------------------------------------- 3. app
 if on app; then
-  NODE=$(command -v node || true)
-  [ -n "$NODE" ] || die "node not found — install Node.js ≥ 20 (Arch: sudo pacman -S nodejs npm) and re-run"
-  command -v npm >/dev/null || die "npm not found (Arch: sudo pacman -S npm)"
   PWA=$ROOT/branch
-  if [ "${BIFROST_REBUILD:-0}" = 1 ] || [ ! -f "$PWA/.next/BUILD_ID" ] || [ ! -d "$PWA/node_modules" ] ||
-     [ -n "$(cd "$PWA" && find app components hooks lib styles public middleware.ts next.config.ts package.json package-lock.json server.mjs -newer .next/BUILD_ID -print -quit 2>/dev/null)" ]; then
+  if [ -x "$ROOT/bin/node" ]; then NODE=$ROOT/bin/node   # the release's own Node 24
+  else
+    NODE=$(command -v node || true)
+    [ -n "$NODE" ] || die "node not found — install Node.js 24 (Arch: sudo pacman -S nodejs npm) and re-run"
+  fi
+  if [ $IN_RELEASE = 1 ]; then
+    [ -f "$PWA/.next/BUILD_ID" ] || die "the release has no built app ($PWA/.next) — download it again (bash install.sh --update)"
+    say "app     $PWA (prebuilt, $(sed -n '1p' "$ROOT/RELEASE"), node $("$NODE" --version))"
+    # what the app keeps in its own folder (web-push subscriptions, a queued message) moves along on an update
+    for f in .push-subs.json .oc-queue.json; do
+      [ -e "$PWA/$f" ] && continue
+      for o in $(unpacked | sort -rV); do [ -f "$REL_HOME/$o/branch/$f" ] && { cp -p "$REL_HOME/$o/branch/$f" "$PWA/$f"; break; }; done
+    done
+  elif ! app_built; then
+    [ $FROM_SOURCE = 1 ] || die "the app in $PWA is not built (or older than its sources) — --from-source builds it (npm, Node 24)"
+    command -v npm >/dev/null || die "--from-source: npm not found (Arch: sudo pacman -S nodejs npm)"
     say "app     npm install + npm run build in $PWA (takes a few minutes)"
     (cd "$PWA" && npm install --no-audit --no-fund && npm run build) || die "app build failed (output above)"
     NET+=("registry.npmjs.org (npm install for the app)")
@@ -530,6 +777,8 @@ if on livekit && [ "$LK_MODE" = binary ]; then
   case $(uname -m) in x86_64|amd64) LK_ARCH=amd64 ;; aarch64|arm64) LK_ARCH=arm64 ;; *) LK_ARCH= ;; esac
   if [ -n "${LIVEKIT_BINARY:-}" ]; then LK_SRC=$LIVEKIT_BINARY
   elif [ -x "$HERE/livekit-server" ]; then LK_SRC=$HERE/livekit-server
+  elif [ -x "$ROOT/bin/livekit-server" ] && "$ROOT/bin/livekit-server" --version 2>/dev/null | grep -q " $LIVEKIT_VERSION\$"; then
+    LK_SRC=$ROOT/bin/livekit-server   # the release's (sha256-checked when the release was built)
   elif [ -x "$BIN_DIR/livekit-server" ] && "$BIN_DIR/livekit-server" --version 2>/dev/null | grep -q " $LIVEKIT_VERSION\$"; then LK_SRC=$BIN_DIR/livekit-server
   elif [ -z "$LK_ARCH" ]; then die "no livekit-server build for $(uname -m) — set LIVEKIT_MODE=cloud in $BF_ENV"
   else
@@ -617,7 +866,7 @@ fi
 BRAIN_READY=0; grep -q '^YGG_UPSTREAM_BASE_URL=.' "$ENV_FILE" 2>/dev/null && BRAIN_READY=1
 STARTED=()
 run_direct() { # unit — run the unit's own ExecStartPre/ExecStart with its environment, under nohup
-  local u=$1 f=$UNIT_DIR/$1 wd=$HOME cmd= line k v
+  local u=$1 f=$UNIT_DIR/$1 wd=$HOME cmd='' line k v
   local -a envs=() files=() pre=()
   while IFS= read -r line; do
     case $line in
@@ -649,7 +898,7 @@ if [ $START = 1 ]; then
       [ -f "$UNIT_DIR/$u" ] && { systemctl --user disable --now "$u" >/dev/null 2>&1 || true; say "stopped $u (not part of this install)"; }
     done
     for u in "${UNITS[@]}"; do
-      [ $u = yggdrasil.service ] && [ $BRAIN_READY = 0 ] && { warn "brain not started: set YGG_UPSTREAM_BASE_URL (+ YGG_UPSTREAM_API_KEY) in $ENV_FILE, then: systemctl --user restart yggdrasil"; systemctl --user enable -q "$u"; continue; }
+      [ "$u" = yggdrasil.service ] && [ $BRAIN_READY = 0 ] && { warn "brain not started: set YGG_UPSTREAM_BASE_URL (+ YGG_UPSTREAM_API_KEY) in $ENV_FILE, then: systemctl --user restart yggdrasil"; systemctl --user enable -q "$u"; continue; }
       systemctl --user enable -q "$u"
       if ! systemctl --user is-active --quiet "$u" || [[ $CHANGED == *" $u "* ]]; then
         systemctl --user restart --no-block "$u"; say "start   $u"; STARTED+=("$u")
@@ -658,7 +907,7 @@ if [ $START = 1 ]; then
   elif [ $DIRECT = 1 ]; then
     for u in "${OFF[@]}"; do [ -f "$RUN_DIR/$u.pid" ] && kill -- "-$(cat "$RUN_DIR/$u.pid")" 2>/dev/null; rm -f "$RUN_DIR/$u.pid"; done
     for u in "${UNITS[@]}"; do
-      [ $u = yggdrasil.service ] && [ $BRAIN_READY = 0 ] && { warn "brain not started: set YGG_UPSTREAM_BASE_URL in $ENV_FILE and re-run"; continue; }
+      [ "$u" = yggdrasil.service ] && [ $BRAIN_READY = 0 ] && { warn "brain not started: set YGG_UPSTREAM_BASE_URL in $ENV_FILE and re-run"; continue; }
       if ours "$u" && [[ $CHANGED != *" $u "* ]]; then say "running $u (unchanged, pid $(cat "$RUN_DIR/$u.pid"))"
       else run_direct "$u"; say "start   $u (nohup, pid $(cat "$RUN_DIR/$u.pid"), log $LOG_DIR/$u.log)"; STARTED+=("$u"); fi
     done
@@ -702,7 +951,7 @@ fi
 # ---------------------------------------------------------------------------------- manifest
 {
   echo "# bifrost install manifest — written by install.sh $(date -u +%FT%TZ). Re-written on every run."
-  echo "# repo: $ROOT   mode: full stack   skipped: ${SKIP//,/ }"
+  echo "# from: $ROOT ($( [ $IN_RELEASE = 1 ] && sed -n '1p' "$ROOT/RELEASE" || echo 'a git checkout'))   mode: full stack   skipped: ${SKIP//,/ }"
   echo
   echo "[files]  (path  mode  what)"
   for f in "${FILES[@]}"; do echo "  $f"; done
@@ -716,11 +965,12 @@ fi
   done
   echo
   echo "[network calls install.sh can make]  (each only when needed; nothing else is contacted)"
-  echo "  registry.npmjs.org                      npm install for the app (when the app needs a build)"
-  echo "  github.com/livekit/livekit/releases     livekit-server v$LIVEKIT_VERSION + checksums.txt (LIVEKIT_MODE=binary, once per version)"
+  echo "  github.com/veraldar/yggdrasil/releases  the release: SHA256SUMS + its signature, then the archive (checked)"
+  echo "  registry.npmjs.org                      npm install for the app (--from-source in a checkout only)"
+  echo "  github.com/livekit/livekit/releases     livekit-server v$LIVEKIT_VERSION + checksums.txt (only when no release brought it)"
   echo "  pypi.org                                voice server deps (sherpa-onnx, fastapi, uvicorn, numpy) and the agent's (livekit-agents)"
   echo "  huggingface.co, github.com              agent.py download-files: silero VAD + turn-detector models (with the agent deps)"
-  echo "  crates.io                               cargo build — only when no prebuilt yggdrasil / bifrost-net is found"
+  echo "  crates.io                               cargo build (--from-source in a checkout only)"
   echo "  \$SPEACHES_URL/models                    reachability probe, only when SPEACHES_URL points at a remote speech server"
   echo
   echo "[network calls made by this run]"
@@ -736,29 +986,39 @@ fi
 } >"$MANIFEST"
 chmod 600 "$MANIFEST"
 say "manifest $MANIFEST"
+if [ $IN_RELEASE = 1 ] && [ "$ROOT" = "$REL_HOME/$(basename "$ROOT")" ]; then
+  KEPT=''
+  for o in $(unpacked | sort -rV); do
+    [ "$o" = "$(basename "$ROOT")" ] && continue
+    if [ -z "$KEPT" ]; then KEPT=$o; continue; fi
+    rm -rf "${REL_HOME:?}/$o"; say "release $o removed (older than the two kept)"
+  done
+fi
 
 # ----------------------------------------------------------------------------------- next steps
 if [ -n "$TRUNK" ]; then cat <<EOF
 
 bifrost is installed, connected to your trunk $T_PUBLIC.  Config: $BF_ENV  ·  brain: $ENV_FILE
-$( [ $BRAIN_READY = 1 ] || printf '\n  FIRST: set your model upstream in %s\n         (YGG_UPSTREAM_BASE_URL + YGG_UPSTREAM_API_KEY), then re-run ./install.sh\n' "$ENV_FILE")
-  1. Pair your phone:   $HERE/install.sh pair      (a QR code appears right here)
+$( [ $BRAIN_READY = 1 ] || printf '\n  FIRST: the model — run %s again in a terminal (it asks; the key is not shown),\n         or set YGG_UPSTREAM_BASE_URL + YGG_UPSTREAM_API_KEY in %s\n' "bash $LAUNCHER" "$ENV_FILE")
+  1. Pair your phone:   bash $LAUNCHER pair      (a QR code appears right here)
   2. Scan it with the phone's camera — Wi-Fi or mobile data, from anywhere. The phone opens
      $T_PUBLIC and pairs itself: the first time it walks you through the door, then your sessions.
      Add it to the home screen. Hold the tree to talk: voice rides the trunk's port 443 too.
   3. More computers:    on each, ./join.sh --hub $T_PUBLIC  — approve its QR on your phone.
-  Lost a phone?         $HERE/install.sh pair --list   ·   $HERE/install.sh pair --revoke NAME
+  Lost a phone?         bash $LAUNCHER pair --list   ·   bash $LAUNCHER pair --revoke NAME
+  Update / remove:      bash $LAUNCHER --update   ·   bash $LAUNCHER --uninstall
 EOF
 else cat <<EOF
 
 bifrost is installed.  Config: $BF_ENV  ·  brain: $ENV_FILE
-$( [ $BRAIN_READY = 1 ] || printf '\n  FIRST: set your model upstream in %s\n         (YGG_UPSTREAM_BASE_URL + YGG_UPSTREAM_API_KEY), then re-run ./install.sh\n' "$ENV_FILE")
+$( [ $BRAIN_READY = 1 ] || printf '\n  FIRST: the model — run %s again in a terminal (it asks; the key is not shown),\n         or set YGG_UPSTREAM_BASE_URL + YGG_UPSTREAM_API_KEY in %s\n' "bash $LAUNCHER" "$ENV_FILE")
   1. On THIS box, open   http://127.0.0.1:$APP_PORT/pair      (a QR code appears)
      headless box? from your laptop: ssh -L $APP_PORT:127.0.0.1:$APP_PORT <box>, then open the same URL
   2. Scan the QR with your phone's camera (same Wi-Fi). The phone opens
      http://$LAN:$APP_PORT and pairs itself — no typing. The first time it walks you through
      the door, then your sessions.
   3. Add it to the home screen from the browser menu.
+  Update / remove:      bash $LAUNCHER --update   ·   bash $LAUNCHER --uninstall
 EOF
 fi
 if [ ${#SOFT[@]} -gt 0 ]; then echo; for s in "${SOFT[@]}"; do warn "skipped $s"; done; fi
