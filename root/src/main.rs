@@ -456,8 +456,8 @@ fn context_prompt(files: &[PathBuf]) -> Option<String> {
 /// default (legacy sessions carry no agent).
 fn profile_name_of(st: &AppState, info: &Value) -> String {
     let agents = st.config.profiles.read().unwrap();
-    if let Some(a) = info["agent"].as_str().filter(|a| agents.get(a).is_some()) {
-        return a.to_string();
+    if let Some(p) = info["agent"].as_str().and_then(|a| agents.get(a)) {
+        return p.name.clone();
     }
     if is_main_title(info["title"].as_str().unwrap_or_default()) {
         return "coordinator".into();
@@ -799,12 +799,12 @@ fn new_session(st: &AppState, title: &str, parent: Option<&str>, agent: Option<&
 }
 
 /// `POST /session` — body `{title?, parentID?, agent?, model?, variant?}` (opencode accepts an
-/// empty body too; `model` may be a string or `{id}`). With `harness: {id}` + `cwd` it continues a
-/// Claude Code conversation started in a terminal (`attach_claude`).
+/// empty body too; `model` may be a string or `{id}`). With `harness: {kind?, id}` + `cwd` it continues
+/// a conversation started in a terminal (`attach_harness`).
 async fn create_session(State(st): State<AppState>, body: Option<Json<Value>>) -> Response {
     let body = body.map(|Json(b)| b).unwrap_or(Value::Null);
     if body["harness"]["id"].is_string() {
-        return attach_claude(&st, &body);
+        return attach_harness(&st, &body);
     }
     let title = body["title"].as_str().filter(|t| !t.is_empty()).unwrap_or("New session");
     let model = body["model"].as_str().or(body["model"]["id"].as_str());
@@ -822,51 +822,201 @@ async fn create_session(State(st): State<AppState>, body: Option<Json<Value>>) -
     Json(info).into_response()
 }
 
-/// `POST /session {agent?, harness: {id}, cwd}` — a session that continues the owner's own Claude
-/// Code conversation `id` (started in a terminal in `cwd`) with its full context. The agent must run
-/// on Claude Code (default AGI). Its first turn forks the conversation, so the terminal's transcript
-/// is never written; Claude Code's permission guard stays on (harness.rs `Attach`).
-fn attach_claude(st: &AppState, body: &Value) -> Response {
-    let id = body["harness"]["id"].as_str().unwrap_or_default().trim();
-    let agent_name = body["agent"].as_str().unwrap_or("AGI");
-    match agent(st, agent_name) {
-        Some(a) if a.harness.as_deref() == Some("claude") => {}
-        Some(_) => return bad_request(&format!("agent {agent_name} does not run on Claude Code — continue a Claude Code session with AGI or another Claude Code agent")),
-        None => return bad_request(&format!("unknown agent {agent_name}")),
-    }
-    if !harness::claude::is_uuid(id) {
-        return bad_request(&format!("{id:?} is not a Claude Code session id (a uuid like 3f2a9c1e-0b4d-4e8f-9a6b-1c2d3e4f5a6b)"));
-    }
-    let Some(raw) = body["cwd"].as_str().map(str::trim).filter(|c| !c.is_empty()) else {
-        return bad_request("cwd required: the folder the Claude Code session was started in");
+/// `POST /session {agent?, title?, harness: {kind?, id}, cwd}` — a session that continues a
+/// conversation the owner started in a terminal (`kind`: claude — the default —, opencode or
+/// antigravity) with its full context. The SAME conversation both ways (harness.rs `Attach`): one
+/// bifrost session per conversation — asking again returns the one that exists. It runs on that
+/// harness whatever its agent (default: the built-in one for it — claude, agy — else the default).
+fn attach_harness(st: &AppState, body: &Value) -> Response {
+    let kind = body["harness"]["kind"].as_str().unwrap_or("claude");
+    let id = body["harness"]["id"].as_str().unwrap_or_default();
+    let cwd = body["cwd"].as_str().unwrap_or_default();
+    let opts = AttachOpts {
+        parent: body["parentID"].as_str().map(String::from),
+        agent: body["agent"].as_str().map(String::from),
+        title: body["title"].as_str().map(String::from),
+        model: body["model"].as_str().or(body["model"]["id"].as_str()).map(String::from),
+        fork: body["fork"] == true,
     };
+    match attach_conversation(st, kind, id, cwd, opts) {
+        Ok(info) => Json(info).into_response(),
+        Err(e) => bad_request(&e),
+    }
+}
+
+/// How a terminal's conversation comes into the tree (`attach_conversation`).
+#[derive(Default)]
+pub(crate) struct AttachOpts {
+    pub parent: Option<String>,
+    pub agent: Option<String>,
+    pub title: Option<String>,
+    pub model: Option<String>,
+    /// a copy ("continue in a new session"): its first turn branches off; the original — open in
+    /// a terminal, say — is never written. One copy per conversation and parent: asking again
+    /// returns it.
+    pub fork: bool,
+}
+
+/// The bifrost session on a terminal's conversation (`kind`: claude, opencode or antigravity):
+/// THE one for that conversation (made once), or a copy of it (`fork`). The phone's attach and
+/// the coordinator's tools (tree.rs) both come through here. Errors are said plainly.
+pub(crate) fn attach_conversation(st: &AppState, kind: &str, id: &str, cwd: &str, o: AttachOpts) -> Result<Value, String> {
+    let id = id.trim().to_string();
+    let Some(kind) = harness::Kind::parse(kind) else {
+        return Err("harness.kind: claude, opencode or antigravity".into());
+    };
+    let what = harness_label(kind);
+    let id_ok = match kind {
+        harness::Kind::Opencode => id.starts_with("ses_") && id.len() < 80 && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'),
+        _ => harness::claude::is_uuid(&id),
+    };
+    if !id_ok {
+        return Err(format!("{id:?} is not a {what} conversation id"));
+    }
+    let raw = cwd.trim();
+    if raw.is_empty() {
+        return Err(format!("cwd required: the folder the {what} conversation was started in"));
+    }
     let cwd = match raw.trim_end_matches('/') {
         "" => "/",
         c => c,
     };
     if !std::path::Path::new(cwd).is_absolute() || !std::path::Path::new(cwd).is_dir() {
-        return bad_request(&format!("folder {cwd} does not exist on this root — the Claude Code session runs in the folder it was started in"));
+        return Err(format!("folder {cwd} does not exist on this root — the {what} conversation runs in the folder it was started in"));
     }
-    let path = harness::claude::transcript(cwd, id);
-    if !path.is_file() {
-        return bad_request(&format!("no Claude Code session {id} was started in {cwd} (looked for {})", path.display()));
-    }
-    let title = harness::claude::meta(&path).and_then(|m| m["title"].as_str().map(String::from)).unwrap_or_else(|| "Claude Code session".into());
-    let title = format!("{} · Claude Code", title.chars().take(40).collect::<String>().trim_end());
-    let model = body["model"].as_str().or(body["model"]["id"].as_str());
-    let info = new_session(st, &title, body["parentID"].as_str(), Some(agent_name), model, None);
-    let sid = info["id"].as_str().unwrap_or_default().to_string();
-    match with_session(st, &sid, |s| {
-        s.info["harness"] = json!({ "kind": "claude", "id": id, "attached": true });
-        s.info["cwd"] = json!(cwd);
-        s.info.clone()
-    }) {
-        Some(info) => {
-            publish(st, "session.updated", json!({ "info": info }));
-            Json(info).into_response()
+    let mut title = o.title.as_deref().map(str::trim).filter(|t| !t.is_empty()).map(String::from);
+    if kind == harness::Kind::Claude {
+        let path = harness::claude::transcript(cwd, &id);
+        if !path.is_file() {
+            return Err(format!("no Claude Code session {id} was started in {cwd} (looked for {})", path.display()));
         }
-        None => not_found(&sid),
+        title = title.or_else(|| harness::claude::meta(&path).and_then(|m| m["title"].as_str().map(String::from)));
     }
+    // already here: the one bifrost session for this conversation (or this parent's copy of it)
+    let existing = st.sessions.lock().unwrap().values().find_map(|s| {
+        let h = &s.info["harness"];
+        let same = h["kind"] == kind.name()
+            && if o.fork {
+                h["fork"] == true && (h["origin"] == id.as_str() || (h["id"] == id.as_str() && h["forked"] != true))
+                    && s.info["parentID"].as_str() == o.parent.as_deref()
+            } else {
+                h["id"] == id.as_str() && h["fork"] != true && h["forked"] != true
+            };
+        (same && s.info["archived"] != true).then(|| s.info.clone())
+    });
+    if let Some(info) = existing {
+        return Ok(info);
+    }
+    // the session runs on the conversation's harness whatever its agent (run_turn): the agent
+    // built for that harness when there is one (claude · agy), else the default agent
+    let agent_name = match o.agent {
+        Some(a) => a,
+        None => harness_agent(st, kind).unwrap_or_else(|| st.config.profiles.read().unwrap().default_agent.clone()),
+    };
+    let Some(profile) = agent(st, &agent_name) else {
+        return Err(format!("unknown agent {agent_name}"));
+    };
+    let on_kind = profile.harness.as_deref().and_then(harness::Kind::parse) == Some(kind);
+    let title = title.unwrap_or_else(|| format!("{what} session"));
+    let title = format!("{} · {what}{}", title.chars().take(40).collect::<String>().trim_end(), if o.fork { " (new)" } else { "" });
+    let info = new_session(st, &title, o.parent.as_deref(), Some(&agent_name), o.model.as_deref(), None);
+    let sid = info["id"].as_str().unwrap_or_default().to_string();
+    let info = with_session(st, &sid, |s| {
+        s.info["harness"] = if o.fork {
+            json!({ "kind": kind.name(), "id": id, "attached": true, "fork": true, "origin": id })
+        } else {
+            json!({ "kind": kind.name(), "id": id, "attached": true })
+        };
+        s.info["cwd"] = json!(cwd);
+        // an agent made for another engine: the harness's own pick of model, never the agent's
+        if !on_kind && o.model.is_none() {
+            s.info["model"] = json!({ "id": "default", "providerID": kind.name() });
+        }
+        s.info.clone()
+    })
+    .ok_or_else(|| format!("session {sid} vanished"))?;
+    publish(st, "session.updated", json!({ "info": info }));
+    Ok(info)
+}
+
+fn harness_label(kind: harness::Kind) -> &'static str {
+    match kind {
+        harness::Kind::Claude => "Claude Code",
+        harness::Kind::Opencode => "opencode",
+        harness::Kind::Codex => "Codex",
+        harness::Kind::Antigravity => "Antigravity",
+    }
+}
+
+/// The agent a terminal's conversation continues with: the built-in one for its harness
+/// (claude · agy), else the first agent that runs on it.
+fn harness_agent(st: &AppState, kind: harness::Kind) -> Option<String> {
+    let agents = st.config.profiles.read().unwrap();
+    let on = |p: &&profiles::Profile| p.harness.as_deref().and_then(harness::Kind::parse) == Some(kind);
+    let preferred: &[&str] = match kind {
+        harness::Kind::Claude => &["claude", "AGI"],
+        harness::Kind::Antigravity => &["agy"],
+        _ => &[],
+    };
+    preferred.iter().filter_map(|n| agents.get(n)).find(on).or_else(|| agents.by_name.values().find(on)).map(|p| p.name.clone())
+}
+
+/// Is this harness conversation open in a terminal right now? The preview's live helper
+/// (cc-live, unsandboxed: it sees the processes) writes what is open to `YGG_HARNESS_LIVE` every
+/// couple of seconds: `{at, live: {"<kind>:<id>": {how: "cmd"|"bg", pid}}}`. No file, or one older
+/// than 15 s (the helper is down): nothing is known to be open.
+/// agy has no fork: a copy of an Antigravity conversation is a new one that opens with what was
+/// said in the earlier one (its requests and replies, the newest kept when it is long), read
+/// from agy's own transcript (~/.gemini/antigravity-cli/brain/<id>/…/transcript.jsonl).
+fn agy_earlier(id: &str) -> String {
+    let home = std::env::var("HOME").unwrap_or_default();
+    let path = format!("{home}/.gemini/antigravity-cli/brain/{id}/.system_generated/logs/transcript.jsonl");
+    let Ok(raw) = std::fs::read_to_string(&path) else {
+        return String::new();
+    };
+    let mut said: Vec<String> = Vec::new();
+    for line in raw.lines() {
+        let Ok(e) = serde_json::from_str::<Value>(line) else { continue };
+        let text = e["content"].as_str().unwrap_or_default();
+        match e["type"].as_str() {
+            Some("USER_INPUT") => {
+                let t = text.split("<USER_REQUEST>").nth(1).and_then(|r| r.split("</USER_REQUEST>").next()).unwrap_or(text).trim();
+                if !t.is_empty() {
+                    said.push(format!("USER: {t}"));
+                }
+            }
+            Some("PLANNER_RESPONSE") if !text.trim().is_empty() => said.push(format!("YOU: {}", text.trim())),
+            _ => {}
+        }
+    }
+    if said.is_empty() {
+        return String::new();
+    }
+    // the newest ~24k characters of it
+    let mut kept: Vec<String> = Vec::new();
+    let mut n = 0;
+    for s in said.into_iter().rev() {
+        n += s.len();
+        if n > 24_000 && !kept.is_empty() {
+            break;
+        }
+        kept.push(s);
+    }
+    kept.reverse();
+    format!(
+        "<earlier_conversation>\nThis continues an earlier conversation of ours (Antigravity conversation {id}) in a new one. What was said there, oldest first:\n\n{}\n</earlier_conversation>\n\n",
+        kept.join("\n\n")
+    )
+}
+
+fn live_in_terminal(kind: harness::Kind, id: &str) -> Option<String> {
+    let path = std::env::var("YGG_HARNESS_LIVE").ok().filter(|p| !p.is_empty())?;
+    let v: Value = serde_json::from_slice(&std::fs::read(path).ok()?).ok()?;
+    if now_ms().saturating_sub(v["at"].as_u64().unwrap_or(0)) > 15_000 {
+        return None;
+    }
+    let e = &v["live"][format!("{}:{id}", kind.name())];
+    e.is_object().then(|| e["how"].as_str().unwrap_or("cmd").to_string())
 }
 
 /// `GET /harness/claude/sessions` — the newest 20 Claude Code sessions on this box, to continue
@@ -965,7 +1115,7 @@ async fn list_sessions(State(st): State<AppState>) -> Json<Value> {
 
 /// A session made before agents were stamped at birth names the agent it actually runs.
 fn with_agent(st: &AppState, info: &mut Value) {
-    if info["agent"].is_null() {
+    if info["agent"].is_null() || info["agent"].as_str().is_some_and(|a| agent(st, a).is_some_and(|p| p.name != a)) {
         info["agent"] = json!(profile_name_of(st, info));
     }
 }
@@ -1149,7 +1299,7 @@ async fn switch_agent(State(st): State<AppState>, Path(id): Path<String>, Json(b
     };
     let stamp = agent_model_stamp(&st, &target);
     match with_session(&st, &id, |s| {
-        s.info["agent"] = json!(name);
+        s.info["agent"] = json!(target.name);
         s.info["model"] = stamp.clone();
         match &target.harness {
             Some(h) if s.info["harness"]["kind"].as_str() == Some(h.as_str()) => {}
@@ -1275,6 +1425,7 @@ async fn put_agent(State(st): State<AppState>, Path(name): Path<String>, Json(bo
     let res = st.config.profiles.write().unwrap().upsert(&name, &body);
     match res {
         Ok(()) => {
+            let name = profiles::Profiles::resolve(&name).to_string();
             publish(&st, "agent.updated", json!({ "name": name }));
             get_agent(State(st), Path(name)).await
         }
@@ -2079,7 +2230,12 @@ async fn run_turn(st: &AppState, id: &str, tx: &mpsc::Sender<Event>, queue_ms: u
             .and_then(|m| m["parts"].as_array())
             .is_some_and(|ps| ps.iter().any(|p| p["type"] == "file" && p["mime"].as_str().is_some_and(|t| t.starts_with("image/")))),
     };
-    let harness = session_profile(st, id).harness.as_deref().and_then(harness::Kind::parse);
+    // a terminal's conversation runs on its own harness, whatever the agent; else the agent's
+    let attached = st.sessions.lock().unwrap().get(id).and_then(|s| {
+        let h = &s.info["harness"];
+        (h["attached"] == true).then(|| h["kind"].as_str().and_then(harness::Kind::parse)).flatten()
+    });
+    let harness = attached.or_else(|| session_profile(st, id).harness.as_deref().and_then(harness::Kind::parse));
     let outcome = {
         let fut = async {
             match harness {
@@ -2160,13 +2316,29 @@ async fn harness_loop(st: &AppState, id: &str, history: Vec<Value>, tx: &mpsc::S
         let resume = info["harness"]["id"].as_str().filter(|_| info["harness"]["kind"] == kind.name()).map(String::from);
         (model, resume, cwd, dir, info["harness"].clone())
     };
-    // a conversation continued from the terminal: guarded always, forked on its first turn here
-    let attached = kind == harness::Kind::Claude && h["attached"] == true;
-    let attach = harness::Attach { guarded: attached, fork: attached && h["forked"] != true };
+    // a conversation continued from the terminal: the same one both ways, its guard on — or a
+    // copy of it, whose first turn branches off (the original is never written)
+    let attached = h["attached"] == true;
+    let fork_now = attached && h["fork"] == true && h["forked"] != true;
+    let attach = harness::Attach { guarded: attached, fork: fork_now };
+    // agy has no fork: a new conversation that opens with the earlier one
+    let (resume, prompt) = match (fork_now && kind == harness::Kind::Antigravity, resume) {
+        (true, Some(orig)) => (None, format!("{}{prompt}", agy_earlier(&orig))),
+        (_, r) => (r, prompt),
+    };
+    // one writer at a time: a conversation open in a terminal right now is typed into there
+    if let Some(how) = resume.as_deref().filter(|_| !fork_now).and_then(|r| live_in_terminal(kind, r)) {
+        let what = harness_label(kind);
+        return Err(if how == "bg" {
+            format!("this {what} conversation is running in the background — type into it from its live view")
+        } else {
+            format!("this {what} conversation is open in a terminal right now — type there (or from its live view, when it runs in tmux), close it there and send again here, or continue it in a new session")
+        });
+    }
     let cwd = match cwd {
         Some(c) => c,
-        // its folder is where Claude Code finds the conversation: never run it anywhere else
-        None if attached => return Err(format!("the folder this Claude Code session was started in ({dir}) is gone")),
+        // its folder is where the harness finds the conversation: never run it anywhere else
+        None if attached => return Err(format!("the folder this conversation was started in ({dir}) is gone")),
         None => st.tools.project_dir.clone(),
     };
     // the shared prompt + the agent's own instructions ride on top of the harness's (Claude Code)
@@ -2188,14 +2360,12 @@ async fn harness_loop(st: &AppState, id: &str, history: Vec<Value>, tx: &mpsc::S
     }
     let out = result?;
     if let Some(sid) = &out.session {
-        let next = if attached {
-            // the fork is the session from now on; a turn that did not fork (same id back) forks again
-            let forked = h["forked"] == true || (attach.fork && Some(sid) != resume.as_ref());
-            let origin = h["origin"].as_str().map(String::from).or(resume.clone());
-            json!({ "kind": kind.name(), "id": sid, "attached": true, "forked": forked, "origin": origin })
-        } else {
-            json!({ "kind": kind.name(), "id": sid })
-        };
+        let mut next = h.clone();
+        next["kind"] = json!(kind.name());
+        next["id"] = json!(sid);
+        if fork_now {
+            next["forked"] = json!(true);
+        }
         with_session(st, id, |s| s.info["harness"] = next);
     }
     run.text = out.text;
@@ -3138,6 +3308,12 @@ async fn main() {
             // "fix this" from MAIN, 11-13 morning) runs the default agent
             s.info["agent"] = json!(default_agent);
             persist(&data_dir, id, s);
+        } else if let Some(raw) = s.info["agent"].as_str().map(str::to_string) {
+            let resolved = profiles::Profiles::resolve(&raw);
+            if resolved != raw {
+                s.info["agent"] = json!(resolved);
+                persist(&data_dir, id, s);
+            }
         }
     }
     let max_inflight = env_num("YGG_MAX_INFLIGHT", 6).max(1) as usize;
@@ -3938,5 +4114,95 @@ mod image_tests {
         apply_clock_headers(&mut c, SYSTEM_PREAMBLE);
         assert!(c[5]["content"][0]["text"].as_str().unwrap().starts_with("[clock "), "header rides the text part");
         assert!(rollup::est_tokens(&convo) < 2000, "an image counts as ~1.6k tokens, not its bytes");
+    }
+
+    #[test]
+    fn legacy_agi_session_and_new_agy_resolve_cleanly() {
+        let dir = std::env::temp_dir().join(format!("ygg-main-alias-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(dir.join("session"));
+        let profiles = profiles::Profiles::load(None);
+        let http = reqwest::Client::new();
+        let config = Config {
+            base_url: "http://127.0.0.1:1".into(),
+            dialect: Dialect::OpenAi,
+            max_tokens: 1024,
+            api_key: None,
+            model: "glm-5.3".into(),
+            models: vec!["glm-5.3".into()],
+            catalog: json!({"default": {"yggdrasil": {}}}),
+            max_steps: 20,
+            profiles: std::sync::RwLock::new(profiles),
+            tree: tree::TreeCfg { max_depth: 12, max_children: 24, digest_model: None, wake_debounce_ms: 4000, max_wakes: 60 },
+            context_files: Vec::new(),
+            peers: peers::Peers::load(),
+            ext: ext::Extensions::load(),
+            tiers: HashMap::new(),
+            vision: Vec::new(),
+            tools_enabled: true,
+            rollup_tokens: 100_000,
+            rollup_keep_tokens: 25_000,
+            voice: false,
+            voice_max_words: 300,
+            default_variant: "high".into(),
+            think_high: 4096,
+        };
+        let legacy_id = "ses_legacy_agi";
+        let mut legacy_info = json!({ "id": legacy_id, "title": "old", "agent": "AGI" });
+        let st = AppState {
+            sessions: Arc::new(Mutex::new(HashMap::from([(
+                legacy_id.to_string(),
+                Session { info: legacy_info.clone(), messages: Vec::new(), todo: Vec::new(), inbox: Vec::new() },
+            )]))),
+            running: Arc::default(),
+            run_locks: Arc::default(),
+            bus: broadcast::channel(16).0,
+            data_dir: Arc::new(dir.clone()),
+            config: Arc::new(config),
+            http: http.clone(),
+            tools: Arc::new(tools::ToolEnv { project_dir: dir.clone(), bash_timeout: Duration::from_secs(1), http }),
+            upstream: Arc::new(tokio::sync::Semaphore::new(2)),
+            wakes: Arc::default(),
+            harness_slots: Arc::new(tokio::sync::Semaphore::new(2)),
+            harness_models: Arc::new(Mutex::new(HashMap::new())),
+            harness_labels: Arc::new(Mutex::new(HashMap::new())),
+        };
+        assert_eq!(profile_name_of(&st, &legacy_info), "claude");
+        let prof = session_profile(&st, legacy_id);
+        assert_eq!(prof.name, "claude");
+        assert_eq!(prof.harness.as_deref(), Some("claude"));
+        with_agent(&st, &mut legacy_info);
+        assert_eq!(legacy_info["agent"], "claude");
+
+        let from_agi = new_session(&st, "from agi", None, Some("AGI"), None, None);
+        assert_eq!(from_agi["agent"], "claude");
+        assert_eq!(from_agi["harness"]["kind"], "claude");
+        assert_eq!(from_agi["model"]["id"], "opus");
+
+        let from_agy = new_session(&st, "from agy", None, Some("agy"), None, None);
+        assert_eq!(from_agy["agent"], "agy");
+        assert_eq!(from_agy["harness"]["kind"], "antigravity");
+        assert_eq!(from_agy["model"]["id"], "default");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod live_tests {
+    use super::*;
+
+    #[test]
+    fn a_conversation_open_in_a_terminal_is_typed_into_there() {
+        let f = std::env::temp_dir().join(format!("ygg-harness-live-{}.json", std::process::id()));
+        unsafe { std::env::set_var("YGG_HARNESS_LIVE", &f) };
+        let (k, id) = (harness::Kind::Antigravity, "8ab72649-76ea-4fb2-98b2-364176c7f309");
+        assert_eq!(live_in_terminal(k, id), None, "no file: nothing is known to be open");
+        let write = |at: u64, live: Value| std::fs::write(&f, json!({ "at": at, "live": live }).to_string()).unwrap();
+        write(now_ms(), json!({ format!("antigravity:{id}"): { "how": "cmd", "pid": 7 } }));
+        assert_eq!(live_in_terminal(k, id).as_deref(), Some("cmd"));
+        assert_eq!(live_in_terminal(harness::Kind::Claude, id), None, "keyed by harness");
+        assert_eq!(live_in_terminal(k, "3f2a9c1e-0b4d-4e8f-9a6b-1c2d3e4f5a6b"), None);
+        write(now_ms() - 60_000, json!({ format!("antigravity:{id}"): { "how": "cmd" } }));
+        assert_eq!(live_in_terminal(k, id), None, "a stale file (the helper is down) locks nothing");
+        let _ = std::fs::remove_file(&f);
     }
 }

@@ -166,16 +166,19 @@ export async function GET() {
 export async function POST(req: Request) {
   try {
     const body = await req.json();
-    // continue a Claude Code session from the terminal: {attach: {id, cwd}} → an AGI session on
-    // it; the brain checks the id, the folder and the transcript and says plainly what is wrong
+    // continue a terminal's conversation here: {attach: {kind, id, cwd, title?}} → THE bifrost
+    // session on it (the same conversation both ways; the brain returns the one that exists,
+    // picks the agent for the harness, checks the id and the folder and says plainly what is wrong)
     if (body?.attach?.id) {
       const r = await fetch(`${OC}/session`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          agent: 'AGI',
-          harness: { id: String(body.attach.id) },
+          harness: { kind: String(body.attach.kind || 'claude'), id: String(body.attach.id) },
           cwd: String(body.attach.cwd || ''),
+          ...(body.attach.title ? { title: String(body.attach.title).slice(0, 80) } : {}),
+          // a copy ("continue in a new session"): the original stays the terminal's
+          ...(body.attach.fork ? { fork: true } : {}),
         }),
       });
       const d = await r.json().catch(() => ({}));

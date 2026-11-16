@@ -30,9 +30,9 @@
    "expect": "."
   },
   {
-   "name": "an AGI (Claude Code) session did the work",
+   "name": "a claude (Claude Code) session did the work",
    "kind": "child_profile",
-   "agent": "AGI"
+   "agent": "claude"
   },
   {
    "name": "follow-up reused the session (<=1 claude session)",

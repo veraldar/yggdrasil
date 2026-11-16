@@ -2893,7 +2893,7 @@ export default function SessionView({
           }}
           className={`oz-k sm ${logOn ? 'on' : ''}`}
         >
-          log
+          <LineIcon name="log" size={14} />
         </button>
         {/* search is not a mode — hands-free lives on the composer mic: tap
             to toggle, hold to talk (req 09-30) */}

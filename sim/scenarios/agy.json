@@ -1,0 +1,43 @@
+{
+ "id": "agy",
+ "title": "Ask MAIN to use agy (Antigravity) for a small job, then a follow-up in the same session",
+ "persona": "A developer who likes trying Google's Antigravity. Short phone messages; calls it simply 'agy'.",
+ "goals": [
+  "Have the agy agent (Antigravity, not the default builder) write a python module in a folder named agy-words that counts the words in a text file, with a pytest test.",
+  "Then, as a follow-up to the same agy session, ask it to add an option that returns only the N most frequent words.",
+  "Get confirmation that all tests pass."
+ ],
+ "script": [
+  "Ask main to give the word-count job to agy, in your own short words.",
+  "Wait for main to come back with the result.",
+  "Send the top-N follow-up (it should go to the same agy session).",
+  "Ask whether all tests pass, then finish."
+ ],
+ "brain_env": {
+  "SIM_HARNESS": "1"
+ },
+ "max_minutes": 25,
+ "max_turns": 10,
+ "checks": [
+  {
+   "name": "agy-words tests pass",
+   "cmd": "cd agy-words && python3 -m pytest -q >/tmp/pytest.$$.out 2>&1 && echo PYTEST-OK || tail -5 /tmp/pytest.$$.out",
+   "expect": "PYTEST-OK"
+  },
+  {
+   "name": "top-N implemented",
+   "cmd": "grep -rniE 'top|most_common|most frequent' agy-words --include=*.py | head -3",
+   "expect": "top|most_common|most frequent"
+  },
+  {
+   "name": "an agy session did the work",
+   "kind": "child_profile",
+   "agent": "agy"
+  },
+  {
+   "name": "follow-up reused the session (<=1 under main)",
+   "kind": "max_children_of_main",
+   "value": 1
+  }
+ ]
+}

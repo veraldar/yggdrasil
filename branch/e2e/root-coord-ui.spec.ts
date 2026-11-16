@@ -244,7 +244,7 @@ test('full log on MAIN: internal turns + tool calls behind the header key', asyn
   await expect(started).toHaveCount(0);
 });
 
-test('agents: from MAIN settings — AGI on Claude Code, make tester, a session takes it (diff first), delete', async ({
+test('agents: from MAIN settings — claude on Claude Code & agy on Antigravity, make tester, a session takes it (diff first), delete', async ({
   page,
   request,
 }) => {
@@ -265,9 +265,21 @@ test('agents: from MAIN settings — AGI on Claude Code, make tester, a session 
     await page.getByRole('link', { name: 'session settings' }).tap();
     await page.getByRole('link', { name: 'agents ›' }).tap();
     await page.waitForURL(/\/agents$/);
-    // AGI runs on Claude Code, on opus
-    await page.getByTestId('agent-row').filter({ hasText: 'AGI' }).tap();
-    await page.waitForURL(/\/agents\/AGI$/);
+    // agy runs on Antigravity, using its own default pick
+    await page.locator('[data-testid="agent-row"][href="/agents/agy"]').tap();
+    await page.waitForURL(/\/agents\/agy$/);
+    await expect(page.getByRole('button', { name: 'Antigravity', exact: true })).toHaveAttribute(
+      'aria-pressed',
+      'true'
+    );
+    await expect(page.getByRole('button', { name: 'default', exact: true })).toHaveAttribute(
+      'aria-pressed',
+      'true'
+    );
+    await page.getByRole('button', { name: 'back' }).tap();
+    // claude runs on Claude Code, on opus
+    await page.locator('[data-testid="agent-row"][href="/agents/claude"]').tap();
+    await page.waitForURL(/\/agents\/claude$/);
     await expect(page.getByRole('button', { name: 'Claude Code', exact: true })).toHaveAttribute(
       'aria-pressed',
       'true'
@@ -339,12 +351,12 @@ test('agents: from MAIN settings — AGI on Claude Code, make tester, a session 
       .poll(async () => (await brainSession()).model?.id)
       .toMatch(/^glm-5\.3(-think-\w+)?$/);
     expect((await brainSession()).agent).toBe(NAME);
-    // AGI: the diff says it moves to Claude Code
-    await agentBlk.getByRole('button', { name: 'AGI', exact: true }).tap();
+    // claude: the diff says it moves to Claude Code
+    await agentBlk.getByRole('button', { name: 'claude', exact: true }).tap();
     await expect(diff).toContainText('runs on');
     await expect(diff).toContainText('root → Claude Code');
     await diff.getByRole('button', { name: 'switch' }).tap();
-    await expect.poll(async () => (await brainSession()).agent).toBe('AGI');
+    await expect.poll(async () => (await brainSession()).agent).toBe('claude');
     // on Claude Code the session picks from Claude's models, not the root's
     await expect(modelPick).toContainText('opus');
     await modelPick.tap();
@@ -355,7 +367,7 @@ test('agents: from MAIN settings — AGI on Claude Code, make tester, a session 
       .poll(async () => (await brainSession()).model)
       .toEqual({ id: 'sonnet', providerID: 'claude' });
     // customize ‹agent› › opens its editor
-    await expect(page.getByRole('link', { name: 'customize AGI ›' })).toBeVisible();
+    await expect(page.getByRole('link', { name: 'customize claude ›' })).toBeVisible();
 
     // a new agent on opencode: its own models, grouped by provider, picked from a list
     const OC_NAME = `${NAME}-oc`;
@@ -442,8 +454,8 @@ test('agents: one shared prompt, stored once — edit it on the agents page, eve
     await expect(full).toContainText('that is how the tree brings your question to them.');
     const text = (await full.textContent()) || '';
     expect(text.split("Re-interpret the user's intent").length - 1, 'the shared text once').toBe(1);
-    // AGI (Claude Code) gets the same shared prompt with its instructions
-    await page.goto('/agents/AGI');
+    // claude (Claude Code) gets the same shared prompt with its instructions
+    await page.goto('/agents/claude');
     await page.getByText(/everything the model reads/).tap();
     await expect(page.getByTestId('system-full')).toContainText(marker);
     // the session list: the agent in three capitals before the title; MAIN keeps its own

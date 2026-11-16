@@ -1,7 +1,7 @@
 'use client';
 
 /** /agents — the root's agents: name, where it runs (the root, or a harness:
- *  Claude Code / opencode / Codex), its model, what it is for. A row opens
+ *  Claude Code / Antigravity / opencode / Codex), its model, what it is for. A row opens
  *  its editor (/agents/[name]); '+ new agent' names one and opens it empty.
  *  Reached from MAIN's settings ('agents ›') and the app settings. */
 import { useEffect, useState } from 'react';
@@ -103,7 +103,7 @@ export default function AgentsPage() {
         )}
         <p className="note">
           on the root an agent is yours to shape — model, thinking, tools, instructions. on a
-          harness (Claude Code, opencode, Codex) the harness brings its own tools.
+          harness (Claude Code, Antigravity, opencode, Codex) the harness brings its own tools.
         </p>
       </section>
       <SharedPrompt />

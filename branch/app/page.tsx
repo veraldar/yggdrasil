@@ -8,7 +8,7 @@ import { BAND_VIEWBOX, YggTree } from '@/components/ygg';
 import { Door } from '@/components/tree-door';
 import { Roots } from '@/components/roots';
 import { Marked } from '@/components/marked';
-import { ContinueClaude } from '@/components/app/continue-claude';
+import { ContinueTerminal, TerminalStrip } from '@/components/app/continue-claude';
 import { agentTag } from '@/lib/agents';
 import { askedSessions, clearAsked, notifyReply } from '@/lib/notify';
 import type { ArtifactEntry } from '@/lib/artifacts';
@@ -198,7 +198,7 @@ export default function SessionsPage() {
   const [unseenArts, setUnseenArts] = useState(0);
   const [creating, setCreating] = useState(false);
   const [name, setName] = useState('');
-  // "continue a Claude Code session": the terminal's conversations, one tap to carry on
+  // the terminal's sessions (Claude Code, Antigravity, opencode): watch live, continue here
   const [continuing, setContinuing] = useState(false);
   const [loading, setLoading] = useState(true);
   const loadInFlightRef = useRef(false);
@@ -604,7 +604,7 @@ export default function SessionsPage() {
               </span>
             ) : null}
             <span className={`t ${depth ? 'opacity-85' : ''}`}>
-              {/* the agent at a glance: [AGI] [BUI] [FIX]… — MAIN's title is its own tag */}
+              {/* the agent at a glance: [CLA] [AGY] [BUI] [FIX]… — MAIN's title is its own tag */}
               {s.agent && !isMainSlug(slugify(s.title || '')) && (
                 <span className="mr-1 opacity-60" aria-hidden="true" title={s.agent}>
                   [{agentTag(s.agent)}]
@@ -745,11 +745,15 @@ export default function SessionsPage() {
               }}
               className="oz-k mt-1.5 w-full justify-start px-3 text-[12px]"
             >
-              continue a Claude Code session…
+              continue a terminal session…
             </button>
           </div>
         )}
-        {continuing && <ContinueClaude onClose={() => setContinuing(false)} />}
+        {continuing ? (
+          <ContinueTerminal onClose={() => setContinuing(false)} />
+        ) : (
+          <TerminalStrip onMore={() => setContinuing(true)} />
+        )}
 
         {/* global search — expands from the search key into the query field */}
         {gOpen && (

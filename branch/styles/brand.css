@@ -620,3 +620,37 @@
   .oz-doorp .vnote[data-voice='loading'] { opacity: 1; }
   .oz-first[data-voice='loading'] .oz-tree .sig.t { opacity: .7 !important; }
 }
+
+/* ── Claude Code live (11-14): a running Claude Code session as the terminal shows it —
+   your words and its replies like chat, every tool call one compact card (tap: the input and
+   its output), errors in red without a tap, notes muted. ── */
+@layer components {
+  .cc-list { display: flex; flex-direction: column; gap: 10px; }
+  .cc-tool { border: 1px solid var(--oz-border); background: var(--oz-surface); font-size: 12px; min-width: 0; }
+  .cc-tool.err { border-color: color-mix(in srgb, var(--oz-danger) 55%, var(--oz-border)); }
+  .cc-tool > button { display: flex; width: 100%; align-items: baseline; gap: 7px; padding: 5px 8px; text-align: left; min-width: 0; }
+  .cc-tool > button .g { flex: none; width: 1ch; color: var(--oz-dim); }
+  .cc-tool.err > button .g { color: var(--oz-danger); }
+  .cc-tool > button .n { flex: none; color: var(--oz-info); }
+  .cc-tool > button .t { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--oz-text); }
+  .cc-tool[data-open='true'] > button .t { white-space: normal; overflow-wrap: anywhere; }
+  .cc-pre {
+    margin: 0 8px 6px; padding: 6px 8px; max-height: 40vh; overflow: auto; font-size: 11px; line-height: 1.45;
+    white-space: pre-wrap; overflow-wrap: anywhere; background: var(--oz-bg); border: 1px solid var(--oz-border); color: var(--oz-dim);
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  .cc-pre.err { color: var(--oz-danger); }
+  .cc-sub { padding: 0 8px 6px 23px; font-size: 11px; color: var(--oz-dim); overflow-wrap: anywhere; }
+  .cc-note { font-size: 11px; color: var(--oz-dim); overflow-wrap: anywhere; }
+  .cc-note summary { cursor: pointer; list-style: none; }
+  .cc-note.error { color: var(--oz-danger); }
+  .cc-turn { text-align: center; font-size: 10px; color: var(--oz-dim); opacity: .7; }
+  .cc-ask { border: 1px solid var(--oz-active); background: var(--oz-surface); padding: 8px; margin-top: 6px; }
+  .cc-ask .q { font-size: 13px; color: var(--oz-text); margin-bottom: 4px; }
+  .cc-ask .opts { display: flex; flex-direction: column; gap: 5px; margin-top: 6px; }
+  .cc-ask .opts .oz-k { height: auto; min-height: var(--oz-key); justify-content: flex-start; text-align: left; padding: 6px 10px; white-space: normal; }
+  .cc-term { flex: 1; min-height: 0; padding-top: 6px; }
+  .cc-term .xterm { height: 100%; }
+  .cc-keys { display: flex; gap: 5px; overflow-x: auto; padding: 6px 0 2px; }
+  .cc-keys .oz-k { flex: none; }
+}

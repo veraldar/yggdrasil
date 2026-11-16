@@ -50,15 +50,16 @@ pub fn schemas(profiles: &crate::profiles::Profiles) -> Vec<Value> {
     }
     let s = |d: &str| json!({ "type": "string", "description": d });
     vec![
-        f("sessions_find", "Find sessions by topic or project (ranked by relevance and recency) before starting a new one. Returns id, title, profile, status and the card headline.",
+        f("sessions_find", "Find sessions by topic or project (ranked by relevance and recency) before starting a new one. Returns id, title, profile, status and the card headline. The owner's own terminal sessions on this box (Claude Code, Antigravity, opencode) are listed too, with ids term:…",
           json!({ "query": s("words describing the topic, project or task"), "limit": { "type": "integer", "description": "max results (default 8)" },
                   "archived": { "type": "boolean", "description": "include closed sessions" } }), &["query"]),
         f("session_start", "Start a new session under you with a self-contained brief. It works in the background and reports back to you; do not wait for it.",
           json!({ "title": s("short topic title, 2-6 words, unique"), "agent": s(&format!("one of — {}", offer.join(" · "))),
                   "brief": s("self-contained instructions: goal, constraints, paths, what done means, needed facts"),
                   "root": s("optional: another root (machine) to run it on — see the roots line of the [tree] view"),
-                  "model": s("optional model id"), "variant": s("optional thinking: high | low | off") }), &["title", "agent", "brief"]),
-        f("session_send", "Send a message or follow-up instruction to an existing session (its context is kept). It reports back when done.",
+                  "model": s("optional model id"), "variant": s("optional thinking: high | low | off"),
+                  "from": s("optional: start as a COPY of this conversation — a terminal session (term:…) or a session here on Claude Code/opencode/Antigravity — with its whole context; the original is never written (use it when the owner has it open in their terminal)") }), &["title", "agent", "brief"]),
+        f("session_send", "Send a message or follow-up instruction to an existing session (its context is kept). It reports back when done. A terminal session (term:…) gets it typed into the owner's terminal when that is possible, else it continues here under you.",
           json!({ "id": s("session id (or exact title)"), "message": s("the message") }), &["id", "message"]),
         f("session_read", "Read a session's card, status, last request, last reply and sub-sessions.",
           json!({ "id": s("session id (or exact title)") }), &["id"]),
@@ -257,6 +258,9 @@ fn target_of(st: &AppState, caller: &str, input: &Value) -> Result<String, Out> 
 }
 
 pub async fn run(st: &AppState, caller: &str, name: &str, input: &Value) -> Out {
+    if let Some(o) = run_terminal(st, caller, name, input).await {
+        return o;
+    }
     if let Some(o) = run_remote(st, caller, name, input).await {
         return o;
     }
@@ -276,7 +280,7 @@ async fn run_remote(st: &AppState, caller: &str, name: &str, input: &Value) -> O
     if name == "session_start" {
         let root = input["root"].as_str().filter(|r| !r.is_empty() && *r != me)?;
         let (title, brief) = (input["title"].as_str().unwrap_or("work"), input["brief"].as_str().unwrap_or_default());
-        let profile = input["agent"].as_str().or(input["profile"].as_str()).unwrap_or("build");
+        let profile = crate::profiles::Profiles::resolve(input["agent"].as_str().or(input["profile"].as_str()).unwrap_or("build").trim());
         if brief.trim().is_empty() {
             return Some(err("brief required".into()));
         }
@@ -389,14 +393,15 @@ fn unique_title(sessions: &HashMap<String, Session>, want: &str) -> String {
 
 fn start(st: &AppState, caller: &str, input: &Value) -> Out {
     let Some(brief) = input["brief"].as_str().filter(|b| !b.trim().is_empty()) else { return err("brief required".into()) };
-    let profile = input["agent"].as_str().or(input["profile"].as_str()).unwrap_or("build").trim().to_string();
-    if profile == "coordinator" {
-        return err("there is one coordinator; pick another agent".into());
-    }
-    if crate::agent(st, &profile).is_none() {
+    let raw = input["agent"].as_str().or(input["profile"].as_str()).unwrap_or("build").trim();
+    let Some(prof) = crate::agent(st, raw) else {
         let agents = st.config.profiles.read().unwrap();
         let known: Vec<&str> = agents.by_name.keys().map(String::as_str).filter(|n| *n != "coordinator").collect();
-        return err(format!("unknown agent {profile:?}; known: {}", known.join(", ")));
+        return err(format!("unknown agent {raw:?}; known: {}", known.join(", ")));
+    };
+    let profile = prof.name;
+    if profile == "coordinator" {
+        return err("there is one coordinator; pick another agent".into());
     }
     let title = {
         let sessions = st.sessions.lock().unwrap();
@@ -1095,6 +1100,294 @@ pub fn recover(st: &AppState, interrupted: Vec<String>) {
             on_turn_end(st, &sid, target, Err("interrupted by a brain restart — send it again to resume".into()));
         }
     }
+}
+
+// ── the owner's terminal sessions (11-15) ────────────────────────────────────────────────────
+// Claude Code, Antigravity and opencode conversations on this box are sessions too: the
+// coordinator finds them (`term:<kind>:<id>`), reads them, sends to them and starts from them.
+// The live helper (cc-live: YGG_HARNESS_HELPER + YGG_HARNESS_HELPER_TOKEN) lists and reads them
+// and types into one open in tmux or in the background (both ways: the owner sees it in their
+// terminal); one not open anywhere continues HERE (THE session on that conversation, under the
+// caller); one open in a plain terminal is the owner's to type in — a copy can go on here
+// (session_start from=…). Without a helper (a root without one) the tools are as before.
+
+const TERM_KINDS: [&str; 3] = ["claude", "antigravity", "opencode"];
+
+fn helper() -> Option<(String, String)> {
+    let url = std::env::var("YGG_HARNESS_HELPER").ok().filter(|u| !u.trim().is_empty())?;
+    let tok = std::env::var("YGG_HARNESS_HELPER_TOKEN").ok().filter(|t| !t.trim().is_empty())?;
+    Some((url.trim().trim_end_matches('/').to_string(), tok.trim().to_string()))
+}
+
+async fn helper_call(st: &AppState, post: Option<Value>, path: &str) -> Result<Value, String> {
+    let (url, tok) = helper().ok_or("the owner's terminal sessions are not visible on this root")?;
+    let req = match post {
+        Some(b) => st.http.post(format!("{url}{path}")).json(&b),
+        None => st.http.get(format!("{url}{path}")),
+    };
+    let r = req.header("x-cc-live-token", tok).timeout(std::time::Duration::from_secs(15)).send().await.map_err(|e| format!("the live helper did not answer: {e}"))?;
+    let code = r.status();
+    let v: Value = r.json().await.unwrap_or(Value::Null);
+    if !code.is_success() {
+        return Err(v["error"].as_str().map(String::from).unwrap_or_else(|| format!("the live helper said {code}")));
+    }
+    Ok(v)
+}
+
+/// `term:<kind>:<id>` → (kind, id)
+fn term_id(s: &str) -> Option<(&str, &str)> {
+    let (k, id) = s.trim().strip_prefix("term:")?.split_once(':')?;
+    (TERM_KINDS.contains(&k) && !id.is_empty()).then_some((k, id))
+}
+
+fn term_label(kind: &str) -> &'static str {
+    match kind {
+        "claude" => "Claude Code",
+        "antigravity" => "Antigravity",
+        _ => "opencode",
+    }
+}
+
+fn term_live(row: &Value) -> &'static str {
+    match row["live"].as_str() {
+        Some("tmux") => "open in the owner's terminal (tmux): you can type into it",
+        Some("bg") if row["canType"] == true => "running in the background: you can type into it",
+        Some("here") => "running a turn here right now",
+        Some(_) => "open in the owner's terminal: only they can type there",
+        None => "not open anywhere: it continues here when you send to it",
+    }
+}
+
+fn home(p: &str) -> String {
+    match std::env::var("HOME") {
+        Ok(h) if !h.is_empty() && p.starts_with(&h) => format!("~{}", &p[h.len()..]),
+        _ => p.to_string(),
+    }
+}
+
+async fn term_rows(st: &AppState) -> Result<Vec<Value>, String> {
+    helper_call(st, None, "/harness").await.map(|v| v["sessions"].as_array().cloned().unwrap_or_default())
+}
+
+async fn term_row(st: &AppState, kind: &str, id: &str) -> Result<Value, String> {
+    term_rows(st)
+        .await?
+        .into_iter()
+        .find(|r| r["kind"] == kind && r["id"] == id)
+        .ok_or_else(|| format!("no terminal session term:{kind}:{id} on this box — sessions_find lists them"))
+}
+
+fn term_line(r: &Value) -> String {
+    let kind = r["kind"].as_str().unwrap_or_default();
+    format!(
+        "- \"{}\" [terminal · {} in {}, {}, {} ago] (id=term:{kind}:{})",
+        one_line(r["title"].as_str().unwrap_or_default(), 100),
+        term_label(kind),
+        home(r["cwd"].as_str().unwrap_or_default()),
+        term_live(r),
+        ago(r["modified"].as_u64().unwrap_or(0)),
+        r["id"].as_str().unwrap_or_default()
+    )
+}
+
+/// The conversation itself, newest last (what the owner and the harness said, its tool calls).
+async fn term_transcript(st: &AppState, kind: &str, id: &str) -> String {
+    let Ok(v) = helper_call(st, None, &format!("/h/{kind}/{id}/history?limit=80")).await else {
+        return "(its transcript could not be read)".into();
+    };
+    let items = v["items"].as_array().cloned().unwrap_or_default();
+    let last_reply = items.iter().rposition(|i| i["k"] == "assistant");
+    let lines: Vec<String> = items
+        .iter()
+        .enumerate()
+        .filter_map(|(n, i)| {
+            let text = i["text"].as_str().unwrap_or_default();
+            match i["k"].as_str()? {
+                "user" => Some(format!("OWNER: {}", one_line(text, 400))),
+                "assistant" if Some(n) == last_reply => Some(format!("{}: {}", term_label(kind), clip(text, 3000))),
+                "assistant" => Some(format!("{}: {}", term_label(kind), one_line(text, 300))),
+                "tool" => Some(format!("  · {}{}", one_line(i["title"].as_str().unwrap_or_default(), 120), if i["result"]["error"] == true { " (failed)" } else { "" })),
+                _ => None,
+            }
+        })
+        .collect();
+    let keep = lines.len().saturating_sub(40);
+    lines[keep..].join("\n")
+}
+
+async fn run_terminal(st: &AppState, caller: &str, name: &str, input: &Value) -> Option<Out> {
+    helper()?;
+    match name {
+        "sessions_find" => {
+            let local = find(st, caller, input);
+            let rows = term_rows(st).await.ok()?;
+            let q = input["query"].as_str().unwrap_or_default().to_lowercase();
+            let any = ["terminal", "cmd", "omarchy", "tmux"].iter().any(|w| q.contains(w));
+            let qt = tokens(&q);
+            let mut hits: Vec<(usize, &Value)> = rows
+                .iter()
+                .filter_map(|r| {
+                    let kind = r["kind"].as_str().unwrap_or_default();
+                    let hay = tokens(&format!("{} {}", r["title"].as_str().unwrap_or_default(), r["cwd"].as_str().unwrap_or_default()));
+                    let words = qt.iter().filter(|t| hay.contains(t)).count();
+                    let named = (kind == "claude" && q.contains("claude"))
+                        || (kind == "antigravity" && (q.contains("agy") || q.contains("antigravity")))
+                        || (kind == "opencode" && q.contains("opencode"));
+                    let open = !r["live"].is_null();
+                    let sc = words * 2 + usize::from(named) * 2 + usize::from(open) * (if any { 3 } else { 1 });
+                    (words > 0 || named || (any && open)).then_some((sc, r))
+                })
+                .collect();
+            hits.sort_by(|a, b| b.0.cmp(&a.0));
+            hits.truncate(8);
+            if hits.is_empty() {
+                return Some(local);
+            }
+            let lines: Vec<String> = hits.iter().map(|(_, r)| term_line(r)).collect();
+            let head = if local.ok && !local.output.starts_with("no session matches") { format!("{}\n", local.output) } else { String::new() };
+            Some(ok(format!("{head}the owner's terminal sessions on this box:\n{}", lines.join("\n"))))
+        }
+        "session_read" => {
+            let key = input["id"].as_str().unwrap_or_default();
+            if let Some((kind, id)) = term_id(key) {
+                let row = match term_row(st, kind, id).await {
+                    Ok(r) => r,
+                    Err(e) => return Some(err(e)),
+                };
+                return Some(ok(format!(
+                    "\"{}\" (id=term:{kind}:{id}) — the owner's {} session in {}: {}\n{}\n",
+                    one_line(row["title"].as_str().unwrap_or_default(), 100),
+                    term_label(kind),
+                    home(row["cwd"].as_str().unwrap_or_default()),
+                    term_live(&row),
+                    term_transcript(st, kind, id).await
+                )));
+            }
+            // a session here on a terminal's conversation: its card, then the conversation itself
+            let (kind, id) = attached_conv(st, key)?;
+            let local = read(st, caller, input);
+            if !local.ok {
+                return Some(local);
+            }
+            Some(ok(format!("{}the conversation itself ({}, the terminal's turns too), newest last:\n{}\n", local.output, term_label(&kind), term_transcript(st, &kind, &id).await)))
+        }
+        "session_send" => {
+            let key = input["id"].as_str().unwrap_or_default();
+            let message = input["message"].as_str().unwrap_or_default();
+            if message.trim().is_empty() {
+                return None;
+            }
+            if let Some((kind, id)) = term_id(key) {
+                return Some(term_send(st, caller, kind, id, message).await);
+            }
+            // a session here whose conversation is open in the terminal right now: typed in there
+            let (kind, id) = attached_conv(st, key)?;
+            let row = term_row(st, &kind, &id).await.ok()?;
+            row["live"].as_str().filter(|l| *l != "here")?;
+            Some(term_send(st, caller, &kind, &id, message).await)
+        }
+        "session_start" => {
+            let from = input["from"].as_str().map(str::trim).filter(|f| !f.is_empty())?;
+            Some(start_from(st, caller, input, from).await)
+        }
+        _ => None,
+    }
+}
+
+/// (kind, conversation id) of a session here that holds a terminal's conversation.
+fn attached_conv(st: &AppState, key: &str) -> Option<(String, String)> {
+    let sessions = st.sessions.lock().unwrap();
+    let h = &sessions.get(&resolve(&sessions, key)?)?.info["harness"];
+    let kind = crate::harness::Kind::parse(h["kind"].as_str()?)?.name();
+    (h["attached"] == true && TERM_KINDS.contains(&kind))
+        .then(|| (kind.to_string(), h["id"].as_str().unwrap_or_default().to_string()))
+        .filter(|(_, id)| !id.is_empty())
+}
+
+async fn term_send(st: &AppState, caller: &str, kind: &str, id: &str, message: &str) -> Out {
+    let row = match term_row(st, kind, id).await {
+        Ok(r) => r,
+        Err(e) => return err(e),
+    };
+    let title = one_line(row["title"].as_str().unwrap_or_default(), 80);
+    if row["canType"] == true {
+        return match helper_call(st, Some(json!({ "text": message })), &format!("/h/{kind}/{id}/input")).await {
+            Ok(_) => ok(format!(
+                "TYPED into the owner's {} session \"{title}\" (open in their terminal): it answers there and the owner sees it live. It does not report back to you — read its answer later with session_read id=term:{kind}:{id}.",
+                term_label(kind)
+            )),
+            Err(e) => err(e),
+        };
+    }
+    match row["live"].as_str() {
+        Some("here") => return err(format!("\"{title}\" is running a turn here right now — send when it is done")),
+        Some(_) => {
+            return err(format!(
+                "\"{title}\" is open in the owner's terminal: only they can type there (it is not in tmux). To go on with it here, start a copy: session_start with from=term:{kind}:{id} — its whole context, the terminal's conversation untouched."
+            ));
+        }
+        None => {}
+    }
+    // not open anywhere: THE session here on that conversation (under you), then a normal send
+    let opts = crate::AttachOpts { parent: Some(caller.to_string()), title: Some(title.clone()), ..Default::default() };
+    let info = match crate::attach_conversation(st, kind, id, row["cwd"].as_str().unwrap_or_default(), opts) {
+        Ok(i) => i,
+        Err(e) => return err(e),
+    };
+    let sid = info["id"].as_str().unwrap_or_default().to_string();
+    with_session(st, &sid, |s| {
+        if !s.info["card"].is_object() {
+            s.info["card"] = json!({ "topic": title, "brief": format!("the owner's {} conversation from their terminal", term_label(kind)),
+                "status": "idle", "by": caller, "created": now_ms(), "updated": now_ms() });
+        }
+    });
+    send(st, caller, &json!({ "id": sid, "message": message }))
+}
+
+/// session_start from=…: a copy of a terminal's conversation (or of a session here on one), its
+/// whole context, under the caller; the brief is its first message.
+async fn start_from(st: &AppState, caller: &str, input: &Value, from: &str) -> Out {
+    let Some(brief) = input["brief"].as_str().filter(|b| !b.trim().is_empty()) else { return err("brief required".into()) };
+    let (kind, id, cwd, title) = if let Some((kind, id)) = term_id(from) {
+        match term_row(st, kind, id).await {
+            Ok(r) => (kind.to_string(), id.to_string(), r["cwd"].as_str().unwrap_or_default().to_string(), r["title"].as_str().unwrap_or_default().to_string()),
+            Err(e) => return err(e),
+        }
+    } else {
+        let Some((kind, id)) = attached_conv(st, from) else {
+            return err(format!("{from:?} is neither a terminal session (term:…) nor a session here on Claude Code, opencode or Antigravity"));
+        };
+        let sessions = st.sessions.lock().unwrap();
+        let s = resolve(&sessions, from).and_then(|t| sessions.get(&t).map(|s| (s.info["cwd"].as_str().unwrap_or_default().to_string(), title_of(s))));
+        let (cwd, title) = s.unwrap_or_default();
+        (kind, id, cwd, title)
+    };
+    let title = input["title"].as_str().map(str::trim).filter(|t| !t.is_empty()).map(String::from).unwrap_or(title);
+    let opts = crate::AttachOpts {
+        parent: Some(caller.to_string()),
+        title: Some(title.clone()),
+        model: input["model"].as_str().filter(|m| !m.is_empty()).map(String::from),
+        fork: true,
+        ..Default::default()
+    };
+    let info = match crate::attach_conversation(st, &kind, &id, &cwd, opts) {
+        Ok(i) => i,
+        Err(e) => return err(e),
+    };
+    let sid = info["id"].as_str().unwrap_or_default().to_string();
+    let t = info["title"].as_str().unwrap_or_default().to_string();
+    with_session(st, &sid, |s| {
+        s.info["card"] = json!({ "topic": t, "brief": clip(brief, 600), "status": "working", "by": caller, "created": now_ms(), "updated": now_ms() });
+    });
+    let turn = Turn { parts: vec![text_part(brief)], modality: None, auto_turn: false, internal: false, origin: Some(caller.to_string()), completes: None };
+    if let Err(e) = crate::submit(st, &sid, turn) {
+        return err(format!("created {sid} but could not post the brief ({:?})", e.status()));
+    }
+    publish(st, "tree.updated", json!({ "sessionID": sid, "parentID": caller }));
+    ok(format!(
+        "STARTED, NOT DONE YET: id={sid} \"{t}\" — a copy of the owner's {} conversation (its whole context; theirs is untouched) — is on it and reports back when finished. Tell the user it is on its way (→ {t}); never say it is done.",
+        term_label(&kind)
+    ))
 }
 
 #[cfg(test)]

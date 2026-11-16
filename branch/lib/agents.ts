@@ -98,7 +98,7 @@ export function agentDiff(
   return rows;
 }
 
-/** the agent's three-letter tag in the session list: AGI, BUI(ld), FIX, LEA(d)… */
+/** the agent's three-letter tag in the session list: CLA(ude), AGY, BUI(ld), FIX, LEA(d)… */
 export const agentTag = (agent: string) =>
   agent
     .replace(/[^a-z0-9]/gi, '')

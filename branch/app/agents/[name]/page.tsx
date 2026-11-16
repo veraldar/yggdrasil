@@ -3,7 +3,7 @@
 /** /agents/[name] — one agent, edited. Only what the brain says is
  *  `customizable` shows; a `locked` field shows disabled with the reason.
  *  Root agents: description, model + thinking, instructions, tools, steps,
- *  manages sessions. Harness agents (Claude Code / opencode / Codex): less —
+ *  manages sessions. Harness agents (Claude Code / Antigravity / opencode / Codex): less —
  *  the harness brings its own tools. Save = PUT (creates a new one); the
  *  brain's refusal is said inline. A custom agent deletes in two taps. */
 import { useEffect, useState } from 'react';
