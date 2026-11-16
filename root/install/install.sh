@@ -41,7 +41,14 @@ trap 'printf "\033[1;31mxx\033[0m  install.sh stopped at line %s: %s\n" "$LINENO
 # scripts/release.sh stamps YGG_RELEASE with the release this file belongs to ('' = a source checkout).
 # YGG_SIGNER is the release key's allowed_signers line (RELEASE-KEY.pub in the repo).
 YGG_RELEASE=''
+YGG_RELEASE_TEST=''
 YGG_SIGNER='release@yggdrasil namespaces="yggdrasil-release" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIJyKwTSmRf3Cy1cHpzKHl3teRvCQtgK8/dcFRvlNCDJg'
+# A test release (signed by a throwaway key) is marked YGG_RELEASE_TEST=1 by scripts/release.sh: only it, or an
+# unstamped script from a checkout, may be pointed at other signers. A real release's script refuses, loudly.
+if [ -n "${YGG_RELEASE_TEST_SIGNERS:-}" ] && [ -n "$YGG_RELEASE" ] && [ "$YGG_RELEASE_TEST" != 1 ]; then
+  printf '\033[1;31mxx\033[0m  %s\n' "YGG_RELEASE_TEST_SIGNERS is set, but this is the v$YGG_RELEASE release's installer: it trusts only the yggdrasil release key. Unset it — it is for tests, from a checkout." >&2
+  exit 64
+fi
 
 say()  { printf '\033[1m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m!!\033[0m  %s\n' "$*" >&2; }
@@ -121,8 +128,8 @@ if [ $UNINSTALL = 1 ]; then
   for u in "$UNIT_DIR"/yggdrasil.service "$UNIT_DIR"/bifrost-*.service; do [ -e "$u" ] && UNITS_GONE+=("$(basename "$u")") && UN+=("$u  (unit)"); done
   for f in "$BIN_DIR/yggdrasil" "$BIN_DIR/bifrost-net" "$BIN_DIR/livekit-server"; do [ -e "$f" ] && UN+=("$f"); done
   for d in "$CONFIG_HOME/bifrost:config, keys, admin token" "$CONF_DIR:the brain's config and your model key" \
-           "$DATA_DIR:your chats (sessions) and the unpacked releases" "$DATA_HOME/bifrost:voice models, the agent's venv" \
-           "$BF_STATE:paired phones, the bridge + WireGuard keys, logs"; do
+           "$DATA_DIR:your chats (sessions)" "$REL_HOME:the unpacked release — the app, its Node, these scripts — goes too" \
+           "$DATA_HOME/bifrost:voice models, the agent's venv" "$BF_STATE:paired phones, the bridge + WireGuard keys, logs"; do
     [ -e "${d%%:*}" ] && UN+=("${d%%:*}/  (${d#*:})")
   done
   if [ ${#UN[@]} = 0 ]; then say "nothing of yggdrasil's here — nothing to remove"; exit 0; fi
@@ -172,7 +179,16 @@ release_get() { # BASE ASSET OUT — download ASSET, check it against the verifi
   [ "$(sha256sum <"$3" | cut -c1-64)" = "$want" ] || { rm -f "$3"; die "$2 does not match SHA256SUMS — refusing to install it"; }
 }
 release_base() { if [ -n "$1" ]; then echo "$RELEASES/download/v${1#v}"; else echo "$RELEASES/latest/download"; fi; }
-newer() { [ "$1" != "$2" ] && [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | tail -1)" = "$1" ]; }   # A newer than B?
+newer() { # A B — is version A newer than B? A pre-release is OLDER than its release: 0.9.1-rc.1 < 0.9.1
+  [ "$1" = "$2" ] && return 1
+  local a=${1%%-*} b=${2%%-*}
+  if [ "$a" != "$b" ]; then [ "$(printf '%s\n%s\n' "$a" "$b" | sort -V | tail -1)" = "$a" ]; return; fi
+  case $1/$2 in
+    *-*/*-*) [ "$(printf '%s\n%s\n' "${1#*-}" "${2#*-}" | sort -V | tail -1)" = "${1#*-}" ] ;;
+    *-*/*) return 1 ;;
+    *) return 0 ;;
+  esac
+}
 unpacked() { # the release versions unpacked here (checked when they were), oldest first
   local d; for d in "$REL_HOME"/*/.verified; do if [ -f "$d" ]; then basename "$(dirname "$d")"; fi; done | sort -V
 }
@@ -180,15 +196,62 @@ run_release() { # VERSION — hand over to that release's own install.sh, with o
   [ -n "$REL_DIR" ] && rm -rf "$REL_DIR"
   YGG_LAUNCHER=$LAUNCHER exec bash "$REL_HOME/$1/root/install/install.sh" ${PASS[@]+"${PASS[@]}"}
 }
-bootstrap() { # the signed release (--version, else max(this script's, the newest unpacked); --update: the newest)
-  local want base tgz newest
+MIN_GLIBC=2.31   # the release's binaries are built on Debian 11 (bullseye): Debian 11+, Ubuntu 20.04+
+VOICE_MB=2500    # free disk the install with voice wants: it takes ~1.9 GB (sim/own-trunk-e2e.sh stage v measures it)
+pkg_line() { # Debian package names → the line that installs them here
+  local p out=()
+  if command -v apt-get >/dev/null; then echo "sudo apt-get install -y $*"; return; fi
+  for p in "$@"; do
+    case $p in
+      libopus0) p=opus ;; python3-venv) p=python3 ;; openssh-client) p=$(command -v dnf >/dev/null && echo openssh-clients || echo openssh) ;;
+    esac
+    out+=("$p")
+  done
+  if command -v pacman >/dev/null; then echo "sudo pacman -S --needed ${out[*]}"
+  elif command -v dnf >/dev/null; then echo "sudo dnf install -y ${out[*]}"
+  else echo "install: ${out[*]}"; fi
+}
+glibc_of() { ldd --version 2>&1 | head -1 | grep -o '[0-9][0-9]*\.[0-9][0-9]*$' || true; }
+preflight() { # what this computer needs for the release, all checked BEFORE anything is downloaded
+  local need=() why=() g free_mb want_mb d py
   case $(uname -s)/$(uname -m) in
     Linux/x86_64|Linux/amd64) ;;
     *) die "no prebuilt release for $(uname -s) $(uname -m) yet — developers: a git checkout and ./install.sh --from-source" ;;
   esac
-  for t in curl ssh-keygen sha256sum tar; do
-    command -v $t >/dev/null || die "$t is needed to fetch and check the release — Debian/Ubuntu: sudo apt install curl ca-certificates openssh-client"
-  done
+  g=$(glibc_of)
+  if [ -z "$g" ]; then die "this Linux has no glibc (musl? Alpine?): the release needs glibc $MIN_GLIBC or newer (Debian 11+, Ubuntu 20.04+, Fedora, Arch)"; fi
+  if [ "$(printf '%s\n%s\n' "$MIN_GLIBC" "$g" | sort -V | head -1)" != "$MIN_GLIBC" ]; then
+    die "this Linux's C library is glibc $g; the release needs $MIN_GLIBC or newer (Debian 11+, Ubuntu 20.04+). Nothing was downloaded."
+  fi
+  command -v curl >/dev/null || need+=(curl ca-certificates)
+  command -v ssh-keygen >/dev/null || need+=(openssh-client)
+  command -v sha256sum >/dev/null && command -v tar >/dev/null || need+=(coreutils tar)
+  if [ $MODE = full ] && on bridge; then
+    case "$(ldconfig -p 2>/dev/null || /sbin/ldconfig -p 2>/dev/null || true)" in *libopus.so.0*) ;; *) need+=(libopus0) ;; esac
+  fi
+  want_mb=700   # the archive (~100 MB) while it unpacks (~310 MB), the binaries, the brain's data
+  if [ $MODE = full ] && { on voice || on agent; }; then
+    want_mb=$VOICE_MB
+    py=$(command -v python3 || true)
+    if [ -z "$py" ] || ! "$py" -c 'import sys, venv, ensurepip; sys.exit(sys.version_info < (3, 10))' 2>/dev/null; then
+      need+=(python3-venv); why+=("voice needs python >= 3.10 with venv (or leave it out: --skip voice,agent)")
+    fi
+    command -v bzip2 >/dev/null || need+=(bzip2)   # the speech models come as .tar.bz2
+  fi
+  if [ ${#need[@]} -gt 0 ]; then
+    die "first install what is missing, then run it again — nothing was downloaded:
+      $(pkg_line "${need[@]}")${why[0]:+
+    (${why[*]})}"
+  fi
+  d=$DATA_HOME; while [ ! -d "$d" ]; do d=$(dirname "$d"); done
+  free_mb=$(( $(df -Pk "$d" | awk 'NR==2 {print $4}') / 1024 ))
+  if [ "$free_mb" -lt "$want_mb" ]; then
+    die "only $free_mb MB free in $d: the install needs about $want_mb MB$( [ "$want_mb" = "$VOICE_MB" ] && echo ' with voice (--skip voice,agent needs about 700 MB)'). Nothing was downloaded."
+  fi
+}
+on() { case ,$SKIP, in *,"$1",*) return 1 ;; esac; return 0; }
+bootstrap() { # the signed release (--version, else max(this script's, the newest unpacked); --update: the newest)
+  local want base tgz newest
   newest=$(unpacked | tail -1)
   want=$WANT_VERSION
   if [ -z "$want" ] && [ $UPDATE = 0 ]; then
@@ -196,9 +259,15 @@ bootstrap() { # the signed release (--version, else max(this script's, the newes
     if [ -n "$newest" ] && { [ -z "$want" ] || newer "$newest" "$want"; }; then want=$newest; fi
   fi
   if [ -n "$want" ] && [ -f "$REL_HOME/$want/.verified" ]; then run_release "$want"; fi
+  preflight   # a download is next: everything this computer needs is checked first
   base=$(release_base "$want")
   release_sums "$base"
   [ -n "$want" ] || want=$(sed -n 's/^[0-9a-f]\{64\}  yggdrasil-\([0-9][0-9A-Za-z.+-]*\)-linux-x86_64\.tar\.gz$/\1/p' "$REL_DIR/SHA256SUMS" | head -1)
+  # this very script, when it belongs to that release: the one the release signed, or stop here
+  if [ -n "$YGG_RELEASE" ] && [ "$want" = "$YGG_RELEASE" ] && [ -f "$SELF_PATH" ] && [ -n "$(sum_of install.sh)" ] &&
+     [ "$(sha256sum <"$SELF_PATH" | cut -c1-64)" != "$(sum_of install.sh)" ]; then
+    die "this install.sh is not the one release v$YGG_RELEASE signed (its sha256 is not in SHA256SUMS) — download it again: $base/install.sh"
+  fi
   tgz=yggdrasil-$want-linux-x86_64.tar.gz
   [ -n "$want" ] && [ -n "$(sum_of "$tgz")" ] || die "the release${want:+ v$want} has no $tgz (signed SHA256SUMS)"
   if [ $UPDATE = 1 ] && [ -n "$newest" ] && ! newer "$want" "$newest"; then
@@ -234,7 +303,6 @@ if [ $IN_RELEASE = 1 ] && [ $FROM_SOURCE = 1 ]; then die "--from-source: this is
 [ $PAIR = 1 ] && { exec bash "$HERE/pair.sh" ${PAIR_ARGS[@]+"${PAIR_ARGS[@]}"}; }
 
 # ------------------------------------------------------------------------- what is here, prebuilt
-on() { case ,$SKIP, in *,"$1",*) return 1 ;; esac; return 0; }
 brain_src() { # the yggdrasil binary to install: given, next to this script, the release's, a checkout's build
   local c
   for c in "${YGG_BINARY:-}" "$HERE/yggdrasil" "$ROOT/bin/yggdrasil" "$CRATE/target/release/yggdrasil"; do
@@ -893,6 +961,11 @@ run_direct() { # unit — run the unit's own ExecStartPre/ExecStart with its env
 }
 if [ $START = 1 ]; then
   if [ $SYSTEMD_SEES = 1 ] && [ $DIRECT = 0 ]; then
+    # lingering: the user services keep running after you log out, and start at boot (best effort, like join.sh)
+    if command -v loginctl >/dev/null && [ "$(loginctl show-user "$(id -un)" -p Linger --value 2>/dev/null || true)" != yes ]; then
+      if loginctl enable-linger "$(id -un)" 2>/dev/null; then say "linger  on: yggdrasil keeps running when you log out, and starts at boot"
+      else warn "could not turn on lingering: yggdrasil runs only while you are logged in — to keep it running: sudo loginctl enable-linger $(id -un)"; fi
+    fi
     systemctl --user daemon-reload
     for u in "${OFF[@]}"; do
       [ -f "$UNIT_DIR/$u" ] && { systemctl --user disable --now "$u" >/dev/null 2>&1 || true; say "stopped $u (not part of this install)"; }
@@ -1004,7 +1077,7 @@ $( [ $BRAIN_READY = 1 ] || printf '\n  FIRST: the model — run %s again in a te
   2. Scan it with the phone's camera — Wi-Fi or mobile data, from anywhere. The phone opens
      $T_PUBLIC and pairs itself: the first time it walks you through the door, then your sessions.
      Add it to the home screen. Hold the tree to talk: voice rides the trunk's port 443 too.
-  3. More computers:    on each, ./join.sh --hub $T_PUBLIC  — approve its QR on your phone.
+  3. More computers:    on each, download join.sh from the same release, then: bash join.sh --hub $T_PUBLIC
   Lost a phone?         bash $LAUNCHER pair --list   ·   bash $LAUNCHER pair --revoke NAME
   Update / remove:      bash $LAUNCHER --update   ·   bash $LAUNCHER --uninstall
 EOF

@@ -45,7 +45,14 @@ umask 077
 # scripts/release.sh stamps YGG_RELEASE with the release this file belongs to ('' = a source checkout).
 # YGG_SIGNER is the release key's allowed_signers line (RELEASE-KEY.pub in the repo).
 YGG_RELEASE=''
+YGG_RELEASE_TEST=''
 YGG_SIGNER='release@yggdrasil namespaces="yggdrasil-release" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIJyKwTSmRf3Cy1cHpzKHl3teRvCQtgK8/dcFRvlNCDJg'
+# A test release (signed by a throwaway key) is marked YGG_RELEASE_TEST=1 by scripts/release.sh: only it, or an
+# unstamped script from a checkout, may be pointed at other signers. A real release's script refuses, loudly.
+if [ -n "${YGG_RELEASE_TEST_SIGNERS:-}" ] && [ -n "$YGG_RELEASE" ] && [ "$YGG_RELEASE_TEST" != 1 ]; then
+  printf '\033[1;31mxx\033[0m  %s\n' "YGG_RELEASE_TEST_SIGNERS is set, but this is the v$YGG_RELEASE release's installer: it trusts only the yggdrasil release key. Unset it — it is for tests, from a checkout." >&2
+  exit 64
+fi
 
 ARGS=("$@")
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -108,6 +115,7 @@ fi
 ARCH=$(uname -m); case $ARCH in amd64) ARCH=x86_64 ;; arm64) ARCH=aarch64 ;; esac
 RELEASES=${YGG_RELEASES:-${JOIN_RELEASES:-https://github.com/veraldar/yggdrasil/releases}}
 REL_HOME=${XDG_DATA_HOME:-$HOME/.local/share}/yggdrasil/release   # unpacked releases (shared with install.sh)
+MIN_GLIBC=2.31   # the release's binaries are built on Debian 11 (bullseye): Debian 11+, Ubuntu 20.04+
 
 # ------------------------------------------------------------------ the release: signed, checked
 fetch() { curl -fsSL --retry 3 --proto '=https,http' ${CACERT:+--cacert "$CACERT"} -o "$2" "$1"; }
@@ -131,7 +139,16 @@ release_sums() { # BASE — BASE/SHA256SUMS into $REL_DIR, verified: signed by Y
 }
 sum_of() { sed -n "s/^\([0-9a-f]\{64\}\)  $1\$/\1/p" "$REL_DIR/SHA256SUMS" | head -1; }   # ASSET → its sha256
 release_base() { if [ -n "$1" ]; then echo "$RELEASES/download/v${1#v}"; else echo "$RELEASES/latest/download"; fi; }
-newer() { [ "$1" != "$2" ] && [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | tail -1)" = "$1" ]; }   # A newer than B?
+newer() { # A B — is version A newer than B? A pre-release is OLDER than its release: 0.9.1-rc.1 < 0.9.1
+  [ "$1" = "$2" ] && return 1
+  local a=${1%%-*} b=${2%%-*}
+  if [ "$a" != "$b" ]; then [ "$(printf '%s\n%s\n' "$a" "$b" | sort -V | tail -1)" = "$a" ]; return; fi
+  case $1/$2 in
+    *-*/*-*) [ "$(printf '%s\n%s\n' "${1#*-}" "${2#*-}" | sort -V | tail -1)" = "${1#*-}" ] ;;
+    *-*/*) return 1 ;;
+    *) return 0 ;;
+  esac
+}
 unpacked() { local d; for d in "$REL_HOME"/*/.verified; do if [ -f "$d" ]; then basename "$(dirname "$d")"; fi; done | sort -V; }
 bootstrap() { # WHY — the signed release (--version, else max(this script's, the newest unpacked)), unpacked, then
   #             ITS join.sh runs with our arguments: prebuilt brain + node, nothing to compile here
@@ -139,9 +156,19 @@ bootstrap() { # WHY — the signed release (--version, else max(this script's, t
   [ "$OS" != macos ] && [ "$ARCH" = x86_64 ] || die "$1, and there is no prebuilt release for $OS $ARCH yet:
     install Rust (your package manager, or https://rustup.rs) and a C compiler ($(pkg_hint build-essential)),
     then run join.sh from a git checkout with --build" 1
-  for t in curl ssh-keygen sha256sum tar; do
-    command -v $t >/dev/null || die "$1; fetching the release needs $t — $(pkg_hint curl ca-certificates openssh-client)"
-  done
+  # what this computer needs, all checked before anything is downloaded
+  local g need=() d free_mb
+  g=$(ldd --version 2>&1 | head -1 | grep -o '[0-9][0-9]*\.[0-9][0-9]*$' || true)
+  [ -n "$g" ] || die "$1, and this Linux has no glibc (musl? Alpine?): the release needs glibc $MIN_GLIBC or newer (Debian 11+, Ubuntu 20.04+)"
+  [ "$(printf '%s\n%s\n' "$MIN_GLIBC" "$g" | sort -V | head -1)" = "$MIN_GLIBC" ] ||
+    die "$1, and this Linux's C library is glibc $g: the release needs $MIN_GLIBC or newer (Debian 11+, Ubuntu 20.04+). Nothing was downloaded."
+  command -v curl >/dev/null || need+=(curl ca-certificates)
+  command -v ssh-keygen >/dev/null || need+=(openssh-client)
+  command -v sha256sum >/dev/null && command -v tar >/dev/null || need+=(coreutils tar)
+  [ ${#need[@]} = 0 ] || die "$1; fetching and checking the release needs: ${need[*]} — first: $(pkg_hint "${need[@]}"). Nothing was downloaded."
+  d=${XDG_DATA_HOME:-$HOME/.local/share}; while [ ! -d "$d" ]; do d=$(dirname "$d"); done
+  free_mb=$(( $(df -Pk "$d" | awk 'NR==2 {print $4}') / 1024 ))
+  [ "$free_mb" -ge 600 ] || die "$1, and only $free_mb MB are free in $d: the release needs about 600 MB. Nothing was downloaded."
   newest=$(unpacked | tail -1)
   want=${WANT_VERSION:-$YGG_RELEASE}
   if [ -z "$WANT_VERSION" ] && [ -n "$newest" ] && { [ -z "$want" ] || newer "$newest" "$want"; }; then want=$newest; fi
@@ -151,6 +178,11 @@ bootstrap() { # WHY — the signed release (--version, else max(this script's, t
     [ -n "$want" ] || want=$(sed -n 's/^[0-9a-f]\{64\}  yggdrasil-\([0-9][0-9A-Za-z.+-]*\)-linux-x86_64\.tar\.gz$/\1/p' "$REL_DIR/SHA256SUMS" | head -1)
     tgz=yggdrasil-$want-linux-x86_64.tar.gz
     [ -n "$want" ] && [ -n "$(sum_of "$tgz")" ] || die "the release${want:+ v$want} has no $tgz (signed SHA256SUMS)"
+    # this very script, when it belongs to that release: the one the release signed, or stop here
+    if [ -n "$YGG_RELEASE" ] && [ "$want" = "$YGG_RELEASE" ] && [ -f "$0" ] && [ -n "$(sum_of join.sh)" ] &&
+       [ "$(sha256sum <"$0" | cut -c1-64)" != "$(sum_of join.sh)" ]; then
+      die "this join.sh is not the one release v$YGG_RELEASE signed (its sha256 is not in SHA256SUMS) — download it again: $base/join.sh"
+    fi
   fi
   if [ ! -f "$REL_HOME/$want/.verified" ]; then
     say "$1: the signed release $want ($base/$tgz)"
