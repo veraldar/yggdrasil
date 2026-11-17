@@ -927,6 +927,58 @@ pub fn on_turn_end(st: &AppState, sid: &str, target: Target, result: Result<Valu
     });
 }
 
+/// What the phone's notification says about a session's last reply (owner 11-17: a concise
+/// digest per session, not a dump): that turn's digest — {for, title, status, headline, needs,
+/// relevance}. The tree's own card when a manager already got this turn, else the same pass made
+/// now; kept per reply, so the push and the in-page notification of one turn cost one pass.
+pub async fn notice(st: &AppState, sid: &str) -> Option<Value> {
+    let last = {
+        let sessions = st.sessions.lock().unwrap();
+        match notice_ready(sessions.get(sid)?) {
+            Ok(n) => return Some(n),
+            Err(m) => m?,
+        }
+    };
+    let f = gather(st, sid, &Ok(last.clone()))?;
+    let n = notice_of(&digest(st, sid, &f).await, &last);
+    // a cache: not persisted, the session's time untouched (the list orders by it)
+    if let Some(s) = st.sessions.lock().unwrap().get_mut(sid) {
+        s.info["notice"] = n.clone();
+    }
+    Some(n)
+}
+
+/// The notice already made for the session's last finished reply (`Ok`), else that reply to
+/// digest (`Err(None)`: it has none yet). A reply still being written is never digested.
+fn notice_ready(s: &Session) -> Result<Value, Option<Value>> {
+    let done = |m: &&Value| m["info"]["role"] == "assistant" && m["info"]["time"]["completed"].is_number();
+    let Some(m) = s.messages.iter().rev().find(done) else {
+        return Err(None);
+    };
+    let mid = &m["info"]["id"];
+    if s.info["notice"]["for"] == *mid {
+        return Ok(s.info["notice"].clone());
+    }
+    // a managed session's card, when the tree digested this very turn (written after the reply)
+    let card = &s.info["card"];
+    let of_this_turn = card["reported"] == *mid
+        && card["headline"].is_string()
+        && card["updated"].as_u64().unwrap_or(0) >= m["info"]["time"]["created"].as_u64().unwrap_or(u64::MAX);
+    if of_this_turn {
+        let mut ev = card.clone();
+        ev["title"] = json!(title_of(s));
+        return Ok(notice_of(&ev, m));
+    }
+    Err(Some(m.clone()))
+}
+
+fn notice_of(ev: &Value, m: &Value) -> Value {
+    json!({
+        "for": m["info"]["id"], "title": ev["title"], "status": ev["status"],
+        "headline": ev["headline"], "needs": ev["needs"], "relevance": ev["relevance"],
+    })
+}
+
 /// Files an event in `parent`'s inbox and wakes it per its profile.
 pub fn deliver(st: &AppState, parent: &str, ev: Value) {
     let filed = with_session(st, parent, |s| {
@@ -1455,6 +1507,29 @@ mod tests {
         assert_eq!(unique_title(&m, "recipe site"), "recipe site 2");
         assert_eq!(unique_title(&m, "[MAIN]"), "work");
         assert_eq!(unique_title(&m, "timer"), "timer");
+    }
+
+    #[test]
+    fn a_notice_is_made_once_per_reply() {
+        let reply = |id: &str, at: u64| json!({"info": {"id": id, "role": "assistant", "time": {"created": at, "completed": at + 5}}, "parts": [{"type": "text", "text": "## Status\n- done"}]});
+        let (_, mut s) = sess("n", "notes", None, json!({}));
+        assert_eq!(notice_ready(&s), Err(None), "no reply yet: nothing to say");
+        s.messages.push(reply("msg_1", 100));
+        assert_eq!(notice_ready(&s), Err(Some(s.messages[0].clone())), "a new reply is digested");
+        s.info["notice"] = json!({"for": "msg_1", "headline": "notes filed"});
+        assert_eq!(notice_ready(&s).unwrap()["headline"], "notes filed", "the same reply: the notice made for it");
+        let mut writing = reply("msg_2", 200);
+        writing["info"]["time"]["completed"] = Value::Null;
+        s.messages.push(writing);
+        assert_eq!(notice_ready(&s).unwrap()["for"], "msg_1", "a reply still being written: the last finished one");
+        s.messages[1]["info"]["time"]["completed"] = json!(205);
+        assert!(notice_ready(&s).is_err(), "a newer reply: a new notice");
+        // a managed session: the tree's card of THIS turn is the notice; one from before it is not
+        s.info["card"] = json!({"reported": "msg_2", "headline": "built, 3 passed", "status": "done", "needs": "", "updated": 150});
+        assert!(notice_ready(&s).is_err(), "the card was written before this reply");
+        s.info["card"]["updated"] = json!(250);
+        let n = notice_ready(&s).unwrap();
+        assert_eq!((n["for"].as_str(), n["headline"].as_str(), n["title"].as_str()), (Some("msg_2"), Some("built, 3 passed"), Some("notes")));
     }
 
     #[test]

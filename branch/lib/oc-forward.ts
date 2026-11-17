@@ -106,7 +106,7 @@ export function forward(sid: string, slug: string, body: SendBody, isRetry = fal
     // messages at opencode at once, and its own queue stalls after aborts
     if (!markRunEnd(sid)) return;
     bustCache(); // list drops the "awaiting answer" state
-    void pushRunDone(slug);
+    void pushRunDone(slug, sid);
     // queue pickup: an abort also lands here, so stop advances to the
     // next queued message instead of stalling the session
     const next = dequeue(sid);

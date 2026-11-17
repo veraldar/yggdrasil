@@ -1122,6 +1122,15 @@ async fn get_inbox(State(st): State<AppState>, Path(id): Path<String>) -> Respon
     }
 }
 
+/// `GET /session/{id}/notice` — what the phone's notification says about its last reply: that
+/// turn's digest (tree.rs `notice`).
+async fn get_notice(State(st): State<AppState>, Path(id): Path<String>) -> Response {
+    match tree::notice(&st, &id).await {
+        Some(n) => Json(n).into_response(),
+        None => not_found(&id),
+    }
+}
+
 /// `GET /session` — newest-updated first, like opencode.
 async fn list_sessions(State(st): State<AppState>) -> Json<Value> {
     let mut infos: Vec<Value> = st.sessions.lock().unwrap().values().map(|s| s.info.clone()).collect();
@@ -3401,6 +3410,7 @@ async fn main() {
         .route("/tree/report", post(tree_report))
         .route("/root", get(get_root))
         .route("/session/{id}/inbox", get(get_inbox))
+        .route("/session/{id}/notice", get(get_notice))
         .route("/session/{id}/close", post(close_session))
         .with_state(state.clone());
     tree::recover(&state, interrupted);

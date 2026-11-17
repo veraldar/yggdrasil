@@ -131,8 +131,8 @@ self.addEventListener('push', (e) => {
     /* plain-text or empty payload */
   }
   e.waitUntil(
-    self.registration.showNotification('opencode', {
-      body: data.body || 'reply ready',
+    self.registration.showNotification(data.title || 'bifrost', {
+      body: data.body || 'replied',
       tag: data.tag || 'oz-reply',
       icon: '/favicon.ico',
       data: { slug: data.slug },
