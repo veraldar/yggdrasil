@@ -88,7 +88,8 @@ test('the session list shows what is open in a terminal; open, it is watch only'
   page,
 }) => {
   await page.goto('/');
-  const strip = page.getByTestId('terminal-strip');
+  await page.getByTestId('terminal-key').tap();
+  const strip = page.getByTestId('continue-terminal');
   await expect(strip).toBeVisible({ timeout: 20_000 });
   for (const kind of ['claude', 'antigravity'])
     await expect(strip.locator(`[data-kind="${kind}"][data-live="cmd"]`).first()).toBeVisible();
@@ -105,6 +106,7 @@ test('the session list shows what is open in a terminal; open, it is watch only'
   await expect(page.getByTestId('cc-continue')).toHaveCount(0);
   await shot(page, '2-agy-watch');
   await page.goBack();
+  await page.getByTestId('terminal-key').tap();
   await strip.locator('[data-kind="claude"][data-live="cmd"]').first().tap();
   await expect(page.locator('.cc-list > *').nth(2)).toBeVisible({ timeout: 20_000 });
   await expect(page.getByTestId('cc-watch-only')).toBeVisible();
@@ -120,7 +122,7 @@ for (const kind of ['claude', 'antigravity', 'opencode']) {
     const before = kind === 'claude' ? claudeTranscripts() : '';
     // the owner finds it in the sheet: session list → all… → the conversation
     await page.goto('/');
-    await page.getByTestId('terminal-strip').getByText('all…').tap();
+    await page.getByTestId('terminal-key').tap();
     const sheet = page.getByTestId('continue-terminal');
     await sheet.locator(`[data-term="${id}"]`).tap();
     await expect(page).toHaveURL(new RegExp(href(kind, id).replace('?', '\\?')));

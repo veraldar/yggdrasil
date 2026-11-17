@@ -9,8 +9,8 @@
  *    not open anywhere  continue here: the brain runs the turn on THAT conversation (no fork),
  *                       the terminal sees it on its next resume
  *
- *  TerminalStrip: the ones open right now, on the session list. ContinueTerminal: the sheet with
- *  the newest of every harness. */
+ *  ContinueTerminal: the sheet behind the session list's terminal key — the newest of every harness,
+ *  open ones first. */
 import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { HARNESS_TAG } from '@/lib/agents';
@@ -101,40 +101,6 @@ function Row({ s }: { s: TermSession }) {
   );
 }
 
-/** On the session list: the terminal's sessions open right now (polled), nothing when none. */
-export function TerminalStrip({ onMore }: { onMore: () => void }) {
-  const [open, setOpen] = useState<TermSession[]>([]);
-  useEffect(() => {
-    let stop = false;
-    const tick = () =>
-      fetchSessions()
-        .then((ss) => !stop && setOpen(ss.filter((s) => s.live)))
-        .catch(() => !stop && setOpen([]));
-    void tick();
-    const iv = setInterval(tick, 5000);
-    return () => {
-      stop = true;
-      clearInterval(iv);
-    };
-  }, []);
-  if (!open.length) return null;
-  return (
-    <div className="mb-2" data-testid="terminal-strip">
-      <div className="flex items-center justify-between px-1 pb-1 text-[10px] text-[var(--oz-dim)]">
-        <span>in the terminal</span>
-        <button onClick={onMore} className="underline-offset-2 hover:underline">
-          all…
-        </button>
-      </div>
-      <ul className="flex flex-col gap-1">
-        {open.map((s) => (
-          <Row key={`${s.kind}:${s.id}`} s={s} />
-        ))}
-      </ul>
-    </div>
-  );
-}
-
 /** The sheet: the newest conversations of every harness on this box, open ones first. */
 export function ContinueTerminal({ onClose }: { onClose: () => void }) {
   const [list, setList] = useState<TermSession[] | null>(null);
@@ -152,10 +118,6 @@ export function ContinueTerminal({ onClose }: { onClose: () => void }) {
           close
         </button>
       </div>
-      <p className="px-1 pb-1.5 text-[10px] text-[var(--oz-dim)]">
-        Claude Code, Antigravity and opencode on this box. Open one to watch it live; continue it
-        here when it isn’t open in a terminal — the same conversation, both ways.
-      </p>
       {err && (
         <p role="alert" className="px-1 pb-1.5 text-[11px] text-[var(--oz-danger)]">
           {err}

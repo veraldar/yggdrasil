@@ -19,6 +19,8 @@ const ICONS = {
   external: ['M9.5 2.5h4v4M13.5 2.5 7.5 8.5', 'M11.5 9.5v4h-9v-9h4'],
   // fork: a line that goes on, and a branch leaving it — "continue in a new session"
   fork: ['M4.5 2v12', 'M4.5 5.5c0 3.5 2.5 5 8.25 5', 'M10.25 8l2.5 2.5-2.5 2.5'],
+  // terminal: a prompt — work started on the computer
+  terminal: ['M2.5 4l3.5 3.5-3.5 3.5', 'M8 12h5.5'],
   // log: the full transcript, every line of it
   log: ['M2.5 3.5h11', 'M2.5 6.5h11', 'M2.5 9.5h11', 'M2.5 12.5h6.5'],
 } as const;

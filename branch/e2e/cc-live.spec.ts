@@ -115,10 +115,9 @@ test('Claude Code live: watch + type into a background session from the phone; i
     );
     const isid = agents().find((a) => a.name === watchName)!.sessionId;
 
-    // the phone: + new session → continue a terminal session → open ones first
+    // the phone: the terminal key on the session list → open ones first
     await page.goto('/');
-    await page.getByRole('button', { name: 'new session' }).tap();
-    await page.getByRole('button', { name: /continue a terminal session/ }).tap();
+    await page.getByTestId('terminal-key').tap();
     const sheet = page.getByTestId('continue-terminal');
     const row = sheet.locator(`[data-term="${sid}"]`);
     await expect(row).toHaveAttribute('data-live', 'bg');
