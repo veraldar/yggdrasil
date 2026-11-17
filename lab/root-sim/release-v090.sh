@@ -5,6 +5,11 @@
 #   setsid nohup bash ~/Work/root-coord/lab/root-sim/release-v090.sh > ~/Work/root-coord/lab/root-sim/release-v090.log 2>&1 &
 # Not in here, on purpose: the VPS upgrade and the veraldar.org update (the owner runs those).
 set -uo pipefail
+# a shell outside the sandbox may start with a service's short PATH: the tools installed with mise
+for d in "$HOME/.local/bin" "$HOME"/.local/share/mise/installs/gh/*/gh_*/bin "$HOME/.local/share/mise/installs/node/latest/bin"; do
+  [ -d "$d" ] && PATH="$d:$PATH"
+done
+export PATH
 T=$HOME/Work/tree-next
 U=https://github.com/veraldar/yggdrasil/releases/download/v0.9.0
 step() { echo "== STEP $1 $(date +%T): $2"; }

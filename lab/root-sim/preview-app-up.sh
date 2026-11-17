@@ -2,6 +2,12 @@
 # preview-app-up.sh — rebuild :8447's app (~/Work/tree-next/branch, the v0.9.0 candidate) and restart it.
 # 11-17: brings the mic back (.env.local copied from root-coord-pwa) and the three-letter tag on every row. ~2 min.
 set -euo pipefail
+# a shell outside the sandbox may start with a service's short PATH: the tools installed with mise
+for d in "$HOME/.local/bin" "$HOME"/.local/share/mise/installs/gh/*/gh_*/bin "$HOME/.local/share/mise/installs/node/latest/bin"; do
+  [ -d "$d" ] && PATH="$d:$PATH"
+done
+export PATH
+export XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}   # systemctl --user from a service
 cd "$HOME/Work/tree-next/branch"
 TMPDIR=$HOME/.cache/tmp npm run build >/tmp/preview-app-build.log 2>&1 || { tail -20 /tmp/preview-app-build.log; exit 1; }
 git -C .. checkout branch/package.json branch/package-lock.json 2>/dev/null || true   # the build stamps a version
