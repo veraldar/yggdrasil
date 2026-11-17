@@ -205,5 +205,24 @@ class Transcript(unittest.TestCase):
         self.assertEqual(T.mangle("/home/dweeb_xyz/Work/cc-live.x"), "-home-dweeb-xyz-Work-cc-live-x")
 
 
+class LiveFile(unittest.TestCase):
+    """The brain's lease is written the moment the helper knows (never behind the phone)."""
+
+    def test_written_as_soon_as_known(self):
+        d = tempfile.mkdtemp()
+        f = os.path.join(d, "harness-live.json")
+        seen = {"claude:070d6b89-df88-495a-b061-1a0a80cfbea0": {"how": "cmd", "pid": 1, "cwd": "/x"},
+                "claude:3f2a9c1e-0b4d-4e8f-9a6b-1c2d3e4f5a6b": {"how": "here", "pid": 2, "cwd": "/x"}}
+        old_file, old_all = C.LIVE_FILE, C.live_all
+        C.LIVE_FILE, C.live_all = f, lambda: dict(seen)
+        try:
+            live = C.Live()
+            self.assertIn("claude:070d6b89-df88-495a-b061-1a0a80cfbea0", live.get())
+            v = json.load(open(f))
+            self.assertEqual(list(v["live"]), ["claude:070d6b89-df88-495a-b061-1a0a80cfbea0"], "the brain's own turn is not a terminal")
+        finally:
+            C.LIVE_FILE, C.live_all = old_file, old_all
+
+
 if __name__ == "__main__":
     unittest.main()
