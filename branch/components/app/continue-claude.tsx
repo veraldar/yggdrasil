@@ -13,6 +13,7 @@
  *  the newest of every harness. */
 import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
+import { HARNESS_TAG } from '@/lib/agents';
 
 export type HarnessKind = 'claude' | 'antigravity' | 'opencode';
 export type TermSession = {
@@ -75,7 +76,12 @@ function Row({ s }: { s: TermSession }) {
         className="oz-row"
       >
         <div className="oz-r1">
-          <span className="t">{s.title || HARNESS_LABEL[s.kind]}</span>
+          <span className="t">
+            <span className="mr-1 opacity-60" aria-hidden="true">
+              [{HARNESS_TAG[s.kind] || 'CLA'}]
+            </span>
+            {s.title || HARNESS_LABEL[s.kind]}
+          </span>
           {word ? (
             <span
               className="oz-st"

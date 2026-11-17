@@ -9,7 +9,7 @@ import { Door } from '@/components/tree-door';
 import { Roots } from '@/components/roots';
 import { Marked } from '@/components/marked';
 import { ContinueTerminal, TerminalStrip } from '@/components/app/continue-claude';
-import { agentTag } from '@/lib/agents';
+import { sessionTag } from '@/lib/agents';
 import { askedSessions, clearAsked, notifyReply } from '@/lib/notify';
 import type { ArtifactEntry } from '@/lib/artifacts';
 import { countUnseen, seenInit } from '@/lib/artifact-read';
@@ -40,6 +40,8 @@ type Sess = {
   msgs?: number;
   pending?: boolean;
   agent?: string | null;
+  /** a terminal's conversation continued here: its harness (claude · antigravity · opencode) */
+  harness?: string | null;
   card?: Card | null;
   archived?: boolean; // closed by its parent — hidden behind "N closed"
 };
@@ -604,12 +606,10 @@ export default function SessionsPage() {
               </span>
             ) : null}
             <span className={`t ${depth ? 'opacity-85' : ''}`}>
-              {/* the agent at a glance: [CLA] [AGY] [BUI] [FIX]… — MAIN's title is its own tag */}
-              {s.agent && !isMainSlug(slugify(s.title || '')) && (
-                <span className="mr-1 opacity-60" aria-hidden="true" title={s.agent}>
-                  [{agentTag(s.agent)}]
-                </span>
-              )}
+              {/* every session at a glance: [MAI] [CLA] [AGY] [OPE] [BUI] [FIX]… */}
+              <span className="mr-1 opacity-60" aria-hidden="true" title={s.harness || s.agent || ''}>
+                [{sessionTag(s, isMainSlug(slugify(s.title || '')))}]
+              </span>
               {s.title || s.id}
             </span>
             {kids.length > 0 && (

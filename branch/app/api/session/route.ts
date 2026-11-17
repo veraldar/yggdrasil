@@ -41,9 +41,12 @@ function textOf(parts: Array<{ type?: string; text?: string }> | undefined) {
 }
 
 /** root-coord tree fields off a brain session info — absent on opencode */
-function treeFields(s: { agent?: unknown; card?: unknown; archived?: unknown }) {
+function treeFields(s: { agent?: unknown; card?: unknown; archived?: unknown; harness?: unknown }) {
+  const h = s.harness && typeof s.harness === 'object' ? (s.harness as Record<string, unknown>) : null;
   return {
     agent: s.agent || null,
+    // a terminal's conversation continued here: it runs on that harness whatever the agent
+    harness: h && h.attached === true && typeof h.kind === 'string' ? h.kind : null,
     card: s.card && typeof s.card === 'object' ? s.card : null,
     archived: s.archived === true,
   };
