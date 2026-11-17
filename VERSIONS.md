@@ -29,6 +29,14 @@ Adds the end-design trunk, voice fixes, two-way terminal sessions, and `claude` 
 
 ### Terminal sessions both ways (`root/cc-live/`, `branch/app/cc/[id]/`)
 - **Live view & continuation across harnesses:** Browse and stream active or recent Claude Code, Antigravity (`agy`), and `opencode` terminal sessions from the phone with single-writer safety: watch-only when open in a plain terminal, interactive typing and prompt answers when running inside `tmux` or Claude Code background mode, or continued through `yggdrasil` when not open elsewhere.
+- **One writer, no gap:** the live helper tells the brain the moment a conversation opens in a terminal, so a message sent from the phone right then is refused instead of run twice.
+- **Continue in a new session:** a terminal session's page has the same header and footer as any session, with a copy icon on the right to continue it in a new bifrost session.
+
+### The phone app (`branch/`)
+- **Every session row carries a three-letter tag** (`[MAI]` for MAIN, `[CLA]` `[AGY]` `[OPE]` for a terminal's conversation, else the agent's) and **the list is ordered by the newest message**.
+- **One terminal key on the session list** opens every terminal session (Claude Code, Antigravity, opencode) in one place.
+- **Type while it works:** a message typed while a session is busy waits its turn (`queued`) and is delivered when the turn ends.
+- **Notifications per session:** off by default, on for MAIN; each session's settings has the switch, and both the push and the in-app notification follow it.
 
 ### `claude` and `agy` agents (`root/`, `branch/`)
 - **Built-in `claude` and `agy` agents:** Replaced `agi` with built-in `claude` (Claude Code) and `agy` (Antigravity) agents in `yggdrasil` and the app's agent picker/editor.
