@@ -18,6 +18,7 @@ import { useRouter } from 'next/navigation';
 import { slugify } from '@/lib/slug';
 import { LineIcon } from '@/components/line-icon';
 import { HARNESS_LABEL } from '@/components/app/continue-claude';
+import { HARNESS_TAG } from '@/lib/agents';
 import {
   type CcItem,
   type CcPrompt,
@@ -374,12 +375,21 @@ export default function CcLive({
       className="relative mx-auto flex h-dvh max-w-md flex-col overflow-hidden px-3"
       data-testid="cc-live"
     >
+      {/* the same header as any session: its tag and title, a breathing dot while it works */}
       <header className="oz-head">
-        <div className="min-w-0 flex-1">
-          <div className="truncate text-[13px]">{title}</div>
-          <div className="truncate text-[10px] text-[var(--oz-dim)]">
-            {meta ? `${label} · ${meta.cwd.replace(/^\/home\/[^/]+/, '~')}` : ''}
-          </div>
+        <div
+          className="min-w-0 flex-1 truncate text-[13px]"
+          title={meta ? `${label} · ${meta.cwd.replace(/^\/home\/[^/]+/, '~')}` : label}
+        >
+          <span className="mr-1 opacity-60" aria-hidden="true">
+            [{HARNESS_TAG[kind] || 'CLA'}]
+          </span>
+          {title}
+          {word === 'working' && (
+            <span className="oz-breathe ml-2 text-[var(--oz-success)]" aria-label="working">
+              ●
+            </span>
+          )}
         </div>
         {word && (
           <span
@@ -388,7 +398,7 @@ export default function CcLive({
             className="flex-none text-[10px]"
             style={{ color: colour }}
           >
-            <span className={word === 'working' ? 'oz-breathe' : ''}>●</span> {word}
+            {word}
           </span>
         )}
         {canType && kind === 'claude' && live === 'bg' && (
@@ -523,27 +533,32 @@ export default function CcLive({
             </button>
           </div>
         ) : (
-          <p
-            className="oz-dock -mx-3 px-3 pb-[max(8px,env(safe-area-inset-bottom))] text-[11px] text-[var(--oz-dim)]"
+          // the same footer as any session: the composer, here read-only (someone else has it
+          // open), and where send sits, the copy to go on in a new session
+          <div
+            className="oz-dock -mx-3 px-3 pb-[max(8px,env(safe-area-inset-bottom))]"
             data-testid="cc-watch-only"
           >
-            {live === 'here' ? (
-              'bifrost is running a turn on it — the reply shows up here'
-            ) : (
-              <span className="flex justify-end">
-                <button
-                  onClick={() => void forkHere()}
-                  disabled={sending}
-                  aria-label="continue in a new session"
-                  title="continue in a new session"
-                  className="oz-k h-11 w-11"
-                  data-testid="cc-fork"
-                >
-                  <LineIcon name="fork" size={16} />
-                </button>
-              </span>
+            <textarea
+              disabled
+              rows={1}
+              placeholder={live === 'here' ? 'working here…' : 'watch only'}
+              aria-label="watch only"
+              className="oz-ta opacity-60"
+            />
+            {live !== 'here' && (
+              <button
+                onClick={() => void forkHere()}
+                disabled={sending}
+                aria-label="continue in a new session"
+                title="continue in a new session"
+                className="oz-k ok"
+                data-testid="cc-fork"
+              >
+                <LineIcon name="fork" size={16} />
+              </button>
             )}
-          </p>
+          </div>
         ))}
     </main>
   );
