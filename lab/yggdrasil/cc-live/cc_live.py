@@ -369,18 +369,26 @@ class Live:
             if time.time() - self.at > fresh:
                 self.v = live_all()
                 self.at = time.time()
+                # written as soon as it is known: the brain never knows less than the phone is
+                # shown (a turn sent the moment the phone says "open in a terminal" is refused)
+                self.write()
             return dict(self.v)
 
-    def write_loop(self, path):
-        while True:
-            try:
-                v = {k: e for k, e in self.get(1.0).items() if e["how"] != "here"}
-                tmp = f"{path}.tmp"
-                with open(tmp, "w") as f:
-                    json.dump({"at": int(time.time() * 1000), "live": v}, f)
-                os.replace(tmp, path)
-            except Exception as e:
-                log(f"live file: {e!r}")
+    def write(self):
+        if not LIVE_FILE:
+            return
+        try:
+            v = {k: e for k, e in self.v.items() if e["how"] != "here"}
+            tmp = f"{LIVE_FILE}.tmp"
+            with open(tmp, "w") as f:
+                json.dump({"at": int(time.time() * 1000), "live": v}, f)
+            os.replace(tmp, LIVE_FILE)
+        except Exception as e:
+            log(f"live file: {e!r}")
+
+    def write_loop(self):
+        while True:  # fresh every 2 s, so the brain can tell a helper that is down (15 s)
+            self.get(1.0)
             time.sleep(2)
 
 
@@ -1077,7 +1085,7 @@ def main():
     srv = Server((a.host, a.port), H)
     if a.live_file:
         LIVE_FILE = os.path.expanduser(a.live_file)
-        threading.Thread(target=LIVE.write_loop, args=(LIVE_FILE,), daemon=True).start()
+        threading.Thread(target=LIVE.write_loop, daemon=True).start()
     log(f"cc-live on {a.host}:{a.port} · claude {CLAUDE} · readers {sorted(READERS)} · live file {LIVE_FILE or '-'}")
     srv.serve_forever()
 
