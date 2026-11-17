@@ -27,7 +27,7 @@ async function bustListCache(request: APIRequestContext) {
 
 /** the row (the swipe button) titled exactly `title` */
 const row = (page: Page, title: string): Locator =>
-  page.locator('.oz-row').filter({ has: page.locator('.t', { hasText: new RegExp(`^${title}$`) }) });
+  page.locator('.oz-row').filter({ has: page.locator('.t', { hasText: new RegExp(`(^|\\])${title}$`) }) }); // after its [TAG]
 
 /** how many sub-tree levels (.oz-kids) hold this row */
 const depthOf = (r: Locator) =>
@@ -70,22 +70,23 @@ test('home: the tree nests 3 deep under MAIN, cards speak, closed sessions wait'
   const branch = page.locator('li').filter({ has: site });
   await expect(branch.locator('.oz-row')).toHaveCount(4); // site, pages, photos, search box
 
-  // cards: status word, "asks: …" before the headline, the headline otherwise
-  await expect(photos.locator('.oz-st')).toHaveText('needs you');
+  // one status word, nothing longer (owner 11-17): "working" or "terminal" — a card's state is
+  // its dot's color; "asks: …" before the headline, the headline otherwise
+  await expect(photos.locator('.oz-st')).toHaveCount(0);
   await expect(photos.locator('.oz-r2')).toHaveText(
     'asks: Which photo licence is OK — CC-BY or only CC0?'
   );
   await expect(site.locator('.oz-r2')).toHaveText(
     'index + 3 recipe pages drafted; search box in progress'
   );
-  await expect(site.getByLabel('working')).toBeVisible(); // the green breath, no word
-  await expect(site.locator('.oz-st')).toHaveCount(0);
-  await expect(row(page, 'Wordfreq CLI').locator('.oz-st')).toHaveText('failed');
-  await expect(row(page, 'Habit tracker CLI').locator('.oz-st')).toHaveText('done');
+  await expect(site.getByLabel('working')).toBeVisible(); // the green breath…
+  await expect(site.locator('.oz-st')).toHaveText('working'); // …and the one word
+  await expect(row(page, 'Wordfreq CLI').locator('.oz-st')).toHaveCount(0);
+  await expect(row(page, 'Habit tracker CLI').locator('.oz-st')).toHaveCount(0);
   await expect(pages.locator('.oz-r2')).toHaveText('3 recipe pages + shared stylesheet written');
 
   // MAIN's subtree comes before the other top-level sessions
-  const order = await page.locator('ul > li .oz-row .t').allTextContents();
+  const order = (await page.locator('ul > li .oz-row .t').allTextContents()).map((t) => t.replace(/^\[[A-Z]{3}\]\s*/, ''));
   expect(order.indexOf('Static recipe site')).toBeLessThan(order.indexOf('garden plan'));
 
   // closed sessions: hidden behind "N closed", per parent
@@ -93,7 +94,7 @@ test('home: the tree nests 3 deep under MAIN, cards speak, closed sessions wait'
   await expect(row(page, 'Notes API stdlib')).toHaveCount(0);
   await branch.getByRole('button', { name: '1 closed' }).tap();
   await expect(row(page, 'Old layout draft')).toBeVisible();
-  await expect(row(page, 'Old layout draft').locator('.oz-st')).toHaveText('closed');
+  await expect(row(page, 'Old layout draft').locator('.oz-st')).toHaveCount(0);
   expect(await depthOf(row(page, 'Old layout draft'))).toBe(1);
   const mainClosed = page.locator('ul > li > button.oz-closed').first();
   await expect(mainClosed).toHaveText('1 closed');

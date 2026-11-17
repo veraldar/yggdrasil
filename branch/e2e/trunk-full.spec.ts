@@ -735,7 +735,7 @@ test('trunk full: phone ↔ ap ↔ hub ↔ joined root — pair, talk, join, del
           .locator('.oz-row')
           .filter({ has: phone.locator('.t', { hasText: /(^|\])on mac$/ }) });
         await expect(row).toBeVisible({ timeout: 30_000 });
-        await expect(row.locator('.oz-st')).toHaveText('done');
+        await expect(row.locator('.oz-st')).toHaveCount(0); // done: no word (only "working" / "terminal")
         await expect(row.locator('.oz-r2')).toContainText('MAC-DONE');
       }
     );

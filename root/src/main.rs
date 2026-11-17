@@ -1131,10 +1131,31 @@ async fn get_notice(State(st): State<AppState>, Path(id): Path<String>) -> Respo
     }
 }
 
-/// `GET /session` — newest-updated first, like opencode.
+/// When the owner last wrote in a session (owner 11-17: their own newest message orders the list;
+/// a reply, a report or another session's message never moves it up) — one never written to:
+/// when it was made.
+fn owner_at(s: &Session) -> u64 {
+    let mine = |m: &&Value| {
+        let meta = &m["info"]["meta"];
+        m["info"]["role"] == "user" && !is_compaction(m) && meta["auto"] != true && meta["internal"] != true && meta["origin"].is_null()
+    };
+    s.messages.iter().rev().find(mine).and_then(|m| m["info"]["time"]["created"].as_u64()).or_else(|| s.info["time"]["created"].as_u64()).unwrap_or(0)
+}
+
+/// `GET /session` — the owner's newest message first (`time.user`, see `owner_at`).
 async fn list_sessions(State(st): State<AppState>) -> Json<Value> {
-    let mut infos: Vec<Value> = st.sessions.lock().unwrap().values().map(|s| s.info.clone()).collect();
-    infos.sort_by_key(|i| std::cmp::Reverse(i["time"]["updated"].as_u64().unwrap_or(0)));
+    let mut infos: Vec<Value> = st
+        .sessions
+        .lock()
+        .unwrap()
+        .values()
+        .map(|s| {
+            let mut i = s.info.clone();
+            i["time"]["user"] = json!(owner_at(s));
+            i
+        })
+        .collect();
+    infos.sort_by_key(|i| std::cmp::Reverse(i["time"]["user"].as_u64().unwrap_or(0)));
     infos.iter_mut().for_each(|i| with_agent(&st, i));
     Json(Value::Array(infos))
 }
@@ -3843,6 +3864,28 @@ mod law_tests {
             assert!(lines.contains(&format!("verdict {n}").as_str()), "verdict {n}");
         }
         assert!(!lines.iter().any(|l| ["verdict 0", "verdict 2", "verdict 10", "verdict 12"].contains(l)));
+    }
+
+    #[test]
+    fn the_list_follows_the_owners_own_messages() {
+        let at = |mut m: Value, t: u64| {
+            m["info"]["time"]["created"] = json!(t);
+            m
+        };
+        let mut s = Session { info: json!({ "id": "s", "time": { "created": 10 } }), messages: Vec::new(), todo: Vec::new(), inbox: Vec::new() };
+        assert_eq!(owner_at(&s), 10, "never written to: when it was made");
+        s.messages.push(at(make_message("s", "user", vec![text_part("mine")]), 100));
+        s.messages.push(at(make_message("s", "assistant", vec![text_part("a reply")]), 500));
+        let mut report = at(make_message("s", "user", vec![text_part("a report")]), 600);
+        report["info"]["meta"] = json!({ "auto": true });
+        let mut sent = at(make_message("s", "user", vec![text_part("from MAIN")]), 700);
+        sent["info"]["meta"] = json!({ "origin": "ses_main" });
+        let mut inner = at(make_message("s", "user", vec![text_part("internal")]), 800);
+        inner["info"]["meta"] = json!({ "internal": true });
+        s.messages.extend([report, sent, inner]);
+        assert_eq!(owner_at(&s), 100, "replies, reports, other sessions' and internal messages never move it up");
+        s.messages.push(at(make_message("s", "user", vec![text_part("mine again")]), 900));
+        assert_eq!(owner_at(&s), 900);
     }
 
     #[test]

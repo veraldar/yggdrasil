@@ -73,10 +73,24 @@ export async function GET() {
             info?: {
               role?: string;
               time?: { created?: number; completed?: number };
+              meta?: { auto?: boolean; internal?: boolean; origin?: string };
             };
             parts?: Array<{ type?: string; text?: string }>;
           }>;
           const last = [...msgs].reverse().find((m) => textOf(m.parts));
+          // the owner's own newest message orders the list (owner 11-17): a reply, a report or
+          // another session's message never moves a session up (the brain's owner_at)
+          const mine = [...msgs]
+            .reverse()
+            .find(
+              (m) =>
+                m.info?.role === 'user' &&
+                !m.info?.meta?.auto &&
+                !m.info?.meta?.internal &&
+                !m.info?.meta?.origin &&
+                !(m.parts || []).some((p) => p.type === 'compaction')
+            );
+          const userAt = mine?.info?.time?.created || s.time?.user || s.time?.created || 0;
           const lastRole = last?.info?.role || '';
           const lastText = textOf(last?.parts);
           // mid-run detection on the RAW last message (may be a tool-only
@@ -109,6 +123,7 @@ export async function GET() {
             // sessions it manages, and closed ones (hidden behind a toggle)
             ...treeFields(s),
             updated: s.time?.updated || 0,
+            userAt,
             preview: lastText.slice(0, 80),
             lastRole,
             // full-text question check — the client only sees an 80-char
@@ -143,6 +158,7 @@ export async function GET() {
             parentId: s.parentID || null,
             ...treeFields(s),
             updated: s.time?.updated || 0,
+            userAt: s.time?.user || s.time?.created || 0,
             preview: '',
             lastRole: '',
             lastHasQ: false,
@@ -156,7 +172,7 @@ export async function GET() {
         }
       })
     );
-    enriched.sort((a, b) => (b.updated || 0) - (a.updated || 0));
+    enriched.sort((a, b) => (b.userAt || 0) - (a.userAt || 0));
     // never pin an empty list: a transient opencode scope/failure window must
     // not get cached as "no sessions" — the next poll retries instead
     if (enriched.length) setCache(enriched, gen);

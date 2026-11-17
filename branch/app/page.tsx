@@ -36,6 +36,8 @@ type Sess = {
   updated: number;
   lastRole?: string;
   lastAt?: number;
+  /** when the owner last wrote in it (their own newest message orders the list) */
+  userAt?: number;
   lastHasQ?: boolean;
   msgs?: number;
   pending?: boolean;
@@ -167,6 +169,9 @@ function fmtListTime(t?: number): string {
     : d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
 }
 
+/** the list's order (owner 11-17): when the owner last wrote in it — never a reply's time */
+const byOwner = (s: { userAt?: number; updated?: number }) => s.userAt || s.updated || 0;
+
 export default function SessionsPage() {
   const router = useRouter();
   // the door, per device (never the server store): not walked yet → the
@@ -232,8 +237,7 @@ export default function SessionsPage() {
       if (arr) arr.push(s);
       else m.set(s.parentId, [s]);
     }
-    for (const arr of m.values())
-      arr.sort((a, b) => (b.lastAt || b.updated || 0) - (a.lastAt || a.updated || 0));
+    for (const arr of m.values()) arr.sort((a, b) => byOwner(b) - byOwner(a));
     return m;
   }, [sessions]);
   const byId = useMemo(() => new Map(sessions.map((s) => [s.id, s])), [sessions]);
@@ -507,8 +511,7 @@ export default function SessionsPage() {
 
   // the list's order law (owner 11-17): the session with the newest message first — a running
   // or unread one shows its dot, it does not jump the order
-  const sortTop = (list: Sess[]) =>
-    [...list].sort((a, b) => (b.lastAt || b.updated || 0) - (a.lastAt || a.updated || 0));
+  const sortTop = (list: Sess[]) => [...list].sort((a, b) => byOwner(b) - byOwner(a));
 
   /** One level of the tree: its open sessions, then — behind a small
    *  "N closed" key (`key` remembers it) — the closed ones. Top level rows
@@ -565,11 +568,9 @@ export default function SessionsPage() {
       </>
     ) : (
       s.card?.headline ||
-      (s.pending
-        ? 'awaiting answer…'
-        : isOnboardPrompt(s.preview || '') // the brain's setup brief, never for eyes
-          ? 'setup'
-          : s.preview)
+      (isOnboardPrompt(s.preview || '') // the brain's setup brief, never for eyes
+        ? 'setup'
+        : s.preview)
     );
     const dot = depth ? 'text-[10px]' : '';
     return (
@@ -629,12 +630,14 @@ export default function SessionsPage() {
                 {kidLive && !open ? ' ●' : ''}
               </span>
             )}
-            {!working && st?.w && (
-              <span className="oz-st" style={{ color: st.c }}>
-                {st.w}
+            {/* one status word, nothing longer (owner 11-17): "working" while it works,
+                "terminal" for a terminal's conversation — the rest is the dot's color */}
+            {(working || s.harness) && (
+              <span className="oz-st" style={{ color: working ? 'var(--oz-success)' : 'var(--oz-dim)' }}>
+                {working ? 'working' : 'terminal'}
               </span>
             )}
-            <time>{fmtListTime(s.lastAt || s.updated)}</time>
+            <time>{fmtListTime(byOwner(s))}</time>
           </div>
           {(sub || !depth) && <div className="oz-r2">{sub || '\u00a0'}</div>}
         </SwipeRow>
