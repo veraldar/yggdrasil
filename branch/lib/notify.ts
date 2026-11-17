@@ -91,6 +91,12 @@ async function subscribePush(): Promise<void> {
 export async function notifyReply(slug: string): Promise<void> {
   if (typeof window === 'undefined' || !('Notification' in window)) return;
   if (Notification.permission !== 'granted') return;
+  // this session's switch (off by default; MAIN on) — asked of the app each time, it is cheap
+  const on = await fetch(`/api/notify?slug=${encodeURIComponent(slug)}`, { cache: 'no-store' })
+    .then((r) => r.json())
+    .then((d) => d?.on === true)
+    .catch(() => false);
+  if (!on) return;
   const options: NotificationOptions & { data: { slug: string } } = {
     body: `reply ready — ${slug}`,
     tag: `oz-${slug}`,

@@ -82,6 +82,24 @@ export default function SessionSettingsView() {
   // null = not landed yet (loading, or failed — loadErr says which)
   const [providers, setProviders] = useState<ProviderRow[] | null>(null);
   const [agents, setAgents] = useState<Agent[] | null>(null);
+  // may this session notify the phone (off by default, MAIN on): null until known
+  const [notify, setNotify] = useState<boolean | null>(null);
+  useEffect(() => {
+    fetch(`/api/notify?slug=${encodeURIComponent(slug)}`, { cache: 'no-store' })
+      .then((r) => r.json())
+      .then((d) => setNotify(d?.on === true))
+      .catch(() => setNotify(false));
+  }, [slug]);
+  const saveNotify = async (on: boolean) => {
+    const was = notify;
+    setNotify(on);
+    const r = await fetch('/api/notify', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ slug, on }),
+    }).catch(() => null);
+    if (!r?.ok) setNotify(was);
+  };
   // the models each harness offers (+ labels): a session on Claude Code / opencode / Codex
   // picks from its harness, not from the root's upstream
   const [harnessModels, setHarnessModels] = useState<Record<string, string[]>>({});
@@ -597,6 +615,25 @@ export default function SessionSettingsView() {
       <p className="px-0.5 pb-2.5 text-[10.5px] leading-relaxed text-[var(--oz-dim)]">
         changes apply from the next message in this session
       </p>
+
+      {/* NOTIFICATIONS — may this session wake the phone when a reply is ready? Off by default,
+          on for MAIN (owner 11-17); the push and the in-page notification both ask it */}
+      <section className="oz-blk" data-testid="notify-block">
+        <h2>notifications</h2>
+        <div className="oz-chips">
+          {([true, false] as const).map((v) => (
+            <button
+              key={String(v)}
+              aria-pressed={notify === v}
+              disabled={notify === null}
+              data-testid={v ? 'notify-on' : 'notify-off'}
+              onClick={() => void saveNotify(v)}
+            >
+              {v ? 'on' : 'off'}
+            </button>
+          ))}
+        </div>
+      </section>
 
       {/* DELETE — two taps; sub-sessions cascade server-side, then back to
           the list (which no longer shows the deleted row). MAIN has none:
