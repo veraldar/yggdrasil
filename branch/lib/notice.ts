@@ -19,9 +19,13 @@ export function plain(s: string, max = MAX): string {
     .replace(/^\s{0,3}(#{1,6}|[-*+>]|\d+[.)])\s+/gm, '')
     .replace(/(\*\*|\*|`|~~)(\S(?:.*?\S)?)\1/g, '$2')
     .replace(/[`*]/g, '')
+    .replace(/#{2,}\s*/g, '')
     .replace(/\s+/g, ' ')
     .trim();
-  return t.length > max ? `${t.slice(0, max - 1).trimEnd()}…` : t;
+  if (t.length <= max) return t;
+  const cut = t.slice(0, max - 1);
+  const word = cut.lastIndexOf(' '); // a whole word last, when there is one not too far back
+  return `${(word > max * 0.7 ? cut.slice(0, word) : cut).replace(/[\s,;:.-]+$/, '')}…`;
 }
 
 /** The words for one digest: the session's name (with "needs you" / "failed" / "stopped" when it

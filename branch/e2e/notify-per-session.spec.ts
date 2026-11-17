@@ -116,8 +116,12 @@ test("a notification is the session's digest of its reply", async ({ request }) 
 
 test('on the phone: a reply in a session you asked in shows its digest', async ({ page, request }) => {
   await request.put('/api/notify', { data: { slug, on: true } });
-  // the phone's notifications, as the app makes them (permission given, no service worker)
+  // the phone's notifications, as the app makes them (permission given, no service worker), with
+  // the app in the background — as when you send and put the phone away (the list watches the
+  // sessions you asked in only then: in front, you see the list itself)
   await page.addInitScript((s: string) => {
+    Object.defineProperty(document, 'hidden', { get: () => true, configurable: true });
+    Object.defineProperty(document, 'visibilityState', { get: () => 'hidden', configurable: true });
     const shown: { title: string; body?: string }[] = [];
     (window as unknown as { __shown: typeof shown }).__shown = shown;
     class N {
