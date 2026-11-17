@@ -93,6 +93,10 @@ test('the session list shows what is open in a terminal; open, it is watch only'
   for (const kind of ['claude', 'antigravity'])
     await expect(strip.locator(`[data-kind="${kind}"][data-live="cmd"]`).first()).toBeVisible();
   await shot(page, '1-strip');
+  // every row carries a three-letter tag (owner 11-17): the sessions, MAIN, the terminal strip
+  const titles = await page.locator('.oz-row .t').allInnerTexts();
+  expect(titles.length).toBeGreaterThan(2);
+  for (const t of titles) expect(t.trim(), 'a row without its tag').toMatch(/^\[[A-Z]{3}\]/);
   await strip.locator('[data-kind="antigravity"][data-live="cmd"]').first().tap();
   await expect(page).toHaveURL(/\/cc\/[0-9a-f-]{36}\?k=antigravity/);
   await expect(page.locator('.cc-list > *').nth(2)).toBeVisible({ timeout: 20_000 });
