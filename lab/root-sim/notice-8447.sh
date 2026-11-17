@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # notice-8447.sh — for a shell OUTSIDE the :8447 sandbox (the :8443 opencode, or a terminal on omarchy):
-# tree-next HEAD's brain + app onto :8447 (11-17: the notification digest 038c84ab, the queued-message fix 8f5551d8) — the brain's tests + build, then, once no
+# tree-next HEAD's brain + app onto :8447 (11-17: the notification digest, the queued-message fix, the list ordered by the owner's messages) — the brain's tests + build, then, once no
 # session is working (a brain restart ends a turn in flight, the one that asked for this included),
 # the brain on the new binary and verify-8447.sh (app, live helper, the phone suites incl. the
 # notification spec). The verdict ("== DEPLOY: GREEN|RED …") is posted back into the session that
