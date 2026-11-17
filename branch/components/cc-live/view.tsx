@@ -145,12 +145,15 @@ export function Item({
       <div
         className="text-[13.5px] leading-relaxed break-words"
         data-k="user"
-        data-pending={it.pending ? '' : undefined}
+        data-pending={it.pending ? (it.queued ? 'queued' : '') : undefined}
       >
         <div className="oz-who">
           <span className="text-[var(--oz-success)]">(you)</span>
-          <time>{it.pending ? 'sending…' : clock(it.t)}</time>
-          {it.queued && <span className="text-[10px] text-[var(--oz-dim)]">· while it worked</span>}
+          {/* sent while it worked: it waits its turn, then shows up in the conversation */}
+          <time>{it.pending ? (it.queued ? 'queued' : 'sending…') : clock(it.t)}</time>
+          {it.queued && !it.pending && (
+            <span className="text-[10px] text-[var(--oz-dim)]">· while it worked</span>
+          )}
         </div>
         <span className="whitespace-pre-wrap">{it.text}</span>
       </div>

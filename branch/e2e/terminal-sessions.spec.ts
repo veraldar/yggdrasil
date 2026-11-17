@@ -309,3 +309,32 @@ test('open in a plain terminal: "continue in a new session" — a copy, the orig
     stopTerminal(`[c]laude --resume ${id}`);
   }
 });
+
+test('while it works here, a message typed on the phone is queued and answered after', async ({
+  page,
+}) => {
+  const id = IDS.claude;
+  test.skip(!id, 'no scratch Claude Code conversation');
+  stopTerminal(`[c]laude --resume ${id}`);
+  await expect.poll(() => liveOf(page, id), { timeout: 30_000 }).toBeNull();
+  await page.goto(href('claude', id));
+  const box = page.getByTestId('cc-continue');
+  await expect(box).toBeVisible({ timeout: 20_000 });
+  const first = `first-${tag}`;
+  const second = `second-${tag}`;
+  await box.locator('textarea').fill(`Run the shell command \`sleep 12\`, then reply with exactly: ${first}`);
+  await box.getByRole('button', { name: 'send' }).tap();
+  // bifrost is working on it: the box stays open, a message waits its turn
+  await expect(page.getByTestId('cc-status')).toHaveText(/working here/, { timeout: 60_000 });
+  await expect(box.locator('textarea')).toBeEnabled();
+  await box.locator('textarea').fill(`Reply with exactly: ${second}`);
+  await box.getByRole('button', { name: 'send' }).tap();
+  await expect(page.locator('[data-k="user"][data-pending="queued"]')).toBeVisible();
+  await shot(page, '11-queued');
+  await expect(said(page, first)).toBeVisible({ timeout: 240_000 });
+  await expect(said(page, second)).toBeVisible({ timeout: 240_000 });
+  await expect(page.locator('[data-k="user"][data-pending]')).toHaveCount(0, { timeout: 15_000 });
+  await page.waitForTimeout(8_000);
+  await expect(page.locator('main [role="alert"]')).toHaveCount(0); // the earlier turn's reply was not taken for this one's
+  expect(inConversation('claude', id, second)).toBe(true);
+});

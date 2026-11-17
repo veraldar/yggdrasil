@@ -218,7 +218,7 @@ export default function CcLive({
       const w = waiting.current;
       if (!w) return;
       try {
-        const r = await fetch(`/api/session/${slugify(bif.title)}/messages?limit=2&errors=1`, {
+        const r = await fetch(`/api/session/${slugify(bif.title)}/messages?limit=6&errors=1`, {
           cache: 'no-store',
           headers: { 'X-Session-Pin': bif.id },
         });
@@ -229,8 +229,15 @@ export default function CcLive({
           done?: boolean;
           error?: string;
         }[];
-        const last = Array.isArray(ms) ? ms[ms.length - 1] : null;
-        if (last?.role === 'assistant' && last.done && last.time > w.at && waiting.current === w) {
+        // the reply to THIS message (a queued one waits behind the turn running now: that turn's
+        // reply is not it) — the first assistant message after it
+        const list = Array.isArray(ms) ? ms : [];
+        let mine = -1;
+        list.forEach((m, i) => {
+          if (m.role === 'user' && norm(m.text || '') === norm(w.text)) mine = i;
+        });
+        const last = mine >= 0 ? list.slice(mine + 1).find((m) => m.role === 'assistant') : undefined;
+        if (last?.done && waiting.current === w) {
           setTimeout(() => {
             if (waiting.current !== w) return; // the transcript caught up meanwhile
             waiting.current = null;
@@ -315,7 +322,14 @@ export default function CcLive({
       else await continueHere(text);
       setPending((p) => [
         ...p,
-        { k: 'user', id: `local-${Date.now()}`, t: new Date().toISOString(), text, pending: true },
+        {
+          k: 'user',
+          id: `local-${Date.now()}`,
+          t: new Date().toISOString(),
+          text,
+          pending: true,
+          queued: !canType && busyHere,
+        },
       ]);
       setInput('');
       stick.current = true;
@@ -363,7 +377,9 @@ export default function CcLive({
   const canType = status ? !!status.canType : !!meta?.canType;
   const live: Live = status ? (status.live ?? null) : (meta?.live ?? null);
   // nobody has it open: it continues here, through bifrost
-  const canContinue = !!meta && !canType && !live;
+  // nobody else has it open — or bifrost itself is working on it: then a message waits its turn
+  const canContinue = !!meta && !canType && (!live || live === 'here');
+  const busyHere = live === 'here';
   const [word, colour] = statusWord(status, meta);
   const prompt = status?.prompt || null;
   const label = HARNESS_LABEL[kind] || kind;
@@ -517,7 +533,9 @@ export default function CcLive({
                   ? 'answer the question above first…'
                   : canType
                     ? `message ${meta.name}…`
-                    : 'continue it here…'
+                    : busyHere
+                      ? 'it is working — your message waits its turn…'
+                      : 'continue it here…'
               }
               aria-label="message the session"
               className="oz-ta"
@@ -542,22 +560,20 @@ export default function CcLive({
             <textarea
               disabled
               rows={1}
-              placeholder={live === 'here' ? 'working here…' : 'watch only'}
+              placeholder="watch only"
               aria-label="watch only"
               className="oz-ta opacity-60"
             />
-            {live !== 'here' && (
-              <button
-                onClick={() => void forkHere()}
-                disabled={sending}
-                aria-label="continue in a new session"
-                title="continue in a new session"
-                className="oz-k ok"
-                data-testid="cc-fork"
-              >
-                <LineIcon name="fork" size={16} />
-              </button>
-            )}
+            <button
+              onClick={() => void forkHere()}
+              disabled={sending}
+              aria-label="continue in a new session"
+              title="continue in a new session"
+              className="oz-k ok"
+              data-testid="cc-fork"
+            >
+              <LineIcon name="fork" size={16} />
+            </button>
           </div>
         ))}
     </main>
