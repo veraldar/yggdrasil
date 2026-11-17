@@ -16,7 +16,12 @@ case "$NAME" in preview) PORT=4320 ;; ui) PORT=4321 ;; *) PORT=${CC_LIVE_PORT:?C
 UNIT="rc-$NAME-cclive"
 TOK="$HOME/.cache/root-sim/cc-live.token"
 LOG="$HOME/.cache/root-sim/cc-live-$NAME.log"
-HERE=$(cd "$(dirname "$0")/../yggdrasil/cc-live" && pwd)
+# the helper's code: the tree's (the :8447 brain runs tree-next's since 11-16; CC_LIVE_DIR to override)
+HERE=${CC_LIVE_DIR:-$HOME/Work/tree-next/root/cc-live}
+# full access (11-17, the preview you open only): the owner's key + the grants, outside the brain's
+# sandbox (it binds ~/.cache/root-sim/$NAME, never this) — full-access-enroll.sh writes the key
+ACCESS=()
+[ "$NAME" = preview ] && ACCESS=(--access-dir "$HOME/.cache/root-sim/full-access")
 CLAUDE_BIN=$(command -v claude || true)
 [ -n "$CLAUDE_BIN" ] || CLAUDE_BIN="$HOME/.local/share/mise/installs/claude/latest/claude"
 [ -x "$CLAUDE_BIN" ] || { echo "cc-live: no claude binary"; exit 1; }
@@ -24,8 +29,8 @@ CLAUDE_BIN=$(command -v claude || true)
 systemctl --user stop "$UNIT" 2>/dev/null || true
 systemctl --user reset-failed "$UNIT" 2>/dev/null || true
 systemd-run --user --unit "$UNIT" --collect -q -p "StandardOutput=append:$LOG" -p "StandardError=append:$LOG" \
-  --setenv=HOME="$HOME" --setenv=PATH="$(dirname "$CLAUDE_BIN"):/usr/local/bin:/usr/bin:/bin" \
-  python3 "$HERE/cc_live.py" --port "$PORT" --token-file "$TOK" --claude "$CLAUDE_BIN" --live-file "$HOME/.cache/root-sim/$NAME/harness-live.json"
+  --setenv=HOME="$HOME" --setenv=PATH="$(dirname "$CLAUDE_BIN"):$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin" \
+  python3 "$HERE/cc_live.py" --port "$PORT" --token-file "$TOK" --claude "$CLAUDE_BIN" --live-file "$HOME/.cache/root-sim/$NAME/harness-live.json" "${ACCESS[@]}"
 for _ in $(seq 1 30); do
   [ -s "$TOK" ] && curl -sf -m 3 -H "x-cc-live-token: $(cat "$TOK")" "http://127.0.0.1:$PORT/sessions" >/dev/null && break
   sleep 0.3
