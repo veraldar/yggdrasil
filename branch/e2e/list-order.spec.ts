@@ -33,6 +33,23 @@ async function idle(request: APIRequestContext, id: string) {
   }, { timeout: 150_000, intervals: [2000] }).toBe(true);
 }
 
+/** a turn that did not pass the app (sent from another session): its end, as the brain sees it —
+ *  the newest message a finished reply, nothing after it */
+async function brainIdle(request: APIRequestContext, id: string) {
+  await expect.poll(async () => {
+    const ms = (await (await request.get(`${OC}/session/${id}/message`)).json()) as { info: { role: string; time: { completed?: number } } }[];
+    const last = ms[ms.length - 1];
+    return last?.info?.role === 'assistant' && !!last.info.time.completed;
+  }, { timeout: 150_000, intervals: [2000] }).toBe(true);
+}
+
+/** the app keeps the list a minute: a new session (made and deleted at once) starts it fresh */
+async function freshList(request: APIRequestContext) {
+  const r = await request.post('/api/session', { data: { name: `e2e-order-bust-${tag}` } });
+  const id = (await r.json()).id;
+  if (id) await request.delete(`/api/session/${id}`);
+}
+
 /** the list's order on the phone: row titles top to bottom, without their [TAG] */
 const titles = async (page: Page) =>
   (await page.locator('.oz-row .t').allTextContents()).map((t) => t.replace(/^\[[A-Z]{3}\]\s*/, ''));
@@ -56,9 +73,10 @@ test("a reply never moves a session up; the owner's own message does", async ({ 
     data: { parts: [{ type: 'text', text: 'Reply with exactly: a-2' }] },
   });
   expect(r.ok(), await r.text()).toBe(true);
-  await page.waitForTimeout(3000);
-  await idle(request, A.id);
-  await idle(request, B.id);
+  await brainIdle(request, A.id);
+  await page.waitForTimeout(3000); // B hears that A finished (its own turn, a report): let it end
+  await brainIdle(request, B.id);
+  await freshList(request);
   const [a, b] = [await rowOf(request, A.id), await rowOf(request, B.id)];
   expect(a!.lastAt!, 'A has a newer reply than B’s message').toBeGreaterThan(b!.userAt!);
   expect(b!.userAt!, 'B: the owner wrote there last').toBeGreaterThan(a!.userAt!);
