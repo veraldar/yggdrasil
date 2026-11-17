@@ -85,9 +85,17 @@ test('home: the tree nests 3 deep under MAIN, cards speak, closed sessions wait'
   await expect(row(page, 'Habit tracker CLI').locator('.oz-st')).toHaveCount(0);
   await expect(pages.locator('.oz-r2')).toHaveText('3 recipe pages + shared stylesheet written');
 
-  // MAIN's subtree comes before the other top-level sessions
-  const order = (await page.locator('ul > li .oz-row .t').allTextContents()).map((t) => t.replace(/^\[[A-Z]{3}\]\s*/, ''));
-  expect(order.indexOf('Static recipe site')).toBeLessThan(order.indexOf('garden plan'));
+  // one list, the owner's own newest message first (11-17): MAIN's sub-tree is not pinned above
+  // the rest — the top-level rows follow the list's userAt
+  const order = await page.locator('.oz-row').evaluateAll((rows) =>
+    rows
+      .filter((el) => !el.closest('.oz-kids')) // the top-level rows only
+      .map((el) => (el.querySelector('.t')?.textContent || '').replace(/^\[[A-Z]{3}\]\s*/, ''))
+  );
+  const at = new Map(((await (await request.get('/api/session')).json()) as { title: string; userAt?: number }[]).map((r) => [r.title, r.userAt || 0]));
+  const tops = order.filter((t) => at.has(t));
+  expect(tops.length).toBeGreaterThan(1);
+  for (let i = 1; i < tops.length; i++) expect(at.get(tops[i - 1])!, `${tops[i - 1]} before ${tops[i]}`).toBeGreaterThanOrEqual(at.get(tops[i])!);
 
   // closed sessions: hidden behind "N closed", per parent
   await expect(row(page, 'Old layout draft')).toHaveCount(0);

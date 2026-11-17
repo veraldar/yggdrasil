@@ -86,6 +86,15 @@ test("a reply never moves a session up; the owner's own message does", async ({ 
   await expect(page.locator('.oz-row .t', { hasText: A.name })).toBeVisible();
   let order = await titles(page);
   expect(order.indexOf(B.name), 'on the phone too').toBeLessThan(order.indexOf(A.name));
+  // the whole list, not only these two: the top-level rows follow the owner's own messages
+  // (MAIN's sub-sessions no longer sit above the rest)
+  const at = new Map((await rows(request)).map((x) => [x.title, x.userAt || 0]));
+  const tops = (
+    await page.locator('.oz-row').evaluateAll((els) =>
+      els.filter((el) => !el.closest('.oz-kids')).map((el) => (el.querySelector('.t')?.textContent || '').replace(/^\[[A-Z]{3}\]\s*/, ''))
+    )
+  ).filter((t) => at.has(t));
+  for (let i = 1; i < tops.length; i++) expect(at.get(tops[i - 1])!, `${tops[i - 1]} before ${tops[i]}`).toBeGreaterThanOrEqual(at.get(tops[i])!);
   await page.screenshot({ path: 'test-results/order-1-reply-stays.png' });
   // the owner writes in A: A goes up
   await say(request, A, 'Reply with exactly: a-3');

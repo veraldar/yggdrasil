@@ -821,13 +821,9 @@ export default function SessionsPage() {
           )
         ) : (
           <ul className="flex flex-col gap-1">
-            {/* MAIN's own sub-tree first (MAIN itself is the roots), then
-                the other top-level sessions — each nests to any depth */}
-            {group(
-              sortTop(tops.filter((s) => !!s.parentId && byId.has(s.parentId))),
-              'closed:main'
-            )}
-            {group(sortTop(tops.filter((s) => !s.parentId || !byId.has(s.parentId))), 'closed:top')}
+            {/* one list, the owner's own newest message first (11-17) — MAIN's sub-tree no
+                longer sits above the rest (MAIN itself is the roots); each nests to any depth */}
+            {group(sortTop(tops), 'closed:top')}
           </ul>
         )}
       </main>
