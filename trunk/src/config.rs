@@ -45,6 +45,12 @@ pub struct ApDialSection {
     /// raw TCP forwards the ap may name → local target, e.g. { livekit-ice = "127.0.0.1:7881" }
     #[serde(default)]
     pub tcp: std::collections::HashMap<String, String>,
+    /// the pinned channel's ICE over TCP: where phones dial it (the ap's :443).
+    /// Absent = the ap url's host on :443, resolved at start; [] = off. Its
+    /// connections arrive on the `livekit-ice` raw forward and are told apart
+    /// from LiveKit's by the STUN username.
+    #[serde(default)]
+    pub ice_tcp: Option<Vec<String>>,
     /// where a `/rootlink` stream from the ap goes (a remote root dialing
     /// wss://<ap>/rootlink): default = this bridge's root-link listener;
     /// "off" = /rootlink is not routed (it falls through to the app upstream)
@@ -120,6 +126,19 @@ pub struct RootLinkConfig {
     /// a turn on a real brain can take minutes; default 20
     #[serde(default = "default_result_secs")]
     pub result_secs: u64,
+    /// the root <-> root leg (wg.rs): this bridge's loopback UDP socket for the hub's own
+    /// WireGuard node (that node's `relay`). Binary root-link frames are relayed root -> root
+    /// without it; `local` needs both wg_relay and wg_local.
+    #[serde(default)]
+    pub wg_relay: Option<String>,
+    /// the hub's own WireGuard node (its `udp`), where frames addressed `local` go
+    #[serde(default)]
+    pub wg_local: Option<String>,
+    /// the OLD root <-> root path: brain calls as plaintext `http` ops through the switchboard
+    /// (`/_root/<id>/` and a root's `local`). Off unless set true — for roots joined before
+    /// the WireGuard leg, which have no pinned key yet.
+    #[serde(default)]
+    pub plaintext_http: bool,
 }
 
 fn default_result_secs() -> u64 {

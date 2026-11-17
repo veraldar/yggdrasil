@@ -1,22 +1,26 @@
 /** The voice line's one way in: POST /api/token (room = session slug) — shared
  *  by MAIN's composer (app/session/[slug]) and the roots (lib/roots-voice).
  *
- *  Voice is a STATE of the connection, never an error: a phone paired through
- *  the trunk (devices mode, reached via the access point) has no LiveKit it
- *  can reach — voice over the trunk is not built yet (it comes with WebRTC
- *  through the access point's TURN). The route says so as
+ *  Voice is a STATE of the connection, never an error: where voice cannot work
+ *  (no LiveKit on the box, or a browser that is not a paired device in devices
+ *  mode) the route says so as
  *  `503 {error:"voice-unavailable", why}`; the first such answer is kept for
  *  the life of the page, so the mic and hands-free controls show one calm
  *  line and never ask again (no retry storm). Any other answer it cannot read
  *  — an empty 500, a proxy's HTML — is a plain error with a clear message,
- *  never the raw "Unexpected end of JSON input". */
+ *  never the raw "Unexpected end of JSON input".
+ *
+ *  Over the trunk (devices mode) the token carries `iceTcp`: the access
+ *  point's ICE-TCP address, which lib/trunk-ice.ts adds to every peer
+ *  connection — the media then rides vps:443 to the box, DTLS-SRTP end to end. */
+import { type IceTcp, trunkIce } from '@/lib/trunk-ice';
 
 export const VOICE_UNAVAILABLE = 'voice-unavailable';
 
 /** the one line the app shows for it */
 export const VOICE_OFF_NOTE = {
-  en: "Voice isn't available over the trunk yet — type instead",
-  fr: 'La voix ne passe pas encore par le tronc — écrivez plutôt',
+  en: "Voice isn't set up on your home computer — type instead",
+  fr: "La voix n'est pas installée sur votre ordinateur — écrivez plutôt",
 } as const;
 
 export type VoiceToken = {
@@ -24,6 +28,7 @@ export type VoiceToken = {
   roomName: string;
   participantName: string;
   participantToken: string;
+  iceTcp?: IceTcp[];
 };
 
 export class VoiceUnavailable extends Error {
@@ -101,5 +106,7 @@ export async function voiceToken(room: string): Promise<VoiceToken> {
           : raw.slice(0, 120);
     throw new Error(`no voice token (${r.status} — ${said})`);
   }
-  return d as unknown as VoiceToken;
+  const t = d as unknown as VoiceToken;
+  trunkIce(t.iceTcp);
+  return t;
 }

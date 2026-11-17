@@ -95,7 +95,9 @@ export function setPlayFailHandler(f: (() => void) | null): void {
   playFailHandler = f;
 }
 
-const SAMPLE_RATE = 24000;
+// the stream's own rate (X-Sample-Rate): 24 kHz from the Mac's Kokoro, 16 kHz from the box's
+// bifrost-voice (piper) — a fixed 24000 played those replies 1.5× fast and high
+let SAMPLE_RATE = 24000;
 const PIECE_SEC = 10; // wav blob length for the playlist
 const SEC_PER_CHAR = 0.075;
 
@@ -118,6 +120,7 @@ let state: SpeechState = {
   rate: initialRate(),
 };
 const subs = new Set<() => void>();
+import { ttsStream } from '@/lib/voice-tts';
 import { diagEvent } from '@/lib/diag';
 import { stripMarkers } from '@/lib/tree-first';
 function set(patch: Partial<SpeechState>) {
@@ -173,19 +176,51 @@ function setPhase(p: SpeechPhase) {
   if (state.phase !== p) set({ phase: p });
 }
 
-function detectLang(s: string): 'fr' | 'en' {
-  if (/[àâçéèêëîïôùûüœ]/i.test(s)) return 'fr';
-  const fr = (
-    s.toLowerCase().match(
-      /\b(le|la|les|un|une|des|du|et|est|que|qui|pour|avec|dans|pas|vous|je|sur|au|aux|ce|cette|mais|plus|tout|tous|par|comme|il|elle|on|nous|son|sa|ses|ne|se|en|y|déjà|très|alors|donc|corriger|corrigé|déployer|déployé|deploye|tester|testé|changer|changé|voix|faut|était|peux|veux|vais|voilà|merci|parce|pendant|depuis|encore|aussi|besoin)\b/gi
-    ) || []
-  ).length;
-  const en = (
-    s.toLowerCase().match(
-      /\b(the|and|is|are|you|for|with|this|that|have|not|was|from|but|they|will|can|what|when|how|should|would|there|then|again)\b/gi
-    ) || []
-  ).length;
-  return fr >= 1 && fr >= en ? 'fr' : 'en';
+/** The voice's language for one reply (the FR or the EN model). Only WORDS count: code,
+ *  paths, URLs, numbers and symbols go first. A reply too short to tell — under 8 words, or no
+ *  clear majority — speaks the session's language (the last reply here long enough to tell),
+ *  else the person's own (the door's answer, else the phone's). voice-fixes 11-14: "On it →
+ *  notes-api." went to the French voice — "on" alone outvoted nothing. Words both languages use
+ *  (on, en, y, son, sa, plus, ce, a) are never evidence. */
+const FR_WORDS = new Set(
+  'le la les un une des du et est que qui pour avec dans pas vous je sur au aux cette mais tout tous par comme il elle nous ses ne se déjà très alors donc corriger corrigé déployer déployé tester testé changer changé voix faut était peux veux vais voilà merci parce pendant depuis encore aussi besoin oui non fait fini bien'.split(' ')
+);
+const EN_WORDS = new Set(
+  'the and is are you for with this that have not was from but they will can what when how should would there then again it its i i\'ve i\'ll i\'m your done to of in my me we our be been has had did does just now'.split(' ')
+);
+const langBySlug = new Map<string, 'fr' | 'en'>();
+
+function personLang(): 'fr' | 'en' {
+  try {
+    const p = JSON.parse(localStorage.getItem('bifrost-onboard') || '{}') as { lang?: string };
+    if (p.lang === 'fr' || p.lang === 'en') return p.lang;
+  } catch {
+    /* private mode */
+  }
+  return typeof navigator !== 'undefined' && /^fr/i.test(navigator.language || '') ? 'fr' : 'en';
+}
+
+export function detectLang(s: string, slug = ''): 'fr' | 'en' {
+  const words = (
+    s
+      .replace(/https?:\/\/\S+/g, ' ')
+      .replace(/\S*[/\\]\S*/g, ' ') // paths
+      .replace(/\S+\.(py|ts|tsx|js|json|md|csv|txt|sh|rs|html|css|toml|yaml|yml)\b/gi, ' ')
+      .toLowerCase()
+      .match(/\p{L}+(?:['’]\p{L}+)?/gu) || []
+  ).map((w) => w.replace('’', "'"));
+  let fr = 0;
+  let en = 0;
+  for (const w of words) {
+    if (FR_WORDS.has(w) || /[àâçéèêëîïôùûüœ]/.test(w)) fr++;
+    else if (EN_WORDS.has(w)) en++;
+  }
+  const fallback = langBySlug.get(slug) || personLang();
+  if (words.length < 8) return fallback;
+  const lang = fr >= 2 && fr > en * 1.5 ? 'fr' : en >= 2 && en > fr * 1.5 ? 'en' : null;
+  if (!lang) return fallback;
+  langBySlug.set(slug, lang); // the session's language, for its next short reply
+  return lang;
 }
 
 function ensureEls(): [HTMLAudioElement, HTMLAudioElement] {
@@ -195,11 +230,39 @@ function ensureEls(): [HTMLAudioElement, HTMLAudioElement] {
       a.preload = 'auto';
       (a as HTMLAudioElement & { playsInline?: boolean }).playsInline = true;
       a.addEventListener('ended', () => onPieceEnded(a));
+      a.addEventListener('pause', () => onForeignPause(a));
       return a;
     };
     els = [make(), make()];
   }
   return els;
+}
+
+/** A REPLY THAT GOES SILENT (voice-fixes 11-14): the browser itself paused the playing piece —
+ *  no pause button, no voice command, not its end (the rig caught it 0.5 s and 5.6 s into a
+ *  reply; a phone does it on an audio-focus or route change). The deck still said "speaking",
+ *  so hands-free waited on it for minutes. It plays on; when it cannot (or keeps being paused),
+ *  the deck closes and the page gets its mic back — never a silent "speaking". */
+let foreignPauses = 0;
+function onForeignPause(el: HTMLAudioElement): void {
+  if (!els || el !== els[activeEl] || el.ended || userPaused || state.phase !== 'playing') return;
+  const myGen = gen;
+  setTimeout(() => {
+    if (gen !== myGen || !els || el !== els[activeEl] || !el.paused || el.ended || userPaused) return;
+    if (state.phase !== 'playing') return;
+    foreignPauses++;
+    diagEvent('tts', `the reply's audio was paused by the browser at ${el.currentTime.toFixed(1)}s — playing on (${foreignPauses})`);
+    if (foreignPauses > 3) {
+      stopSpeech();
+      playFailHandler?.();
+      return;
+    }
+    void el.play().catch((e) => {
+      console.warn('tts resume after a foreign pause failed:', String(e));
+      stopSpeech();
+      playFailHandler?.();
+    });
+  }, 300);
 }
 
 function onPieceEnded(el: HTMLAudioElement): void {
@@ -366,13 +429,10 @@ async function run(text: string, myGen: number): Promise<void> {
   // the route holds the connection up to 10 min, a mid-stream death
   // otherwise looked exactly like the eternal "synthesizing…" of 09-30
   try {
-    const res = await fetch('/api/tts/stream', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text, lang: msgLang }),
-      signal: abort!.signal,
-    });
+    // over the trunk the reply's sound rides the voice room (lib/voice-tts.ts), else https
+    const res = await ttsStream({ text, lang: msgLang }, abort!.signal);
     if (!res.ok) throw new Error(`tts ${res.status}: ${(await res.text()).slice(0, 120)}`);
+    SAMPLE_RATE = Number(res.headers.get('X-Sample-Rate')) || 24000;
     const reader = res.body!.getReader();
     let carry = new Uint8Array(0);
     while (true) {
@@ -458,7 +518,8 @@ export function startSpeech(text: string, slug = ''): void {
   spokenText = clean; // the echo ledger: what is about to go out loud
   spokenPlayedChars = 0; // nothing has played yet — the whole text is live evidence
   spokenAt = Date.now();
-  msgLang = detectLang(clean.slice(0, 600)); // ONE language per message
+  msgLang = detectLang(clean.slice(0, 600), slug); // ONE language per message
+  foreignPauses = 0;
   userPaused = false;
   ensureEls();
   abort = new AbortController();

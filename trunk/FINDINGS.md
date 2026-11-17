@@ -457,3 +457,154 @@ phone) and `trunk/deploy/sni-443-test.py`.
 
 **Not proven:** real Let's Encrypt (Pebble speaks the same ACME, but the run never leaves docker),
 a real VPS provider's firewall and DNS, IPv6 end to end, voice over the trunk (not wired).
+
+## Root ↔ root inside WireGuard (trunk-wg, 2026-11-14)
+
+Until now the VPS (TLS ends there) and the hub's bridge could read every brain call between
+roots: the switchboard carried them as `http` ops with the body in base64. Now each root runs a
+`bifrost-net wg` node (trunk/src/wg.rs): boringtun + a userspace TCP stack (smoltcp), no TUN, no
+privileges. The brain only gets URLs (`/_wg/<root>/…` on the node's loopback front door) and is
+unchanged. The datagrams ride the root link as binary ws frames; the bridge relays them by
+address (root → root under the claim law, root ↔ the hub's node over a loopback UDP pair) and
+drops anything not WireGuard-shaped. Each root's key is pinned when the phone approves its join
+(docs/spec-join.md). The plaintext switchboard is off unless `plaintext_http = true`.
+
+- **A relay that rewrites the source is what binds a key to a link.** The bridge stamps every
+  frame with the id of the link it came in on; the hub's node drops a pinned key arriving on any
+  other link (`wrong_link`). A copied private key is useless from another root's link.
+- **Revocation finally cuts a live root.** The hub's node re-reads roots.json + devices.json every
+  second: revoking the approving device, or `revoked: true` on the root, drops its peer and resets
+  its streams, while the ws link stays up (the old gap: links already up were never cut).
+- **40 ms per call was Nagle.** The first tunnel bench gave 43 ms medians against 3 ms on the old
+  path: root-dial.py's socket had no TCP_NODELAY, so each small WireGuard frame waited for a
+  delayed ACK. In-process the tunnel is 0.6 ms. With TCP_NODELAY the two paths are within noise.
+- **boringtun does not pad transport data** (the spec says pad to 16; it sends the exact size), so
+  the relay's shape check is `type 4, ≥ 32 bytes`, not a multiple of 16.
+- **A burst of calls found the far side's door shut.** smoltcp gives one connection per listening
+  socket; with 4 kept ready, the 9th of 16 simultaneous calls was refused. Now 16 listen, and a
+  refused connect is retried inside the 10 s connect window: 40 calls at once pass both ways.
+- **A restarted hub node waited 11 s** for WireGuard's own retry. Every node now dials each peer
+  until its first handshake (static peer every 2 s, pinned roots every 5 s): 1 s.
+
+**Proof:** `cargo test` (wg: two nodes through a fake relay, both ways, header law, 300 KB, 40
+concurrent calls, the
+relay sees WireGuard only, replay + tamper dropped, unpinned key refused, revoke cuts),
+`scripts/rootlink-sim.py` T15 (the real bridge's relay law), `sim/trunk-roots-e2e.py` (real brains
+through the ap; a tap where the ap hands the link to the bridge; unapproved key, stolen key,
+replay, tamper; revoke/restore/root revoke; node restart; `--rekey` 200 s; `--plaintext` baseline),
+`sim/trunk-full-e2e.sh` (the phone sees the fingerprint and approves; revoking it cuts the tunnel).
+
+**Not proven (then):** the real installer; joined ↔ joined roots — both done below. Still not: a
+direct UDP leg; a real VPS and its packet loss (TCP inside the link's TCP); a hub restart with
+roots linked for hours (only the node restart is simulated).
+
+### Real machines: join.sh, the directory, macOS (trunk-wg, 2026-11-14, later)
+
+- **join.sh runs the node.** It finds or downloads (Linux/WSL x86_64, SHA256SUMS) or builds
+  (macOS) `bifrost-net`, makes the key before the join, shows the fingerprint, and supervises
+  `bifrost-net wg` as a third service (systemd --user, launchd, nohup). A keyless root re-joins
+  by itself. join-test.sh's fake hub learns the key and grants the tunnel; it also serves a fake
+  release, and a tampered asset is refused.
+- **`NET_SRC=$(find_net)` ended join.sh in silence** when no binary was found: the function's last
+  test failed, and a failing `$(…)` in an assignment trips `set -e`. `find_brain` had the same
+  latent bug (a machine without a brain binary never reached the cargo build). Both end in
+  `return 0` now.
+- **The Linux binary links libopus.** In a clean ubuntu:24.04 the repo build stopped with
+  `libopus.so.0: cannot open shared object file`. join.sh now names the package, wsl-bootstrap.sh
+  installs `libopus0` with the rest, and the docker run lists it as a runtime need (as trunk.sh
+  already did on the VPS).
+- **macOS cannot be cross-checked here.** `cargo check --target aarch64-apple-darwin` stops in
+  C build scripts (ring, libopus) without the macOS SDK: it must be built on the Mac. It also
+  showed that CMake ≥ 4 refuses the bundled libopus (`Compatibility with CMake < 3.5 has been
+  removed`; `CMAKE_POLICY_VERSION_MINIMUM=3.5` fixes that). On the real Mac the full build then
+  failed anyway: no cmake at all.
+- **A joined root needs none of that: the root build.** opus, str0m (whose aws-lc-sys also
+  build-depends on cmake), the access point's TLS stack and the mesh lab sit behind the default
+  `bridge` feature. `cargo build --release --no-default-features` builds keygen, wg-key, wg and
+  rootlink mint only: no cmake, no libopus (in `rust:1-bookworm`, which has neither, it builds in
+  50 s while the full build fails in audiopus_sys); 69 s clean here, 4.8 MB, links only libc.
+  join.sh builds that one wherever it builds (macOS; Linux when the release cannot be fetched),
+  into `trunk/target/root`, and a release may ship it as `bifrost-net-root-<ver>-linux-<arch>`
+  (join.sh prefers it: no libopus0 needed).
+- **Joined roots reach each other through a directory, not the claim.** The hub's node serves
+  `/_wg/directory` inside the tunnel; joined nodes refresh it every 5 s and drop a copy older than
+  20 s. The relay now carries root → root between any two linked roots: keys decide, not the
+  link-token claim (which still gates the plaintext switchboard). Revoking a root takes it off
+  the others in ~5 s; revoking the device that approved them all, in ≤ 20 s.
+
+**Proof:** `cargo test` (a fourth node: B ↔ D via the directory, the unpinned C in none, revoking
+D drops it from B), rootlink-sim T15, trunk-roots-e2e (mac ↔ lab, brains learn each other, a
+session on lab reports to mac, the tap sees WireGuard only for the pair, a rogue holding mac's
+key is refused by mac), trunk-full-e2e 4e–4h (a third root approved on the phone; the tap where
+the ap hands the links over: 202 mac ↔ lab frames, all WireGuard), join-test.sh (local + docker
+ubuntu:24.04), win/launcher-test.sh (wine).
+
+## The end design in one world (trunk-e2e, 2026-11-14)
+
+`trunk-wg` and `trunk-rtc` merged (no textual conflict: both touched bridge.rs, bridge_main.rs,
+config.rs, trunk-full.spec.ts and root/install/README.md in separate hunks; str0m stays under the
+`bridge` feature, the root build compiles neither the ap nor the bridge). `sim/trunk-e2e.sh` puts
+all of it in one world, tcp 443 only (nftables per namespace): the phone, the VPS (sni-443.py, the
+ap, `vps-eye.py` with the ap's TLS key, the ICE tap), the hub (bridge, app, LiveKit, the real agent
+with whisper-tiny + piper, the hub brain on the mock, the hub's WireGuard node) and two machines
+that join (each its brain on its own mock, its node from the ROOT build, root-dial.py).
+
+- **One utterance does the whole tree.** The phone holds the roots and says "Start a session on
+  mac and have it start a session on lab to say lab done." (a WAV as the mic): LiveKit over
+  ICE-TCP <vps>:443 → the agent's STT → MAIN → `session_start` on mac (WireGuard) → mac's lead
+  starts one on lab (the hub's relay, still WireGuard) → lab reports to mac's session → mac
+  reports home. MAIN's reply is spoken over the room. The mock reads "start a session on <root>
+  and <brief>" as `session_start` (root/mock/mock_upstream.py): what a compliant model would do.
+- **Typical run:** pinned 2.6–3.2 s after the claim, /api over it 225–275 ms per call; QR →
+  approved 2.5–3.2 s, → linked 2.9–5.4 s; hold → talk 2.3–2.9 s; release → transcript in MAIN
+  1.9 s, → the session on mac 1.9–2.2 s, → speaking 2.1–2.8 s, → lab done 2.6–2.9 s, → mac's
+  report home 3.9–4.0 s; revoke → out of the room, channel severed, hub ↛ mac/lab 0.5–1.1 s,
+  mac ↛ lab 17.5–19 s (the directory's 20 s staleness).
+- **What the VPS read** (its own decrypted view): after pairing 52 phone requests, all page loads,
+  `/sw.js` and `POST /offer` — 0 API calls, 0 of 9 app strings in ~2.8 MB; on the root links
+  380–450 binary frames, all WireGuard (110–140 mac ↔ lab), text ops only
+  root-link/ok/ping/pong; the media STUN/DTLS/SRTP only.
+- **A short English reply was spoken in French.** "On its way to mac: → on mac." went to the
+  French voice (the app's language pick), so the room carried French phonemes and the STT heard
+  "I'm going to make a mess." The mock's line is plain English now; the pick on short text with
+  symbols is not fixed.
+- **The first syllables can be lost.** With the speech 0.4 s into the WAV, one run heard "Charge
+  Session on Mac…" and MAIN did not delegate. The fixture leads with 1.5 s of silence; a person
+  who speaks the instant the tone sounds may be clipped the same way (not measured on a phone).
+- **The real installers did not carry the end design** (`sim/own-trunk-e2e.sh` stage a: RED, 9 of
+  12 phone steps). install.sh never started the hub's WireGuard node, and with `plaintext_http`
+  off a joined root reached nothing; now `install.sh --trunk` makes the hub's key, runs
+  `bifrost-wg.service` (BIFROST_WG_* ports) and points the bridge, the brain and the app at it.
+  join.sh's node links libopus (the full release build): the joining machine needs libopus0. And
+  `--skip livekit` still wrote LIVEKIT_* into app.env, so the app minted voice tokens for a LiveKit
+  that never ran (the phone's mic stuck connecting, no calm line): those lines are written only
+  when LiveKit runs. The phone needs `--ignore-certificate-errors` on the test certificate (the
+  service worker). Stage a: GREEN after.
+
+### Revocation in a second, a hub restart, the VPS kit (trunk-e2e, 2026-11-14, later)
+
+- **Revoked roots kept talking for 18 s.** Revoking the phone that approved mac and lab cut both
+  at the hub at once, but mac ↔ lab went on through the relay until each node's copy of the
+  directory went stale (20 s): a revoked root cannot fetch a new one, its tunnel to the hub is
+  gone. Now the hub's node pushes every directory change into each tunnel (`PUT /_wg/directory`,
+  versioned) and keeps a revoked peer's key for at most 2 s, only for that push (nothing else
+  is opened to it or accepted from it). Combined world: mac and lab drop each other 0.96–1.5 s
+  after the tap, the hub 0.8–1.2 s; cargo test: 0.8 s. The 5 s fetch and 20 s staleness stay as
+  the fallback.
+- **After a hub restart the voice leaked to the VPS.** The phone's pinned channel came back by
+  itself, but meanwhile LiveKit's reconnect opened `/rtc` (its access token in the URL) over the
+  trunk's TLS: the patched WebSocket only tunnelled while `pinned`. And a channel that failed its
+  one retry fell back to the trunk's TLS for good. Now a page that had the channel and lost it is
+  `reconnecting`: requests wait, then 503 `pin-reconnecting`; websockets wait for the channel;
+  the offer is retried with backoff (0.5–8 s); fallback is a first-contact answer only, and a 401
+  from the box (a revoked phone) still ends in pairing. Combined world, brain + bridge + wg node
+  restarted: the ap channel 0.3 s, the tunnels 5.6–6.7 s (the hub dials a root every 5 s until
+  its first handshake), the phone pinned again 6.8–7.9 s (it notices the drop ~5 s in), the voice
+  room rejoined, 0 app calls through the VPS, no re-pairing, no re-join.
+- **The active MITM in the combined world**: the VPS swaps the box key in the `/offer` answer →
+  a fresh phone says "box key mismatch — nothing sent", 0 API calls cross.
+- **The VPS kit** (`trunk/deploy/vps-443/`): sni-443.py with a config that keeps today's three
+  :443 rules and adds ICE-TCP → the ap's `livekit-ice` forward. `superset-test.py --old` runs the
+  owner's own dispatcher test, unmodified, against it (9/9 PASS); the ported cases + 4 ICE cases
+  pass too. Difference outside every test: a connection that closes before 8 bytes goes to the
+  website instead of being dropped.

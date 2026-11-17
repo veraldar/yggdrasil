@@ -44,6 +44,9 @@ export async function GET(req: Request, ctx: { params: Promise<{ id: string }> }
     // ?log=1: the full log — the brain's internal turns too (?internal=1) and
     // each message's tool calls as `log` lines. Default answer unchanged
     const log = new URL(req.url).searchParams.get('log') === '1';
+    // ?errors=1: a turn that failed is listed too, with the brain's reason (`error`) — the live
+    // page of a terminal's conversation says why a message sent from it never got there
+    const errors = new URL(req.url).searchParams.get('errors') === '1';
     const msgs = await ocFetch(`/session/${sid}/message${log ? '?internal=1' : ''}`);
     const out = msgs.map((m: any) => {
       const text = stripCtx(
@@ -70,13 +73,14 @@ export async function GET(req: Request, ctx: { params: Promise<{ id: string }> }
         done:
           (m.info?.role || m.role) === 'assistant' ? !!m.info?.time?.completed : undefined,
         autoReply: m.info?.meta?.autoReply === true ? true : undefined,
+        ...(errors && m.info?.error && { error: String(m.info.error?.data?.message || m.info.error?.name || 'error') }),
         ...(log && {
           internal: m.info?.meta?.internal === true ? true : undefined,
           log: (m.parts || []).filter((p: any) => p.type === 'tool').map(toolLine),
         }),
       };
     });
-    const all = out.filter((m: any) => m.text || m.images.length || m.log?.length);
+    const all = out.filter((m: any) => m.text || m.images.length || m.log?.length || m.error);
     // run state for the busy indicator: opencode emits one assistant message
     // per step, so "an assistant message landed" ≠ "the run is done". The run
     // is done only when the last relevant message is an assistant message with

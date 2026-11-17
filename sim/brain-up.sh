@@ -3,10 +3,11 @@
 # (the live env's key), its own data dir + workspace under ~/.cache/root-sim/NAME, sandboxed
 # (ProtectHome=tmpfs: only the workspace and the binary are visible under /home).
 # brain-up.sh NAME down — stop it.   State: ~/.cache/root-sim/NAME/{data,work,brain.log}
+# SIM_UPSTREAM_BASE_URL: another door to the same upstream (sim/voice/upstream_tap.py measures it)
 set -euo pipefail
 NAME=${1:?name}; PORT=${2:?port|down}
 ROOT="$HOME/.cache/root-sim/$NAME"; UNIT="rootsim-$NAME"
-if [ "$PORT" = down ]; then systemctl --user stop "$UNIT" 2>/dev/null || true; exit 0; fi
+if [ "$PORT" = down ]; then systemctl --user stop "$UNIT" "$UNIT-secrets" 2>/dev/null || true; exit 0; fi
 BIN=${3:-$(cd "$(dirname "$0")/../root" && pwd)/target/release/yggdrasil}
 mkdir -p "$ROOT/data/session" "$ROOT/work/artifacts" "$ROOT/bin"
 cp -f "$BIN" "$ROOT/bin/yggdrasil"           # frozen copy: a rebuild never swaps a running sim
@@ -34,6 +35,24 @@ if [ "${SIM_HARNESS:-0}" = 1 ]; then
     -p "BindReadOnlyPaths=-$HOME/.local/bin/agy"
     --setenv=XDG_CONFIG_HOME="$ROOT/xdgc" --setenv=XDG_CACHE_HOME="$ROOT/xdg-cache" --setenv=XDG_STATE_HOME="$ROOT/xdg-state")
   SIMHOME="$HOME"
+  # agy's Google sign-in: a filtered D-Bus proxy that reads THAT keyring item only (as preview-up.sh)
+  SS=org.freedesktop.secrets SP=/org/freedesktop/secrets SBUS="$ROOT/secrets.bus"
+  systemctl --user stop "$UNIT-secrets" 2>/dev/null || true; systemctl --user reset-failed "$UNIT-secrets" 2>/dev/null || true
+  rm -f "$SBUS"
+  AGY_ITEM=$(busctl --user --json=short call "$SS" "$SP/aliases/default" org.freedesktop.Secret.Collection SearchItems 'a{ss}' 2 service gemini username antigravity 2>/dev/null |
+    python3 -c 'import json,sys; d=json.load(sys.stdin)["data"][0]; print(d[0] if d else "")' 2>/dev/null || true)
+  if [ -n "$AGY_ITEM" ]; then
+    mkdir -p "$ROOT"
+    systemd-run --user --unit "$UNIT-secrets" --collect -q \
+      xdg-dbus-proxy "${DBUS_SESSION_BUS_ADDRESS:-unix:path=/run/user/$(id -u)/bus}" "$SBUS" --filter \
+      --call="$SS=org.freedesktop.DBus.Properties.Get@$SP" --call="$SS=org.freedesktop.Secret.Service.OpenSession@$SP" \
+      --call="$SS=org.freedesktop.Secret.Service.Unlock@$SP" --call="$SS=org.freedesktop.Secret.Collection.SearchItems@$SP/aliases/default" \
+      --call="$SS=org.freedesktop.Secret.Item.GetSecret@$AGY_ITEM" --call="$SS=org.freedesktop.Secret.Session.Close@$SP/session/*"
+    for _ in $(seq 1 40); do [ -S "$SBUS" ] && break; sleep 0.1; done
+    HARNESS_PROPS+=(--setenv=DBUS_SESSION_BUS_ADDRESS="unix:path=$SBUS" --setenv=AGY_CLI_DISABLE_AUTO_UPDATE=1)
+  fi
+  # SIM_BINDS="dir …": the owner's folders a sim's harness sessions continue in (read-write)
+  for b in ${SIM_BINDS:-}; do HARNESS_PROPS+=(-p "BindPaths=$b"); done
   HPATH="$HOME/.local/share/mise/installs/claude/latest:$HOME/.local/share/mise/installs/opencode/latest:$HOME/.local/share/mise/installs/codex/latest/bin:$HOME/.local/bin:"
 fi
 systemctl --user stop "$UNIT" 2>/dev/null || true
@@ -42,7 +61,7 @@ systemd-run --user --unit="$UNIT" --collect -q \
   -p ProtectHome=tmpfs -p "BindPaths=$ROOT" -p "BindReadOnlyPaths=$HOME/.cache/root-sim/_venv$RO_PROFILES" "${HARNESS_PROPS[@]}" \
   --setenv=XDG_DATA_HOME="$ROOT/xdg" \
   -p StandardOutput="append:$ROOT/brain.log" -p StandardError="append:$ROOT/brain.log" \
-  --setenv=YGG_UPSTREAM_BASE_URL="$YGG_UPSTREAM_BASE_URL" --setenv=YGG_UPSTREAM_API_KEY="$YGG_UPSTREAM_API_KEY" \
+  --setenv=YGG_UPSTREAM_BASE_URL="${SIM_UPSTREAM_BASE_URL:-$YGG_UPSTREAM_BASE_URL}" --setenv=YGG_UPSTREAM_API_KEY="$YGG_UPSTREAM_API_KEY" \
   --setenv=YGG_UPSTREAM_STYLE="${YGG_UPSTREAM_STYLE:-anthropic}" --setenv=YGG_UPSTREAM_MODEL="${SIM_MODEL:-glm-5.3-flash}" \
   --setenv=YGG_MODELS="${SIM_MODELS:-glm-5.3-flash,glm-5.3,glm-5.2}" --setenv=YGG_VISION_MODELS="${SIM_VISION:-glm-5.3-flash}" --setenv=YGG_ARTIFACTS_DIR="$ROOT/work/artifacts" \
   --setenv=YGG_MAX_TOKENS="${YGG_MAX_TOKENS:-16384}" --setenv=YGG_THINK_HIGH="${YGG_THINK_HIGH:-8192}" \
@@ -52,6 +71,8 @@ systemd-run --user --unit="$UNIT" --collect -q \
   ${SIM_PROFILES:+--setenv=YGG_PROFILES=$SIM_PROFILES} ${SIM_EXTENSIONS:+--setenv=YGG_EXTENSIONS=$SIM_EXTENSIONS} \
   ${YGG_ROOT_NAME:+--setenv=YGG_ROOT_NAME=$YGG_ROOT_NAME} ${YGG_PEERS:+--setenv=YGG_PEERS=$YGG_PEERS} \
   ${YGG_PEER_TOKEN:+--setenv=YGG_PEER_TOKEN=$YGG_PEER_TOKEN} ${YGG_ROOT_NOTE:+"--setenv=YGG_ROOT_NOTE=$YGG_ROOT_NOTE"} \
+  ${YGG_HARNESS_HELPER:+--setenv=YGG_HARNESS_HELPER=$YGG_HARNESS_HELPER} ${YGG_HARNESS_HELPER_TOKEN:+--setenv=YGG_HARNESS_HELPER_TOKEN=$YGG_HARNESS_HELPER_TOKEN} \
+  ${YGG_HARNESS_LIVE:+--setenv=YGG_HARNESS_LIVE=$YGG_HARNESS_LIVE} \
   --setenv=HOME="$SIMHOME" --setenv=PATH="$HPATH$HOME/.cache/root-sim/_venv/bin:/usr/local/bin:/usr/bin:/bin" --setenv=VIRTUAL_ENV="$HOME/.cache/root-sim/_venv" \
   "$ROOT/bin/yggdrasil"
 for i in $(seq 1 40); do curl -sf -m 1 "http://127.0.0.1:$PORT/session" >/dev/null && { echo "brain $NAME up on :$PORT ($ROOT)"; exit 0; }; sleep 0.25; done

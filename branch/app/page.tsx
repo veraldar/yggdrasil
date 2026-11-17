@@ -8,8 +8,8 @@ import { BAND_VIEWBOX, YggTree } from '@/components/ygg';
 import { Door } from '@/components/tree-door';
 import { Roots } from '@/components/roots';
 import { Marked } from '@/components/marked';
-import { ContinueClaude } from '@/components/app/continue-claude';
-import { agentTag } from '@/lib/agents';
+import { ContinueTerminal } from '@/components/app/continue-claude';
+import { sessionTag } from '@/lib/agents';
 import { askedSessions, clearAsked, notifyReply } from '@/lib/notify';
 import type { ArtifactEntry } from '@/lib/artifacts';
 import { countUnseen, seenInit } from '@/lib/artifact-read';
@@ -40,6 +40,8 @@ type Sess = {
   msgs?: number;
   pending?: boolean;
   agent?: string | null;
+  /** a terminal's conversation continued here: its harness (claude · antigravity · opencode) */
+  harness?: string | null;
   card?: Card | null;
   archived?: boolean; // closed by its parent — hidden behind "N closed"
 };
@@ -198,7 +200,7 @@ export default function SessionsPage() {
   const [unseenArts, setUnseenArts] = useState(0);
   const [creating, setCreating] = useState(false);
   const [name, setName] = useState('');
-  // "continue a Claude Code session": the terminal's conversations, one tap to carry on
+  // the terminal's sessions (Claude Code, Antigravity, opencode): watch live, continue here
   const [continuing, setContinuing] = useState(false);
   const [loading, setLoading] = useState(true);
   const loadInFlightRef = useRef(false);
@@ -231,7 +233,7 @@ export default function SessionsPage() {
       else m.set(s.parentId, [s]);
     }
     for (const arr of m.values())
-      arr.sort((a, b) => (b.updated || b.lastAt || 0) - (a.updated || a.lastAt || 0));
+      arr.sort((a, b) => (b.lastAt || b.updated || 0) - (a.lastAt || a.updated || 0));
     return m;
   }, [sessions]);
   const byId = useMemo(() => new Map(sessions.map((s) => [s.id, s])), [sessions]);
@@ -503,15 +505,10 @@ export default function SessionsPage() {
   const working = sessions.filter((s) => s.pending).length;
   const branchWorking = sessions.some((s) => s.pending && !inRoots(s));
 
-  // the list's order law: live runs and unread float, each latest-first;
-  // question circles are a hint only — recency decides everything else
+  // the list's order law (owner 11-17): the session with the newest message first — a running
+  // or unread one shows its dot, it does not jump the order
   const sortTop = (list: Sess[]) =>
-    [...list].sort(
-      (a, b) =>
-        Number(!!b.pending) - Number(!!a.pending) ||
-        Number(isUnread(b)) - Number(isUnread(a)) ||
-        (b.updated || b.lastAt || 0) - (a.updated || a.lastAt || 0)
-    );
+    [...list].sort((a, b) => (b.lastAt || b.updated || 0) - (a.lastAt || a.updated || 0));
 
   /** One level of the tree: its open sessions, then — behind a small
    *  "N closed" key (`key` remembers it) — the closed ones. Top level rows
@@ -604,12 +601,10 @@ export default function SessionsPage() {
               </span>
             ) : null}
             <span className={`t ${depth ? 'opacity-85' : ''}`}>
-              {/* the agent at a glance: [AGI] [BUI] [FIX]… — MAIN's title is its own tag */}
-              {s.agent && !isMainSlug(slugify(s.title || '')) && (
-                <span className="mr-1 opacity-60" aria-hidden="true" title={s.agent}>
-                  [{agentTag(s.agent)}]
-                </span>
-              )}
+              {/* every session at a glance: [MAI] [CLA] [AGY] [OPE] [BUI] [FIX]… */}
+              <span className="mr-1 opacity-60" aria-hidden="true" title={s.harness || s.agent || ''}>
+                [{sessionTag(s, isMainSlug(slugify(s.title || '')))}]
+              </span>
               {s.title || s.id}
             </span>
             {kids.length > 0 && (
@@ -639,7 +634,7 @@ export default function SessionsPage() {
                 {st.w}
               </span>
             )}
-            <time>{fmtListTime(s.updated || s.lastAt)}</time>
+            <time>{fmtListTime(s.lastAt || s.updated)}</time>
           </div>
           {(sub || !depth) && <div className="oz-r2">{sub || '\u00a0'}</div>}
         </SwipeRow>
@@ -709,6 +704,16 @@ export default function SessionsPage() {
           >
             <LineIcon name="plus" size={14} /> new session
           </button>
+          {/* work started on the computer (Claude Code, Antigravity, opencode): one key */}
+          <button
+            aria-label="work in the terminal"
+            aria-pressed={continuing}
+            onClick={() => setContinuing((c) => !c)}
+            className={`oz-k h-11 w-11 ${continuing ? 'on' : ''}`}
+            data-testid="terminal-key"
+          >
+            <LineIcon name="terminal" size={14} />
+          </button>
           {!gOpen && (
             <button
               aria-label="search all sessions"
@@ -738,18 +743,9 @@ export default function SessionsPage() {
                 cancel
               </button>
             </div>
-            <button
-              onClick={() => {
-                setCreating(false);
-                setContinuing(true);
-              }}
-              className="oz-k mt-1.5 w-full justify-start px-3 text-[12px]"
-            >
-              continue a Claude Code session…
-            </button>
           </div>
         )}
-        {continuing && <ContinueClaude onClose={() => setContinuing(false)} />}
+        {continuing && <ContinueTerminal onClose={() => setContinuing(false)} />}
 
         {/* global search — expands from the search key into the query field */}
         {gOpen && (

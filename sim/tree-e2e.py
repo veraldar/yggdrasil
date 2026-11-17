@@ -15,11 +15,48 @@ on scratch ports, sandboxed, and walks the critical paths:
     tree-e2e.py [--bin PATH]     exit 0 = all green
 """
 import argparse
-import time, json, os, shutil, subprocess, sys, tempfile, time, urllib.request
+import time, json, os, shutil, subprocess, sys, tempfile, time, urllib.request, threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 YGG = os.path.join(HERE, "..", "root")
-MOCK_PORT, HOME_PORT, LAB_PORT, LIB_PORT = 18197, 4187, 4188, 18310
+MOCK_PORT, HOME_PORT, LAB_PORT, LIB_PORT, HELPER_PORT = 18197, 4187, 4188, 18310, 18321
+
+# A fake live helper (cc-live): the owner's terminal sessions as the coordinator sees them
+HELPER = {"rows": [], "typed": [], "history": {}}
+
+
+class FakeHelper(BaseHTTPRequestHandler):
+    def log_message(self, *a):
+        pass
+
+    def _send(self, code, obj):
+        b = json.dumps(obj).encode()
+        self.send_response(code)
+        self.send_header("content-type", "application/json")
+        self.send_header("content-length", str(len(b)))
+        self.end_headers()
+        self.wfile.write(b)
+
+    def do_GET(self):
+        if self.headers.get("x-cc-live-token") != "helper-token":
+            return self._send(401, {"error": "token"})
+        parts = self.path.split("?")[0].strip("/").split("/")
+        if parts == ["harness"]:
+            return self._send(200, {"sessions": HELPER["rows"], "error": ""})
+        if len(parts) == 4 and parts[0] == "h" and parts[3] == "history":
+            return self._send(200, {"items": HELPER["history"].get(parts[2], []), "cursor": None})
+        self._send(404, {"error": "no such route"})
+
+    def do_POST(self):
+        if self.headers.get("x-cc-live-token") != "helper-token":
+            return self._send(401, {"error": "token"})
+        body = json.loads(self.rfile.read(int(self.headers.get("content-length") or 0)) or b"{}")
+        parts = self.path.strip("/").split("/")
+        if len(parts) == 4 and parts[0] == "h" and parts[3] == "input":
+            HELPER["typed"].append((parts[1], parts[2], body.get("text")))
+            return self._send(200, {"ok": True})
+        self._send(404, {"error": "no such route"})
 LIBRARIAN = os.path.join(os.path.realpath(YGG), "extensions", "librarian", "librarian.py")
 FAILS = []
 
@@ -72,6 +109,8 @@ def main():
     ap.add_argument("--bin", default=os.path.join(YGG, "target", "release", "yggdrasil"))
     a = ap.parse_args()
     tmp = tempfile.mkdtemp(prefix="tree-e2e-")
+    helper_srv = ThreadingHTTPServer(("127.0.0.1", HELPER_PORT), FakeHelper)
+    threading.Thread(target=helper_srv.serve_forever, daemon=True).start()
     units = ["tree-e2e-mock", "tree-e2e-home", "tree-e2e-lab", "tree-e2e-librarian"]
     try:
         unit(units[0], ["python3", os.path.join(YGG, "mock", "mock_upstream.py"), str(MOCK_PORT)], {})
@@ -94,7 +133,8 @@ def main():
                                         "model": {"id": "gemini-3.5-flash", "providerID": "gemini"},
                                         "harness": {"kind": "gemini", "id": "5a0c1f9e-2b7d-4c55-9e0a-7f3b2d1c4e5f"}}, "messages": []}, f)
             # home reads Claude Code's sessions from a scratch config dir (one fake terminal session)
-            extra = {"YGG_EXTENSIONS": f"librarian=http://127.0.0.1:{LIB_PORT}", "CLAUDE_CONFIG_DIR": os.path.join(tmp, "claude")} if name == "home" else {}
+            extra = {"YGG_EXTENSIONS": f"librarian=http://127.0.0.1:{LIB_PORT}", "CLAUDE_CONFIG_DIR": os.path.join(tmp, "claude"),
+                     "YGG_HARNESS_HELPER": f"http://127.0.0.1:{HELPER_PORT}", "YGG_HARNESS_HELPER_TOKEN": "helper-token"} if name == "home" else {}
             unit(f"tree-e2e-{name}", [a.bin], dict(base, YGG_LISTEN=f"127.0.0.1:{port}", YGG_DATA_DIR=os.path.join(d, "data"), YGG_PROFILES=os.path.join(d, "agents.json"),
                  YGG_PROJECT_DIR=os.path.join(d, "work"), YGG_ROOT_NAME=name, YGG_PEERS=f"{other}=http://127.0.0.1:{oport}", **extra))
         check("brains up", wait(lambda: req(HOME_PORT, "GET", "/root") and req(LAB_PORT, "GET", "/root"), 10))
@@ -179,11 +219,13 @@ def main():
         check("automation filed in the inbox", wait(lambda: any(e["from"] == "external" for e in req(HOME_PORT, "GET", f"/session/{main_id}/inbox")), 15))
 
         # 6b. agents: read, create, refuse, switch (model stamped, tools enforced), harness, lock, delete
-        agi = req(HOME_PORT, "GET", "/agent/AGI")
-        check("AGI agent: Claude Code on Opus", agi["harness"] == "claude" and agi["model"] == "opus" and agi["builtin"], {k: agi.get(k) for k in ("harness", "model")})
-        check("AGI offers Claude Code's models", {"opus", "sonnet", "haiku"} <= set(agi["models"]), agi.get("models"))
+        listed_names = [a["name"] for a in req(HOME_PORT, "GET", "/agent")]
+        check("agent list exposes claude and agy, never AGI", "claude" in listed_names and "agy" in listed_names and "AGI" not in listed_names, listed_names)
+        cl = req(HOME_PORT, "GET", "/agent/claude")
+        check("claude agent: Claude Code on Opus", cl["harness"] == "claude" and cl["model"] == "opus" and cl["builtin"], {k: cl.get(k) for k in ("harness", "model")})
+        check("claude offers Claude Code's models", {"opus", "sonnet", "haiku"} <= set(cl["models"]), cl.get("models"))
         try:
-            req(HOME_PORT, "PUT", "/agent/AGI", {"model": "gpt-free-text"})
+            req(HOME_PORT, "PUT", "/agent/claude", {"model": "gpt-free-text"})
             check("a harness model must be one it offers", False, "accepted")
         except urllib.error.HTTPError as e:
             check("a harness model must be one it offers", e.code == 400, e.code)
@@ -203,9 +245,9 @@ def main():
         r = req(HOME_PORT, "POST", f"/session/{sid}/message", {"parts": [{"type": "text", "text": tool([["bash", {"command": "echo hi"}]])}]}, 60)
         out = [p for p in r["parts"] if p["type"] == "tool"][0]["state"]["output"]
         check("the switched agent's tools are enforced", "permission denied" in out, out)
-        req(HOME_PORT, "POST", f"/api/session/{sid}/agent", {"agent": "AGI"})
+        req(HOME_PORT, "POST", f"/api/session/{sid}/agent", {"agent": "claude"})
         info = req(HOME_PORT, "GET", f"/session/{sid}")
-        check("switching to AGI moves the session onto Claude Code", info["model"] == {"id": "opus", "providerID": "claude"} and info["harness"]["kind"] == "claude", (info["model"], info.get("harness")))
+        check("switching to claude moves the session onto Claude Code", info["agent"] == "claude" and info["model"] == {"id": "opus", "providerID": "claude"} and info["harness"]["kind"] == "claude", (info.get("agent"), info["model"], info.get("harness")))
         req(HOME_PORT, "POST", f"/session/{sid}/model".replace("/session/", "/api/session/"), {"model": {"id": "sonnet", "providerID": "claude"}})
         check("a Claude Code session can change model within Claude's", req(HOME_PORT, "GET", f"/session/{sid}")["model"] == {"id": "sonnet", "providerID": "claude"})
         try:
@@ -213,8 +255,8 @@ def main():
             check("…and only within Claude's models", False, "accepted")
         except urllib.error.HTTPError as e:
             check("…and only within Claude's models", e.code == 400, e.code)
-        agi2 = req(HOME_PORT, "GET", "/agent/AGI")
-        check("model labels for the picker", agi2["model_labels"]["claude"]["opus"].startswith("strongest"), agi2.get("model_labels", {}).get("claude"))
+        cl2 = req(HOME_PORT, "GET", "/agent/claude")
+        check("model labels for the picker", cl2["model_labels"]["claude"]["opus"].startswith("strongest"), cl2.get("model_labels", {}).get("claude"))
 
         # 6c. continue a Claude Code session from the phone: the list (metadata only), attach, refusals
         cc_id, cc_cwd = "0f1e2d3c-4b5a-4968-8776-655443322110", os.path.join(tmp, "home", "work", "proj")
@@ -230,40 +272,82 @@ def main():
         row = next((r for r in listed if r["id"] == cc_id), None)
         check("Claude Code's sessions are listed: id, cwd, modified, title", row and row["cwd"] == cc_cwd and row["title"] == "remember the word walrus; reply ok" and row["modified"] > 0 and set(row) == {"id", "cwd", "modified", "title"}, row)
         check("…metadata only, no transcript content", "TOOL-OUTPUT" not in json.dumps(listed) and '"ok"' not in json.dumps(listed))
-        att = req(HOME_PORT, "POST", "/session", {"agent": "AGI", "harness": {"id": cc_id}, "cwd": cc_cwd})
-        check("attach: an AGI session holding the terminal's conversation", att["agent"] == "AGI" and att["harness"] == {"kind": "claude", "id": cc_id, "attached": True} and att["cwd"] == cc_cwd, (att.get("agent"), att.get("harness"), att.get("cwd")))
+        att = req(HOME_PORT, "POST", "/session", {"agent": "claude", "harness": {"id": cc_id}, "cwd": cc_cwd})
+        check("attach: a claude session holding the terminal's conversation", att["agent"] == "claude" and att["harness"] == {"kind": "claude", "id": cc_id, "attached": True} and att["cwd"] == cc_cwd, (att.get("agent"), att.get("harness"), att.get("cwd")))
         check("attach: titled after it · Claude Code", att["title"] == "remember the word walrus; reply ok · Claude Code", att["title"])
         for name, body in (("a non-uuid id", {"harness": {"id": "../../etc/passwd"}, "cwd": cc_cwd}),
                            ("a folder that does not exist", {"harness": {"id": cc_id}, "cwd": cc_cwd + "-gone"}),
-                           ("a session not started in that folder", {"harness": {"id": cc_id}, "cwd": os.path.join(tmp, "home", "work")}),
-                           ("an agent that does not run on Claude Code", {"agent": "build", "harness": {"id": cc_id}, "cwd": cc_cwd})):
+                           ("a session not started in that folder", {"harness": {"id": cc_id}, "cwd": os.path.join(tmp, "home", "work")})):
             try:
                 req(HOME_PORT, "POST", "/session", body)
                 check(f"attach refuses {name}", False, "accepted")
             except urllib.error.HTTPError as e:
                 msg = json.loads(e.read() or b"{}").get("error", "")
                 check(f"attach refuses {name} (400, said plainly)", e.code == 400 and len(msg) > 20, (e.code, msg))
+        # the same conversation both ways (11-15): one bifrost session per conversation, whatever agent asks
+        again = req(HOME_PORT, "POST", "/session", {"agent": "build", "harness": {"id": cc_id}, "cwd": cc_cwd})
+        check("attach again: the same session (one per conversation)", again["id"] == att["id"], (again.get("id"), att.get("id")))
 
-        # 6d. Google's harness next to Claude Code's and Codex's: an agent on Antigravity (agy)
-        agy = req(HOME_PORT, "PUT", "/agent/agy", {"harness": "antigravity", "description": "Antigravity"})
+        # 6c'. the owner's terminal sessions, as the coordinator sees them (11-15): one typable in
+        # tmux, one open in a plain terminal, one (the fake Claude Code conversation above) not open
+        tm_id, ag_id = "6a5b4c3d-2e1f-4a0b-9c8d-7e6f5a4b3c2d", "1b2c3d4e-5f6a-4b7c-8d9e-0f1a2b3c4d5e"
+        HELPER["rows"] = [
+            {"kind": "claude", "id": tm_id, "cwd": cc_cwd, "title": "refactor the parser", "modified": int(time.time() * 1000), "live": "tmux", "canType": True},
+            {"kind": "antigravity", "id": ag_id, "cwd": cc_cwd, "title": "dashboard colours", "modified": int(time.time() * 1000), "live": "cmd", "canType": False},
+            {"kind": "claude", "id": cc_id, "cwd": cc_cwd, "title": "remember the word walrus; reply ok", "modified": int(time.time() * 1000), "live": None, "canType": False},
+        ]
+        HELPER["history"][ag_id] = [{"k": "user", "id": "u0", "t": 1, "text": "make the dashboard blue"},
+                                    {"k": "tool", "id": "c1.0", "t": 2, "name": "edit_file", "title": "edit_file · theme.css"},
+                                    {"k": "assistant", "id": "a2", "t": 3, "text": "Done: the dashboard is blue now (theme.css)."}]
+        def tool_out(r):
+            return [p for p in r["parts"] if p["type"] == "tool"][0]["state"]["output"]
+        out = tool_out(say(tool([["sessions_find", {"query": "my terminal sessions"}]])))
+        check("sessions_find lists the owner's terminal sessions (term: ids, who has them open)",
+              f"term:claude:{tm_id}" in out and f"term:antigravity:{ag_id}" in out and "you can type" in out and "only they can type" in out, out)
+        out = tool_out(say(tool([["session_read", {"id": f"term:antigravity:{ag_id}"}]])))
+        check("session_read reads a terminal session's conversation", "make the dashboard blue" in out and "theme.css" in out and "dashboard is blue" in out, out)
+        out = tool_out(say(tool([["session_send", {"id": f"term:claude:{tm_id}", "message": "also run the tests"}]])))
+        check("session_send types into one open in tmux (both ways)", out.startswith("TYPED") and HELPER["typed"] == [("claude", tm_id, "also run the tests")], (out, HELPER["typed"]))
+        out = tool_out(say(tool([["session_send", {"id": f"term:antigravity:{ag_id}", "message": "make it green"}]])))
+        check("…one open in a plain terminal: said plainly, a copy offered", "only they can type" in out and f"from=term:antigravity:{ag_id}" in out and len(HELPER["typed"]) == 1, out)
+        out = tool_out(say(tool([["session_send", {"id": f"term:claude:{cc_id}", "message": "Reply with exactly: TERM-OK"}]])))
+        check("…one not open anywhere continues here: THE session on that conversation", out.startswith("SENT") and f"id={att['id']}" in out, out)
+        out = tool_out(say(tool([["session_start", {"title": "walrus copy", "agent": "build", "brief": "Reply with exactly: COPY-OK", "from": f"term:claude:{cc_id}"}]])))
+        copy = next((r for r in req(HOME_PORT, "GET", "/tree") if r["title"].startswith("walrus copy")), None)
+        cinfo = req(HOME_PORT, "GET", f"/session/{copy['id']}") if copy else {}
+        check("session_start from=term:… starts a copy under MAIN (fork; the original untouched)",
+              out.startswith("STARTED") and copy and copy["parentID"] == main_id and cinfo.get("harness", {}).get("fork") is True
+              and cinfo["harness"].get("origin") == cc_id, (out, copy, cinfo.get("harness")))
+        HELPER["rows"][2]["live"] = "cmd"
+        out = tool_out(say(tool([["session_send", {"id": att["id"], "message": "hi"}]])))
+        check("a session here whose conversation is open in a plain terminal: not sent, said plainly", "only they can type" in out, out)
+        HELPER["rows"][2]["live"] = None
+
+        # 6d. Google's harness next to Claude Code's and Codex's: built-in agy + custom agent on Antigravity
+        agy_bi = req(HOME_PORT, "GET", "/agent/agy")
+        check("built-in agy: Antigravity with its own model pick", agy_bi["harness"] == "antigravity" and agy_bi["model"] is None and agy_bi["builtin"] and agy_bi["customizable"] == ["description", "model"], agy_bi)
+        agy = req(HOME_PORT, "PUT", "/agent/agy-custom", {"harness": "antigravity", "description": "Antigravity"})
         check("an agent can run on Antigravity", agy["harness"] == "antigravity" and agy["customizable"] == ["description", "model"], (agy.get("harness"), agy.get("customizable")))
         mbh = agy["models_by_harness"]
         check("Gemini CLI is no longer a harness", "gemini" not in mbh and set(mbh) == {"root", "claude", "opencode", "codex", "antigravity"}, list(mbh))
         am = mbh["antigravity"]
-        check("Antigravity's picker: its own pick first, then Google's current models strongest first",
-              am[:4] == ["default", "gemini-4-carbon", "gemini-4-argon", "gemini-4-hydrogen"] and "gemini-3.8-flash" in am, am)
         al = agy["model_labels"]["antigravity"]
-        check("…each with a label", all(al.get(m) for m in am) and al["gemini-4-carbon"].startswith("Gemini 4 Carbon — strongest"), {m: al.get(m) for m in am[:3]})
         if shutil.which("agy"):
-            check("…merged with what `agy models` lists (agy on this tree's PATH)", len(am) > 6 or all(not al[m].endswith("needs GEMINI_API_KEY") for m in am), am)
+            # 11-14: exactly what `agy models` lists, its own pick first
+            listed = [l.split("\t")[0] for l in subprocess.run(["agy", "models"], capture_output=True, text=True, timeout=60).stdout.splitlines() if "\t" in l]
+            check("Antigravity's picker: its own pick, then exactly what `agy models` lists", am[0] == "default" and am[1:] == listed, (am, listed))
+        else:
+            check("Antigravity's picker: its own pick first, then Google's current models strongest first",
+                  am[:4] == ["default", "gemini-4-carbon", "gemini-4-argon", "gemini-4-hydrogen"] and "gemini-3.8-flash" in am, am)
+        check("…each with a label", all(al.get(m) for m in am), {m: al.get(m) for m in am[:3]})
         try:
-            req(HOME_PORT, "PUT", "/agent/agy", {"harness": "gemini"})
+            req(HOME_PORT, "PUT", "/agent/agy-custom", {"harness": "gemini"})
             check("an agent cannot be put on Gemini CLI", False, "accepted")
         except urllib.error.HTTPError as e:
             check("an agent cannot be put on Gemini CLI", e.code == 400, e.code)
-        req(HOME_PORT, "PUT", "/agent/agy", {"model": "gemini-4-hydrogen"})
-        check("an Antigravity agent takes a model of its list", req(HOME_PORT, "GET", "/agent/agy")["model"] == "gemini-4-hydrogen")
-        req(HOME_PORT, "DELETE", "/agent/agy")
+        req(HOME_PORT, "PUT", "/agent/agy-custom", {"model": am[1]})
+        check("an Antigravity agent takes a model of its list", req(HOME_PORT, "GET", "/agent/agy-custom")["model"] == am[1])
+        req(HOME_PORT, "DELETE", "/agent/agy-custom")
         old = req(HOME_PORT, "GET", "/agent/gem-old")
         check("an agent saved on Gemini CLI loads on Antigravity (its model dropped: agy does not run it)", old["harness"] == "antigravity" and old["model"] is None, (old.get("harness"), old.get("model")))
         olds = req(HOME_PORT, "GET", "/session/ses_gemold")
@@ -274,11 +358,12 @@ def main():
             check("the coordinator's tools are locked", False, "accepted")
         except urllib.error.HTTPError as e:
             check("the coordinator's tools are locked", e.code == 400, e.code)
-        try:
-            req(HOME_PORT, "DELETE", "/agent/AGI")
-            check("built-in agents cannot be deleted", False, "accepted")
-        except urllib.error.HTTPError as e:
-            check("built-in agents cannot be deleted", e.code == 400, e.code)
+        for bi in ("claude", "agy", "AGI"):
+            try:
+                req(HOME_PORT, "DELETE", f"/agent/{bi}")
+                check(f"built-in agent {bi} cannot be deleted", False, "accepted")
+            except urllib.error.HTTPError as e:
+                check(f"built-in agent {bi} cannot be deleted", e.code == 400, e.code)
         req(HOME_PORT, "DELETE", "/agent/reader")
         check("a made agent can be deleted", "reader" not in [x["name"] for x in req(HOME_PORT, "GET", "/agent")])
 
@@ -293,6 +378,23 @@ def main():
         check("the lab root's report reached home", home_done and "GAMMA-ON-LAB" in (tree(HOME_PORT)["gamma"]["card"].get("headline") or ""), tree(HOME_PORT)["gamma"].get("card"))
         msgs = req(HOME_PORT, "GET", f"/session/{t['gamma']['id']}/message")
         check("reading the proxy reads the lab root", any("GAMMA-ON-LAB" in json.dumps(m["parts"]) for m in msgs), msgs[-1:] if msgs else msgs)
+        # 7b. the lab's own door hands that session more work (voice-fixes 11-14: the lab's request
+        # went into the home root's session and its answer went home): the answer is the lab's
+        lab_main = req(LAB_PORT, "POST", "/session", {"title": "[MAIN]"})["id"]
+        r = req(LAB_PORT, "POST", f"/session/{lab_main}/message", {"parts": [{"type": "text", "text": tool([["session_send", {"id": "gamma", "message": "Reply with exactly: GAMMA-FOR-LAB"}]])}]}, 60)
+        out = [p for p in r["parts"] if p["type"] == "tool"][0]["state"]["output"]
+        check("the lab's door can send work to a session home started there", out.startswith("SENT"), out)
+        lab_inbox = lambda: [m for m in req(LAB_PORT, "GET", f"/session/{lab_main}/message?internal=1")
+                             if m["info"]["role"] == "user" and (m["info"].get("meta") or {}).get("auto") and "GAMMA-FOR-LAB" in json.dumps(m["parts"])]
+        check("…its answer reports to the lab's MAIN, the one that asked", wait(lab_inbox, 20), req(LAB_PORT, "GET", f"/session/{lab_main}/message?internal=1")[-2:])
+        time.sleep(2)
+        home_saw = json.dumps(tree(HOME_PORT)["gamma"].get("card")) + json.dumps(req(HOME_PORT, "GET", f"/session/{main_id}/message?internal=1"))
+        check("…and never goes home", "GAMMA-FOR-LAB" not in home_saw, tree(HOME_PORT)["gamma"].get("card"))
+        # the mock echoes an unscripted turn whole — the [tree] view the lab's door read included
+        r = req(LAB_PORT, "POST", f"/session/{lab_main}/message", {"parts": [{"type": "text", "text": "what runs here?"}]}, 60)
+        seen = "".join(p.get("text", "") for p in r["parts"] if p["type"] == "text")
+        gline = next((ln for ln in seen.split("\n") if '"gamma"' in ln), "")
+        check("the lab's [tree] shows gamma as home's work, apart from its own", "work other roots asked this machine for" in seen and "for root home" in gline, gline or seen[-400:])
         bad = urllib.request.Request(f"http://127.0.0.1:{HOME_PORT}/tree/report", data=b'{"proxy":"x","event":{}}', method="POST", headers={"content-type": "application/json"})
         try:
             urllib.request.urlopen(bad, timeout=5)

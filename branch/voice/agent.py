@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import re
+import time
 from typing import AsyncIterable
 
 import httpx
@@ -32,6 +33,10 @@ SPEACHES_URL = os.environ.get("SPEACHES_URL", "http://127.0.0.1:8000/v1")
 STT_MODEL = os.environ.get("STT_MODEL", "Systran/faster-whisper-small")
 TTS_MODEL = os.environ.get("TTS_MODEL", "speaches-ai/Kokoro-82M-v1.0-ONNX")
 TTS_VOICE = os.environ.get("TTS_VOICE", "af_heart")
+# the app on loopback (http://127.0.0.1:<port>): its /api/tts/stream is the phone's TTS. Set, the
+# phone may ask for a reply's speech over the ROOM (RPC "tts_stream") instead of over https — over
+# the trunk that keeps the spoken reply on the encrypted media path (phone ↔ box), off the VPS.
+APP_URL = os.environ.get("APP_URL", "").rstrip("/")
 INSTRUCTIONS = (
     "You relay the user's spoken words to a coding assistant and speak its answers. "
     "Answers arrive as text from opencode; speak them verbatim unless asked to summarize. "
@@ -100,6 +105,44 @@ def strip_commands(text: str) -> str:
     return " ".join(p for p in parts if command_of(p) is None).strip()
 
 
+# ---- the phone's own voice (voice-fixes 11-14): while the deck speaks, the mic hears the reply
+# through the speaker. A phone's echo canceller removes most of it; what it leaves (or all of it,
+# when it fails: speakerphone, a cheap device) reaches the STT mixed with the person's words —
+# one long segment, the reply's sentences around a barge-in. The phone tells the agent the text it
+# is speaking (deck_state), and every run of words that also runs in that text is its echo.
+ECHO_RUN = 3  # words in a row that must match the reply to count as its echo
+ECHO_TAIL_S = 0.5  # speech that began this soon after the reply stopped still carries its tail
+
+
+def _tok(w: str) -> str:
+    return re.sub(r"[^a-z0-9\u4e00-\u9fff']+", "", w.lower())
+
+
+def strip_echo(heard: str, spoken: str) -> str:
+    """`heard` without the reply's echo: every run of >= ECHO_RUN words that also runs in `spoken`
+    goes, and a single odd word inside the echo (the STT's own variant of a reply word) with it —
+    never "over" or a command word: those are the person's. The person's words keep their order."""
+    raw = heard.split()
+    toks = [_tok(w) for w in raw]
+    ref = [t for t in (_tok(w) for w in spoken.split()) if t]
+    if len(ref) < ECHO_RUN or len(toks) < ECHO_RUN:
+        return heard
+    grams = {tuple(ref[i : i + ECHO_RUN]) for i in range(len(ref) - ECHO_RUN + 1)}
+    idx = [i for i, t in enumerate(toks) if t]  # punctuation-only pieces ride along
+    echo = [False] * len(raw)
+    for k in range(len(idx) - ECHO_RUN + 1):
+        if tuple(toks[idx[k + j]] for j in range(ECHO_RUN)) in grams:
+            for j in range(ECHO_RUN):
+                echo[idx[k + j]] = True
+    keep_words = {"over", "out"} | {w for k in VOICE_COMMANDS for w in k.split()}
+    for k in range(1, len(idx) - 1):
+        i = idx[k]
+        if not echo[i] and echo[idx[k - 1]] and echo[idx[k + 1]] and toks[i] not in keep_words:
+            echo[i] = True
+    out = [w for i, w in enumerate(raw) if not echo[i] and toks[i]]
+    return " ".join(out).strip()
+
+
 # whisper-small hallucinates on silence/room tone — these strings as an ENTIRE
 # turn are noise, not speech (seen live: "you" and "呃" committed after a
 # quiet stretch). Matched lowercase, punctuation stripped.
@@ -148,6 +191,10 @@ class OpenCodeLLM(llm.LLM):
         # VAD re-commits turns as A, A+B, A+B+C… while the previous reply is
         # still playing; only the delta may reach opencode (see _run)
         self.last_prompt = ""
+        # the keyword commit's own words (voice-fixes 11-14): the session's user-turn buffer also
+        # holds what the agent dropped (the reply's echo, speech over a reply), so a keyword commit
+        # hands its curated text here and that — not the buffer — is what reaches opencode
+        self.curated: str | None = None
 
     @staticmethod
     def _slugify(title: str) -> str:
@@ -309,6 +356,7 @@ class OpenCodeStream(LLMStream):
         # must not re-send an earlier message to opencode
         last = messages[-1] if messages else None
         prompt = (last.text_content or "").strip() if last is not None and last.role == "user" else ""
+        curated, self._oc.curated = self._oc.curated, None
         if not prompt:
             logger.info("opencode bridge: empty or absent user turn, skipping")
             return
@@ -324,6 +372,10 @@ class OpenCodeStream(LLMStream):
         # update even when dropping: a discarded noise prefix must never
         # resurface later as the "new tail" of a cumulative re-commit
         self._oc.last_prompt = prompt
+        if curated is not None:
+            if curated != send:
+                logger.info("keyword turn sends its own words (%d of %d chars)", len(curated), len(send))
+            send = curated
         # VAD fired on room tone and whisper turned the noise into a fill word
         # ("you", "呃") — a silent send with no real speech must not reach
         # opencode (defense in depth behind the VAD thresholds)
@@ -392,7 +444,11 @@ async def entrypoint(ctx: JobContext) -> None:
         # turn-taking is keyword-driven in hands-free (see below): turns never
         # auto-commit on silence — speech buffers until "over"/"over and out".
         # Manual is (re-)set after every PTT commit/abort too.
-        vad=silero.VAD.load(min_silence_duration=0.9),
+        # activation 0.35, not silero's 0.5 (voice-fixes 11-14): a soft or breathy voice sat near
+        # 0.5 — a short "Hey!" was never speech, a sentence's start or end fell outside its segment,
+        # and those words never reached the STT (a 37 s dictation lost most of them; the room had
+        # carried every word). 60 s of pink/brown noise at -35 dBFS still makes no segment.
+        vad=silero.VAD.load(min_silence_duration=0.9, activation_threshold=0.35),
         # batch whisper needs 1-2s per segment: with the 0.5s default the
         # turn commits BEFORE the STT final lands (livekit logs "transcript
         # arrives after turn has been committed") and the speech is dropped
@@ -401,7 +457,7 @@ async def entrypoint(ctx: JobContext) -> None:
         # join was auto-committed AND then committed again by its "over" — a duplicate turn
         turn_handling={"endpointing": {"min_delay": 1.5}, "turn_detection": "manual"},
         stt=openai.STT(base_url=SPEACHES_URL, api_key=_api_key, model=STT_MODEL),
-        llm=OpenCodeLLM(OPENCODE_URL, room_key=ctx.room.name, mode_state=mode_state),
+        llm=(oc_llm := OpenCodeLLM(OPENCODE_URL, room_key=ctx.room.name, mode_state=mode_state)),
         # AGENT_TTS=off: the phone speaks the replies (audio_enabled=False below), so the agent
         # synthesizes nothing — a TTS that only 500s made the session close as "unrecoverable"
         # after three replies and dropped hands-free turns until a re-dispatch (root-coord 11-13)
@@ -570,6 +626,7 @@ async def entrypoint(ctx: JobContext) -> None:
         # room, participant disconnect race) — raising here surfaces as a raw
         # RPC error/timeout on the phone; a "not-running" answer lets it
         # self-heal by reconnecting
+        oc_llm.curated = None  # a held turn is the whole buffer
         try:
             await _commit_with_flush()
         except Exception as e:  # noqa: BLE001
@@ -598,14 +655,72 @@ async def entrypoint(ctx: JobContext) -> None:
                 pass
         return "ok"
 
+    # what the phone's deck is saying, and when it last stopped (the echo window)
+    deck = {"text": "", "stopped": 0.0, "seg_over": False}
+
     async def _deck_state_rpc(data) -> str:
-        # the phone says when its deck speaks a reply (keywords-only window) and when it stops
+        # the phone says when its deck speaks a reply (keywords-only window) and when it stops —
+        # and, speaking, the text it speaks (its echo is dropped from what the mic heard)
         try:
-            mode_state["speaking"] = bool(json.loads(data.payload).get("speaking"))
+            d = json.loads(data.payload)
+            mode_state["speaking"] = bool(d.get("speaking"))
         except Exception:  # noqa: BLE001
             return "bad-payload"
+        if mode_state["speaking"]:
+            if d.get("text"):
+                deck["text"] = str(d["text"])[:8000]
+        else:
+            deck["stopped"] = time.monotonic()
         return "ok"
 
+    # ---- the phone's TTS over the room (trunk): the app's own /api/tts/stream bytes, as a byte
+    # stream to the caller only (topic bifrost.tts, attribute id). The voice, the deck and every
+    # command stay the phone's — only the transport of the audio changes. The RPC answers once the
+    # synthesis has started (its sample rate), so a slow first byte never looks like a dead agent.
+    async def _tts_pump(sid: str, client: httpx.AsyncClient, r: httpx.Response, who: str) -> None:
+        writer = None
+        try:
+            writer = await ctx.room.local_participant.stream_bytes(
+                f"tts-{sid}", topic="bifrost.tts", destination_identities=[who], attributes={"id": sid}
+            )
+            async for chunk in r.aiter_bytes():
+                await writer.write(chunk)
+        except Exception as e:  # noqa: BLE001 — the phone's deck ends a short stream like https's
+            logger.warning("tts over the room (%s): %s", sid, e)
+        finally:
+            if writer is not None:
+                try:
+                    await writer.aclose()
+                except Exception:  # noqa: BLE001
+                    pass
+            await r.aclose()
+            await client.aclose()
+
+    async def _tts_stream_rpc(data) -> str:
+        if not APP_URL:
+            return json.dumps({"status": 0, "why": "off"})
+        try:
+            req = json.loads(data.payload)
+            sid, text, lang = str(req["id"])[:64], str(req["text"]), str(req.get("lang") or "")
+        except Exception:  # noqa: BLE001
+            return json.dumps({"status": 0, "why": "bad-payload"})
+        client = httpx.AsyncClient(timeout=httpx.Timeout(600.0, connect=5.0))
+        try:
+            r = await client.send(
+                client.build_request("POST", f"{APP_URL}/api/tts/stream", json={"text": text, "lang": lang}),
+                stream=True,
+            )
+        except Exception as e:  # noqa: BLE001
+            await client.aclose()
+            return json.dumps({"status": 0, "why": str(e)[:200]})
+        if r.status_code != 200:
+            await r.aclose()
+            await client.aclose()
+            return json.dumps({"status": r.status_code})
+        asyncio.ensure_future(_tts_pump(sid, client, r, data.caller_identity))
+        return json.dumps({"status": 200, "rate": int(r.headers.get("x-sample-rate") or 24000)})
+
+    ctx.room.local_participant.register_rpc_method("tts_stream", _tts_stream_rpc)
     ctx.room.local_participant.register_rpc_method("deck_state", _deck_state_rpc)
     ctx.room.local_participant.register_rpc_method("ptt_begin", _ptt_begin_rpc)
     ctx.room.local_participant.register_rpc_method("ptt_abort", _ptt_abort_rpc)
@@ -650,12 +765,36 @@ async def entrypoint(ctx: JobContext) -> None:
 
         asyncio.ensure_future(_send())
 
+    @session.on("user_state_changed")
+    def _on_user_state(ev) -> None:
+        # a segment that STARTS over the reply is speech over the reply until its final, even when
+        # the final lands after the reply ended (the echo held the segment open to its end)
+        if ev.new_state == "speaking":
+            deck["seg_over"] = bool(mode_state.get("speaking")) or time.monotonic() - deck["stopped"] < ECHO_TAIL_S
+
     @session.on("user_input_transcribed")
     def _on_transcript(ev) -> None:
         nonlocal turn_text, keyword_busy
         if not ev.is_final:
             return
-        cmd = command_of(ev.transcript, bool(mode_state.get("speaking")))
+        speaking = bool(mode_state.get("speaking"))
+        over_reply = speaking or deck["seg_over"]
+        heard = ev.transcript
+        if over_reply and deck["text"]:
+            heard = strip_echo(heard, deck["text"])
+            raw_n, left = len(ev.transcript.split()), heard.split()
+            if left and len(left) <= 2 and raw_n >= 10 and command_of(heard, True) is None and not _norm(heard).endswith("over"):
+                heard = ""  # a word or two left over from a long echo is its residue, not the person
+            if heard != ev.transcript.strip():
+                logger.info("echo of the reply dropped: %r → %r", ev.transcript[:80], heard[:80])
+            if not heard:
+                if not turn_text.strip():
+                    try:
+                        session.clear_user_turn()
+                    except Exception as e:  # noqa: BLE001
+                        logger.warning("echo discard: %s", e)
+                return
+        cmd = command_of(ev.transcript, over_reply) or command_of(heard, over_reply)
         if cmd and mode_state["mode"] == "free":
             # the command was the whole utterance: if nothing else is buffered, the session's
             # user turn holds only it — clear it so the next "over" never carries it
@@ -669,7 +808,9 @@ async def entrypoint(ctx: JobContext) -> None:
             return
         # while the phone speaks a reply only keywords count (owner 11-13 r2): speech that is
         # neither a command nor ends in "over" is room noise or the reply's own echo — dropped
-        if mode_state.get("speaking") and not _norm(ev.transcript).endswith("over"):
+        # (a segment that began over the reply but ends after it keeps its words, echo removed:
+        # the person may have started their next turn over the reply's last words)
+        if speaking and not _norm(heard).endswith("over"):
             if not turn_text.strip():
                 try:
                     session.clear_user_turn()
@@ -677,7 +818,7 @@ async def entrypoint(ctx: JobContext) -> None:
                     logger.warning("speaking discard: %s", e)
             logger.info("heard over a playing reply, not a keyword — dropped: %r", ev.transcript[:80])
             return
-        turn_text = f"{turn_text} {ev.transcript}".strip()
+        turn_text = f"{turn_text} {heard}".strip()
         if keyword_busy:
             return
         norm = _norm(turn_text)
@@ -686,6 +827,7 @@ async def entrypoint(ctx: JobContext) -> None:
             return
         phrase = "over and out" if out else "over"
         keyword_busy = True
+        oc_llm.curated = turn_text  # the words this turn is made of — never the dropped echo
         turn_text = ""
         # keyword turn-taking only exists in hands-free — authoritative mode
         # even if the metadata update has not landed yet. "over and out" is
@@ -751,4 +893,9 @@ if __name__ == "__main__":
     lt = os.environ.get("AGENT_LOAD_THRESHOLD")
     if lt:
         server._load_threshold = float(lt)
+    # AGENT_LOAD=off: report no cpu load at all. The cgroup monitor measures the whole user
+    # session (every other process of this login), so a busy machine reads as a full worker and
+    # LiveKit dispatches nothing — a box whose only voice job is this one can say so
+    if os.environ.get("AGENT_LOAD") == "off":
+        server._load_fnc = lambda: 0.0
     cli.run_app(server)

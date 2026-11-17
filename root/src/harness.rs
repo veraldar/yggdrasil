@@ -7,10 +7,18 @@
 //!
 //! One adapter per harness = argv + a line parser over its JSON event stream. Nothing else.
 //!
-//! An ATTACHED session (11-13) continues a Claude Code conversation the owner started in a
-//! terminal: its first turn forks it (`--resume <id> --fork-session`, the terminal's transcript is
-//! never written), later turns resume the fork, and Claude Code's permission guard stays on
-//! (`--permission-mode auto`, never `--dangerously-skip-permissions`).
+//! An ATTACHED session continues a conversation the owner started in a terminal (Claude Code,
+//! opencode or Antigravity). Since 11-15 it is the SAME conversation both ways (no fork): a turn
+//! here lands in the terminal's transcript, `claude --resume` / `agy --conversation` / `opencode
+//! --session` there shows it. One writer at a time: the brain never runs a turn on a conversation
+//! that is open in a terminal right now (main.rs `live_in_terminal`). The harness's own permission
+//! guard stays on (`--permission-mode auto` for Claude Code, agy's own review for Antigravity;
+//! never a skip-permissions flag).
+//!
+//! A FORK ("continue in a new session", 11-15) is for a conversation that is open in a terminal
+//! right now: its first turn copies it (`--resume <id> --fork-session`, opencode `--session <id>
+//! --fork`; agy has no fork — a new conversation that opens with the earlier one, main.rs), the
+//! terminal's conversation is never written, later turns resume the copy.
 
 use std::{path::Path, process::Stdio};
 
@@ -27,12 +35,12 @@ pub enum Kind {
     Antigravity,
 }
 
-/// How a turn continues a session that came from the owner's terminal (Claude Code only).
+/// How a turn continues a session that came from the owner's terminal.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Attach {
     /// the conversation came from a terminal: its permission guard stays on
     pub guarded: bool,
-    /// the first turn on it: branch off into a new session, never write into its transcript
+    /// the first turn of a copy: branch off into a new conversation, never write the original
     pub fork: bool,
 }
 
@@ -74,7 +82,6 @@ impl Kind {
                 }
                 if let Some(r) = resume {
                     push(&["--resume", r]);
-                    // first turn on a terminal's conversation: a fork, its transcript stays untouched
                     if attach.fork {
                         push(&["--fork-session"]);
                     }
@@ -92,6 +99,9 @@ impl Kind {
                 }
                 if let Some(r) = resume {
                     push(&["--session", r]);
+                    if attach.fork {
+                        push(&["--fork"]);
+                    }
                 }
                 push(&["--", prompt]);
                 (a, false)
@@ -107,7 +117,7 @@ impl Kind {
                 push(&[prompt]);
                 (a, false)
             }
-            Kind::Antigravity => (antigravity::argv(model, resume, antigravity::api_key()), true),
+            Kind::Antigravity => (antigravity::argv(model, resume, antigravity::api_key(), attach.guarded), true),
         }
     }
 
@@ -141,11 +151,14 @@ pub mod antigravity {
     }
 
     /// A turn, headless: the prompt as stream-json on stdin, stream-json out, every tool approved
-    /// (like the other harnesses), the session's folder as the process cwd (agy's workspace).
-    pub fn argv(model: Option<&str>, resume: Option<&str>, api_key: bool) -> Vec<String> {
-        let mut a: Vec<String> = ["agy", "--input-format", "stream-json", "--output-format", "stream-json", "--dangerously-skip-permissions"]
-            .map(String::from)
-            .to_vec();
+    /// (like the other harnesses) — unless the conversation came from a terminal (`guarded`): then
+    /// agy's own review decides, as it does there — the session's folder as the process cwd (agy's
+    /// workspace).
+    pub fn argv(model: Option<&str>, resume: Option<&str>, api_key: bool, guarded: bool) -> Vec<String> {
+        let mut a: Vec<String> = ["agy", "--input-format", "stream-json", "--output-format", "stream-json"].map(String::from).to_vec();
+        if !guarded {
+            a.push("--dangerously-skip-permissions".into());
+        }
         if let Some(m) = model {
             a.extend(["--model".into(), m.into()]);
         }
@@ -575,6 +588,16 @@ pub async fn run(kind: Kind, model: Option<&str>, resume: Option<&str>, cwd: &Pa
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
+    // opencode keeps its conversations under XDG_DATA_HOME: a brain whose own XDG folders are
+    // elsewhere (the preview's sandbox) shares the owner's (YGG_OPENCODE_XDG_DATA / _CONFIG), so
+    // the terminal's opencode and this one see the same conversations, both ways
+    if kind == Kind::Opencode {
+        for (from, to) in [("YGG_OPENCODE_XDG_DATA", "XDG_DATA_HOME"), ("YGG_OPENCODE_XDG_CONFIG", "XDG_CONFIG_HOME")] {
+            if let Some(v) = std::env::var_os(from).filter(|v| !v.is_empty()) {
+                cmd.env(to, v).env("OPENCODE_DISABLE_AUTOUPDATE", "1");
+            }
+        }
+    }
     let mut child = cmd.spawn().map_err(|e| format!("{} not runnable: {e}", kind.name()))?;
     if stdin_prompt {
         let mut sin = child.stdin.take().ok_or("no stdin")?;
@@ -689,7 +712,7 @@ mod tests {
         let (a, stdin) = Kind::Claude.argv(Some("sonnet"), Some("s1"), Path::new("/w"), "p", Some("be terse"), none);
         assert!(stdin && a.contains(&"--resume".to_string()) && a.contains(&"sonnet".to_string()));
         assert!(a.windows(2).any(|w| w[0] == "--append-system-prompt" && w[1] == "be terse"));
-        // a session the brain started itself: unchanged — no guard, no fork
+        // a session the brain started itself: no guard
         assert!(a.contains(&"--dangerously-skip-permissions".to_string()) && !a.contains(&"--fork-session".to_string()));
         assert!(!a.contains(&"--permission-mode".to_string()));
         let (a, stdin) = Kind::Opencode.argv(None, Some("ses_1"), Path::new("/w"), "do it", None, none);
@@ -704,21 +727,28 @@ mod tests {
     }
 
     #[test]
-    fn attached_first_turn_forks_with_the_guard_on() {
+    fn attached_turns_continue_the_same_conversation_with_the_guard_on() {
         let t = "3f2a9c1e-0b4d-4e8f-9a6b-1c2d3e4f5a6b";
-        let (a, stdin) = Kind::Claude.argv(Some("opus"), Some(t), Path::new("/w"), "p", None, Attach { guarded: true, fork: true });
-        assert!(stdin);
-        assert!(pair(&a, "--resume", t) && a.contains(&"--fork-session".to_string()), "{a:?}");
-        assert!(pair(&a, "--permission-mode", "auto"), "{a:?}");
-        assert!(!a.iter().any(|x| x.contains("dangerously")), "the guard stays on: {a:?}");
+        let g = Attach { guarded: true, fork: false };
+        let (a, stdin) = Kind::Claude.argv(Some("opus"), Some(t), Path::new("/w"), "p", None, g);
+        assert!(stdin && pair(&a, "--resume", t), "{a:?}");
+        assert!(!a.iter().any(|x| x.contains("fork")), "the same conversation both ways, never a fork: {a:?}");
+        assert!(pair(&a, "--permission-mode", "auto") && !a.iter().any(|x| x.contains("dangerously")), "the guard stays on: {a:?}");
+        let (a, _) = Kind::Antigravity.argv(None, Some(t), Path::new("/w"), "p", None, g);
+        assert!(pair(&a, "--conversation", t) && !a.iter().any(|x| x.contains("dangerously")), "agy's own review decides: {a:?}");
+        let (a, _) = Kind::Opencode.argv(None, Some("ses_1"), Path::new("/w"), "p", None, g);
+        assert!(pair(&a, "--session", "ses_1") && !a.iter().any(|x| x.contains("fork") || x == "--auto"), "{a:?}");
     }
 
     #[test]
-    fn attached_later_turns_resume_the_fork_with_the_guard_on() {
-        let fork = "9d8c7b6a-5f4e-4d3c-8b2a-0f1e2d3c4b5a";
-        let (a, _) = Kind::Claude.argv(Some("opus"), Some(fork), Path::new("/w"), "p", None, Attach { guarded: true, fork: false });
-        assert!(pair(&a, "--resume", fork) && !a.contains(&"--fork-session".to_string()), "{a:?}");
-        assert!(pair(&a, "--permission-mode", "auto") && !a.iter().any(|x| x.contains("dangerously")), "{a:?}");
+    fn a_copy_branches_off_and_never_writes_the_original() {
+        let t = "3f2a9c1e-0b4d-4e8f-9a6b-1c2d3e4f5a6b";
+        let f = Attach { guarded: true, fork: true };
+        let (a, _) = Kind::Claude.argv(None, Some(t), Path::new("/w"), "p", None, f);
+        assert!(pair(&a, "--resume", t) && a.contains(&"--fork-session".to_string()) && pair(&a, "--permission-mode", "auto"), "{a:?}");
+        let (a, _) = Kind::Opencode.argv(None, Some("ses_1"), Path::new("/w"), "p", None, f);
+        let i = a.iter().position(|x| x == "--fork").expect("opencode --fork");
+        assert!(pair(&a, "--session", "ses_1") && i < a.iter().position(|x| x == "--").unwrap(), "{a:?}");
     }
 
     #[test]
@@ -727,15 +757,15 @@ mod tests {
         assert_eq!(Kind::parse("agy"), Some(Kind::Antigravity));
         assert_eq!(Kind::parse("gemini"), None, "Gemini CLI is gone (an agent saved on it loads as antigravity)");
         assert_eq!(Kind::Antigravity.name(), "antigravity");
-        let first = antigravity::argv(Some("gemini-3.8-flash-low"), None, false);
+        let first = antigravity::argv(Some("gemini-3.8-flash-low"), None, false, false);
         assert_eq!(first[0], "agy");
         assert!(pair(&first, "--input-format", "stream-json") && pair(&first, "--output-format", "stream-json"), "{first:?}");
         assert!(first.contains(&"--dangerously-skip-permissions".to_string()) && pair(&first, "--model", "gemini-3.8-flash-low"));
         assert!(!first.iter().any(|x| x == "--conversation" || x == "-p" || x == "--settings"), "{first:?}");
         let id = "c5d319b9-22e0-46b1-a22b-d34f40028fd2";
-        let again = antigravity::argv(None, Some(id), false);
+        let again = antigravity::argv(None, Some(id), false, false);
         assert!(pair(&again, "--conversation", id) && !again.contains(&"--model".to_string()), "{again:?}");
-        let keyed = antigravity::argv(None, None, true);
+        let keyed = antigravity::argv(None, None, true, false);
         assert!(pair(&keyed, "--settings", r#"{"modelProvider":"gemini"}"#), "with a key agy runs on the Gemini API: {keyed:?}");
         // through Kind: the prompt never rides argv (stdin), whatever the process env says about a key
         let (a, stdin) = Kind::Antigravity.argv(Some("gemini-4-carbon"), Some(id), Path::new("/w"), "secret prompt", Some("sys"), Attach::default());

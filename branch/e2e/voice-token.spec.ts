@@ -1,6 +1,6 @@
 import { type ChildProcess, spawn } from 'child_process';
-import { createHmac } from 'crypto';
-import { existsSync, mkdtempSync } from 'fs';
+import { createHash, createHmac } from 'crypto';
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'fs';
 import http from 'node:http';
 import net from 'node:net';
 import { tmpdir } from 'os';
@@ -13,9 +13,11 @@ import { expect, test } from '@playwright/test';
  *   tailnet + LIVEKIT_* → mints exactly as before: a JWT for the room (HS256, the API secret),
  *     the voice agent dispatched (the mock sees CreateDispatch); GET says available
  *   tailnet, no LIVEKIT_* → 503 {error:"voice-unavailable"} — JSON, never an empty 500
- *   devices (a phone paired through the trunk) → 503 voice-unavailable even with LIVEKIT_* set:
- *     no mint, no dispatch (the auth is not loosened); a garbage credential is still 401 at
- *     the edge (the middleware's gate, unchanged)
+ *   devices (a phone paired through the trunk) + LIVEKIT_* → mints for a PAIRED DEVICE only (the
+ *     device gate is the auth): the JWT names the device (attribute), the agent is dispatched,
+ *     the trunk's ICE-TCP address rides along (BIFROST_TRUNK_ICE); the box console (no device)
+ *     gets 503 voice-unavailable and nothing is minted; a garbage credential is still 401 at the
+ *     edge; revoking the device removes its participant from the room (lib/voice-revoke)
  *   unreadable or room-less bodies → a JSON 400, never an empty answer
  */
 const APP = resolve(__dirname, '..');
@@ -40,8 +42,9 @@ function freePort(): Promise<number> {
   });
 }
 
-/** a LiveKit server API that records every call and answers `{}` */
-async function mockLiveKit() {
+/** a LiveKit server API that records every call and answers `{}` — or, for GetParticipant,
+ *  the participant `holder` says is in the room (its token's attributes) */
+async function mockLiveKit(holder: () => Record<string, unknown> | null = () => null) {
   const calls: Array<{ url: string; auth: string; body: string }> = [];
   const port = await freePort();
   const srv = http.createServer((req, res) => {
@@ -49,8 +52,14 @@ async function mockLiveKit() {
     req.on('data', (c) => (body += c));
     req.on('end', () => {
       calls.push({ url: req.url || '', auth: String(req.headers.authorization || ''), body });
+      const who = (req.url || '').endsWith('/GetParticipant') ? holder() : {};
+      if (!who) {
+        res.writeHead(404, { 'content-type': 'application/json' });
+        res.end('{"code":"not_found","msg":"participant not found"}');
+        return;
+      }
       res.writeHead(200, { 'content-type': 'application/json' });
-      res.end('{}');
+      res.end(JSON.stringify(who));
     });
   });
   await new Promise<void>((done) => srv.listen(port, '127.0.0.1', done));
@@ -173,17 +182,61 @@ test('tailnet without LIVEKIT_*: 503 voice-unavailable, as JSON', async () => {
   }
 });
 
-test('devices mode (the trunk): 503 voice-unavailable, nothing minted, the edge gate unchanged', async () => {
-  const lk = await mockLiveKit();
+/** a paired device in the registry (v2 record): its access token, issued in the region a
+ *  loopback client has */
+function pairedDevice(file: string, id: string) {
+  const raw = `bfnd-test-${id}-0123456789abcdef`;
+  const sha = (x: string) => createHash('sha256').update(x).digest('hex');
+  const reg = {
+    version: 2,
+    killEpoch: 0,
+    codes: [],
+    devices: [
+      {
+        id,
+        name: 'phone',
+        created: new Date().toISOString(),
+        revoked: false,
+        region: 'loopback',
+        lastRegion: 'loopback',
+        regionChanges: 0,
+        lastSeen: '',
+        refreshHash: sha(`refresh-${id}`),
+        refreshExp: Date.now() + 86_400_000,
+        prevRefresh: [],
+        access: [{ hash: sha(raw), exp: Date.now() + 3_600_000, region: 'loopback' }],
+      },
+    ],
+  };
+  writeFileSync(file, JSON.stringify(reg));
+  return {
+    raw,
+    revoke: () => {
+      const r = JSON.parse(readFileSync(file, 'utf8'));
+      r.devices[0].revoked = true;
+      writeFileSync(file, JSON.stringify(r));
+    },
+  };
+}
+
+test('devices mode (the trunk): mints for a paired device only, names the trunk ICE, revoke removes it', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'voice-token-dev-'));
+  const file = join(dir, 'devices.json');
+  const dev = pairedDevice(file, 'dev_phone1');
+  let inRoom = false;
+  const lk = await mockLiveKit(() =>
+    inRoom ? { identity: 'user_main', attributes: { device: 'dev_phone1' } } : null
+  );
   const app = await serve({
     BIFROST_AUTH: 'devices',
-    BIFROST_DEVICES_FILE: join(dir, 'devices.json'),
+    BIFROST_DEVICES_FILE: file,
     ...LK_ENV,
     LIVEKIT_API_URL: lk.url,
+    BIFROST_TRUNK_ICE: '198.51.100.7:443,[2001:db8::7]:443',
+    BIFROST_VOICE_SWEEP_MS: '200',
   });
   try {
-    // the box's own console (loopback, no credential) clears the gate — and still gets no token
+    // the box's own console (loopback, no credential) clears the gate — and gets no token
     for (const method of ['POST', 'GET']) {
       const r = await call(app.base, {
         method,
@@ -191,7 +244,7 @@ test('devices mode (the trunk): 503 voice-unavailable, nothing minted, the edge 
       });
       expect(r.status, r.text).toBe(503);
       expect(r.json).toMatchObject({ error: 'voice-unavailable' });
-      expect(String(r.json!.why)).toContain('trunk');
+      expect(String(r.json!.why)).toContain('paired');
       expect(r.json).not.toHaveProperty('participantToken');
     }
     expect(lk.calls, 'no dispatch, no LiveKit call at all').toEqual([]);
@@ -199,6 +252,41 @@ test('devices mode (the trunk): 503 voice-unavailable, nothing minted, the edge 
     const bad = await call(app.base, { body: '{"room":"main"}', bearer: 'bfnd-not-a-real-token' });
     expect(bad.status).toBe(401);
     expect(bad.json).toMatchObject({ why: 'invalid', reauth: 'pair' });
+
+    // the paired device: voice is available, and the mint names the device and the trunk's ICE
+    const g = await call(app.base, { method: 'GET', bearer: dev.raw });
+    expect(g.status, g.text).toBe(200);
+    expect(g.json).toEqual({ voice: 'available' });
+    const r = await call(app.base, { body: '{"room":"main"}', bearer: dev.raw });
+    expect(r.status, r.text).toBe(200);
+    expect(r.json).toMatchObject({ serverUrl: 'wss://lk.test', roomName: 'main' });
+    expect(r.json!.iceTcp).toEqual([
+      { ip: '198.51.100.7', port: 443 },
+      { ip: '2001:db8::7', port: 443 },
+    ]);
+    const claims = verifyJwt(String(r.json!.participantToken), SECRET);
+    expect(claims).toMatchObject({ sub: 'user_main', attributes: { device: 'dev_phone1' } });
+    expect(claims.video).toMatchObject({ room: 'main', roomJoin: true, canPublish: true });
+    expect(claims.video).not.toHaveProperty('canUpdateOwnMetadata');
+    expect(lk.calls.map((c) => c.url)).toContain(
+      '/twirp/livekit.AgentDispatchService/CreateDispatch'
+    );
+
+    // it joins; then it is revoked: the sweep removes it from the room, the gate refuses it
+    inRoom = true;
+    await new Promise((d) => setTimeout(d, 600));
+    expect(lk.calls.some((c) => c.url.endsWith('/RemoveParticipant'))).toBe(false);
+    dev.revoke();
+    await expect
+      .poll(() => lk.calls.filter((c) => c.url.endsWith('/RemoveParticipant')).length, {
+        timeout: 5_000,
+      })
+      .toBeGreaterThan(0);
+    const rm = lk.calls.find((c) => c.url.endsWith('/RemoveParticipant'))!;
+    expect(JSON.parse(rm.body)).toMatchObject({ room: 'main', identity: 'user_main' });
+    const after = await call(app.base, { body: '{"room":"main"}', bearer: dev.raw });
+    expect(after.status).toBe(401);
+    expect(after.json).toMatchObject({ why: 'revoked' });
   } finally {
     app.stop();
     lk.close();

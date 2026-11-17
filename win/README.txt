@@ -36,9 +36,9 @@ Step by step
 2. Run Veraldar-Setup.exe, click Install.
 3. Double-click "Veraldar" on the Desktop.
    - It asks for your hub address once (the address your phone uses, https://...).
-   - Inside WSL it may ask to install a few packages (git, python3, a compiler; sudo
-     asks for your Linux password) and Rust. The first run builds the brain:
-     5 to 15 minutes.
+   - Inside WSL it may ask to install a few packages (git, python3, curl, openssh-client;
+     sudo asks for your Linux password). The first run downloads the signed release
+     (the brain comes prebuilt, its signature and checksum are checked): a minute or two.
    - It asks which AI model this root uses: an OpenAI- or Anthropic-compatible
      address, a model name and an API key (the key is not shown and is stored only
      in ~/.local/share/yggdrasil-root/brain.env, mode 600).

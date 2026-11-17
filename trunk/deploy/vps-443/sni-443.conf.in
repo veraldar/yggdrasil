@@ -1,0 +1,12 @@
+# sni-443.conf — the VPS's :443, made by make-conf.sh from @AP_NAME@ / @VPS_IP@ (no real names in git).
+# It reproduces today's hand-made turn-dispatcher.py rule for rule, and adds one:
+#   1. STUN / TURN over TCP (magic cookie 0x2112A442 at byte 4) → coturn on the VPS's public address
+#   2. TLS naming the trunk                                         → the access point, PROXY v1 first
+#   3. everything else (other names, no name, plain http, garbage)  → caddy (the website)
+#   4. NEW: ICE over TCP (RFC 4571 frame + STUN, cookie at byte 6) → the ap's raw `livekit-ice`
+#      forward: a paired phone's WebRTC (the pinned channel, voice) to the hub — opaque here
+listen  0.0.0.0:443
+stun    @VPS_IP@:3478
+route   @AP_NAME@ 127.0.0.1:@AP_PORT@ proxy
+default 127.0.0.1:@SITE_PORT@
+ice     127.0.0.1:@ICE_PORT@

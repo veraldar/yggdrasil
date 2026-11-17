@@ -25,6 +25,7 @@ import { markRead } from '@/lib/read';
 import {
   applyVoiceCommand,
   getSpeech,
+  lastSpoken,
   startSpeech,
   stopSpeech,
   subscribeSpeech,
@@ -38,6 +39,7 @@ import {
   withTimeout,
 } from '@/lib/voice-room';
 import { VOICE_OFF_NOTE, isVoiceUnavailable, voiceToken } from '@/lib/voice-token';
+import { voiceRoom } from '@/lib/voice-tts';
 
 export type RootsPhase =
   | 'off' // no voice here: the roots show MAIN's row
@@ -338,6 +340,7 @@ export class RootsLine {
     });
     room.on(RoomEvent.MediaDevicesError, (e: Error) => diagEvent('voice-fail', `roots: ${e}`));
     await withTimeout(room.connect(d.serverUrl, d.participantToken), 12_000, 'signal');
+    voiceRoom(room); // the reply's sound may ride this room (lib/voice-tts.ts)
     // the agent's keyword turn cycle: "over" → processing (mic pauses, the
     // reply is spoken here), "over and out" → hands-free ends (text reply)
     room.localParticipant.registerRpcMethod('free_state', async (data) => {
@@ -732,7 +735,7 @@ export class RootsLine {
     const speaking = getSpeech().phase !== 'idle';
     if (speaking !== this.deckSpeaking) {
       this.deckSpeaking = speaking;
-      tellDeckState(this.room, speaking);
+      tellDeckState(this.room, speaking, speaking ? lastSpoken().text : '');
     }
     const cycle = this.cycle;
     if (!cycle?.speaking) return;

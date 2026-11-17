@@ -1,0 +1,15 @@
+{
+ "id": "v-memory",
+ "port_of": "memory",
+ "title": "Voice: a new day, MAIN remembers last week through the librarian (hsim 'memory', spoken)",
+ "voice": {"voice": "bf_emma", "speed": 0.95},
+ "phone": {"noiseDb": -50, "noiseColor": "brown", "echo": 0},
+ "max_minutes": 25,
+ "max_turns": 8,
+ "voice_checks": [
+  {"kind": "all_turns_landed", "name": "every spoken turn reached MAIN"},
+  {"kind": "every_reply_spoken", "name": "every reply was spoken"},
+  {"kind": "heard_regex", "regex": "sequel|sqlite|s q lite|sql lite", "name": "the person HEARD the decision (SQLite) spoken back"},
+  {"kind": "box_wer_max", "value": 0.2, "name": "the box heard the person (mean box WER <= 0.2)"}
+ ]
+}

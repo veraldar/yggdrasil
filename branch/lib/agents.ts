@@ -98,9 +98,15 @@ export function agentDiff(
   return rows;
 }
 
-/** the agent's three-letter tag in the session list: AGI, BUI(ld), FIX, LEA(d)… */
+/** the agent's three-letter tag in the session list: CLA(ude), AGY, BUI(ld), FIX, LEA(d)… */
 export const agentTag = (agent: string) =>
   agent
     .replace(/[^a-z0-9]/gi, '')
     .slice(0, 3)
     .toUpperCase();
+
+/** every row carries one (owner 11-17): MAIN is MAI; a conversation from the terminal is its
+ *  harness's (CLA · AGY · OPE) — it runs there whatever the agent; else the agent's */
+export const HARNESS_TAG: Record<string, string> = { claude: 'CLA', antigravity: 'AGY', opencode: 'OPE', codex: 'COD' };
+export const sessionTag = (s: { agent?: string | null; harness?: string | null }, isMain = false) =>
+  isMain ? 'MAI' : (s.harness && HARNESS_TAG[s.harness]) || agentTag(s.agent || 'build');

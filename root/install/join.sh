@@ -1,13 +1,20 @@
 #!/usr/bin/env bash
 # join.sh — make THIS machine (Linux, WSL2 Ubuntu, macOS) a root of an existing tree. No sudo, no docker.
 #
-#   ./join.sh --hub https://tree.example.org    ask the hub; a QR appears; scan it with your paired phone, approve
-#   ./join.sh                                   re-run: keeps the join, refreshes files, makes sure it all runs
-#   ./join.sh --rejoin --hub URL                join again (a new root id); the old join stays if this one fails
-#   ./join.sh --stop                            stop this root's services (the join is kept)
+#   bash join.sh --hub https://tree.example.org  ask the hub; a QR appears; scan it with your paired phone, approve
+#   bash join.sh                                 re-run: keeps the join, refreshes files, makes sure it all runs
+#   bash join.sh --rejoin --hub URL              join again (a new root id); the old join stays if this one fails
+#   bash join.sh --stop                          stop this root's services (the join is kept)
+#   bash join.sh --uninstall                     stop it and remove it all (lists what goes, asks first; -y: no question)
+#
+# The join.sh you download is small: it fetches the release it belongs to and checks it — SHA256SUMS must be
+# signed by the yggdrasil release key embedded below (YGG_SIGNER, never fetched), the archive must match it —
+# then runs that release's join.sh, with prebuilt binaries: no git, Rust or compiler needed (Linux/WSL x86_64).
 #
 # This machine only DIALS OUT: its brain listens on loopback, root-dial.py carries it to the trunk through
 # the hub's public access point (wss). Nothing here needs an open port, a public IP or a certificate.
+# Brain calls with the other roots ride this root's own WireGuard node (bifrost-net wg): its key is made
+# here (mode 600), the phone shows the key's fingerprint next to the code, and approving pins it.
 #
 #   --hub URL             the hub your phone is paired with (needed for the first join only)
 #   --name NAME           this root's name in the tree (default: the hostname)
@@ -15,29 +22,49 @@
 #   --upstream-env FILE   the model: YGG_UPSTREAM_BASE_URL / _API_KEY / _MODEL / _STYLE lines. Default: the
 #                         same variables from the environment; asked for when run in a terminal. Kept on re-runs.
 #   --qr-png FILE         where the QR picture goes (default DIR/join-qr.png)   --open-qr   show it on screen
-#   --brain-bin FILE      use this yggdrasil binary (default: DIR/bin, the repo's build, ~/.local/bin, PATH,
-#                         else cargo build --release in root/)           --build   rebuild with cargo anyway
-#   --brain-port P / --peer-port P   loopback ports (first join: 4180/4181, or the next free pair)
+#   --brain-bin FILE      use this yggdrasil binary (default: DIR/bin, the release's, the repo's build, ~/.local/bin,
+#                         PATH, else the signed release on Linux/WSL x86_64)
+#   --net-bin FILE        use this bifrost-net binary (the tunnel's node; default: DIR/bin, the release's root build,
+#                         the repo's build, ~/.local/bin, PATH, else the signed release's — checked like the rest)
+#   --build               developers, in a git checkout (macOS, other CPUs: there is no release for them yet):
+#                         build the brain and the node with cargo (the node's root build: no cmake, no libopus)
+#   --brain-port P / --peer-port P   loopback ports (first join: 4180/4181, or the next free pair); the peer
+#                         port is the node's door (tcp) and its udp, the brain port the dialer's udp too
 #   --project-dir DIR     where the brain's tools work (default: your home)
 #   --supervisor auto|systemd|launchd|nohup   auto = launchd on macOS, systemd --user when it answers, else a
 #                         nohup loop (logs in DIR/log; re-run join.sh after a reboot)
 #   --no-start            write everything, start nothing
 #   --cacert FILE         trust this CA for the hub (tests with a self-signed hub ONLY)
+#   --version vX.Y.Z      another release than this script's own
 #
 # Exit: 0 joined and running · 3 refused on the phone · 4 the request expired · 64 usage · 1 anything else.
 set -euo pipefail
 umask 077
 
+# ------------------------------------------------------------------------------ the release key
+# scripts/release.sh stamps YGG_RELEASE with the release this file belongs to ('' = a source checkout).
+# YGG_SIGNER is the release key's allowed_signers line (RELEASE-KEY.pub in the repo).
+YGG_RELEASE=''
+YGG_RELEASE_TEST=''
+YGG_SIGNER='release@yggdrasil namespaces="yggdrasil-release" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIJyKwTSmRf3Cy1cHpzKHl3teRvCQtgK8/dcFRvlNCDJg'
+# A test release (signed by a throwaway key) is marked YGG_RELEASE_TEST=1 by scripts/release.sh: only it, or an
+# unstamped script from a checkout, may be pointed at other signers. A real release's script refuses, loudly.
+if [ -n "${YGG_RELEASE_TEST_SIGNERS:-}" ] && [ -n "$YGG_RELEASE" ] && [ "$YGG_RELEASE_TEST" != 1 ]; then
+  printf '\033[1;31mxx\033[0m  %s\n' "YGG_RELEASE_TEST_SIGNERS is set, but this is the v$YGG_RELEASE release's installer: it trusts only the yggdrasil release key. Unset it — it is for tests, from a checkout." >&2
+  exit 64
+fi
+
+ARGS=("$@")
 HERE=$(cd "$(dirname "$0")" && pwd)
 REPO=$(cd "$HERE/../.." && pwd)
 
 say()  { printf '\033[1m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m!!\033[0m  %s\n' "$*" >&2; }
-die()  { printf '\033[1;31mxx\033[0m  %s\n' "$*" >&2; exit "${2:-1}"; }
-usage() { sed -n '2,27p' "$0" | sed 's/^# \{0,1\}//'; }
+die()  { printf '\033[1;31mxx\033[0m  %s\n' "$1" >&2; exit "${2:-1}"; }
+usage() { sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//'; }
 
-HUB='' NAME='' DIR='' UPSTREAM_FILE='' QR_PNG='' OPEN_QR='' BRAIN_BIN=${YGG_BINARY:-} BUILD=0 BRAIN_PORT='' PEER_PORT=''
-PROJECT_DIR='' SUPERVISOR=auto START=1 CACERT='' REJOIN=0 STOP=0
+HUB='' NAME='' DIR='' UPSTREAM_FILE='' QR_PNG='' OPEN_QR='' BRAIN_BIN=${YGG_BINARY:-} BUILD=0 BRAIN_PORT='' PEER_PORT='' NET_BIN=''
+PROJECT_DIR='' SUPERVISOR=auto START=1 CACERT='' REJOIN=0 STOP=0 UNINSTALL=0 YES=0 WANT_VERSION=''
 need() { [ $# -ge 2 ] && [ -n "$2" ] || die "$1 needs a value" 64; }
 while [ $# -gt 0 ]; do
   case $1 in
@@ -48,6 +75,7 @@ while [ $# -gt 0 ]; do
     --qr-png) need "$@"; QR_PNG=$2; shift ;;
     --open-qr) OPEN_QR=1 ;;
     --brain-bin) need "$@"; BRAIN_BIN=$2; shift ;;
+    --net-bin) need "$@"; NET_BIN=$2; shift ;;
     --build) BUILD=1 ;;
     --brain-port) need "$@"; BRAIN_PORT=$2; shift ;;
     --peer-port) need "$@"; PEER_PORT=$2; shift ;;
@@ -57,6 +85,9 @@ while [ $# -gt 0 ]; do
     --cacert) need "$@"; CACERT=$2; shift ;;
     --rejoin) REJOIN=1 ;;
     --stop) STOP=1 ;;
+    --uninstall) UNINSTALL=1 ;;
+    -y|--yes) YES=1 ;;
+    --version) need "$@"; WANT_VERSION=${2#v}; shift ;;
     -h|--help) usage; exit 0 ;;
     *) die "unknown option: $1 (see --help)" 64 ;;
   esac
@@ -80,6 +111,99 @@ pkg_hint() { # what to run to get the named packages (Debian names)
 PY=$(command -v python3 || true)
 if [ -z "$PY" ] || ! "$PY" -c 'import ssl, json, urllib.request, zlib, fcntl' 2>/dev/null; then
   die "python3 (with ssl) is needed — $(pkg_hint python3 ca-certificates)"
+fi
+ARCH=$(uname -m); case $ARCH in amd64) ARCH=x86_64 ;; arm64) ARCH=aarch64 ;; esac
+RELEASES=${YGG_RELEASES:-${JOIN_RELEASES:-https://github.com/veraldar/yggdrasil/releases}}
+REL_HOME=${XDG_DATA_HOME:-$HOME/.local/share}/yggdrasil/release   # unpacked releases (shared with install.sh)
+MIN_GLIBC=2.31   # the release's binaries are built on Debian 11 (bullseye): Debian 11+, Ubuntu 20.04+
+
+# ------------------------------------------------------------------ the release: signed, checked
+fetch() { curl -fsSL --retry 3 --proto '=https,http' ${CACERT:+--cacert "$CACERT"} -o "$2" "$1"; }
+REL_DIR=''
+release_sums() { # BASE — BASE/SHA256SUMS into $REL_DIR, verified: signed by YGG_SIGNER, else stop here
+  local base=$1 signers
+  [ -n "$REL_DIR" ] || { REL_DIR=$(mktemp -d); trap 'rm -rf "$REL_DIR"' EXIT; }
+  say "release: $base/SHA256SUMS (+ its signature)"
+  fetch "$base/SHA256SUMS" "$REL_DIR/SHA256SUMS" || die "cannot download $base/SHA256SUMS — check the network and that the release exists"
+  fetch "$base/SHA256SUMS.sig" "$REL_DIR/SHA256SUMS.sig" || die "the release at $base has no signature (SHA256SUMS.sig) — refusing it"
+  signers=$REL_DIR/allowed_signers
+  printf '%s\n' "$YGG_SIGNER" >"$signers"
+  if [ -n "${YGG_RELEASE_TEST_SIGNERS:-}" ]; then # tests only: their own throwaway release key
+    warn "TEST ONLY: trusting the release signers in $YGG_RELEASE_TEST_SIGNERS (YGG_RELEASE_TEST_SIGNERS), not the built-in key"
+    cat "$YGG_RELEASE_TEST_SIGNERS" >"$signers"
+  fi
+  ssh-keygen -Y verify -f "$signers" -I release@yggdrasil -n yggdrasil-release -s "$REL_DIR/SHA256SUMS.sig" \
+    <"$REL_DIR/SHA256SUMS" >/dev/null 2>&1 \
+    || die "the SHA256SUMS at $base is NOT signed by the yggdrasil release key — refusing it (a tampered or foreign release)"
+  say "release: signature OK (the yggdrasil release key)"
+}
+sum_of() { sed -n "s/^\([0-9a-f]\{64\}\)  $1\$/\1/p" "$REL_DIR/SHA256SUMS" | head -1; }   # ASSET → its sha256
+release_base() { if [ -n "$1" ]; then echo "$RELEASES/download/v${1#v}"; else echo "$RELEASES/latest/download"; fi; }
+newer() { # A B — is version A newer than B? A pre-release is OLDER than its release: 0.9.1-rc.1 < 0.9.1
+  [ "$1" = "$2" ] && return 1
+  local a=${1%%-*} b=${2%%-*}
+  if [ "$a" != "$b" ]; then [ "$(printf '%s\n%s\n' "$a" "$b" | sort -V | tail -1)" = "$a" ]; return; fi
+  case $1/$2 in
+    *-*/*-*) [ "$(printf '%s\n%s\n' "${1#*-}" "${2#*-}" | sort -V | tail -1)" = "${1#*-}" ] ;;
+    *-*/*) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+unpacked() { local d; for d in "$REL_HOME"/*/.verified; do if [ -f "$d" ]; then basename "$(dirname "$d")"; fi; done | sort -V; }
+bootstrap() { # WHY — the signed release (--version, else max(this script's, the newest unpacked)), unpacked, then
+  #             ITS join.sh runs with our arguments: prebuilt brain + node, nothing to compile here
+  local want base tgz newest
+  [ "$OS" != macos ] && [ "$ARCH" = x86_64 ] || die "$1, and there is no prebuilt release for $OS $ARCH yet:
+    install Rust (your package manager, or https://rustup.rs) and a C compiler ($(pkg_hint build-essential)),
+    then run join.sh from a git checkout with --build" 1
+  # what this computer needs, all checked before anything is downloaded
+  local g need=() d free_mb
+  g=$(ldd --version 2>&1 | head -1 | grep -o '[0-9][0-9]*\.[0-9][0-9]*$' || true)
+  [ -n "$g" ] || die "$1, and this Linux has no glibc (musl? Alpine?): the release needs glibc $MIN_GLIBC or newer (Debian 11+, Ubuntu 20.04+)"
+  [ "$(printf '%s\n%s\n' "$MIN_GLIBC" "$g" | sort -V | head -1)" = "$MIN_GLIBC" ] ||
+    die "$1, and this Linux's C library is glibc $g: the release needs $MIN_GLIBC or newer (Debian 11+, Ubuntu 20.04+). Nothing was downloaded."
+  command -v curl >/dev/null || need+=(curl ca-certificates)
+  command -v ssh-keygen >/dev/null || need+=(openssh-client)
+  command -v sha256sum >/dev/null && command -v tar >/dev/null || need+=(coreutils tar)
+  [ ${#need[@]} = 0 ] || die "$1; fetching and checking the release needs: ${need[*]} — first: $(pkg_hint "${need[@]}"). Nothing was downloaded."
+  d=${XDG_DATA_HOME:-$HOME/.local/share}; while [ ! -d "$d" ]; do d=$(dirname "$d"); done
+  free_mb=$(( $(df -Pk "$d" | awk 'NR==2 {print $4}') / 1024 ))
+  [ "$free_mb" -ge 600 ] || die "$1, and only $free_mb MB are free in $d: the release needs about 600 MB. Nothing was downloaded."
+  newest=$(unpacked | tail -1)
+  want=${WANT_VERSION:-$YGG_RELEASE}
+  if [ -z "$WANT_VERSION" ] && [ -n "$newest" ] && { [ -z "$want" ] || newer "$newest" "$want"; }; then want=$newest; fi
+  if [ -z "$want" ] || [ ! -f "$REL_HOME/$want/.verified" ]; then
+    base=$(release_base "$want")
+    release_sums "$base"
+    [ -n "$want" ] || want=$(sed -n 's/^[0-9a-f]\{64\}  yggdrasil-\([0-9][0-9A-Za-z.+-]*\)-linux-x86_64\.tar\.gz$/\1/p' "$REL_DIR/SHA256SUMS" | head -1)
+    tgz=yggdrasil-$want-linux-x86_64.tar.gz
+    [ -n "$want" ] && [ -n "$(sum_of "$tgz")" ] || die "the release${want:+ v$want} has no $tgz (signed SHA256SUMS)"
+    # this very script, when it belongs to that release: the one the release signed, or stop here
+    if [ -n "$YGG_RELEASE" ] && [ "$want" = "$YGG_RELEASE" ] && [ -f "$0" ] && [ -n "$(sum_of join.sh)" ] &&
+       [ "$(sha256sum <"$0" | cut -c1-64)" != "$(sum_of join.sh)" ]; then
+      die "this join.sh is not the one release v$YGG_RELEASE signed (its sha256 is not in SHA256SUMS) — download it again: $base/join.sh"
+    fi
+  fi
+  if [ ! -f "$REL_HOME/$want/.verified" ]; then
+    say "$1: the signed release $want ($base/$tgz)"
+    fetch "$base/$tgz" "$REL_DIR/$tgz" || die "cannot download $base/$tgz"
+    [ "$(sha256sum <"$REL_DIR/$tgz" | cut -c1-64)" = "$(sum_of "$tgz")" ] || die "$tgz does not match SHA256SUMS — refusing to install it"
+    mkdir -p "$REL_HOME"; rm -rf "$REL_HOME/.$want.new"; mkdir -p "$REL_HOME/.$want.new"
+    tar -xzf "$REL_DIR/$tgz" -C "$REL_HOME/.$want.new" --strip-components=1 --no-same-owner || die "could not unpack $tgz"
+    grep -qx "yggdrasil $want" "$REL_HOME/.$want.new/RELEASE" 2>/dev/null || die "$tgz holds another release than $want — refusing it"
+    sum_of "$tgz" >"$REL_HOME/.$want.new/.verified"
+    rm -rf "${REL_HOME:?}/$want"; mv "$REL_HOME/.$want.new" "$REL_HOME/$want"
+    say "release: $want unpacked in $REL_HOME/$want (signature + sha256 checked)"
+  fi
+  [ -n "$REL_DIR" ] && rm -rf "$REL_DIR"
+  exec bash "$REL_HOME/$want/root/install/join.sh" ${ARGS[@]+"${ARGS[@]}"}
+}
+# alone (downloaded): the release first; --version names another release than this one
+if [ $UNINSTALL = 0 ] && [ $STOP = 0 ]; then
+  if [ ! -f "$HERE/rootjoin.py" ]; then bootstrap "this join.sh came alone"
+  elif [ -n "$WANT_VERSION" ] && [ "$(sed -n '1s/^yggdrasil //p' "$REPO/RELEASE" 2>/dev/null)" != "$WANT_VERSION" ]; then
+    bootstrap "--version $WANT_VERSION"
+  fi
 fi
 
 DIR=${DIR:-$HOME/.local/share/yggdrasil-root}
@@ -125,10 +249,11 @@ supervise_pid() { # the running nohup supervisor of THIS dir, if any
   pid_alive "$p" && proc_args "$p" | grep -q "$BIN/supervise" && echo "$p" || true
 }
 stop_services() { # stop whatever supervisor this dir used
-  local sup p; sup=$(confget SUPERVISOR)
+  local sup p u; sup=$(confget SUPERVISOR); u=("${UNITS[@]}")
+  [ -f "$UNIT_DIR/yggdrasil-root-wg.service" ] && u+=(yggdrasil-root-wg.service)
   case $sup in
-    systemd) systemctl --user disable --now "${UNITS[@]}" yggdrasil-root-refill.timer >/dev/null 2>&1 || true ;;
-    launchd) for s in brain dial refill; do launchctl bootout "gui/$(id -u)/$LABEL.$s" 2>/dev/null || true; done ;;
+    systemd) systemctl --user disable --now "${u[@]}" yggdrasil-root-refill.timer >/dev/null 2>&1 || true ;;
+    launchd) for s in brain dial refill wg; do launchctl bootout "gui/$(id -u)/$LABEL.$s" 2>/dev/null || true; done ;;
   esac
   p=$(supervise_pid)
   if [ -n "$p" ]; then
@@ -142,6 +267,33 @@ if [ $STOP = 1 ]; then
   [ -f "$CONF" ] || die "nothing here to stop: $CONF missing"
   stop_services
   h=$(cat "$RUN/hold.pid" 2>/dev/null || true); if pid_alive "$h"; then kill "$h"; fi; rm -f "$RUN/hold.pid"
+  exit 0
+fi
+if [ $UNINSTALL = 1 ]; then
+  GONE=()
+  for u in "${UNITS[@]}" yggdrasil-root-wg.service yggdrasil-root-refill.service yggdrasil-root-refill.timer; do
+    [ -e "$UNIT_DIR/$u" ] && GONE+=("$UNIT_DIR/$u  (unit)")
+  done
+  for s in brain dial refill wg; do [ -e "$AGENT_DIR/$LABEL.$s.plist" ] && GONE+=("$AGENT_DIR/$LABEL.$s.plist"); done
+  [ -e "$DIR" ] && GONE+=("$DIR/  (this root: its join, keys, link tokens, model key, brain data, logs)")
+  OWN_REL=0   # the unpacked releases go too, unless the full stack (install.sh) uses them
+  [ -d "$REL_HOME" ] && [ ! -d "${XDG_CONFIG_HOME:-$HOME/.config}/bifrost" ] && OWN_REL=1 && GONE+=("$REL_HOME/  (the unpacked releases)")
+  if [ ${#GONE[@]} = 0 ]; then say "no joined root here — nothing to remove"; exit 0; fi
+  echo "This removes this root from this computer (the tree keeps the others; revoke it on the phone if you like):"
+  printf '    %s\n' "${GONE[@]}"
+  if [ $YES = 0 ]; then
+    [ -t 0 ] || die "--uninstall asks first: add -y to remove without a question" 64
+    read -r -p "remove all of this? [y/N] " a
+    case $a in y|Y|yes|YES) ;; *) die "nothing removed" ;; esac
+  fi
+  [ -f "$CONF" ] && stop_services
+  h=$(cat "$RUN/hold.pid" 2>/dev/null || true); if pid_alive "$h"; then kill "$h"; fi
+  for u in "${UNITS[@]}" yggdrasil-root-wg.service yggdrasil-root-refill.service yggdrasil-root-refill.timer; do rm -f "$UNIT_DIR/$u"; done
+  systemd_sees && systemctl --user daemon-reload
+  for s in brain dial refill wg; do rm -f "$AGENT_DIR/$LABEL.$s.plist"; done
+  rm -rf "$DIR"
+  if [ $OWN_REL = 1 ]; then rm -rf "$REL_HOME"; rmdir "$(dirname "$REL_HOME")" 2>/dev/null || true; fi
+  say "removed"
   exit 0
 fi
 
@@ -192,18 +344,19 @@ find_brain() {
   local c
   if [ -n "$BRAIN_BIN" ]; then echo "$BRAIN_BIN"; return; fi
   [ $BUILD = 1 ] && return 0
-  for c in "$BIN/yggdrasil" "$REPO/root/target/release/yggdrasil" "$HOME/.local/bin/yggdrasil" "$(command -v yggdrasil || true)"; do
+  for c in "$BIN/yggdrasil" "$REPO/bin/yggdrasil" "$REPO/root/target/release/yggdrasil" "$HOME/.local/bin/yggdrasil" "$(command -v yggdrasil || true)"; do
     [ -n "$c" ] && [ -x "$c" ] && { echo "$c"; return; }
   done
+  return 0   # none found: the caller builds one (a failing $(…) would end the script under set -e)
 }
 SRC=$(find_brain)
+[ -z "$SRC" ] && [ $BUILD = 0 ] && bootstrap "no yggdrasil binary here"
 if [ -z "$SRC" ]; then
   # shellcheck disable=SC1091
   command -v cargo >/dev/null || { [ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"; } || true
   if ! command -v cargo >/dev/null || ! command -v cc >/dev/null; then
-    die "no yggdrasil binary here, and no Rust to build one. Install, then re-run:
-      $(pkg_hint build-essential pkg-config | sed 's/xcode-select --install.*/xcode-select --install/')
-      curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal && . ~/.cargo/env
+    die "--build: no Rust or no C compiler here. Install them (your package manager, or https://rustup.rs;
+      $(pkg_hint build-essential pkg-config | sed 's/xcode-select --install.*/xcode-select --install/')), then re-run
     (or pass --brain-bin /path/to/yggdrasil built elsewhere for this OS/CPU)"
   fi
   [ -f "$REPO/root/Cargo.toml" ] || die "no root/Cargo.toml in $REPO to build the brain from"
@@ -216,6 +369,53 @@ fi
 DIAL_SRC=$REPO/trunk/scripts/root-dial.py
 [ -f "$DIAL_SRC" ] || die "missing $DIAL_SRC (the dialer) — is this a full checkout?"
 copy "$DIAL_SRC" "$BIN/root-dial.py" 755
+
+# ---------------------------------------------------------------- 1b. the tunnel's node binary
+# bifrost-net runs this root's WireGuard node: a given binary, the one installed before, the repo's build,
+# ~/.local/bin or PATH; else the release (Linux/WSL x86_64, checked against the release's SHA256SUMS: the
+# root binary bifrost-net-root-<ver>-linux-x86_64 when the release has one, else the full bifrost-net, which
+# needs libopus0) or, on macOS and other CPUs, the ROOT build from trunk/ (--no-default-features: the node,
+# keys and link tokens only — no WebRTC or audio, so no cmake and no libopus).
+find_net() {
+  local c
+  if [ -n "$NET_BIN" ]; then echo "$NET_BIN"; return; fi
+  for c in "$BIN/bifrost-net" "$REPO/bin/bifrost-net-root" "$REPO/bin/bifrost-net" \
+    "$REPO/trunk/target/release/bifrost-net" "$REPO/trunk/target/root/release/bifrost-net" \
+    "$HOME/.local/bin/bifrost-net" "$(command -v bifrost-net || true)"; do
+    [ -n "$c" ] && [ -x "$c" ] && { echo "$c"; return; }
+  done
+  return 0   # none found: the release, or a build
+}
+NET_SRC=$(find_net)
+if [ -z "$NET_SRC" ] && [ $OS != macos ] && [ "$ARCH" = x86_64 ]; then
+  NBASE=$(release_base "${WANT_VERSION:-$YGG_RELEASE}")
+  say "downloading bifrost-net (this root's WireGuard node) from $NBASE: SHA256SUMS signed by the release key, then checked"
+  if "$PY" "$HELPER" fetch-net --base "$NBASE" --arch "$ARCH" --out "$BIN/bifrost-net.dl" ${CACERT:+--cacert "$CACERT"}; then
+    NET_SRC=$BIN/bifrost-net.dl
+  else
+    [ $BUILD = 1 ] || die "no bifrost-net from the release (above) — or pass --net-bin FILE"
+    warn "no bifrost-net from the release: building the root build instead (--build)"
+  fi
+fi
+if [ -z "$NET_SRC" ]; then
+  [ $BUILD = 1 ] || die "no bifrost-net binary for $OS/$ARCH here — pass --net-bin FILE, or build it: join.sh --build (a checkout, Rust)"
+  # shellcheck disable=SC1091
+  command -v cargo >/dev/null || { [ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"; } || true
+  [ -f "$REPO/trunk/Cargo.toml" ] || die "no bifrost-net here and no trunk/ to build it from: pass --net-bin FILE"
+  command -v cargo >/dev/null || die "--build: no Rust here to build bifrost-net (your package manager, or https://rustup.rs) — or pass --net-bin FILE"
+  command -v cc >/dev/null || die "building bifrost-net needs a C compiler (for ring): $(pkg_hint build-essential)"
+  # the root build (its own target dir: a full build there is never overwritten)
+  say "building bifrost-net, the root build (cargo build --release --no-default-features in $REPO/trunk — about 1-2 minutes the first time)"
+  cargo build --release --no-default-features --manifest-path "$REPO/trunk/Cargo.toml" --target-dir "$REPO/trunk/target/root"
+  NET_SRC=$REPO/trunk/target/root/release/bifrost-net
+fi
+[ -x "$NET_SRC" ] || die "bifrost-net not found or not executable: $NET_SRC"
+[ "$NET_SRC" = "$BIN/bifrost-net" ] || copy "$NET_SRC" "$BIN/bifrost-net" 755
+rm -f "$BIN/bifrost-net.dl"
+NET_OUT=$("$BIN/bifrost-net" 2>&1 || true)   # usage (exit 2) when it runs; the loader's error when it cannot
+case $NET_OUT in # the Linux build links libopus
+  *'error while loading shared libraries'*) die "bifrost-net cannot start: ${NET_OUT%%$'\n'*} — $(pkg_hint libopus0)" ;;
+esac
 
 # ------------------------------------------------------------------------------ 2. upstream
 UP_ARGS=() UP_TMP=
@@ -262,16 +462,33 @@ write_conf() { # write_conf HUB SUPERVISOR — the settings re-runs read (no sec
 }
 write_conf "$HUB" "$OLD_SUP"   # so an interrupted join resumes with the same name, ports and CA
 
+# ------------------------------------------------------------------------ 2b. the tunnel's key
+# Made here, mode 600; only the public half leaves (the phone shows its fingerprint next to the code, and
+# approving pins it). A join again gets a fresh key, kept apart until it is approved (the old join keeps
+# its own). A root that joined before the tunnel has no key: it joins again, with one.
+if [ $JOINED = 1 ] && [ $REJOIN = 0 ] && [ -z "$("$PY" "$HELPER" get --state "$DIR" wg_pub)" ]; then
+  say "this root joined before the tunnel: joining again with a WireGuard key — approve it on the phone"
+  REJOIN=1
+fi
+KEYFILE=$DIR/wg.key; [ $JOINED = 1 ] && [ $REJOIN = 1 ] && KEYFILE=$DIR/wg-next.key
+WG_PUB=$("$BIN/bifrost-net" wg-key "$KEYFILE" 2>/dev/null | sed -n 's/^public_key = "\(.*\)"$/\1/p')
+[ -n "$WG_PUB" ] || die "could not make the WireGuard key ($KEYFILE) with $BIN/bifrost-net"
+if [ $JOINED = 1 ] && [ $REJOIN = 0 ] && [ "$("$PY" "$HELPER" get --state "$DIR" wg_pub)" != "$WG_PUB" ]; then
+  say "this root's WireGuard key is not the one the hub pinned: joining again with it — approve it on the phone"
+  REJOIN=1
+fi
+
 # --------------------------------------------------------------------------------- 3. join
 if [ $JOINED = 1 ] && [ $REJOIN = 0 ]; then
   say "already joined: root $("$PY" "$HELPER" get --state "$DIR" root_id) of $HUB (no new join; --rejoin to join again)"
 else
   [ $REJOIN = 1 ] && [ $JOINED = 1 ] && say "rejoin: asking $HUB for a new join (the current one stays until this is approved)"
   rc=0 NEW_FLAG=; [ $REJOIN = 1 ] && NEW_FLAG=--new
-  "$PY" "$HELPER" join --state "$DIR" --hub "$HUB" --name "$NAME" --os "$OS" --host "$HOSTN" \
+  "$PY" "$HELPER" join --state "$DIR" --hub "$HUB" --name "$NAME" --os "$OS" --host "$HOSTN" --wg-pub "$WG_PUB" \
     --qr-png "$QR_PNG" ${OPEN_QR:+--open-qr} ${CACERT:+--cacert "$CACERT"} $NEW_FLAG || rc=$?
   case $rc in
-    0) CHANGED=1 ;;
+    0) CHANGED=1
+       if [ "$KEYFILE" != "$DIR/wg.key" ]; then mv -f "$KEYFILE" "$DIR/wg.key"; mv -f "$KEYFILE.pub" "$DIR/wg.key.pub"; fi ;;
     3|4|130) exit $rc ;;
     *) die "join failed (exit $rc)" ;;
   esac
@@ -279,12 +496,24 @@ fi
 ROOT_ID=$("$PY" "$HELPER" get --state "$DIR" root_id)
 HUB=$("$PY" "$HELPER" get --state "$DIR" hub)
 HUB_NAME=$("$PY" "$HELPER" get --state "$DIR" hub_name); HUB_NAME=${HUB_NAME:-hub}   # the hub brain's root name
+TUNNEL=$("$PY" "$HELPER" get --state "$DIR" tunnel)   # 1 = the approval granted the WireGuard tunnel
+WG_AGENT='' WG_LOOP=''
+if [ "$TUNNEL" = 1 ]; then
+  UNITS+=(yggdrasil-root-wg.service) WG_AGENT=' wg' WG_LOOP="loop wg '$BIN/run-wg'"
+fi
 SUP=$(pick_supervisor)
 [ -n "$OLD_SUP" ] && [ "$OLD_SUP" != "$SUP" ] && stop_services
 write_conf "$HUB" "$SUP"
 
 # ---------------------------------------------------------------------------- 4. brain env
 brain_env
+if [ "$TUNNEL" = 1 ]; then # this root's WireGuard node: its door + udp on the peer port, the dialer's udp on the brain port
+  out=$("$PY" "$HELPER" wg-config --state "$DIR" --out "$DIR/wg.toml" --brain-port "$BRAIN_PORT" --peer-port "$PEER_PORT") \
+    || die "could not write $DIR/wg.toml"
+  [ "$out" = changed ] && CHANGED=1
+else
+  warn "the hub granted no WireGuard tunnel (it runs no node): brain calls with other roots use the old plaintext path"
+fi
 
 # ----------------------------------------------------------------------- 5. the run scripts
 DIAL=$("$PY" "$HELPER" dial --state "$DIR")
@@ -295,6 +524,8 @@ BRAIN_URL=http://127.0.0.1:$BRAIN_PORT
 CA_LINE=; [ -n "$CACERT" ] && CA_LINE="export SSL_CERT_FILE='$CACERT'   # trust the test hub's CA (--cacert)"
 TLS_FLAG=; [ "$D_TLS" = 1 ] && TLS_FLAG='--tls '
 SETSID=$(command -v setsid || true)
+# the tunnel's datagrams ride the dialer's link (opaque); without a tunnel, the old plaintext peer port
+if [ "$TUNNEL" = 1 ]; then PEER_FLAGS="--wg-udp 127.0.0.1:$BRAIN_PORT --wg-node 127.0.0.1:$PEER_PORT"; else PEER_FLAGS="--peer-port $PEER_PORT"; fi
 
 put "$BIN/run-brain" 755 <<EOF
 #!/bin/sh
@@ -311,8 +542,16 @@ put "$BIN/run-dialer" 755 <<EOF
 # yggdrasil-root: top up the single-use link tokens (< 5 left), then dial the trunk (generated by join.sh)
 '$PY' '$HELPER' refill --state '$DIR' || echo "refill failed — dialing with the tokens left" >&2
 $CA_LINE
-exec '$PY' '$BIN/root-dial.py' $TLS_FLAG--host '$D_HOST' --port $D_PORT --path '$D_PATH' --token-file '$DIR/link-tokens' --brain '$BRAIN_URL' --peer-port $PEER_PORT --probe-exec '$PY $HELPER probe $BRAIN_URL/root'
+exec '$PY' '$BIN/root-dial.py' $TLS_FLAG--host '$D_HOST' --port $D_PORT --path '$D_PATH' --token-file '$DIR/link-tokens' --brain '$BRAIN_URL' $PEER_FLAGS --probe-exec '$PY $HELPER probe $BRAIN_URL/root'
 EOF
+if [ "$TUNNEL" = 1 ]; then
+put "$BIN/run-wg" 755 <<EOF
+#!/bin/sh
+# yggdrasil-root: this root's WireGuard node — brain calls with the other roots ride it; its key never
+# leaves $DIR/wg.key (generated by join.sh)
+exec '$BIN/bifrost-net' wg -c '$DIR/wg.toml'
+EOF
+fi
 put "$BIN/supervise" 755 <<EOF
 #!/bin/sh
 # yggdrasil-root: keeps the brain, the dialer and the 5-minute token refill alive without systemd/launchd
@@ -332,6 +571,7 @@ loop() { # loop NAME CMD... — restart CMD 5 s after it exits
   pids="\$pids \$!"
 }
 loop brain '$BIN/run-brain'
+$WG_LOOP
 loop dial '$BIN/run-dialer'
 loop refill '$PY' '$HELPER' refill --state '$DIR' --every 300
 trap 'kill \$pids 2>/dev/null; rm -f "$RUN/supervise.pid"; exit 0' TERM INT HUP
@@ -341,8 +581,8 @@ EOF
 case $SUP in
   systemd) START_CMD="systemctl --user start ${UNITS[*]} yggdrasil-root-refill.timer"
            STOP_CMD="systemctl --user stop ${UNITS[*]} yggdrasil-root-refill.timer" ;;
-  launchd) START_CMD="for s in brain dial refill; do launchctl kickstart gui/\$(id -u)/$LABEL.\$s; done"
-           STOP_CMD="for s in brain dial refill; do launchctl bootout gui/\$(id -u)/$LABEL.\$s; done" ;;
+  launchd) START_CMD="for s in brain dial refill$WG_AGENT; do launchctl kickstart gui/\$(id -u)/$LABEL.\$s; done"
+           STOP_CMD="for s in brain dial refill$WG_AGENT; do launchctl bootout gui/\$(id -u)/$LABEL.\$s; done" ;;
   nohup)   START_CMD="p=\$(cat '$RUN/supervise.pid' 2>/dev/null); if [ -z \"\$p\" ] || ! kill -0 \"\$p\" 2>/dev/null; then nohup $SETSID '$BIN/supervise' >/dev/null 2>&1 </dev/null & fi"
            STOP_CMD="p=\$(cat '$RUN/supervise.pid' 2>/dev/null); [ -n \"\$p\" ] && kill \"\$p\"" ;;
 esac
@@ -405,6 +645,25 @@ NoNewPrivileges=yes
 [Install]
 WantedBy=default.target
 EOF
+  if [ "$TUNNEL" = 1 ]; then
+  put "$UNIT_DIR/yggdrasil-root-wg.service" 644 <<EOF
+# yggdrasil-root: this root's WireGuard node — brain calls with the other roots (generated by join.sh)
+[Unit]
+Description=yggdrasil root WireGuard node ($ROOT_ID)
+StartLimitIntervalSec=0
+
+[Service]
+Type=exec
+ExecStart=$BIN/run-wg
+Restart=always
+RestartSec=3
+UMask=0077
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=default.target
+EOF
+  fi
   put "$UNIT_DIR/yggdrasil-root-refill.service" 644 <<EOF
 # yggdrasil-root: top up the link tokens when fewer than 5 are left (generated by join.sh)
 [Unit]
@@ -454,9 +713,10 @@ start_launchd() {
   local s dom; dom=gui/$(id -u)
   plist brain true '' "$BIN/run-brain"
   plist dial true '' "$BIN/run-dialer"
+  [ "$TUNNEL" = 1 ] && plist wg true '' "$BIN/run-wg"
   plist refill false '  <key>StartInterval</key><integer>300</integer>\n' "$PY" "$HELPER" refill --state "$DIR"
   [ $START = 1 ] || return 0
-  for s in brain dial refill; do
+  for s in brain dial refill$WG_AGENT; do
     if launchctl print "$dom/$LABEL.$s" >/dev/null 2>&1; then
       [ $CHANGED = 0 ] && continue
       launchctl bootout "$dom/$LABEL.$s" 2>/dev/null || true
@@ -490,9 +750,10 @@ fi
 cat <<EOF
 
   root      $ROOT_ID  ($NAME on $OS) of $HUB
-  home      the hub brain "$HUB_NAME" (YGG_PEERS $HUB_NAME=http://127.0.0.1:$PEER_PORT/local: reports go home there)
+  home      the hub brain "$HUB_NAME" ($(if [ "$TUNNEL" = 1 ]; then echo "inside WireGuard: http://127.0.0.1:$PEER_PORT/_wg/local; the other roots: /_wg/<root>"; else echo "YGG_PEERS $HUB_NAME=http://127.0.0.1:$PEER_PORT/local, plaintext"; fi): reports go home there)
+  tunnel    $(if [ "$TUNNEL" = 1 ]; then echo "bifrost-net wg on 127.0.0.1:$PEER_PORT · key $DIR/wg.key (mode 600)"; else echo "none: the hub runs no WireGuard node"; fi)
   services  $SUP: brain $BRAIN_URL · dialer -> $([ "$D_TLS" = 1 ] && echo wss || echo ws)://$D_HOST:$D_PORT$D_PATH · token refill every 5 min
   files     $DIR  (root.json, link-tokens, brain.env: mode 600)
   logs      $(case $SUP in systemd) echo "journalctl --user -u yggdrasil-root-brain -u yggdrasil-root-dial -f" ;; *) echo "$LOG/" ;; esac)
-  stop      $0 --stop     re-run: $0 (keeps this join)
+  stop      $0 --stop     re-run: $0 (keeps this join)     remove: $0 --uninstall
 EOF

@@ -1,7 +1,7 @@
 {
  "id": "all-agents",
  "title": "A real working session: one door, every kind of agent",
- "persona": "The owner: a busy developer on a phone. Short messages, typos, no punctuation, never explains more than needed, often sends the next request before the last one is done. Writes like: 'can u check for bugs', 'fix the empty one', 'use agi for the readme'.",
+ "persona": "The owner: a busy developer on a phone. Short messages, typos, no punctuation, never explains more than needed, often sends the next request before the last one is done. Writes like: 'can u check for bugs', 'fix the empty one', 'use claude for the readme'.",
  "brain_env": {
   "SIM_HARNESS": "1"
  },
@@ -15,7 +15,7 @@
   "A quick research answer: for this inventory, sqlite or a json file? a short answer with sources.",
   "A small CLI inv.py in the inventory folder: add, list, export csv, with tests.",
   "A bigger project in a folder named inventory-web, standard library only, with three independent parts: a JSON API server, a dashboard page that uses it, and a CSV import job \u2014 run the parts in parallel if possible, with tests, iterated until everything passes.",
-  "AGI (Claude Code) writes a short README.md in the inventory folder explaining the CLI \u2014 you ask for AGI by name.",
+  "claude (Claude Code) writes a short README.md in the inventory folder explaining the CLI \u2014 you ask for claude by name.",
   "After all that, you want a review of everything that happened in the past few minutes \u2014 what each session did and whether it worked \u2014 as a report.",
   "In the end you want to know that everything is done and tested."
  ],
@@ -25,7 +25,7 @@
   "Without waiting for the fix, send the research question in one short message.",
   "Then, still without waiting, ask for the inv.py cli (add, list, export csv, with tests).",
   "Then ask for the bigger inventory-web project in one message: three parts (json api server, dashboard page, csv import job), stdlib only, tests, run the parts in parallel, keep going until green.",
-  "Then ask to use agi for a short README for inventory explaining the cli.",
+  "Then ask to use claude for a short README for inventory explaining the cli.",
   "When most results are in, ask exactly: 'review everything happened in past 5m'",
   "Wait for results to come back. If something is unclear, ask main. At the end ask in a few words whether everything is done and tested, then finish."
  ],
@@ -65,9 +65,9 @@
    "agent": "lead"
   },
   {
-   "name": "AGI (Claude Code) did the readme",
+   "name": "claude (Claude Code) did the readme",
    "kind": "child_profile",
-   "agent": "AGI"
+   "agent": "claude"
   },
   {
    "name": "the lead split its project (depth 2)",

@@ -24,11 +24,47 @@ pub fn run(path: &str) -> Result<(), String> {
         .clone();
 
     let candidates: Vec<_> = cfg.candidates.iter().filter_map(|c| c.parse().ok()).collect();
+    let http: std::net::SocketAddr = cfg.http.parse().map_err(|e| format!("bridge.http: {e}"))?;
+    let own = std::net::SocketAddr::new(
+        if http.ip().is_unspecified() {
+            if http.is_ipv4() { std::net::IpAddr::from([127, 0, 0, 1]) } else { std::net::Ipv6Addr::LOCALHOST.into() }
+        } else {
+            http.ip()
+        },
+        http.port(),
+    )
+    .to_string();
+    let tokens = std::sync::Arc::new(crate::tokens::TokenStore::open(cfg.tokens_file.clone()));
+    // the pinned channel through the trunk: ICE over TCP at the ap's :443, and
+    // the HTTP tunnel (the same stream law as the ap's edge, ap.rs)
+    let (ice_tcp, tunnel) = match loaded.config.ap.as_ref() {
+        None => (vec![], None),
+        Some(apc) => {
+            let ice: Vec<std::net::SocketAddr> = match &apc.ice_tcp {
+                Some(list) => list.iter().filter_map(|a| a.parse().ok()).collect(),
+                None => {
+                    use std::net::ToSocketAddrs;
+                    let host = apc.url.trim_start_matches("wss://").split(['/', ':']).next().unwrap_or("").to_string();
+                    (host.as_str(), 443).to_socket_addrs().map(|a| a.collect()).unwrap_or_default()
+                }
+            };
+            let t = crate::ap::DialConfig {
+                url: apc.url.clone(),
+                pin: apc.pin.clone(),
+                token: String::new(),
+                upstream: apc.upstream.clone(),
+                livekit: apc.livekit.clone(),
+                tcp: Default::default(),
+                rootlink: None,
+                branch: Some(own.clone()),
+                tokens: tokens.clone(),
+                ice_demux: None,
+            };
+            (ice, Some(std::sync::Arc::new(t)))
+        }
+    };
     let handle = bridge::start(BridgeConfig {
-        http: cfg
-            .http
-            .parse()
-            .map_err(|e| format!("bridge.http: {e}"))?,
+        http,
         media: cfg
             .media
             .parse()
@@ -48,10 +84,15 @@ pub fn run(path: &str) -> Result<(), String> {
         root_link_ping_secs: cfg.root_link.as_ref().map(|rl| rl.ping_secs).unwrap_or(15),
         root_link_max_inflight: cfg.root_link.as_ref().map(|rl| rl.max_inflight).unwrap_or(1),
         root_link_result_secs: cfg.root_link.as_ref().map(|rl| rl.result_secs).unwrap_or(20),
+        root_link_wg_relay: cfg.root_link.as_ref().and_then(|rl| rl.wg_relay.clone()),
+        root_link_wg_local: cfg.root_link.as_ref().and_then(|rl| rl.wg_local.clone()),
+        root_link_plaintext_http: cfg.root_link.as_ref().is_some_and(|rl| rl.plaintext_http),
         // v0.9 pairing identity: /identity publishes the persisted DTLS fingerprint
         name: loaded.config.node.name.clone(),
         dtls_cert_file: cfg.dtls_cert_file.clone().map(Into::into),
         public_url: cfg.public_url.clone(),
+        ice_tcp: ice_tcp.clone(),
+        tunnel,
     })?;
 
     println!(
@@ -67,10 +108,21 @@ pub fn run(path: &str) -> Result<(), String> {
         Some(p) => println!("  bridge: root-link dial-in ws on port {p} (link-token first frame)"),
         None => println!("  bridge: root-link dial-in off"),
     }
-    println!(
-        "  bridge: switchboard — http://{}/_root/<root>/<path> (loopback) reaches a linked root's brain; `local` = {}",
-        handle.http, cfg.opencode_url
-    );
+    let rl = cfg.root_link.as_ref();
+    match (rl.and_then(|r| r.wg_relay.as_deref()), rl.and_then(|r| r.wg_local.as_deref())) {
+        (Some(r), Some(l)) => println!(
+            "  bridge: root <-> root over WireGuard — relays ciphertext only: root -> root, and `local` via udp {r} <-> the hub's node {l}"
+        ),
+        _ => println!("  bridge: root <-> root over WireGuard — relays root -> root only (no wg_relay/wg_local: the hub runs no node)"),
+    }
+    if rl.is_some_and(|r| r.plaintext_http) {
+        println!(
+            "  bridge: switchboard (PLAINTEXT, opted in for old roots) — http://{}/_root/<root>/<path> (loopback); `local` = {}",
+            handle.http, cfg.opencode_url
+        );
+    } else {
+        println!("  bridge: plaintext switchboard OFF (/_root/ and `http` ops answer 403; [bridge.root-link] plaintext_http = true for old roots)");
+    }
     println!(
         "  bridge: linked roots — GET http://{}/_roots (loopback; the hub brain's YGG_PEERS_FROM)",
         handle.http
@@ -97,17 +149,15 @@ pub fn run(path: &str) -> Result<(), String> {
         }
         // a paired phone names a root over HTTPS: POST /branch reaches this
         // bridge's own listener (device token checked in the phone's region)
-        let own = handle.http;
-        let branch = std::net::SocketAddr::new(
-            if own.ip().is_unspecified() {
-                if own.is_ipv4() { std::net::IpAddr::from([127, 0, 0, 1]) } else { std::net::Ipv6Addr::LOCALHOST.into() }
-            } else {
-                own.ip()
-            },
-            own.port(),
-        )
-        .to_string();
-        println!("  bridge: access point /branch → {branch} (device token, the phone's region)");
+        let branch = own.clone();
+        println!("  bridge: access point /branch + /offer → {branch} (device token, the phone's region)");
+        let ice_demux = handle.ice_listen.map(|bridge| {
+            println!(
+                "  bridge: pinned channel ICE-TCP at {} (livekit-ice forward, by STUN username) → {bridge}",
+                ice_tcp.iter().map(|a| a.to_string()).collect::<Vec<_>>().join(", ")
+            );
+            crate::ap::IceDemux { name: "livekit-ice".into(), bridge, ufrags: handle.ufrags.clone() }
+        });
         crate::ap::spawn_dialer(crate::ap::DialConfig {
             url: apc.url.clone(),
             pin: apc.pin.clone(),
@@ -117,7 +167,8 @@ pub fn run(path: &str) -> Result<(), String> {
             tcp: apc.tcp.clone(),
             rootlink,
             branch: Some(branch),
-            tokens: std::sync::Arc::new(crate::tokens::TokenStore::open(cfg.tokens_file.clone())),
+            tokens,
+            ice_demux,
         });
     }
     println!("bifrost-net bridge serving — Ctrl-C to stop");

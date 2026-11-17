@@ -1,0 +1,10 @@
+# --- append to the VPS's ap.toml (the [ap] table stays as it is: listen 127.0.0.1:4443,
+# proxy_protocol = true, the systemd credentials, bridge_token_sha256) ------------------------
+# voice + the pinned channel: a phone's ICE over TCP arrives from sni-443.py's `ice` line here
+# (RFC 4571-framed STUN, then DTLS/SRTP — encrypted between the phone and the hub, opaque on the
+# VPS) and rides this raw forward through the hub's dial-out; the hub's bridge tells its own
+# streams from LiveKit's by the STUN username and maps `livekit-ice` to its LiveKit.
+[[ap.tcp]]
+name = "livekit-ice"
+listen = "127.0.0.1:4479"
+# (`ice = "livekit-ice"` in [ap] is only for an ap that owns :443 itself — not behind sni-443.py)

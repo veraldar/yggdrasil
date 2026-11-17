@@ -48,3 +48,5 @@ next-env.d.ts
 # paired devices (lib/devices.ts — sha256 hashes only, still never committed)
 .devices.json
 .devices.json.*.tmp
+# which sessions may notify the phone (lib/notify-sessions.ts)
+.notify-sessions.json
