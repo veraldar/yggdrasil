@@ -4,6 +4,7 @@
 import { readFile, writeFile } from 'fs/promises';
 import path from 'path';
 import webpush from 'web-push';
+import { notifyOn } from './notify-sessions';
 
 const SUBS_FILE = path.join(process.cwd(), '.push-subs.json');
 const PUB = process.env.VAPID_PUBLIC_KEY || '';
@@ -52,6 +53,7 @@ export async function removeSub(endpoint: string): Promise<void> {
 /** Best-effort broadcast to every device; dead subscriptions are pruned. */
 export async function pushRunDone(slug: string): Promise<void> {
   if (!ensureConfigured()) return;
+  if (!(await notifyOn(slug))) return; // this session's switch (off by default; MAIN on)
   const subs = await loadSubs();
   if (!subs.length) return;
   const payload = JSON.stringify({
