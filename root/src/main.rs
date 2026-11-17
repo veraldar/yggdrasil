@@ -1760,7 +1760,7 @@ fn submit(st: &AppState, id: &str, turn: Turn) -> Result<Submitted, Response> {
         let result = match gate.admit(&ticket).await {
             gate::Admit::Go(mut permit) => {
                 let queue_ms = enqueued.elapsed().as_millis() as u64;
-                let result = run_turn(&st, &id, &tx, queue_ms, auto_turn).await;
+                let result = run_turn(&st, &id, &tx, queue_ms, auto_turn, &turn_id).await;
                 permit.finish(&result);
                 let _ = done_tx.send(result.clone());
                 // roll-up runs AFTER the reply, still inside the run slot (item 2)
@@ -2225,14 +2225,17 @@ impl Run {
 /// One run, called with the session's run lock held: snapshot history, create the
 /// un-completed assistant placeholder, run the agent loop (abortable), store the
 /// outcome, then `session.idle`. Returns the final assistant message (aborted ones included).
-async fn run_turn(st: &AppState, id: &str, tx: &mpsc::Sender<Event>, queue_ms: u64, auto_class: bool) -> Result<Value, String> {
+async fn run_turn(st: &AppState, id: &str, tx: &mpsc::Sender<Event>, queue_ms: u64, auto_class: bool, turn_id: &str) -> Result<Value, String> {
     let history = st.sessions.lock().unwrap().get(id).map(|s| s.messages.clone());
     let Some(history) = history else { return Err(format!("session {id} not found")) };
 
     let cancel = Arc::new(Notify::new());
     st.running.lock().unwrap().insert(id.to_string(), cancel.clone());
     publish(st, "session.status", json!({ "sessionID": id, "status": { "type": "busy" } }));
-    let placeholder = make_message(id, "assistant", vec![text_part("")]);
+    let mut placeholder = make_message(id, "assistant", vec![text_part("")]);
+    // the message it answers (opencode's parentID): with messages waiting their turn, the reply
+    // to one is not the first reply after it
+    placeholder["info"]["parentID"] = json!(turn_id);
     replace_message(st, id, &placeholder);
     publish(st, "message.updated", json!({ "info": placeholder["info"] }));
 
@@ -2276,7 +2279,7 @@ async fn run_turn(st: &AppState, id: &str, tx: &mpsc::Sender<Event>, queue_ms: u
     let outcome = {
         let fut = async {
             match harness {
-                Some(kind) => harness_loop(st, id, history, tx, &mut run, kind).await,
+                Some(kind) => harness_loop(st, id, harness_prompt(&history, turn_id, auto_class), tx, &mut run, kind).await,
                 None => agent_loop(st, id, history, tx, &mut run).await,
             }
         };
@@ -2335,11 +2338,29 @@ async fn run_turn(st: &AppState, id: &str, tx: &mpsc::Sender<Event>, queue_ms: u
     result
 }
 
-/// A harness session's turn: the newest user message goes to the harness, which resumes its own
-/// session (`info.harness.id`). Its text streams as deltas, its tool calls land as completed tool
-/// parts, its final answer is the reply; the harness session id is kept for the next turn.
-async fn harness_loop(st: &AppState, id: &str, history: Vec<Value>, tx: &mpsc::Sender<Event>, run: &mut Run, kind: harness::Kind) -> Result<(), String> {
-    let prompt = history.iter().rev().find(|m| m["info"]["role"] == "user" && !is_compaction(m)).map(message_text).unwrap_or_default();
+/// What a harness turn sends (fix 11-17): THIS turn's own message. It used to be the newest one
+/// stored, read when the turn starts — a message waits its turn already stored, so with two
+/// waiting the newer went twice and the other never. An auto turn sends every report folded into
+/// it (gate.rs: the autos stored from its own on; the owner's messages there have turns of their
+/// own).
+fn harness_prompt(history: &[Value], turn_id: &str, auto: bool) -> String {
+    let user = |m: &&Value| m["info"]["role"] == "user" && !is_compaction(m);
+    let Some(at) = history.iter().position(|m| m["info"]["id"] == turn_id) else {
+        // (every turn stores its message first; kept for a turn without one)
+        return history.iter().rev().find(user).map(message_text).unwrap_or_default();
+    };
+    if !auto {
+        return message_text(&history[at]);
+    }
+    let reports: Vec<String> =
+        history[at..].iter().filter(user).filter(|m| m["info"]["meta"]["auto"] == true).map(message_text).filter(|t| !t.trim().is_empty()).collect();
+    reports.join("\n\n")
+}
+
+/// A harness session's turn: its message (`harness_prompt`) goes to the harness, which resumes its
+/// own session (`info.harness.id`). Its text streams as deltas, its tool calls land as completed
+/// tool parts, its final answer is the reply; the harness session id is kept for the next turn.
+async fn harness_loop(st: &AppState, id: &str, prompt: String, tx: &mpsc::Sender<Event>, run: &mut Run, kind: harness::Kind) -> Result<(), String> {
     if prompt.trim().is_empty() {
         return Err("nothing to send".into());
     }
@@ -3822,6 +3843,27 @@ mod law_tests {
             assert!(lines.contains(&format!("verdict {n}").as_str()), "verdict {n}");
         }
         assert!(!lines.iter().any(|l| ["verdict 0", "verdict 2", "verdict 10", "verdict 12"].contains(l)));
+    }
+
+    #[test]
+    fn a_queued_harness_turn_sends_its_own_message() {
+        // the owner sent three while it worked on the first: each turn sends its own (it sent the
+        // newest stored, read when the turn started — "third" twice, "second" never)
+        let mut h: Vec<Value> = ["first", "second", "third"].iter().map(|t| make_message("s", "user", vec![text_part(t)])).collect();
+        let id = |h: &Vec<Value>, i: usize| h[i]["info"]["id"].as_str().unwrap().to_string();
+        h.insert(1, make_message("s", "assistant", vec![text_part("done first")]));
+        assert_eq!(harness_prompt(&h, &id(&h, 0), false), "first");
+        assert_eq!(harness_prompt(&h, &id(&h, 2), false), "second");
+        assert_eq!(harness_prompt(&h, &id(&h, 3), false), "third");
+        // reports folded into one auto turn: every one of them, never an owner's message between
+        let mut r1 = make_message("s", "user", vec![text_part("report a")]);
+        r1["info"]["meta"] = json!({ "auto": true });
+        let mut r2 = make_message("s", "user", vec![text_part("report b")]);
+        r2["info"]["meta"] = json!({ "auto": true });
+        h.extend([r1, make_message("s", "user", vec![text_part("owner, between")]), r2]);
+        assert_eq!(harness_prompt(&h, &id(&h, 4), true), "report a\n\nreport b");
+        assert_eq!(harness_prompt(&h, &id(&h, 5), false), "owner, between");
+        assert_eq!(harness_prompt(&h, "msg_unknown", false), "report b", "no message of its own: the newest");
     }
 
     #[test]

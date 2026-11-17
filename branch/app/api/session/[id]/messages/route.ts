@@ -59,6 +59,9 @@ export async function GET(req: Request, ctx: { params: Promise<{ id: string }> }
       // tool-only steps stay invisible on the phone: the busy indicator
       // already shows activity, ⚙ lines were just clutter (user req)
       return {
+        id: m.info?.id,
+        // a reply: the message it answers (with messages waiting, not the one just before it)
+        parent: m.info?.parentID || undefined,
         role: m.info?.role || m.role,
         text,
         images: (m.parts || [])

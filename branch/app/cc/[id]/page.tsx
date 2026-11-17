@@ -223,20 +223,29 @@ export default function CcLive({
           headers: { 'X-Session-Pin': bif.id },
         });
         const ms = (await r.json()) as {
+          id?: string;
+          parent?: string;
           role: string;
           text: string;
           time: number;
           done?: boolean;
           error?: string;
         }[];
-        // the reply to THIS message (a queued one waits behind the turn running now: that turn's
-        // reply is not it) — the first assistant message after it
+        // the reply to THIS message (a queued one waits behind the turn running now, maybe behind
+        // other waiting ones: their replies are not it) — the one that names it as its parent; a
+        // brain that names none: the first assistant message after it
         const list = Array.isArray(ms) ? ms : [];
         let mine = -1;
         list.forEach((m, i) => {
           if (m.role === 'user' && norm(m.text || '') === norm(w.text)) mine = i;
         });
-        const last = mine >= 0 ? list.slice(mine + 1).find((m) => m.role === 'assistant') : undefined;
+        const byParent = list.some((m) => m.parent);
+        const last =
+          mine < 0
+            ? undefined
+            : byParent
+              ? list.find((m) => m.role === 'assistant' && !!list[mine].id && m.parent === list[mine].id)
+              : list.slice(mine + 1).find((m) => m.role === 'assistant');
         if (last?.done && waiting.current === w) {
           setTimeout(() => {
             if (waiting.current !== w) return; // the transcript caught up meanwhile

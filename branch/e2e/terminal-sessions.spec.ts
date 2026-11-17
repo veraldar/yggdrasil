@@ -310,7 +310,7 @@ test('open in a plain terminal: "continue in a new session" — a copy, the orig
   }
 });
 
-test('while it works here, a message typed on the phone is queued and answered after', async ({
+test('while it works here, messages typed on the phone wait their turn and each is answered once', async ({
   page,
 }) => {
   const id = IDS.claude;
@@ -322,6 +322,7 @@ test('while it works here, a message typed on the phone is queued and answered a
   await expect(box).toBeVisible({ timeout: 20_000 });
   const first = `first-${tag}`;
   const second = `second-${tag}`;
+  const third = `third-${tag}`;
   await box.locator('textarea').fill(`Run the shell command \`sleep 12\`, then reply with exactly: ${first}`);
   await box.getByRole('button', { name: 'send' }).tap();
   // bifrost is working on it: the box stays open, a message waits its turn
@@ -329,12 +330,19 @@ test('while it works here, a message typed on the phone is queued and answered a
   await expect(box.locator('textarea')).toBeEnabled();
   await box.locator('textarea').fill(`Reply with exactly: ${second}`);
   await box.getByRole('button', { name: 'send' }).tap();
-  await expect(page.locator('[data-k="user"][data-pending="queued"]')).toBeVisible();
+  // two waiting: each turn sends its OWN message (11-17: they all sent the newest — the third
+  // went twice, the second never)
+  await box.locator('textarea').fill(`Reply with exactly: ${third}`);
+  await box.getByRole('button', { name: 'send' }).tap();
+  await expect(page.locator('[data-k="user"][data-pending="queued"]')).toHaveCount(2);
   await shot(page, '11-queued');
   await expect(said(page, first)).toBeVisible({ timeout: 240_000 });
   await expect(said(page, second)).toBeVisible({ timeout: 240_000 });
+  await expect(said(page, third)).toBeVisible({ timeout: 240_000 });
   await expect(page.locator('[data-k="user"][data-pending]')).toHaveCount(0, { timeout: 15_000 });
   await page.waitForTimeout(8_000);
+  await expect(said(page, third), 'the newest is answered once, not once per message waiting').toHaveCount(1);
   await expect(page.locator('main [role="alert"]')).toHaveCount(0); // the earlier turn's reply was not taken for this one's
   expect(inConversation('claude', id, second)).toBe(true);
+  expect(inConversation('claude', id, third)).toBe(true);
 });

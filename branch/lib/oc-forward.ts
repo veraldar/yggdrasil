@@ -52,9 +52,11 @@ async function runVerified(sid: string, sentText: string): Promise<boolean> {
           .trim(),
       }))
       .filter((m: any) => m.text);
-    const lastUser = parsed.map((m: any) => m.role).lastIndexOf('user');
-    if (lastUser === -1 || !parsed[lastUser].text.includes(sentText)) return false;
-    return parsed.slice(lastUser + 1).some((m: any) => m.role === 'assistant');
+    // the sent message wherever it is: one stored after it (waiting its turn, or sent here by
+    // another session) is no swallow (11-17: that made this re-send a message that had run)
+    const mine = parsed.map((m: any) => m.role === 'user' && m.text.includes(sentText)).lastIndexOf(true);
+    if (mine === -1) return false;
+    return parsed.slice(mine + 1).some((m: any) => m.role === 'assistant');
   } catch {
     return true; // can't verify → assume fine, a retry could double-send
   }
