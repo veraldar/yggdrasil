@@ -1171,6 +1171,17 @@ fn helper() -> Option<(String, String)> {
     Some((url.trim().trim_end_matches('/').to_string(), tok.trim().to_string()))
 }
 
+/// Until when (ms) a harness conversation (`kind:id`) has full access — the live helper holds the
+/// grants (the owner signs them on the phone; nothing here can) and checks them again on the run.
+pub async fn full_access_until(st: &AppState, key: &str) -> Option<u64> {
+    let v = helper_call(st, None, "/access").await.ok()?;
+    granted(&v, key, now_ms())
+}
+
+fn granted(v: &Value, key: &str, now: u64) -> Option<u64> {
+    v["grants"][key].as_u64().filter(|until| *until > now)
+}
+
 async fn helper_call(st: &AppState, post: Option<Value>, path: &str) -> Result<Value, String> {
     let (url, tok) = helper().ok_or("the owner's terminal sessions are not visible on this root")?;
     let req = match post {
@@ -1530,6 +1541,15 @@ mod tests {
         s.info["card"]["updated"] = json!(250);
         let n = notice_ready(&s).unwrap();
         assert_eq!((n["for"].as_str(), n["headline"].as_str(), n["title"].as_str()), (Some("msg_2"), Some("built, 3 passed"), Some("notes")));
+    }
+
+    #[test]
+    fn full_access_is_one_live_grant() {
+        let v = json!({"enrolled": true, "grants": {"claude:abc": 2000, "claude:old": 500}});
+        assert_eq!(granted(&v, "claude:abc", 1000), Some(2000));
+        assert_eq!(granted(&v, "claude:old", 1000), None, "ran out");
+        assert_eq!(granted(&v, "claude:other", 1000), None, "another conversation (a copy, a session it started)");
+        assert_eq!(granted(&json!({}), "claude:abc", 1000), None, "no helper, no grants");
     }
 
     #[test]

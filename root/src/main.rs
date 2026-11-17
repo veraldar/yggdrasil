@@ -2420,11 +2420,31 @@ async fn harness_loop(st: &AppState, id: &str, prompt: String, tx: &mpsc::Sender
         None if attached => return Err(format!("the folder this conversation was started in ({dir}) is gone")),
         None => st.tools.project_dir.clone(),
     };
+    // full access (owner 11-17): a conversation the owner granted from the phone runs outside the
+    // sandbox, through the live helper (it holds the grants and checks every run again) — only one
+    // continued from the terminal (its own permission check stays on), on Claude Code or
+    // Antigravity, and never a copy's first turn (a copy is another conversation)
+    let full = match (attached && !fork_now, kind, resume.as_deref()) {
+        (true, harness::Kind::Claude | harness::Kind::Antigravity, Some(r)) => tree::full_access_until(st, &format!("{}:{r}", kind.name())).await,
+        _ => None,
+    };
+    let via: Vec<String> = match (full, std::env::var("YGG_HARNESS_RUNNER").ok().filter(|p| !p.trim().is_empty())) {
+        (Some(until), Some(runner)) => {
+            eprintln!("FULL ACCESS session={id} {}:{} — this turn runs outside the sandbox (until {until})", kind.name(), resume.as_deref().unwrap_or("?"));
+            run.msg["info"]["meta"]["full_access"] = json!(true);
+            vec!["python3".into(), runner]
+        }
+        (Some(_), None) => {
+            eprintln!("FULL ACCESS session={id}: granted, but this brain has no runner (YGG_HARNESS_RUNNER) — the turn stays in the sandbox");
+            Vec::new()
+        }
+        _ => Vec::new(),
+    };
     // the shared prompt + the agent's own instructions ride on top of the harness's (Claude Code)
     let system = Some(harness_system(&shared_prompt(st), &session_profile(st, id)));
     let _slot = st.harness_slots.acquire().await.map_err(|e| e.to_string())?;
     let (etx, mut erx) = mpsc::unbounded_channel::<harness::Ev>();
-    let fut = harness::run(kind, model.as_deref(), resume.as_deref(), &cwd, &prompt, system.as_deref(), attach, move |ev| {
+    let fut = harness::run(kind, model.as_deref(), resume.as_deref(), &cwd, &prompt, system.as_deref(), attach, &via, move |ev| {
         let _ = etx.send(ev.clone());
     });
     tokio::pin!(fut);

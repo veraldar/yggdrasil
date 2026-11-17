@@ -576,11 +576,22 @@ pub struct Outcome {
     pub session: Option<String>,
 }
 
+/// The command line of a turn run `via` another program (full access: the runner that hands it to
+/// the live helper, outside the sandbox) — the harness's own argv after `--`.
+pub fn via_argv(via: &[String], argv: Vec<String>) -> Vec<String> {
+    if via.is_empty() {
+        return argv;
+    }
+    via.iter().cloned().chain(std::iter::once("--".to_string())).chain(argv).collect()
+}
+
 /// Runs one turn. `on` sees every event as it arrives (stream text, store tools). The child is
-/// killed when the returned future is dropped (an abort drops it).
+/// killed when the returned future is dropped (an abort drops it). `via`: run it through that
+/// program (full access), else directly.
 #[allow(clippy::too_many_arguments)]
-pub async fn run(kind: Kind, model: Option<&str>, resume: Option<&str>, cwd: &Path, prompt: &str, system: Option<&str>, attach: Attach, mut on: impl FnMut(&Ev)) -> Result<Outcome, String> {
+pub async fn run(kind: Kind, model: Option<&str>, resume: Option<&str>, cwd: &Path, prompt: &str, system: Option<&str>, attach: Attach, via: &[String], mut on: impl FnMut(&Ev)) -> Result<Outcome, String> {
     let (argv, stdin_prompt) = kind.argv(model, resume, cwd, prompt, system, attach);
+    let argv = via_argv(via, argv);
     let mut cmd = tokio::process::Command::new(&argv[0]);
     cmd.args(&argv[1..])
         .current_dir(cwd)
@@ -678,6 +689,17 @@ pub async fn run(kind: Kind, model: Option<&str>, resume: Option<&str>, cwd: &Pa
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_full_access_turn_is_the_same_turn_through_the_runner() {
+        let (argv, _) = Kind::Claude.argv(None, Some("070d6b89-df88-495a-b061-1a0a80cfbea0"), Path::new("/w"), "hi", None, Attach { guarded: true, fork: false });
+        assert_eq!(via_argv(&[], argv.clone()), argv, "no runner: the harness itself");
+        let via = ["python3".to_string(), "/x/cc_run.py".to_string()];
+        let v = via_argv(&via, argv.clone());
+        assert_eq!(&v[..3], &["python3", "/x/cc_run.py", "--"]);
+        assert_eq!(&v[3..], &argv[..], "the guarded argv, untouched (the helper checks it)");
+        assert!(argv.windows(2).any(|w| w == ["--permission-mode", "auto"]));
+    }
 
     #[test]
     fn claude_stream() {
