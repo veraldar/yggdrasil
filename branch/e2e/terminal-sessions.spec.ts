@@ -131,7 +131,9 @@ for (const kind of ['claude', 'antigravity', 'opencode']) {
     const phone = `phone-${kind}-${tag}`;
     await box.locator('textarea').fill(`Reply with exactly: ${phone}`);
     await box.getByRole('button', { name: 'send' }).tap();
-    const said = (t: string) => page.locator('[data-k="assistant"]').getByText(t, { exact: true });
+    // the tag as a word of its own (a model that saw many runs may add a guessed next line)
+    const said = (t: string) =>
+      page.locator('[data-k="assistant"]').getByText(new RegExp(`(^|\\s)${t}(\\s|$)`));
     await expect(said(phone)).toBeVisible({ timeout: 240_000 });
     await expect(page.getByTestId('cc-bifrost')).toBeVisible();
     // the sent message is the one in the transcript now (no "sending…" left), and no error
@@ -144,7 +146,8 @@ for (const kind of ['claude', 'antigravity', 'opencode']) {
     if (kind === 'claude') expect(claudeTranscripts(), 'no fork: no new transcript').toBe(before);
 
     // the terminal goes on with the same conversation: the phone shows it live
-    const term = `term-${kind}-${tag}`;
+    // its own random tag: the conversation's earlier runs make "term-<same tag>" guessable
+    const term = `term-${kind}-${Math.random().toString(36).slice(2, 8)}`;
     const p = terminalTurn(kind, id, `Reply with exactly: ${term}`);
     await expect(said(term)).toBeVisible({ timeout: 240_000 });
     await shot(page, `5-${kind}-from-terminal`);
