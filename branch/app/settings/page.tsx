@@ -27,8 +27,6 @@ const WORLDS = [
 ];
 const SWATCHES = ['bg', 'text', 'success', 'active', 'danger', 'info'] as const;
 
-type MicPerm = 'granted' | 'denied' | 'prompt' | 'unknown';
-
 export default function SettingsPage() {
   const router = useRouter();
   const { theme, setTheme } = useTheme();
@@ -37,7 +35,6 @@ export default function SettingsPage() {
   const [mounted, setMounted] = useState(false);
   // the world whose tree answers right now (+ a counter so a re-tap replays)
   const [wake, setWake] = useState<{ id: string; n: number } | null>(null);
-  const [mic, setMic] = useState<MicPerm>('unknown');
   // voice tests in their own room (lib/voice-test.ts) — device-local
   const [vt, setVt] = useState(false);
   const [vtBusy, setVtBusy] = useState(false);
@@ -82,22 +79,6 @@ export default function SettingsPage() {
     const t = setTimeout(() => setWake(null), 2500);
     return () => clearTimeout(t);
   }, [wake]);
-
-  // read-only: a page cannot revoke its own mic grant — the browser's site
-  // settings can, and the copy says so
-  useEffect(() => {
-    let st: PermissionStatus | null = null;
-    const sync = () => st && setMic(st.state as MicPerm);
-    navigator.permissions
-      ?.query({ name: 'microphone' as PermissionName })
-      .then((s) => {
-        st = s;
-        sync();
-        s.addEventListener('change', sync);
-      })
-      .catch(() => setMic('unknown'));
-    return () => st?.removeEventListener('change', sync);
-  }, []);
 
   const current = mounted ? theme : undefined;
 
@@ -162,31 +143,14 @@ export default function SettingsPage() {
         </div>
       </section>
 
-      {/* possession, named as copy */}
       <section className="oz-blk">
-        <h2>yours</h2>
-        <ul className="oz-kv">
-          <li>
-            <span>agents</span>
-            <span />
-            <Link href="/agents" data-testid="agents-link" className="oz-k sm">
-              browse
-            </Link>
-          </li>
-          <li>
-            <span>mic</span>
-            <span>
-              {mic === 'granted'
-                ? 'granted · this browser'
-                : mic === 'denied'
-                  ? 'denied · keyboard only'
-                  : mic === 'prompt'
-                    ? 'asked on first hold'
-                    : 'unknown'}
-            </span>
-            <span />
-          </li>
-        </ul>
+        <h2>agents</h2>
+        <div>
+          <Link href="/agents" data-testid="agents-link" className="oz-pick">
+            <span>agent types</span>
+            <span>›</span>
+          </Link>
+        </div>
       </section>
 
       {/* the three ways, walked again — the door's first-turn card, one turn

@@ -323,11 +323,13 @@ pub fn remote_of(st: &AppState, sid: &str) -> Option<(String, String)> {
     Some((r["root"].as_str()?.to_string(), r["id"].as_str()?.to_string()))
 }
 
-/// Posts a turn to the peer side of a proxy, asynchronously (it reports back by itself).
-pub async fn send(st: &AppState, root: &str, rid: &str, text: &str) -> Result<(), String> {
-    call(st, root, "POST", &format!("/session/{rid}/message?async=1&origin=none"), Some(json!({ "parts": [{ "type": "text", "text": text }] })), 20)
-        .await
-        .map(|_| ())
+/// Posts a turn to the peer side of a proxy, asynchronously (it reports back by itself). `caller`:
+/// the session here that speaks — the peer stores it as the message's sender (`meta.from`).
+pub async fn send(st: &AppState, root: &str, rid: &str, text: &str, caller: &str) -> Result<(), String> {
+    let title = st.sessions.lock().unwrap().get(caller).map(|s| s.info["title"].as_str().unwrap_or_default().to_string()).unwrap_or_default();
+    let from = json!({ "session": caller, "title": title, "root": st.config.peers.me });
+    let body = json!({ "parts": [{ "type": "text", "text": text }], "meta": { "from": from } });
+    call(st, root, "POST", &format!("/session/{rid}/message?async=1&origin=none"), Some(body), 20).await.map(|_| ())
 }
 
 /// Creates the real session on `root` and the proxy here; posts the brief there.
@@ -349,7 +351,7 @@ pub async fn start(st: &AppState, caller: &str, root: &str, title: &str, profile
         s.info["card"] = json!({ "topic": title, "brief": brief.chars().take(600).collect::<String>(), "status": "working",
             "by": caller, "root": root, "created": now_ms(), "updated": now_ms() });
     });
-    send(st, root, &rid, brief).await?;
+    send(st, root, &rid, brief, caller).await?;
     Ok(pid)
 }
 

@@ -436,6 +436,10 @@
   .oz-mark { background: color-mix(in srgb, var(--oz-info) 22%, transparent); color: var(--oz-info); padding: 0 2px; }
   /* the full log: internal turns and tool calls read muted, beside the conversation */
   .oz-internal { opacity: .6; font-size: 12px; }
+  /* a message another session wrote (not the owner): its sender's ink and a rule on the left */
+  .oz-from { border-left: 2px solid var(--oz-info); padding-left: 8px; }
+  .oz-from .oz-who a { color: var(--oz-info); }
+  .oz-auto { border-left: 2px solid var(--oz-border); padding-left: 8px; color: var(--oz-dim); }
   .oz-log { margin-top: 2px; font-size: 11px; line-height: 1.5; color: var(--oz-dim); overflow-wrap: anywhere; }
   /* a route tag (→ <session>) the coordinator named: the way into that session */
   .oz-route { color: var(--oz-info); text-decoration: underline; text-underline-offset: 2px; text-decoration-thickness: 1px; }

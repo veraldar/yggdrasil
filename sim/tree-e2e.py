@@ -159,6 +159,10 @@ def main():
         out = [p for p in r["parts"] if p["type"] == "tool"][0]["state"]["output"]
         check("session_start answers at once", out.startswith("STARTED"), out)
         t = tree(HOME_PORT)
+        first = [m for m in req(HOME_PORT, "GET", f"/session/{t['alpha']['id']}/message") if m["info"]["role"] == "user"][:1]
+        check("a brief says who sent it (MAIN), not the user (11-18)", first and (first[0]["info"].get("meta") or {}).get("from", {}).get("session") == main_id, first[:1] and first[0]["info"])
+        mine = [m for m in req(HOME_PORT, "GET", f"/session/{main_id}/message") if m["info"]["role"] == "user"][:1]
+        check("…the user's own message names no sender", mine and "from" not in (mine[0]["info"].get("meta") or {}), mine[:1] and mine[0]["info"])
         check("child under MAIN with its profile", t.get("alpha", {}).get("parentID") == main_id and t["alpha"]["agent"] == "build", t.get("alpha"))
         done = wait(lambda: (tree(HOME_PORT)["alpha"].get("card") or {}).get("status") == "done", 20)
         check("child card done with its result", done and "ALPHA-DONE" in (tree(HOME_PORT)["alpha"]["card"].get("headline") or ""), tree(HOME_PORT)["alpha"].get("card"))
@@ -392,6 +396,9 @@ def main():
         check("the lab root's report reached home", home_done and "GAMMA-ON-LAB" in (tree(HOME_PORT)["gamma"]["card"].get("headline") or ""), tree(HOME_PORT)["gamma"].get("card"))
         msgs = req(HOME_PORT, "GET", f"/session/{t['gamma']['id']}/message")
         check("reading the proxy reads the lab root", any("GAMMA-ON-LAB" in json.dumps(m["parts"]) for m in msgs), msgs[-1:] if msgs else msgs)
+        # who wrote it (11-18): the brief on the lab root names its sender — MAIN, on root home
+        f = next((m["info"].get("meta", {}).get("from") for m in req(LAB_PORT, "GET", f"/session/{lab['gamma']['id']}/message") if m["info"]["role"] == "user"), None)
+        check("…the lab's copy of the brief says who sent it: MAIN on root home", f and f.get("session") == main_id and f.get("root") == "home" and f.get("title") == "[MAIN]", f)
         # 7b. the lab's own door hands that session more work (voice-fixes 11-14: the lab's request
         # went into the home root's session and its answer went home): the answer is the lab's
         lab_main = req(LAB_PORT, "POST", "/session", {"title": "[MAIN]"})["id"]

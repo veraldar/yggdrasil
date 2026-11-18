@@ -311,7 +311,14 @@ fn apply_clock_headers(convo: &mut Vec<Value>, shared: &str) {
             .as_array()
             .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
             .unwrap_or_default();
-        let hdr = clock_header(ts / 1000, m["_prev"].as_i64().map(|p| p / 1000), &mw);
+        let mut hdr = clock_header(ts / 1000, m["_prev"].as_i64().map(|p| p / 1000), &mw);
+        // another session wrote it, not the user: say who (frozen on the message — cache law)
+        if let Some(f) = m["_from"].as_str() {
+            hdr = match hdr.split_once('\n') {
+                Some((first, rest)) => format!("{first} [from session {f}]\n{rest}"),
+                None => format!("{hdr} [from session {f}]"),
+            };
+        }
         prefix_text(m, &hdr);
     }
     strip_private(convo);
@@ -602,8 +609,8 @@ struct PostMessage {
     /// Absent/anything else = plain text turn.
     #[serde(default)]
     modality: Option<String>,
-    /// Sender meta; only `auto` (an automated verdict request, not the owner
-    /// speaking) is kept. QUIET-ASSESS law: such a turn's reply is stamped autoReply.
+    /// Sender meta; `auto` (an automated verdict request, not the owner
+    /// speaking) and `from` (a session on another root: `{session, title, root}`) are kept. QUIET-ASSESS law: such a turn's reply is stamped autoReply.
     #[serde(default)]
     meta: Option<Value>,
     /// silent-verdicts law: an internal turn (station/watcher traffic) is stored and
@@ -1645,7 +1652,9 @@ async fn post_message(
         tree::external_report(&st, &id, &text);
         return Json(stub).into_response();
     }
-    let turn = Turn { parts: body.parts, modality: body.modality, auto_turn, internal, origin: origin.clone(), completes: None };
+    // a session on another root speaking (peers::send): its sender rides `meta.from`
+    let from = body.meta.as_ref().and_then(|m| sender_of(&m["from"]));
+    let turn = Turn { parts: body.parts, modality: body.modality, auto_turn, internal, origin: origin.clone(), completes: None, from };
     let (user_msg, rx, done_rx) = match submit(&st, &id, turn) {
         Ok(t) => t,
         Err(r) => return r,
@@ -1694,14 +1703,43 @@ struct Turn {
     origin: Option<String>,
     /// ASYNC-DISPATCH: this turn IS a completion — stored as `meta.async`.
     completes: Option<Value>,
+    /// Who sent it when not the owner: `{session, title, root?}` — another session here (the tree
+    /// tools) or on another root (its `meta.from`). Stored as `meta.from`.
+    from: Option<Value>,
 }
 
 type Submitted = (Value, mpsc::Receiver<Event>, oneshot::Receiver<Result<Value, String>>);
 
+/// The sender of a turn another session here sent: its id and title as they are now.
+pub(crate) fn sender_here(st: &AppState, sid: &str) -> Value {
+    let title = st.sessions.lock().unwrap().get(sid).map(|s| s.info["title"].as_str().unwrap_or_default().to_string()).unwrap_or_default();
+    json!({ "session": sid, "title": title })
+}
+
+/// A sender as another root states it: only short strings, only these keys.
+fn sender_of(v: &Value) -> Option<Value> {
+    let f = |k: &str| v[k].as_str().map(|s| s.chars().take(120).collect::<String>()).filter(|s| !s.trim().is_empty());
+    let (session, title) = (f("session")?, f("title").unwrap_or_default());
+    let mut out = json!({ "session": session, "title": title });
+    if let Some(r) = f("root") {
+        out["root"] = json!(r);
+    }
+    Some(out)
+}
+
+/// "“MAIN”" or "“MAIN” on root lab" — how a sender reads in the model's header.
+fn sender_label(from: &Value) -> Option<String> {
+    let title = from["title"].as_str().filter(|t| !t.is_empty()).or(from["session"].as_str())?;
+    Some(match from["root"].as_str() {
+        Some(r) => format!("“{title}” on root {r}"),
+        None => format!("“{title}”"),
+    })
+}
+
 /// Stores the user message at once, takes a gate ticket, spawns the run. Returns the stored
 /// user message, the per-request event stream, and the run's result.
 fn submit(st: &AppState, id: &str, turn: Turn) -> Result<Submitted, Response> {
-    let Turn { parts, modality, auto_turn, internal, origin, completes } = turn;
+    let Turn { parts, modality, auto_turn, internal, origin, completes, from } = turn;
     // Text parts go upstream; file parts (data: URLs) are stored so the transcript keeps them.
     let parts: Vec<Value> = parts
         .into_iter()
@@ -1731,6 +1769,10 @@ fn submit(st: &AppState, id: &str, turn: Turn) -> Result<Submitted, Response> {
     }
     if let Some(o) = &origin {
         user_msg["info"]["meta"]["origin"] = json!(o);
+    }
+    // the sender, frozen at creation (the model's header renders from it — cache law)
+    if let Some(f) = from {
+        user_msg["info"]["meta"]["from"] = f;
     }
     if let Some(c) = completes {
         user_msg["info"]["meta"]["async"] = c;
@@ -1847,7 +1889,7 @@ fn post_completion(st: &AppState, origin: &str, target: &str, turn_id: &str, res
     let text = completion_text(target, &title, turn_id, result);
     let done = json!({ "turn_id": turn_id, "sessionID": target, "status": status, "replyID": reply_id });
     let turn = Turn { parts: vec![text_part(&text)], modality: None, auto_turn: true, internal: false, origin: None,
-        completes: Some(done.clone()) };
+        completes: Some(done.clone()), from: None };
     match submit(st, origin, turn) {
         Ok((msg, _, _)) => {
             let cid = msg["info"]["id"].clone();
@@ -1979,6 +2021,7 @@ fn upstream_history(messages: &[Value]) -> Vec<Value> {
                     if let Some(ts) = created { u["_ts"] = json!(ts); }
                     if let Some(p) = this_prev { u["_prev"] = json!(p); }
                     if let Some(mw) = m["info"]["time"].get("meanwhile") { u["_mw"] = mw.clone(); }
+                    if let Some(f) = sender_label(&m["info"]["meta"]["from"]) { u["_from"] = json!(f); }
                 }
                 out.push(u);
             }
@@ -2371,7 +2414,11 @@ fn harness_prompt(history: &[Value], turn_id: &str, auto: bool) -> String {
         return history.iter().rev().find(user).map(message_text).unwrap_or_default();
     };
     if !auto {
-        return message_text(&history[at]);
+        // another session wrote it, not the user: the harness reads who (the terminal shows it too)
+        return match sender_label(&history[at]["info"]["meta"]["from"]) {
+            Some(f) => format!("[from session {f}]\n{}", message_text(&history[at])),
+            None => message_text(&history[at]),
+        };
     }
     let reports: Vec<String> =
         history[at..].iter().filter(user).filter(|m| m["info"]["meta"]["auto"] == true).map(message_text).filter(|t| !t.trim().is_empty()).collect();
@@ -3634,6 +3681,30 @@ mod time_awareness_tests {
         let c = request_for(&msgs);
         assert_eq!(c.len(), 3);
         assert_eq!(c[2]["content"], format!("{}\nb", clock_header(t0 / 1000 + 120, Some(t0 / 1000 + 60), &[])));
+    }
+
+    #[test]
+    fn a_message_from_another_session_says_who_sent_it() {
+        // the model's header: after the clock, on its first line
+        let mut convo = vec![json!({"role": "user", "content": "do it", "_ts": 1_000_000, "_from": "“MAIN”"})];
+        apply_clock_headers(&mut convo, "sys");
+        let t = convo[1]["content"].as_str().unwrap();
+        assert!(t.starts_with("[clock ") && t.contains("] [from session “MAIN”]\ndo it"), "{t}");
+        assert!(convo[1].get("_from").is_none(), "private marks never ride upstream");
+        // the owner's own message: no mark
+        let mut mine = vec![json!({"role": "user", "content": "hi", "_ts": 1_000_000})];
+        apply_clock_headers(&mut mine, "sys");
+        assert!(!mine[1]["content"].as_str().unwrap().contains("[from "));
+        // a harness turn reads it too; another root is named
+        let from = json!({"session": "ses_1", "title": "lead", "root": "lab"});
+        assert_eq!(sender_label(&from).as_deref(), Some("“lead” on root lab"));
+        let h = vec![json!({"info": {"id": "m1", "role": "user", "meta": {"from": from}}, "parts": [{"type": "text", "text": "go"}]})];
+        assert_eq!(harness_prompt(&h, "m1", false), "[from session “lead” on root lab]\ngo");
+        // a peer's sender: only short strings, only these keys
+        let f = sender_of(&json!({"session": "ses_9", "title": "x".repeat(500), "root": "r", "evil": 1})).unwrap();
+        assert_eq!(f["title"].as_str().unwrap().chars().count(), 120);
+        assert!(f.get("evil").is_none());
+        assert!(sender_of(&json!({"title": "no id"})).is_none());
     }
 
     #[test]

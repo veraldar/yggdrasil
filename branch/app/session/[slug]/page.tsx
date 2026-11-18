@@ -13,7 +13,7 @@ import { useRouter } from 'next/navigation';
 import { Room, RoomEvent, Track, createAudioAnalyser } from 'livekit-client';
 import Link from 'next/link';
 import { LineIcon, StopSquare } from '@/components/line-icon';
-import { type Msg, SessionMessage, userProse } from '@/components/session-message';
+import { type Msg, SessionMessage, senderName, userProse } from '@/components/session-message';
 import { MessageHistory } from '@/components/message-history';
 import { useSwipeX } from '@/lib/use-swipe-x';
 import { ErrorBox } from '@/components/app/error-box';
@@ -289,6 +289,26 @@ export default function SessionView({
   const [msgs, setMsgs] = useState<Msg[]>([]);
   const msgsRef = useRef<Msg[]>([]);
   msgsRef.current = msgs;
+  // who wrote what: 'you', a session's id, or 'auto' (the brain) — a reply belongs to the message
+  // it answers. The filter shows one writer's messages and the replies to them ('all' = no filter)
+  const [who, setWho] = useState('all');
+  const writers = useMemo(() => {
+    const keyOf = (m: Msg) => (m.from ? m.from.session : m.auto ? 'auto' : 'you');
+    const byId = new Map<string, string>();
+    const keys: string[] = [];
+    const names = new Map<string, string>();
+    let cur = 'you';
+    for (const m of msgs) {
+      if (m.role === 'user') {
+        cur = keyOf(m);
+        if (m.id) byId.set(m.id, cur);
+        if (!names.has(cur)) names.set(cur, m.from ? senderName(m.from) : cur);
+        keys.push(cur);
+      } else keys.push((m.parent && byId.get(m.parent)) || cur);
+    }
+    return { keys, names: [...names.entries()] };
+  }, [msgs]);
+  const whoOn = who !== 'all' && writers.names.some(([k]) => k === who) ? who : 'all';
   // this view IS the voice-test room (lib/voice-test.ts) — said in the header
   const [voiceTest, setVoiceTest_] = useState(false);
   // the door's last step (lib/tree-first.ts): MAIN opens with the first-turn
@@ -3005,6 +3025,17 @@ export default function SessionView({
         </p>
       )}
 
+      {/* who wrote it: one writer's messages and the replies to them (only when there are several) */}
+      {writers.names.length > 1 && !(logOn && logMsgs) && (
+        <div className="oz-chips pt-2" data-testid="who-filter">
+          {[['all', 'all'] as [string, string], ...writers.names].map(([k, n]) => (
+            <button key={k} aria-pressed={whoOn === k} data-who={k} onClick={() => setWho(k)}>
+              {n}
+            </button>
+          ))}
+        </div>
+      )}
+
       {/* transcript */}
       <div
         ref={scrollRef}
@@ -3027,7 +3058,7 @@ export default function SessionView({
         )}
         {logOn &&
           logMsgs?.map((m, i) => <SessionMessage key={`log${i}`} m={m} routes={routes} />)}
-        {!(logOn && logMsgs) && msgs.map((m, i) => (
+        {!(logOn && logMsgs) && msgs.map((m, i) => whoOn !== 'all' && writers.keys[i] !== whoOn ? null : (
           <SessionMessage
             key={i}
             m={m}

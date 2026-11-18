@@ -6,6 +6,7 @@ import { Streamdown } from 'streamdown';
 import { LineIcon } from '@/components/line-icon';
 import { Marked } from '@/components/marked';
 import { type RouteTarget, linkRouteTags } from '@/lib/route-tags';
+import { slugify } from '@/lib/slug';
 import { useSwipeX } from '@/lib/use-swipe-x';
 
 export type Msg = {
@@ -18,7 +19,20 @@ export type Msg = {
   done?: boolean; // assistant: run completed (hands-free auto-listen gate)
   internal?: boolean; // full log only: a turn the brain keeps out of the conversation
   log?: string[]; // full log only: this message's tool calls, one line each
+  id?: string;
+  parent?: string; // assistant: the message it answers
+  from?: Sender; // user: another session wrote it, not the owner
+  auto?: boolean; // user: the brain itself (a report, a wake-up)
 };
+
+/** Who wrote a message the owner did not: a session here, or on another root. */
+export type Sender = { session: string; title: string; root?: string };
+
+/** "MAIN", "lead · lab" — a sender as the transcript names it. */
+export function senderName(f: Sender): string {
+  const t = (f.title || f.session.slice(0, 12)).replace(/^\[(.+)\]$/, '$1');
+  return f.root ? `${t} · ${f.root}` : t;
+}
 
 /** Markdown links: a session of this box (`/session/…`, the route tags)
  *  opens in place — the phone app never spawns a browser tab for its own
@@ -236,13 +250,40 @@ export function SessionMessage({
       ref={swipeRef}
       data-mi={mi}
       style={{ touchAction: 'pan-y' }}
-      className={`scroll-mt-24 text-[13.5px] leading-relaxed break-words ${hit ? 'oz-hit' : ''} ${m.internal ? 'oz-internal' : ''}`}
+      data-from={isUser ? (m.from ? m.from.session : m.auto ? 'auto' : 'you') : undefined}
+      className={`scroll-mt-24 text-[13.5px] leading-relaxed break-words ${hit ? 'oz-hit' : ''} ${m.internal ? 'oz-internal' : ''} ${isUser && m.from ? 'oz-from' : ''} ${isUser && m.auto && !m.from ? 'oz-auto' : ''}`}
     >
-      {/* "(you)" / "(agent)" — the word list says agent, not assistant */}
+      {/* "(you)" / "(← MAIN)" / "(agent)" — the word list says agent, not assistant; a message
+          another session wrote names it (a tap opens that session) */}
       <div className="oz-who">
-        <span className={isUser ? 'text-[var(--oz-success)]' : 'text-[var(--oz-dim)]'}>
-          ({m.internal ? 'internal' : isUser ? 'you' : m.role === 'assistant' ? 'agent' : m.role})
-        </span>
+        {isUser && m.from && !m.internal ? (
+          m.from.root ? (
+            <span data-testid="msg-from" className="text-[var(--oz-info)]">
+              (← {senderName(m.from)})
+            </span>
+          ) : (
+            <Link
+              href={`/session/${slugify(m.from.title) || m.from.session}`}
+              data-testid="msg-from"
+            >
+              (← {senderName(m.from)})
+            </Link>
+          )
+        ) : (
+          <span className={isUser && !m.auto ? 'text-[var(--oz-success)]' : 'text-[var(--oz-dim)]'}>
+            (
+            {m.internal
+              ? 'internal'
+              : isUser
+                ? m.auto
+                  ? 'auto'
+                  : 'you'
+                : m.role === 'assistant'
+                  ? 'agent'
+                  : m.role}
+            )
+          </span>
+        )}
         {stamp && <time>{stamp}</time>}
         {queued && <span className="oz-breathe text-[10px] text-[var(--oz-success)]">● queued</span>}
       </div>

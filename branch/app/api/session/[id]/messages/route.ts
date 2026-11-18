@@ -36,6 +36,26 @@ function toolLine(p: any): string {
   );
 }
 
+/** The sender of a user message that the owner did not write: `{ from }` (a session — its id,
+ *  title, and root when another root's), `{ auto: true }` (the brain itself), else nothing. */
+function senderOf(meta: any): {
+  from?: { session: string; title: string; root?: string };
+  auto?: true;
+} {
+  const f = meta?.from;
+  if (f && typeof f.session === 'string')
+    return {
+      from: {
+        session: f.session,
+        title: typeof f.title === 'string' ? f.title : '',
+        ...(typeof f.root === 'string' && { root: f.root }),
+      },
+    };
+  if (typeof meta?.origin === 'string') return { from: { session: meta.origin, title: '' } };
+  if (meta?.auto === true) return { auto: true };
+  return {};
+}
+
 export async function GET(req: Request, ctx: { params: Promise<{ id: string }> }) {
   try {
     ensureWatchdog(); // the event stream must be up for X-Run-Last-Event to mean anything
@@ -76,6 +96,9 @@ export async function GET(req: Request, ctx: { params: Promise<{ id: string }> }
         done:
           (m.info?.role || m.role) === 'assistant' ? !!m.info?.time?.completed : undefined,
         autoReply: m.info?.meta?.autoReply === true ? true : undefined,
+        // who wrote it when not the owner: another session (here or on another root), or the
+        // brain itself (a report, a wake-up). Older messages carry only the sender's id (origin)
+        ...((m.info?.role || m.role) === 'user' && senderOf(m.info?.meta)),
         ...(errors && m.info?.error && { error: String(m.info.error?.data?.message || m.info.error?.name || 'error') }),
         ...(log && {
           internal: m.info?.meta?.internal === true ? true : undefined,
@@ -83,6 +106,12 @@ export async function GET(req: Request, ctx: { params: Promise<{ id: string }> }
         }),
       };
     });
+    // older messages name the sender by id only: its title, from the session list (one call)
+    if (out.some((m: any) => m.from && !m.from.title)) {
+      const list: any[] = await ocFetch('/session').catch(() => []);
+      const titles = new Map(list.map((x: any) => [x.id, x.title || '']));
+      for (const m of out) if (m.from && !m.from.title) m.from.title = titles.get(m.from.session) || '';
+    }
     const all = out.filter((m: any) => m.text || m.images.length || m.log?.length || m.error);
     // run state for the busy indicator: opencode emits one assistant message
     // per step, so "an assistant message landed" ≠ "the run is done". The run

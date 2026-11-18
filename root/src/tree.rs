@@ -302,7 +302,7 @@ async fn run_remote(st: &AppState, caller: &str, name: &str, input: &Value) -> O
         "session_send" => {
             let msg = input["message"].as_str().unwrap_or_default();
             with_session(st, &target, |s| s.info["card"]["status"] = json!("working"));
-            match crate::peers::send(st, &root, &rid, msg).await {
+            match crate::peers::send(st, &root, &rid, msg, caller).await {
                 Ok(()) => ok(format!("SENT, NOT DONE YET: id={target} on root {root} reports back when finished. Tell the user it is on its way; never say it is done.")),
                 Err(e) => err(e),
             }
@@ -429,7 +429,7 @@ fn start(st: &AppState, caller: &str, input: &Value) -> Out {
         s.info["card"] = json!({ "topic": title, "brief": clip(brief, 600), "status": "working", "by": caller,
             "created": now_ms(), "updated": now_ms() });
     });
-    let turn = Turn { parts: vec![text_part(brief)], modality: None, auto_turn: false, internal: false, origin: Some(caller.to_string()), completes: None };
+    let turn = Turn { parts: vec![text_part(brief)], modality: None, auto_turn: false, internal: false, origin: Some(caller.to_string()), completes: None, from: Some(crate::sender_here(st, caller)) };
     if let Err(e) = crate::submit(st, &sid, turn) {
         return err(format!("created {sid} but could not post the brief ({:?})", e.status()));
     }
@@ -507,7 +507,7 @@ fn send(st: &AppState, caller: &str, input: &Value) -> Out {
         s.info["card"]["status"] = json!("working");
         s.info["card"]["updated"] = json!(now_ms());
     });
-    let turn = Turn { parts: vec![text_part(message)], modality: None, auto_turn: false, internal: false, origin: Some(caller.to_string()), completes: None };
+    let turn = Turn { parts: vec![text_part(message)], modality: None, auto_turn: false, internal: false, origin: Some(caller.to_string()), completes: None, from: Some(crate::sender_here(st, caller)) };
     match crate::submit(st, &target, turn) {
         Ok(_) => ok(format!(
             "SENT, NOT DONE YET: \"{title}\" (id={target}){} has your instruction and reports back when finished. Tell the user it is on its way (→ {title}); never say it is done.",
@@ -1112,7 +1112,7 @@ fn wake(st: &AppState, parent: &str) {
     }
     let text = if door { door_wake_text(&events) } else { lead_wake_text(&events) };
     with_session(st, parent, |s| s.info["card"]["wakes"] = json!(wakes + 1));
-    let turn = Turn { parts: vec![text_part(&text)], modality: None, auto_turn: true, internal: true, origin: None, completes: None };
+    let turn = Turn { parts: vec![text_part(&text)], modality: None, auto_turn: true, internal: true, origin: None, completes: None, from: None };
     match crate::submit(st, parent, turn) {
         Ok(_) => eprintln!("TREE woke {parent} with {} report(s)", events.len()),
         Err(_) => eprintln!("TREE wake of {parent} failed"),
@@ -1520,7 +1520,7 @@ async fn start_from(st: &AppState, caller: &str, input: &Value, from: &str) -> O
     with_session(st, &sid, |s| {
         s.info["card"] = json!({ "topic": t, "brief": clip(brief, 600), "status": "working", "by": caller, "created": now_ms(), "updated": now_ms() });
     });
-    let turn = Turn { parts: vec![text_part(brief)], modality: None, auto_turn: false, internal: false, origin: Some(caller.to_string()), completes: None };
+    let turn = Turn { parts: vec![text_part(brief)], modality: None, auto_turn: false, internal: false, origin: Some(caller.to_string()), completes: None, from: Some(crate::sender_here(st, caller)) };
     if let Err(e) = crate::submit(st, &sid, turn) {
         return err(format!("created {sid} but could not post the brief ({:?})", e.status()));
     }

@@ -141,21 +141,32 @@ export function Item({
   who?: string;
 }) {
   if (it.k === 'user') {
+    // a message another session sent: the brain put its sender on the first line
+    const raw = it.text || '';
+    const sent = /^\[from session “([^”]+)”(?: on root ([^\]]+))?\]\n/.exec(raw);
+    const text = sent ? raw.slice(sent[0].length) : raw;
     return (
       <div
-        className="text-[13.5px] leading-relaxed break-words"
+        className={`text-[13.5px] leading-relaxed break-words ${sent ? 'oz-from' : ''}`}
         data-k="user"
+        data-from={sent ? sent[1] : 'you'}
         data-pending={it.pending ? (it.queued ? 'queued' : '') : undefined}
       >
         <div className="oz-who">
-          <span className="text-[var(--oz-success)]">(you)</span>
+          {sent ? (
+            <span data-testid="msg-from" className="text-[var(--oz-info)]">
+              (← {sent[2] ? `${sent[1]} · ${sent[2]}` : sent[1]})
+            </span>
+          ) : (
+            <span className="text-[var(--oz-success)]">(you)</span>
+          )}
           {/* sent while it worked: it waits its turn, then shows up in the conversation */}
           <time>{it.pending ? (it.queued ? 'queued' : 'sending…') : clock(it.t)}</time>
           {it.queued && !it.pending && (
             <span className="text-[10px] text-[var(--oz-dim)]">· while it worked</span>
           )}
         </div>
-        <span className="whitespace-pre-wrap">{it.text}</span>
+        <span className="whitespace-pre-wrap">{text}</span>
       </div>
     );
   }
