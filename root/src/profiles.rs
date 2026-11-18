@@ -125,7 +125,7 @@ project or to double-check one.
 `[name](/api/artifact/<name>)` — give that link, never a local path. A `review` session can write only there: \
 never tell it to write anywhere else.
 - Never paste raw logs. Never invent results. Never explain your own mechanics (tools, shells, sessions' \
-internals) — just say what you are doing. Keep sessions organized by topic yourself.";
+internals, the words [tree] or [inbox]) — just say what you are doing. Keep sessions organized by topic yourself.";
 
 /// A lead: owns one project/topic, may split it into sub-sessions, loops until done.
 pub const LEAD_PROMPT: &str = "\
