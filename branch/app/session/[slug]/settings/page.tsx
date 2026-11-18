@@ -15,14 +15,6 @@ import Link from 'next/link';
 import { useParams, useRouter } from 'next/navigation';
 import { ErrorBox } from '@/components/app/error-box';
 import { type AgentDetail, agentDiff } from '@/lib/agents';
-import {
-  checkKey,
-  getStatus,
-  loadKey,
-  saveKey,
-  setGrant,
-  type AccessStatus,
-} from '@/lib/full-access';
 import { slugify } from '@/lib/slug';
 import { isMainSlug } from '@/lib/tree-first';
 
@@ -44,8 +36,7 @@ type SessionInfo = {
    * brain didn't say) */
   defaultModel?: ModelRef | null;
   /** a session on another harness: which one, its conversation there, and
-   * whether it continues a terminal's conversation (full access applies
-   * only to that kind) */
+   * whether it continues a terminal's conversation */
   harness?: { kind: string | null; id: string | null; attached: boolean };
 };
 type ProviderRow = {
@@ -85,178 +76,6 @@ function Refusal({ msg }: { msg: string }) {
   );
 }
 
-/** FULL ACCESS (owner 11-17) — a conversation continued from the terminal may run its turns
- *  outside the sandbox (ssh, gh, the release key, the build tools) for a while. Only the owner
- *  grants that, here, with the enrollment code typed once (it stays on this phone; grants go
- *  out as HMACs — lib/full-access.ts). Off by default; a grant runs out on its own; switching
- *  off needs no key. The box holds the matching key file (full-access-enroll.sh, at the
- *  computer, outside every sandbox) and re-checks every run — a grant never rides to a copy.
- *  Shown only where it can apply: a Claude Code / Antigravity session continuing a terminal's
- *  conversation. */
-function FullAccessBlock({ h, title }: { h: SessionInfo['harness']; title: string }) {
-  const key = `${h?.kind || ''}:${h?.id || ''}`;
-  const applicable =
-    (h?.kind === 'claude' || h?.kind === 'antigravity') && h?.attached === true && !!h?.id;
-  const [st, setSt] = useState<AccessStatus | null>(null);
-  const [hasKey, setHasKey] = useState<boolean | null>(null);
-  const [code, setCode] = useState('');
-  const [busy, setBusy] = useState(false);
-  const [refused, setRefused] = useState('');
-  const [pending, setPending] = useState<number | null>(null); // the grant waiting for its yes (s)
-  const [now, setNow] = useState(() => Date.now());
-  const refresh = useCallback(() => {
-    setNow(Date.now());
-    void getStatus().then((d) => setSt(d));
-  }, []);
-  useEffect(() => {
-    refresh();
-    setHasKey(!!loadKey());
-    const t = setInterval(() => {
-      if (!document.hidden) refresh();
-    }, 5000);
-    return () => clearInterval(t);
-  }, [refresh]);
-  if (!applicable) {
-    // every session says where the switch is (11-18: the owner looked for it in MAIN's settings)
-    return (
-      <section className="oz-blk" data-testid="fa-elsewhere">
-        <h2>full access</h2>
-        <p className="note pt-3!">
-          only for a Claude Code or Antigravity session continued from the terminal — open that
-          session&rsquo;s settings
-        </p>
-      </section>
-    );
-  }
-  const until = st?.grants?.[key];
-  const on = !!until && until > now;
-  const save = async () => {
-    const c = code.trim();
-    if (!c || busy) return;
-    setBusy(true);
-    setRefused('');
-    if (await checkKey(c)) {
-      saveKey(c);
-      setHasKey(true);
-      setCode('');
-    } else {
-      setRefused('the box did not recognize this code');
-    }
-    setBusy(false);
-  };
-  const flip = async (s: number) => {
-    if (busy) return;
-    setBusy(true);
-    setRefused('');
-    const r = await setGrant(key, s > 0, s);
-    if (!r.ok) setRefused(r.error || 'the box refused that');
-    refresh();
-    setBusy(false);
-  };
-  const hhmm = (ms: number) =>
-    new Date(ms).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-  return (
-    <section className="oz-blk" data-testid="fa-block">
-      <h2>full access</h2>
-      {st === null ? (
-        <p className="note pt-3!">checking the box&hellip;</p>
-      ) : !st.enabled ? (
-        <p className="note pt-3!">not set up on this box</p>
-      ) : !st.enrolled || hasKey === null || !hasKey ? (
-        <div>
-          <div>
-            <input
-              value={code}
-              onChange={(e) => {
-                setCode(e.target.value);
-                setRefused('');
-              }}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter') {
-                  e.preventDefault();
-                  void save();
-                }
-              }}
-              placeholder="the enrollment code"
-              aria-label="full access enrollment code"
-              data-testid="fa-code"
-              className="oz-field"
-              autoComplete="off"
-              spellCheck={false}
-            />
-          </div>
-          <div className="mt-2.5 flex gap-1.5">
-            <button onClick={() => void save()} disabled={busy || !code.trim()} className="oz-k ok flex-1" data-testid="fa-save">
-              {busy ? 'checking…' : 'save key'}
-            </button>
-          </div>
-          <p className="note">
-            {st.enrolled
-              ? 'type the code from full-access-enroll.sh once — it stays on this phone'
-              : 'the box has no key yet: run full-access-enroll.sh yourself at the computer (never through an agent), then type its code here once'}
-          </p>
-        </div>
-      ) : (
-        <>
-          <div className="oz-chips">
-            <button
-              aria-pressed={!on}
-              disabled={busy}
-              data-testid="fa-off"
-              onClick={() => void flip(0)}
-            >
-              off
-            </button>
-            {[3600, 4 * 3600].map((s) => (
-              <button
-                key={s}
-                aria-pressed={false}
-                disabled={busy}
-                data-testid={s === 3600 ? 'fa-1h' : 'fa-4h'}
-                onClick={() => setPending(s)}
-              >
-                {s === 3600 ? '1 h' : '4 h'}
-              </button>
-            ))}
-          </div>
-          <p className="note" data-testid="fa-status">
-            {on
-              ? `on until ${hhmm(until!)} — its turns run outside the sandbox`
-              : 'off — its turns run in the sandbox'}
-          </p>
-          {pending !== null && (
-            <div data-testid="fa-confirm">
-              <p className="text-[11px] text-[var(--oz-text)]">
-                full access for “{title}”? its turns run on the machine outside the sandbox, with
-                the whole home: ssh keys, the GitHub login, the release key. only this conversation
-                — not MAIN, not the sessions it starts. off by itself in{' '}
-                {pending === 3600 ? '1 hour' : '4 hours'}.
-              </p>
-              <div className="mt-2.5 flex gap-1.5">
-                <button
-                  onClick={() => {
-                    const s = pending;
-                    setPending(null);
-                    void flip(s);
-                  }}
-                  className="oz-k ok flex-1"
-                  data-testid="fa-yes"
-                >
-                  turn on
-                </button>
-                <button onClick={() => setPending(null)} className="oz-k px-4" data-testid="fa-cancel">
-                  cancel
-                </button>
-              </div>
-            </div>
-          )}
-        </>
-      )}
-      {refused && <Refusal msg={refused} />}
-    </section>
-  );
-}
-
 export default function SessionSettingsView() {
   const router = useRouter();
   const params = useParams<{ slug: string }>();
@@ -290,7 +109,6 @@ export default function SessionSettingsView() {
   const [modelLabels, setModelLabels] = useState<Record<string, Record<string, string>>>({});
   // the agent whose meaning shows under the list — the last one tapped
   // (null: the session's own)
-  const [about, setAbout] = useState<string | null>(null);
   // a switch waiting for its yes: what taking that agent changes, first
   const [pending, setPending] = useState<{ to: string; rows: [string, string][] } | null>(null);
   const tapRef = useRef(''); // the last agent tapped — an older answer is stale
@@ -396,7 +214,6 @@ export default function SessionSettingsView() {
   // the coordinator is MAIN's alone: offered on MAIN (and shown where it
   // already runs), never to another session
   const agentList = (agents || []).filter((a) => a.name !== COORD || isMain || agent === COORD);
-  const aboutAgent = agentList.find((a) => a.name === (about ?? agent));
 
   const agentNote = !agents
     ? loadErr.agents
@@ -404,17 +221,11 @@ export default function SessionSettingsView() {
       : 'loading agents…'
     : !agents.length
       ? 'the brain offers no agents'
-      : isMain
-        ? 'MAIN always runs the coordinator — tap another to read what it does'
-        : info && !agent
-          ? "none pinned — the brain's default agent runs"
-          : '';
+      : '';
 
-  /** a tap shows what the agent means, then what switching to it changes
-   *  (harness, model, thinking, tools, instructions) — 'switch' applies it.
-   *  MAIN only ever goes back to the coordinator */
+  /** a tap shows what switching to it changes (harness, model, thinking, tools,
+   *  instructions) — 'switch' applies it. MAIN only ever goes back to the coordinator */
   async function pickAgent(a: string) {
-    setAbout(a);
     setPending(null);
     tapRef.current = a;
     if (a === agent || (isMain && a !== COORD)) return;
@@ -584,15 +395,7 @@ export default function SessionSettingsView() {
             readOnly={isMainSlug(slug)}
           />
         </div>
-        {refused?.block === 'name' ? (
-          <Refusal msg={refused.msg} />
-        ) : (
-          <p className="note">
-            {isMainSlug(slug)
-              ? 'MAIN keeps its name — the tree door finds it by it'
-              : 'url + voice room follow the name'}
-          </p>
-        )}
+        {refused?.block === 'name' && <Refusal msg={refused.msg} />}
       </section>
 
       <section className="oz-blk">
@@ -618,13 +421,6 @@ export default function SessionSettingsView() {
             <span>{pickOpen ? '▲' : '›'}</span>
           </button>
         </div>
-        {onDefault && !pickOpen && (
-          <p className="note">
-            {run
-              ? "the brain's default, set on the box — pick one to pin this session"
-              : "the brain didn't report its default model — pick one to pin this session"}
-          </p>
-        )}
         {pickOpen && (
           <div className="pt-0">
             <input
@@ -689,45 +485,36 @@ export default function SessionSettingsView() {
         {refused?.block === 'model' && <Refusal msg={refused.msg} />}
       </section>
 
-      {/* THINK — the selected model's real levels; the session's current one
+      {/* THINK — the selected model's real levels (none: no block); the session's current one
           is highlighted, tapping it again falls back to the model default */}
-      <section className="oz-blk">
-        <h2>think</h2>
-        {run && run.variants.length ? (
-          <>
-            <div className="oz-chips">
-              {run.variants.map((v) => (
-                <button
-                  key={v}
-                  aria-pressed={shownVariant === v}
-                  onClick={() =>
-                    void patch(
-                      {
-                        model: {
-                          providerID: run.providerID,
-                          modelID: run.modelID,
-                          variant: shownVariant === v ? undefined : v,
-                        },
+      {run && run.variants.length > 0 && (
+        <section className="oz-blk" data-testid="think-block">
+          <h2>think</h2>
+          <div className="oz-chips">
+            {run.variants.map((v) => (
+              <button
+                key={v}
+                aria-pressed={shownVariant === v}
+                onClick={() =>
+                  void patch(
+                    {
+                      model: {
+                        providerID: run.providerID,
+                        modelID: run.modelID,
+                        variant: shownVariant === v ? undefined : v,
                       },
-                      'think'
-                    )
-                  }
-                >
-                  {v}
-                </button>
-              ))}
-            </div>
-            <p className="note">current — {shownVariant || 'model default'}</p>
-          </>
-        ) : (
-          <p className="note pt-3!">
-            {run
-              ? 'no think levels configured for this model'
-              : 'pick a model to see its thinking levels'}
-          </p>
-        )}
-        {refused?.block === 'think' && <Refusal msg={refused.msg} />}
-      </section>
+                    },
+                    'think'
+                  )
+                }
+              >
+                {v}
+              </button>
+            ))}
+          </div>
+          {refused?.block === 'think' && <Refusal msg={refused.msg} />}
+        </section>
+      )}
 
       <section className="oz-blk">
         <h2>agent</h2>
@@ -779,12 +566,6 @@ export default function SessionSettingsView() {
             </div>
           </div>
         )}
-        {aboutAgent?.description && (
-          <p className="note" data-testid="agent-about">
-            <span className="text-[var(--oz-text)]">{aboutAgent.name}</span> —{' '}
-            {aboutAgent.description}
-          </p>
-        )}
         {agentNote && <p className={`note ${agentList.length ? '' : 'pt-3!'}`}>{agentNote}</p>}
         <p className="note">
           {isMain ? (
@@ -795,10 +576,6 @@ export default function SessionSettingsView() {
         </p>
         {refused?.block === 'agent' && <Refusal msg={refused.msg} />}
       </section>
-
-      <p className="px-0.5 pb-2.5 text-[10.5px] leading-relaxed text-[var(--oz-dim)]">
-        changes apply from the next message in this session
-      </p>
 
       {/* NOTIFICATIONS — may this session wake the phone when a reply is ready? Off by default,
           on for MAIN (owner 11-17); the push and the in-page notification both ask it */}
@@ -819,10 +596,6 @@ export default function SessionSettingsView() {
         </div>
       </section>
 
-      {/* FULL ACCESS — the owner grants a terminal-continued conversation a run outside the
-          sandbox (off by default, ≤4 h, signed from this phone); nothing here for the rest */}
-      <FullAccessBlock h={info?.harness} title={title} />
-
       {/* DELETE — two taps; sub-sessions cascade server-side, then back to
           the list (which no longer shows the deleted row). MAIN has none:
           the proxy refuses it (403), the page doesn't offer it */}
@@ -838,11 +611,6 @@ export default function SessionSettingsView() {
               {deleting ? 'deleting…' : armed ? 'tap again to delete' : 'delete session'}
             </button>
           </div>
-          <p className="note">
-            {armed
-              ? 'this cannot be undone — sub-sessions go too'
-              : 'removes the session and its sub-sessions'}
-          </p>
         </section>
       )}
     </main>

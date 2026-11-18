@@ -66,9 +66,8 @@ async function modelRef(providerID: string, raw: string) {
  *  session runs on the brain's default: reported as `defaultModel`, apart
  *  from `model`, so the page shows it AS the default; null = the brain
  *  didn't say (shown as unknown, never guessed). A harness session adds
- *  `harness` (kind / conversation id / attached) — what the full-access
- *  toggle needs to name the conversation it would grant; fork/origin and
- *  cwd stay server-side. */
+ *  `harness` (kind / conversation id / attached); fork/origin and cwd stay
+ *  server-side. */
 async function summary(s: any) {
   const raw = s.model ? s.model.id || s.model.modelID : null;
   const model = raw ? await modelRef(s.model.providerID, raw) : null;
@@ -80,7 +79,11 @@ async function summary(s: any) {
     model,
     defaultModel: d ? await modelRef(d.providerID, d.modelID) : null,
     harness: s.harness
-      ? { kind: s.harness.kind ?? null, id: s.harness.id ?? null, attached: s.harness.attached === true }
+      ? {
+          kind: s.harness.kind ?? null,
+          id: s.harness.id ?? null,
+          attached: s.harness.attached === true,
+        }
       : undefined,
   };
 }

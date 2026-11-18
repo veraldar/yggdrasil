@@ -137,11 +137,7 @@ export default function JoinPage() {
           {pending && (
             <>
               <p className="note">
-                the machine shows a code too. add it only if both codes match — otherwise refuse.
-                {view.wg_fp
-                  ? ' adding it trusts its tunnel key: the machine prints the same key line.'
-                  : ''}{' '}
-                expires {new Date(view.expires_at).toLocaleTimeString()}.
+                same code on the machine? · expires {new Date(view.expires_at).toLocaleTimeString()}
               </p>
               <div className="mt-3 flex gap-2">
                 <button

@@ -6,11 +6,10 @@
  *  seen before it is made. Tapping applies at once via next-themes — one
  *  data-theme attribute on <html>, transitions suppressed for the swap
  *  frame — and that world's tree answers with one pulse up the trunk. */
-
 import { useEffect, useState } from 'react';
+import { useTheme } from 'next-themes';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { useTheme } from 'next-themes';
 import { LineIcon } from '@/components/line-icon';
 import { YggTree } from '@/components/ygg';
 import { VERSION } from '@/lib/version';
@@ -125,7 +124,6 @@ export default function SettingsPage() {
             <span />
           </li>
         </ul>
-        <p className="note">AGPL-3.0. Free for everyone. Your hardware, your words.</p>
       </section>
 
       <section className="oz-blk">
@@ -162,7 +160,6 @@ export default function SettingsPage() {
             </button>
           ))}
         </div>
-        <p className="note">tap a world. it applies at once; its tree answers with one pulse.</p>
       </section>
 
       {/* possession, named as copy */}
@@ -170,26 +167,11 @@ export default function SettingsPage() {
         <h2>yours</h2>
         <ul className="oz-kv">
           <li>
-            <span>sessions</span>
-            <span>on your box, in opencode&apos;s store</span>
-            <span />
-          </li>
-          <li>
             <span>agents</span>
-            <span data-testid="agents-hub-desc">who does what, on the root</span>
+            <span />
             <Link href="/agents" data-testid="agents-link" className="oz-k sm">
               browse
             </Link>
-          </li>
-          <li>
-            <span>speech</span>
-            <span>your models, on your network</span>
-            <span />
-          </li>
-          <li>
-            <span>audio</span>
-            <span>stays on your network</span>
-            <span />
           </li>
           <li>
             <span>mic</span>
@@ -205,7 +187,6 @@ export default function SettingsPage() {
             <span />
           </li>
         </ul>
-        <p className="note">mic access is the browser&apos;s to grant or revoke — site settings.</p>
       </section>
 
       {/* the three ways, walked again — the door's first-turn card, one turn
@@ -215,7 +196,7 @@ export default function SettingsPage() {
         <ul className="oz-kv">
           <li>
             <span>walk-through</span>
-            <span>type · hold · hands-free</span>
+            <span />
             <button
               type="button"
               data-testid="walk-again"
@@ -228,7 +209,6 @@ export default function SettingsPage() {
           </li>
         </ul>
         {walkErr && <p className="note text-[var(--oz-danger)]">{walkErr}</p>}
-        <p className="note">one turn each, in {VOICE_TEST_SLUG} — never in MAIN.</p>
       </section>
 
       {/* testing the voice must never write into MAIN */}
@@ -238,7 +218,7 @@ export default function SettingsPage() {
           <li>
             <span>test room</span>
             <span data-testid="voice-test-state">
-              {vt ? `on · MAIN opens ${VOICE_TEST_SLUG}` : 'off · voice lands where you are'}
+              {vt && <Link href={`/session/${VOICE_TEST_SLUG}`}>{VOICE_TEST_SLUG} ›</Link>}
             </span>
             <button
               type="button"
@@ -255,11 +235,6 @@ export default function SettingsPage() {
           </li>
         </ul>
         {vtErr && <p className="note text-[var(--oz-danger)]">{vtErr}</p>}
-        <p className="note">
-          on: the mic talks to its own session, {VOICE_TEST_SLUG} — MAIN opens it instead, so test
-          turns never land in MAIN.{' '}
-          {vt && <Link href={`/session/${VOICE_TEST_SLUG}`}>open {VOICE_TEST_SLUG} ›</Link>}
-        </p>
       </section>
     </main>
   );

@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """cc-live — the box's running Claude Code sessions, live on the phone.
 
-The app's "Claude Code live" page talks to this helper (never the brain: it runs outside the
-brain's sandbox, because `claude attach` needs the Claude Code daemon's sockets in /tmp and
-/run/user, the claude binary and its sign-in). It only ever runs three things:
+The app's "Claude Code live" page talks to this helper (`claude attach` needs the Claude Code
+daemon's sockets in /tmp and /run/user, the claude binary and its sign-in). It only ever runs
+three things:
 
   claude agents --json        which sessions are running (interactive and background)
   claude attach <short id>    a PTY on ONE background session, to type into it
@@ -14,8 +14,8 @@ only a background session (kind "background") takes input, and a page's input go
 session its URL names, through the PTY attached to that session's short id. Interactive sessions
 (a terminal's own `claude`) can't be attached: they are watch-only.
 
-HTTP on loopback only, every call with the header x-cc-live-token (the token file, 0600, is
-outside the brain's sandbox; the app reads it):
+HTTP on loopback only, every call with the header x-cc-live-token (the token file, 0600; the app
+reads it):
 
   GET  /sessions                      the running sessions {sessionId, short, name, kind, status,
                                       state, cwd, startedAt, title, canType}
@@ -60,10 +60,8 @@ import pty
 import queue
 import re
 import secrets
-import select
 import shutil
 import signal
-import socket
 import struct
 import subprocess
 import sys
@@ -74,7 +72,6 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import full_access as FA  # noqa: E402
 import transcript as T  # noqa: E402
 import vt  # noqa: E402
 
@@ -89,7 +86,6 @@ CLAUDE = "claude"
 TOKEN = ""
 LIVE_FILE = ""
 CWD_PREFIX = ""  # --cwd-prefix: only conversations in this folder (a sim's helper, never the owner's others)
-ACCESS = None  # --access-dir: full access, one conversation at a time (full_access.py)
 PROJECTS = os.path.expanduser("~/.claude/projects")
 UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 SHORT = re.compile(r"^[0-9a-z][0-9a-z-]{0,40}$")
@@ -750,111 +746,6 @@ class H(BaseHTTPRequestHandler):
         parts = [p for p in u.path.split("/") if p]
         return u, parts
 
-    def _access(self, what):
-        """POST /access/grant {key, on, for_s, ts, mac} — the owner's phone (signed; off needs no
-        signature) · /access/check {ts, mac} — the phone's key matches · /access/run {argv, cwd,
-        stdin, env} — a granted conversation's turn, outside the sandbox (the brain's cc_run.py)."""
-        if ACCESS is None:
-            return self._send(404, {"error": "full access is not set up on this helper (--access-dir)"})
-        b = self._body() if what != ["run"] else self._body_big()
-        if not isinstance(b, dict):
-            return self._send(400, {"error": "a JSON object, please"})
-        if what == ["grant"]:
-            code, d = ACCESS.grant(b.get("key"), b.get("on"), b.get("for_s"), b.get("ts"), b.get("mac"))
-            log(f"full access: {b.get('key')} {'ON until ' + str(d.get('until')) if code == 200 and d.get('until') else 'off' if code == 200 else 'refused: ' + d.get('error', '')}")
-            return self._send(code, d)
-        if what == ["check"]:
-            why = ACCESS.check(b.get("ts"), b.get("mac"))
-            return self._send(403 if why else 200, {"error": why} if why else {"ok": True})
-        if what == ["run"]:
-            return self._run(b)
-        return self._send(404, {"error": "no such route"})
-
-    def _body_big(self):
-        n = int(self.headers.get("Content-Length") or 0)
-        if n > 4 * 1024 * 1024:
-            return None
-        try:
-            return json.loads(self.rfile.read(n) or b"{}")
-        except ValueError:
-            return None
-
-    def _run(self, b):
-        argv, cwd, stdin = b.get("argv"), b.get("cwd"), b.get("stdin") or ""
-        key, why = ACCESS.allowed(argv, cwd)
-        if key is None:
-            log(f"full access: run refused — {why}")
-            return self._send(403, {"error": why})
-        if not isinstance(stdin, str):
-            return self._send(400, {"error": "stdin: text"})
-        prog = CLAUDE if argv[0] == "claude" else (shutil.which(argv[0]) or os.path.expanduser(f"~/.local/bin/{argv[0]}"))
-        env = {k: v for k, v in os.environ.items() if not k.startswith(("CLAUDE", "YGG_"))}
-        env["HOME"] = os.path.expanduser("~")
-        extra = b.get("env") if isinstance(b.get("env"), dict) else {}
-        if isinstance(extra.get("GEMINI_API_KEY"), str):  # agy on the Gemini API (the brain's key)
-            env["GEMINI_API_KEY"] = extra["GEMINI_API_KEY"]
-        try:
-            p = subprocess.Popen([prog, *argv[1:]], cwd=os.path.realpath(cwd), env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                 stderr=subprocess.PIPE, start_new_session=True)
-        except OSError as e:
-            return self._send(500, {"error": f"{argv[0]} not runnable: {e}"})
-        log(f"full access: {key} turn started (pid {p.pid}, {cwd})")
-        self.send_response(200)
-        self.send_header("Content-Type", "application/x-ndjson")
-        self.send_header("Cache-Control", "no-store")
-        self.send_header("Connection", "close")
-        self.end_headers()
-        self.close_connection = True
-        wl, gone = threading.Lock(), threading.Event()
-
-        def kill():
-            gone.set()
-            try:
-                os.killpg(p.pid, signal.SIGKILL)
-            except OSError:
-                pass
-
-        def frame(obj):
-            if gone.is_set():
-                return
-            try:
-                with wl:
-                    self.wfile.write((json.dumps(obj, ensure_ascii=False) + "\n").encode())
-                    self.wfile.flush()
-            except OSError:
-                kill()  # the brain dropped the turn (an abort): so does this
-
-        def watch():  # a quiet harness (thinking) writes nothing: notice the brain hanging up anyway
-            while p.poll() is None and not gone.is_set():
-                r, _, _ = select.select([self.connection], [], [], 1.0)
-                if r:
-                    try:
-                        if not self.connection.recv(1, socket.MSG_PEEK):
-                            kill()
-                    except OSError:
-                        kill()
-
-        def errs():
-            for ln in p.stderr:
-                frame({"e": ln.decode("utf-8", "replace").rstrip("\n")})
-
-        try:
-            p.stdin.write(stdin.encode())
-            p.stdin.close()
-        except OSError:
-            pass
-        threading.Thread(target=watch, daemon=True).start()
-        te = threading.Thread(target=errs, daemon=True)
-        te.start()
-        for ln in p.stdout:
-            frame({"o": ln.decode("utf-8", "replace").rstrip("\n")})
-        rc = p.wait()
-        te.join(timeout=5)
-        p.stdout.close()
-        p.stderr.close()
-        frame({"x": rc})
-        log(f"full access: {key} turn ended ({'dropped by the brain' if gone.is_set() else f'exit {rc}'})")
-
     def do_GET(self):
         if not self._auth():
             return
@@ -862,10 +753,6 @@ class H(BaseHTTPRequestHandler):
         qs = parse_qs(u.query)
         if parts == ["harness"]:
             return self._send(200, {"sessions": harness_list(), "error": AGENTS.err})
-        if parts == ["access"]:  # which conversations have full access now (nothing secret)
-            if ACCESS is None:
-                return self._send(200, {"enabled": False, "enrolled": False, "grants": {}})
-            return self._send(200, {"enabled": True, "enrolled": ACCESS.enrolled(), "grants": ACCESS.grants(), "max_s": FA.MAX_S})
         if len(parts) == 4 and parts[0] == "h":
             kind, sid, what = parts[1], parts[2], parts[3]
             if kind == "claude":
@@ -905,8 +792,6 @@ class H(BaseHTTPRequestHandler):
         if not self._auth():
             return
         u, parts = self._route()
-        if parts[:1] == ["access"]:
-            return self._access(parts[1:])
         if len(parts) >= 4 and parts[0] == "h":
             kind, sid, act = parts[1], parts[2], "/".join(parts[3:])
         elif len(parts) >= 3 and parts[0] == "s":
@@ -1176,7 +1061,7 @@ class Server(ThreadingHTTPServer):
 
 
 def main():
-    global CLAUDE, TOKEN, PROJECTS, LIVE_FILE, CWD_PREFIX, ACCESS
+    global CLAUDE, TOKEN, PROJECTS, LIVE_FILE, CWD_PREFIX
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--port", type=int, default=4320)
     ap.add_argument("--host", default="127.0.0.1")
@@ -1185,7 +1070,6 @@ def main():
     ap.add_argument("--projects", default=PROJECTS)
     ap.add_argument("--live-file", default="", help="where to write what is open in a terminal (for the brain)")
     ap.add_argument("--cwd-prefix", default="", help="only conversations in this folder (a sim's helper)")
-    ap.add_argument("--access-dir", default="", help="full access: the owner's key + the grants, outside the brain's sandbox")
     a = ap.parse_args()
     if a.host not in ("127.0.0.1", "::1", "localhost"):
         sys.exit("cc-live listens on loopback only")
@@ -1198,13 +1082,11 @@ def main():
     TOKEN = open(tf).read().strip()
     if len(TOKEN) < 16:
         sys.exit("token file: at least 16 characters")
-    if a.access_dir:
-        ACCESS = FA.Access(a.access_dir)
     srv = Server((a.host, a.port), H)
     if a.live_file:
         LIVE_FILE = os.path.expanduser(a.live_file)
         threading.Thread(target=LIVE.write_loop, daemon=True).start()
-    log(f"cc-live on {a.host}:{a.port} · claude {CLAUDE} · readers {sorted(READERS)} · live file {LIVE_FILE or '-'} · full access {a.access_dir or 'off'}")
+    log(f"cc-live on {a.host}:{a.port} · claude {CLAUDE} · readers {sorted(READERS)} · live file {LIVE_FILE or '-'}")
     srv.serve_forever()
 
 

@@ -576,22 +576,11 @@ pub struct Outcome {
     pub session: Option<String>,
 }
 
-/// The command line of a turn run `via` another program (full access: the runner that hands it to
-/// the live helper, outside the sandbox) — the harness's own argv after `--`.
-pub fn via_argv(via: &[String], argv: Vec<String>) -> Vec<String> {
-    if via.is_empty() {
-        return argv;
-    }
-    via.iter().cloned().chain(std::iter::once("--".to_string())).chain(argv).collect()
-}
-
 /// Runs one turn. `on` sees every event as it arrives (stream text, store tools). The child is
-/// killed when the returned future is dropped (an abort drops it). `via`: run it through that
-/// program (full access), else directly.
+/// killed when the returned future is dropped (an abort drops it).
 #[allow(clippy::too_many_arguments)]
-pub async fn run(kind: Kind, model: Option<&str>, resume: Option<&str>, cwd: &Path, prompt: &str, system: Option<&str>, attach: Attach, via: &[String], mut on: impl FnMut(&Ev)) -> Result<Outcome, String> {
+pub async fn run(kind: Kind, model: Option<&str>, resume: Option<&str>, cwd: &Path, prompt: &str, system: Option<&str>, attach: Attach, mut on: impl FnMut(&Ev)) -> Result<Outcome, String> {
     let (argv, stdin_prompt) = kind.argv(model, resume, cwd, prompt, system, attach);
-    let argv = via_argv(via, argv);
     let mut cmd = tokio::process::Command::new(&argv[0]);
     cmd.args(&argv[1..])
         .current_dir(cwd)
@@ -691,13 +680,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_full_access_turn_is_the_same_turn_through_the_runner() {
+    fn a_terminal_conversation_keeps_its_own_permission_check() {
         let (argv, _) = Kind::Claude.argv(None, Some("070d6b89-df88-495a-b061-1a0a80cfbea0"), Path::new("/w"), "hi", None, Attach { guarded: true, fork: false });
-        assert_eq!(via_argv(&[], argv.clone()), argv, "no runner: the harness itself");
-        let via = ["python3".to_string(), "/x/cc_run.py".to_string()];
-        let v = via_argv(&via, argv.clone());
-        assert_eq!(&v[..3], &["python3", "/x/cc_run.py", "--"]);
-        assert_eq!(&v[3..], &argv[..], "the guarded argv, untouched (the helper checks it)");
         assert!(argv.windows(2).any(|w| w == ["--permission-mode", "auto"]));
     }
 
@@ -938,7 +922,7 @@ mod tests {
         // SAFETY: this test is the only one that runs an `agy`; PATH gains a directory in front
         unsafe { std::env::set_var("PATH", path) };
         let mut seen = Vec::new();
-        let out = run(Kind::Antigravity, Some("gemini-3.8-flash-low"), None, &dir, "check missing.txt", Some("be terse"), Attach::default(), &[], |e| seen.push(e.clone())).await.unwrap();
+        let out = run(Kind::Antigravity, Some("gemini-3.8-flash-low"), None, &dir, "check missing.txt", Some("be terse"), Attach::default(), |e| seen.push(e.clone())).await.unwrap();
         assert_eq!(
             out.text,
             "I will check for the file in this directory.\n\nThe file [missing.txt](file:///home/user/.cache/tmp/agy-try/tooldir/missing.txt) could not be read because it does not exist."
@@ -951,7 +935,7 @@ mod tests {
         assert!(argv.contains("--model gemini-3.8-flash-low") && !argv.contains("check missing"), "{argv}");
 
         put(format!("#!/bin/sh\ncat >/dev/null\ncat '{}'\ncat '{}' >&2\nexit 1\n", fx.join("signed-out.stream.jsonl").display(), fx.join("signed-out.stderr.txt").display()));
-        let err = run(Kind::Antigravity, None, Some("c1"), &dir, "hi", None, Attach::default(), &[], |_| {}).await.err();
+        let err = run(Kind::Antigravity, None, Some("c1"), &dir, "hi", None, Attach::default(), |_| {}).await.err();
         assert_eq!(err.as_deref(), Some(ANTIGRAVITY_SIGNED_OUT));
         let _ = std::fs::remove_dir_all(&dir);
     }

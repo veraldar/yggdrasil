@@ -142,10 +142,6 @@ export default function PairPage() {
                 </li>
               </ul>
               {code.warning && <p className="note">{code.warning}</p>}
-              <p className="note">
-                one use, five minutes. the QR carries the box key — your phone pins it and refuses
-                any bridge that does not hold it.
-              </p>
             </>
           )}
           <p className="note">

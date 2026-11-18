@@ -97,10 +97,9 @@ export default function DevicesPage() {
         <button className="oz-k" data-testid="kill-switch" onClick={kill}>
           sever all bridges
         </button>
-        <p className="note">
-          every device revoked, every live connection dropped. recovery = scan a fresh QR.
-          {reg?.killedAt ? ` last pulled ${new Date(reg.killedAt).toLocaleString()}.` : ''}
-        </p>
+        {reg?.killedAt && (
+          <p className="note">last pulled {new Date(reg.killedAt).toLocaleString()}</p>
+        )}
         {note && (
           <p className="note" data-testid="devices-note">
             {note}

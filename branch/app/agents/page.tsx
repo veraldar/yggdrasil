@@ -101,10 +101,6 @@ export default function AgentsPage() {
             </button>
           </div>
         )}
-        <p className="note">
-          on the root an agent is yours to shape — model, thinking, tools, instructions. on a
-          harness (Claude Code, Antigravity, opencode, Codex) the harness brings its own tools.
-        </p>
       </section>
       <SharedPrompt />
     </main>
@@ -162,9 +158,7 @@ function SharedPrompt() {
         </button>
         {got.custom && <button onClick={() => void save('')}>reset to default</button>}
       </div>
-      <p className="note">
-        {note || 'every agent reads this first, then its own prompt — stored once, not per agent'}
-      </p>
+      {note && <p className="note">{note}</p>}
     </section>
   );
 }

@@ -94,8 +94,7 @@ export default function AgentEditor() {
   const can = (f: string) => custom.includes(f) && !locked.includes(f);
   const lockNote = (f: string) => (
     <p className="note" data-testid={`locked-${f}`}>
-      locked — {name === 'coordinator' ? "MAIN's coordinator keeps its" : 'this agent keeps its'}{' '}
-      {f === 'sessions' ? 'session management' : f}
+      locked
     </p>
   );
   const set = (p: Partial<Draft>) => {
@@ -184,15 +183,7 @@ export default function AgentEditor() {
                 </button>
               ))}
             </div>
-            {locked.includes('harness') ? (
-              lockNote('harness')
-            ) : (
-              <p className="note">
-                {isNew
-                  ? 'the root: yours to shape. a harness brings its own tools — less to set here'
-                  : `set when the agent was made${detail?.builtin ? ' · built in' : ''}`}
-              </p>
-            )}
+            {locked.includes('harness') && lockNote('harness')}
           </section>
 
           {shows('description') && (
@@ -283,17 +274,10 @@ export default function AgentEditor() {
                       </button>
                     ))}
                   </div>
-                  <p className="note">thinking — {draft.variant || 'model default'}</p>
                 </>
               )}
-              {h !== 'root' && (
-                <p className="note">
-                  {labels[h]?.[draft.model || ''] ||
-                    `the models ${harnessLabel(h)} offers on this root`}
-                  {h === 'codex' &&
-                    (byHarness.codex || []).length <= 1 &&
-                    ' · run `codex login` to list its models'}
-                </p>
+              {h !== 'root' && labels[h]?.[draft.model || ''] && (
+                <p className="note">{labels[h]?.[draft.model || '']}</p>
               )}
             </section>
           )}
@@ -311,9 +295,6 @@ export default function AgentEditor() {
                   className="oz-field h-auto py-2 text-[12px] leading-relaxed"
                 />
               </div>
-              <p className="note">
-                every agent first reads the shared prompt (agents page) — all of it below
-              </p>
               {(() => {
                 // everything the model reads, as saved: the entry for this agent's own model
                 const sys = detail?.system || [];

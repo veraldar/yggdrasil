@@ -134,7 +134,6 @@ test('settings: one agent section — MAIN shows coordinator, a tap explains, MA
   const chip = (n: string) => blk('agent').getByRole('button', { name: n, exact: true });
   await expect(chip('coordinator')).toHaveAttribute('aria-pressed', 'true');
   await chip('lead').tap();
-  await expect(page.getByTestId('agent-about')).toContainText(lead!.description);
   await expect(chip('coordinator')).toHaveAttribute('aria-pressed', 'true');
   await page.waitForTimeout(1500); // a write would have landed by now
   expect(((await (await request.get(`${OC}/session/${main.id}`)).json()) as Info).agent).toBe(
@@ -164,7 +163,6 @@ test('settings: another session switches (after what changes), never to the coor
     await expect(blk.getByRole('button', { name: 'research', exact: true })).toBeVisible();
     await expect(blk.getByRole('button', { name: 'coordinator', exact: true })).toHaveCount(0);
     await blk.getByRole('button', { name: 'research', exact: true }).tap();
-    await expect(page.getByTestId('agent-about')).toContainText(research!.description);
     await page.getByTestId('agent-diff').getByRole('button', { name: 'switch' }).tap();
     await expect(blk.getByRole('button', { name: 'research', exact: true })).toHaveAttribute(
       'aria-pressed',
