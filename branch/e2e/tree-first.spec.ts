@@ -50,7 +50,7 @@ test('door: first paint → hold → greeting → language · style · brain →
   const html = await (await request.get('/')).text();
   expect(html).toContain('data-testid="tree-first"');
   expect(html).toContain('hold the tree to begin');
-  expect(html).toContain('the tree stands for your own computer'); // the first name, glossed
+  expect(html).not.toContain('the tree stands for your own computer'); // no help text (owner 11-18)
   expect(html).toContain("localStorage.removeItem('labmic')"); // the boot script heals stuck phones
 
   // 1 · a fresh device: the tree alone — no list, no chrome
