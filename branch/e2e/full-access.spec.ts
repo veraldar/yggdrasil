@@ -107,6 +107,6 @@ test('a fresh phone without the code cannot flip the toggle', async ({ page }) =
   await expect(page.getByTestId('fa-off')).toHaveCount(0);
   await page.getByTestId('fa-code').fill('ZZZZ-ZZZZ-ZZZZ-ZZZZ-ZZZZ-ZZZZ');
   await page.getByTestId('fa-save').tap();
-  await expect(page.getByRole('alert')).toContainText('did not recognize');
+  await expect(page.getByTestId('fa-block').getByRole('alert')).toContainText('did not recognize');
   await expect(page.getByTestId('fa-off')).toHaveCount(0);
 });
