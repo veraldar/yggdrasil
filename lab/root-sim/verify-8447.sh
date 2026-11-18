@@ -17,10 +17,8 @@ bash "$HOME/Work/root-coord/lab/root-sim/cc-live-up.sh" || { echo "== VERIFY: RE
 cd "$HOME/Work/tree-next/branch" || exit 1
 export TS_CLAUDE=070d6b89-df88-495a-b061-1a0a80cfbea0 TS_AGY=1a289121-819e-47e3-b617-d9979520bf50 \
        TS_OC=ses_e1f017bdfffeE4rDioWgFH8kKN PW_BASE_URL=https://omarchy.tail5435b1.ts.net:8447
-# full access: the owner's enrollment code is NEVER read here (11-18: it reached agents through this
-# line). The toggle spec's grant path runs only against a throwaway key (TS_FA_CODE, by hand).
 echo "== suites $(date +%T)"
-TMPDIR=$HOME/.cache/tmp timeout 3600 npx playwright test e2e/terminal-sessions.spec.ts e2e/cc-live.spec.ts e2e/notify-per-session.spec.ts e2e/list-order.spec.ts e2e/full-access.spec.ts \
+TMPDIR=$HOME/.cache/tmp timeout 3600 npx playwright test e2e/terminal-sessions.spec.ts e2e/cc-live.spec.ts e2e/notify-per-session.spec.ts e2e/list-order.spec.ts \
   --reporter=line --workers=1
 rc=$?
 # what the suites opened in "terminals" (tmux, script) must not outlive them

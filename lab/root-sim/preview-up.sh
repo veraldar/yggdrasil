@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# preview-up.sh — restart a preview brain on a new binary, keeping its data, upstream and sandbox.
+# preview-up.sh — restart a preview brain on a new binary, keeping its data and upstream.
+# No sandbox (owner 11-18: every session on every root has full access — like a terminal).
 # The model tiers, the vision model and the review agent's artifacts folder (the one the preview
 # PWA serves) are set here.
 #
@@ -41,30 +42,14 @@ fi
 mkdir -p "$HOME/.gemini"
 B="http://$(printf '%s\n' "${ENVV[@]}" | sed -n 's/^YGG_LISTEN=//p')"
 
-# agy's Google sign-in: a keyring item (Secret Service over the D-Bus session bus), which the
-# sandbox cannot see (ProtectHome also hides /run/user). A filtered proxy (unit rc-$NAME-secrets,
-# socket in the bound $UI) lets it read THAT item only: no other secret, no writes, no systemd,
-# nothing else on the bus. Signed out (no item): no proxy, and a turn says how to sign in.
-# A new sign-in (a new item) needs a rerun of this script.
-SS=org.freedesktop.secrets SP=/org/freedesktop/secrets SBUS="$UI/secrets.bus"
+# agy's Google sign-in is a keyring item on the session bus: the real bus, nothing filtered (the
+# filtered proxy rc-$NAME-secrets was for the sandbox, gone since 11-18)
 systemctl --user stop "rc-$NAME-secrets" 2>/dev/null || true
 systemctl --user reset-failed "rc-$NAME-secrets" 2>/dev/null || true
-rm -f "$SBUS"
-mapfile -t ENVV < <(printf '%s\n' "${ENVV[@]}" | grep -vE '^(DBUS_SESSION_BUS_ADDRESS|AGY_CLI_DISABLE_AUTO_UPDATE)=')
+rm -f "$UI/secrets.bus"
+mapfile -t ENVV < <(printf '%s\n' "${ENVV[@]}" | grep -vE '^(DBUS_SESSION_BUS_ADDRESS|AGY_CLI_DISABLE_AUTO_UPDATE|YGG_HARNESS_RUNNER)=')
 ENVV+=("AGY_CLI_DISABLE_AUTO_UPDATE=1") # the terminal's agy updates the shared binary
-AGY_ITEM=$(busctl --user --json=short call "$SS" "$SP/aliases/default" org.freedesktop.Secret.Collection SearchItems 'a{ss}' 2 service gemini username antigravity 2>/dev/null |
-  python3 -c 'import json,sys; d=json.load(sys.stdin)["data"][0]; print(d[0] if d else "")' 2>/dev/null || true)
-if [ -n "$AGY_ITEM" ]; then
-  systemd-run --user --unit "rc-$NAME-secrets" --collect -q \
-    xdg-dbus-proxy "${DBUS_SESSION_BUS_ADDRESS:-unix:path=/run/user/$(id -u)/bus}" "$SBUS" --filter \
-    --call="$SS=org.freedesktop.DBus.Properties.Get@$SP" --call="$SS=org.freedesktop.Secret.Service.OpenSession@$SP" \
-    --call="$SS=org.freedesktop.Secret.Service.Unlock@$SP" --call="$SS=org.freedesktop.Secret.Collection.SearchItems@$SP/aliases/default" \
-    --call="$SS=org.freedesktop.Secret.Item.GetSecret@$AGY_ITEM" --call="$SS=org.freedesktop.Secret.Session.Close@$SP/session/*"
-  for _ in $(seq 1 40); do [ -S "$SBUS" ] && break; sleep 0.1; done
-  ENVV+=("DBUS_SESSION_BUS_ADDRESS=unix:path=$SBUS")
-else
-  echo "agy: no Google sign-in in the keyring (run \`agy\` once in a terminal, then rerun this): its turns will say so"
-fi
+ENVV+=("DBUS_SESSION_BUS_ADDRESS=${DBUS_SESSION_BUS_ADDRESS:-unix:path=/run/user/$(id -u)/bus}")
 
 # the preview's extensions (outside the core): the librarian indexes this brain (:4310)
 if [ "$NAME" = preview ]; then
@@ -84,17 +69,11 @@ ENVV+=("YGG_HARNESS_LIVE=$UI/harness-live.json")
 case "$NAME" in preview) HPORT=4320 ;; ui) HPORT=4321 ;; *) HPORT= ;; esac
 if [ -n "$HPORT" ] && [ -s "$HOME/.cache/root-sim/cc-live.token" ]; then
   ENVV+=("YGG_HARNESS_HELPER=http://127.0.0.1:$HPORT" "YGG_HARNESS_HELPER_TOKEN=$(cat "$HOME/.cache/root-sim/cc-live.token")")
-  # full access (11-17): a granted conversation's turn goes through this runner to the helper,
-  # which checks the grant and runs it outside the sandbox
-  [ "$NAME" = preview ] && ENVV+=("YGG_HARNESS_RUNNER=${CC_LIVE_DIR:-$HOME/Work/tree-next/root/cc-live}/cc_run.py")
 fi
 
-# the terminal's conversations, both ways (11-15, the preview you open only): the brain continues
-# them in the folders they run in (~/Work), and its opencode shares the owner's opencode data
-# (backup before the first run: ~/.cache/root-sim/backups/opencode-pre-two-way.db)
-BINDS=()
+# the terminal's conversations, both ways (11-15, the preview you open only): its opencode shares
+# the owner's opencode data (backup before the first run: ~/.cache/root-sim/backups/opencode-pre-two-way.db)
 if [ "$NAME" = preview ]; then
-  BINDS=(-p "BindPaths=$HOME/Work" -p "BindPaths=-$HOME/.local/share/opencode" -p "BindPaths=-$HOME/.config/opencode")
   ENVV+=("YGG_OPENCODE_XDG_DATA=$HOME/.local/share" "YGG_OPENCODE_XDG_CONFIG=$HOME/.config")
 fi
 
@@ -110,10 +89,7 @@ PY
 systemctl --user stop "$UNIT" 2>/dev/null || true
 install -m755 "$BIN" "$UI/bin/yggdrasil"
 mkdir -p "$ART"
-args=(--user --unit "$UNIT" --collect -p ProtectHome=tmpfs
-  -p "BindPaths=$UI" -p "BindPaths=$ART" -p "BindReadOnlyPaths=$HOME/.cache/root-sim/_venv"
-  -p "BindPaths=$HOME/.claude" -p "BindPaths=$HOME/.claude.json" -p "BindPaths=$HOME/.gemini" -p "BindReadOnlyPaths=$HOME/.local/share/mise"
-  -p "BindReadOnlyPaths=-$HOME/.local/bin/agy" "${BINDS[@]}"
+args=(--user --unit "$UNIT" --collect
   -p "StandardOutput=append:$UI/brain.log" -p "StandardError=append:$UI/brain.log")
 for e in "${ENVV[@]}"; do args+=(--setenv="$e"); done
 systemd-run "${args[@]}" "$UI/bin/yggdrasil" >/dev/null
