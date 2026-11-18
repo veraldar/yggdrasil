@@ -51,6 +51,12 @@ rm -f "$UI/secrets.bus"
 mapfile -t ENVV < <(printf '%s\n' "${ENVV[@]}" | grep -vE '^(DBUS_SESSION_BUS_ADDRESS|AGY_CLI_DISABLE_AUTO_UPDATE|YGG_HARNESS_RUNNER|XDG_(CONFIG|DATA|STATE|CACHE)_HOME)=')
 ENVV+=("AGY_CLI_DISABLE_AUTO_UPDATE=1") # the terminal's agy updates the shared binary
 ENVV+=("DBUS_SESSION_BUS_ADDRESS=${DBUS_SESSION_BUS_ADDRESS:-unix:path=/run/user/$(id -u)/bus}")
+# Claude Code's own binary first: ~/.local/bin/claude is a launcher (`mise use -g` + `mise x`) that
+# hangs in a service's environment; the sandbox used to hide it, so the binary is what always ran
+CC_DIR="$HOME/.local/share/mise/installs/claude/latest"
+OLD_PATH=$(printf '%s\n' "${ENVV[@]}" | sed -n 's/^PATH=//p' | tr ':' '\n' | grep -vxF "$CC_DIR" | paste -sd:)
+mapfile -t ENVV < <(printf '%s\n' "${ENVV[@]}" | grep -v '^PATH=')
+ENVV+=("PATH=$CC_DIR:$OLD_PATH")
 
 # the preview's extensions (outside the core): the librarian indexes this brain (:4310)
 if [ "$NAME" = preview ]; then
