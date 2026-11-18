@@ -938,7 +938,7 @@ mod tests {
         // SAFETY: this test is the only one that runs an `agy`; PATH gains a directory in front
         unsafe { std::env::set_var("PATH", path) };
         let mut seen = Vec::new();
-        let out = run(Kind::Antigravity, Some("gemini-3.8-flash-low"), None, &dir, "check missing.txt", Some("be terse"), Attach::default(), |e| seen.push(e.clone())).await.unwrap();
+        let out = run(Kind::Antigravity, Some("gemini-3.8-flash-low"), None, &dir, "check missing.txt", Some("be terse"), Attach::default(), &[], |e| seen.push(e.clone())).await.unwrap();
         assert_eq!(
             out.text,
             "I will check for the file in this directory.\n\nThe file [missing.txt](file:///home/user/.cache/tmp/agy-try/tooldir/missing.txt) could not be read because it does not exist."
@@ -951,7 +951,7 @@ mod tests {
         assert!(argv.contains("--model gemini-3.8-flash-low") && !argv.contains("check missing"), "{argv}");
 
         put(format!("#!/bin/sh\ncat >/dev/null\ncat '{}'\ncat '{}' >&2\nexit 1\n", fx.join("signed-out.stream.jsonl").display(), fx.join("signed-out.stderr.txt").display()));
-        let err = run(Kind::Antigravity, None, Some("c1"), &dir, "hi", None, Attach::default(), |_| {}).await.err();
+        let err = run(Kind::Antigravity, None, Some("c1"), &dir, "hi", None, Attach::default(), &[], |_| {}).await.err();
         assert_eq!(err.as_deref(), Some(ANTIGRAVITY_SIGNED_OUT));
         let _ = std::fs::remove_dir_all(&dir);
     }
