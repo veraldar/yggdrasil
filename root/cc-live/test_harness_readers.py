@@ -106,6 +106,7 @@ class Agy(unittest.TestCase):
 
     def test_instructions_preamble_is_not_the_request(self):
         self.assertEqual(A._request("<instructions>\nbe terse\n</instructions>\n\nhello"), "hello")
+        self.assertEqual(A._request("<earlier_conversation>\nUSER: a\n</earlier_conversation>\n\ngo on"), "go on", "a copy is titled by its own request")
 
     def test_live_is_a_held_presence_lock(self):
         lock = os.path.join(self.root, "presence", f"{SID}.lock")
