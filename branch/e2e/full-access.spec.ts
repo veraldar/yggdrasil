@@ -77,8 +77,16 @@ test('off by default, then the phone enrolls once and grants and takes it back',
   await page.getByTestId('fa-save').tap();
   const status = page.getByTestId('fa-status');
   await expect(status).toHaveText('off — its turns run in the sandbox');
-  // grant 1 h: the chip signs on the phone, the box records it, the note says until when
+  // grant 1 h: one confirm (what it opens, said plainly), then the chip signs on the phone
   await page.getByTestId('fa-1h').tap();
+  await expect(page.getByTestId('fa-confirm')).toBeVisible();
+  await expect(page.getByTestId('fa-confirm')).toContainText('outside the sandbox');
+  await expect(page.getByTestId('fa-confirm')).toContainText('not MAIN');
+  await page.getByTestId('fa-cancel').tap();
+  await expect(page.getByTestId('fa-confirm')).toHaveCount(0);
+  await expect(status).toHaveText('off — its turns run in the sandbox');
+  await page.getByTestId('fa-1h').tap();
+  await page.getByTestId('fa-yes').tap();
   await expect(status).toContainText('on until');
   const grants = (await access(request))?.grants || {};
   const until = grants[KEY];

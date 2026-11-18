@@ -93,7 +93,7 @@ function Refusal({ msg }: { msg: string }) {
  *  computer, outside every sandbox) and re-checks every run — a grant never rides to a copy.
  *  Shown only where it can apply: a Claude Code / Antigravity session continuing a terminal's
  *  conversation. */
-function FullAccessBlock({ h }: { h: SessionInfo['harness'] }) {
+function FullAccessBlock({ h, title }: { h: SessionInfo['harness']; title: string }) {
   const key = `${h?.kind || ''}:${h?.id || ''}`;
   const applicable =
     (h?.kind === 'claude' || h?.kind === 'antigravity') && h?.attached === true && !!h?.id;
@@ -102,6 +102,7 @@ function FullAccessBlock({ h }: { h: SessionInfo['harness'] }) {
   const [code, setCode] = useState('');
   const [busy, setBusy] = useState(false);
   const [refused, setRefused] = useState('');
+  const [pending, setPending] = useState<number | null>(null); // the grant waiting for its yes (s)
   const [now, setNow] = useState(() => Date.now());
   const refresh = useCallback(() => {
     setNow(Date.now());
@@ -208,7 +209,7 @@ function FullAccessBlock({ h }: { h: SessionInfo['harness'] }) {
                 aria-pressed={false}
                 disabled={busy}
                 data-testid={s === 3600 ? 'fa-1h' : 'fa-4h'}
-                onClick={() => void flip(s)}
+                onClick={() => setPending(s)}
               >
                 {s === 3600 ? '1 h' : '4 h'}
               </button>
@@ -219,6 +220,32 @@ function FullAccessBlock({ h }: { h: SessionInfo['harness'] }) {
               ? `on until ${hhmm(until!)} — its turns run outside the sandbox`
               : 'off — its turns run in the sandbox'}
           </p>
+          {pending !== null && (
+            <div data-testid="fa-confirm">
+              <p className="text-[11px] text-[var(--oz-text)]">
+                full access for “{title}”? its turns run on the machine outside the sandbox, with
+                the whole home: ssh keys, the GitHub login, the release key. only this conversation
+                — not MAIN, not the sessions it starts. off by itself in{' '}
+                {pending === 3600 ? '1 hour' : '4 hours'}.
+              </p>
+              <div className="mt-2.5 flex gap-1.5">
+                <button
+                  onClick={() => {
+                    const s = pending;
+                    setPending(null);
+                    void flip(s);
+                  }}
+                  className="oz-k ok flex-1"
+                  data-testid="fa-yes"
+                >
+                  turn on
+                </button>
+                <button onClick={() => setPending(null)} className="oz-k px-4" data-testid="fa-cancel">
+                  cancel
+                </button>
+              </div>
+            </div>
+          )}
         </>
       )}
       {refused && <Refusal msg={refused} />}
@@ -790,7 +817,7 @@ export default function SessionSettingsView() {
 
       {/* FULL ACCESS — the owner grants a terminal-continued conversation a run outside the
           sandbox (off by default, ≤4 h, signed from this phone); nothing here for the rest */}
-      <FullAccessBlock h={info?.harness} />
+      <FullAccessBlock h={info?.harness} title={title} />
 
       {/* DELETE — two taps; sub-sessions cascade server-side, then back to
           the list (which no longer shows the deleted row). MAIN has none:
