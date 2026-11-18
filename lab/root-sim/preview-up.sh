@@ -47,7 +47,8 @@ B="http://$(printf '%s\n' "${ENVV[@]}" | sed -n 's/^YGG_LISTEN=//p')"
 systemctl --user stop "rc-$NAME-secrets" 2>/dev/null || true
 systemctl --user reset-failed "rc-$NAME-secrets" 2>/dev/null || true
 rm -f "$UI/secrets.bus"
-mapfile -t ENVV < <(printf '%s\n' "${ENVV[@]}" | grep -vE '^(DBUS_SESSION_BUS_ADDRESS|AGY_CLI_DISABLE_AUTO_UPDATE|YGG_HARNESS_RUNNER)=')
+# …and the owner's own XDG folders (gh, mise trust, git config): the private ones were the sandbox's
+mapfile -t ENVV < <(printf '%s\n' "${ENVV[@]}" | grep -vE '^(DBUS_SESSION_BUS_ADDRESS|AGY_CLI_DISABLE_AUTO_UPDATE|YGG_HARNESS_RUNNER|XDG_(CONFIG|DATA|STATE|CACHE)_HOME)=')
 ENVV+=("AGY_CLI_DISABLE_AUTO_UPDATE=1") # the terminal's agy updates the shared binary
 ENVV+=("DBUS_SESSION_BUS_ADDRESS=${DBUS_SESSION_BUS_ADDRESS:-unix:path=/run/user/$(id -u)/bus}")
 
