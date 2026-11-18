@@ -31,10 +31,8 @@ const access = async (request: import('@playwright/test').APIRequestContext): Pr
 
 test.beforeAll(async ({ request }) => {
   expect(CLAUDE, 'TS_CLAUDE: the conversation this run attaches').toBeTruthy();
-  expect(CODE, 'TS_FA_CODE: the box’s enrollment code (the runner reads owner.key)').toBeTruthy();
   const st = await access(request);
   expect(st?.enabled, 'the helper runs with --access-dir').toBe(true);
-  expect(st?.enrolled, 'the box is enrolled (full-access-enroll.sh ran)').toBe(true);
   const a = await request.post('/api/session', {
     data: { attach: { kind: 'claude', id: CLAUDE, cwd: SCRATCH } },
   });
@@ -68,6 +66,9 @@ test('the box refuses unsigned and wrong-key requests (owner-only, at the seam)'
 });
 
 test('off by default, then the phone enrolls once and grants and takes it back', async ({ page, request }) => {
+  // only against a helper enrolled with a THROWAWAY key: the owner's code never reaches a test
+  // runner (11-18: it did, through verify-8447.sh, and ended up in agents' transcripts)
+  test.skip(!CODE, 'TS_FA_CODE: a throwaway enrolled helper only — never the owner key');
   expect((await access(request))?.grants?.[KEY], 'no grant before anyone taps').toBeUndefined();
   await page.goto(`/session/${slug}/settings`);
   const block = page.getByTestId('fa-block');

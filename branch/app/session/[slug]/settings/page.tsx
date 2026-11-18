@@ -117,14 +117,16 @@ function FullAccessBlock({ h, title }: { h: SessionInfo['harness']; title: strin
     return () => clearInterval(t);
   }, [refresh]);
   if (!applicable) {
-    return h?.kind === 'claude' || h?.kind === 'antigravity' ? (
-      <section className="oz-blk">
+    // every session says where the switch is (11-18: the owner looked for it in MAIN's settings)
+    return (
+      <section className="oz-blk" data-testid="fa-elsewhere">
         <h2>full access</h2>
         <p className="note pt-3!">
-          for a conversation continued from the terminal — this one runs in the sandbox
+          only for a Claude Code or Antigravity session continued from the terminal — open that
+          session&rsquo;s settings
         </p>
       </section>
-    ) : null;
+    );
   }
   const until = st?.grants?.[key];
   const on = !!until && until > now;
@@ -189,7 +191,9 @@ function FullAccessBlock({ h, title }: { h: SessionInfo['harness']; title: strin
             </button>
           </div>
           <p className="note">
-            type the code from full-access-enroll.sh once — it stays on this phone
+            {st.enrolled
+              ? 'type the code from full-access-enroll.sh once — it stays on this phone'
+              : 'the box has no key yet: run full-access-enroll.sh yourself at the computer (never through an agent), then type its code here once'}
           </p>
         </div>
       ) : (

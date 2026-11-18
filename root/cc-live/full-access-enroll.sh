@@ -3,8 +3,10 @@
 #
 # The key is what turns a signed request from the phone into a grant (full_access.py): it lives
 # here, outside every sandbox, so nothing running inside one (MAIN, an agent, a request inside a
-# message) can mint or change it — that is why this script is run by a person at the terminal, or
-# by the unsandboxed :8443 opencode on the owner's say-so, never from inside the :8447 sandbox.
+# message) can mint or change it. A PERSON runs this, at a real terminal: it refuses without one
+# and writes the code to that terminal only — never to a pipe, a log or an agent's tool output.
+# (11-18: an agent minted a key "on the owner's say-so" and the code ended up in MAIN's transcript,
+# readable from inside the sandbox — so no agent runs this, whoever asks.)
 #
 #   full-access-enroll.sh                    the key for the box you open (default dir, below)
 #   full-access-enroll.sh /some/dir          a key somewhere else (cc-live's --access-dir must match)
@@ -15,6 +17,10 @@
 # Again on an enrolled box: a NEW key replaces the old one — every phone holding the old code
 # stops granting until it types the new one (turning full access off needs no key, ever).
 set -euo pipefail
+if ! { [ -t 0 ] && [ -t 1 ] && [ -w /dev/tty ]; }; then
+  echo "full-access-enroll.sh: run it yourself, at a real terminal (no agent, no pipe): the code must reach only you" >&2
+  exit 2
+fi
 DIR=${1:-${FULL_ACCESS_DIR:-$HOME/.cache/root-sim/full-access}}
 HERE=$(cd "$(dirname "$0")" && pwd)
 
@@ -41,5 +47,6 @@ print(f"key checks out: {len(k)} signing characters")
 PY
 
 echo "enrolled: $DIR/owner.key (0600, outside every sandbox)"
-echo "type this code into the phone ONCE — a session's settings › full access:"
-echo "$CODE"
+echo "type this code into the phone ONCE — a Claude Code / Antigravity session's settings › full access."
+echo "never paste it into a chat or a session: anything that reads it can grant itself full access."
+printf '%s\n' "$CODE" > /dev/tty
