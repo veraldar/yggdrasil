@@ -15,6 +15,14 @@ import Link from 'next/link';
 import { useParams, useRouter } from 'next/navigation';
 import { ErrorBox } from '@/components/app/error-box';
 import { type AgentDetail, agentDiff } from '@/lib/agents';
+import {
+  checkKey,
+  getStatus,
+  loadKey,
+  saveKey,
+  setGrant,
+  type AccessStatus,
+} from '@/lib/full-access';
 import { slugify } from '@/lib/slug';
 import { isMainSlug } from '@/lib/tree-first';
 
@@ -33,8 +41,12 @@ type SessionInfo = {
   agent: string | null;
   model: ModelRef | null;
   /** what a model-less session runs on — the brain's default (null: the
-   *  brain didn't say) */
+   * brain didn't say) */
   defaultModel?: ModelRef | null;
+  /** a session on another harness: which one, its conversation there, and
+   * whether it continues a terminal's conversation (full access applies
+   * only to that kind) */
+  harness?: { kind: string | null; id: string | null; attached: boolean };
 };
 type ProviderRow = {
   id: string;
@@ -70,6 +82,147 @@ function Refusal({ msg }: { msg: string }) {
     <p role="alert" className="note text-[var(--oz-danger)]!">
       {msg}
     </p>
+  );
+}
+
+/** FULL ACCESS (owner 11-17) — a conversation continued from the terminal may run its turns
+ *  outside the sandbox (ssh, gh, the release key, the build tools) for a while. Only the owner
+ *  grants that, here, with the enrollment code typed once (it stays on this phone; grants go
+ *  out as HMACs — lib/full-access.ts). Off by default; a grant runs out on its own; switching
+ *  off needs no key. The box holds the matching key file (full-access-enroll.sh, at the
+ *  computer, outside every sandbox) and re-checks every run — a grant never rides to a copy.
+ *  Shown only where it can apply: a Claude Code / Antigravity session continuing a terminal's
+ *  conversation. */
+function FullAccessBlock({ h }: { h: SessionInfo['harness'] }) {
+  const key = `${h?.kind || ''}:${h?.id || ''}`;
+  const applicable =
+    (h?.kind === 'claude' || h?.kind === 'antigravity') && h?.attached === true && !!h?.id;
+  const [st, setSt] = useState<AccessStatus | null>(null);
+  const [hasKey, setHasKey] = useState<boolean | null>(null);
+  const [code, setCode] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [refused, setRefused] = useState('');
+  const [now, setNow] = useState(() => Date.now());
+  const refresh = useCallback(() => {
+    setNow(Date.now());
+    void getStatus().then((d) => setSt(d));
+  }, []);
+  useEffect(() => {
+    refresh();
+    setHasKey(!!loadKey());
+    const t = setInterval(() => {
+      if (!document.hidden) refresh();
+    }, 5000);
+    return () => clearInterval(t);
+  }, [refresh]);
+  if (!applicable) {
+    return h?.kind === 'claude' || h?.kind === 'antigravity' ? (
+      <section className="oz-blk">
+        <h2>full access</h2>
+        <p className="note pt-3!">
+          for a conversation continued from the terminal — this one runs in the sandbox
+        </p>
+      </section>
+    ) : null;
+  }
+  const until = st?.grants?.[key];
+  const on = !!until && until > now;
+  const save = async () => {
+    const c = code.trim();
+    if (!c || busy) return;
+    setBusy(true);
+    setRefused('');
+    if (await checkKey(c)) {
+      saveKey(c);
+      setHasKey(true);
+      setCode('');
+    } else {
+      setRefused('the box did not recognize this code');
+    }
+    setBusy(false);
+  };
+  const flip = async (s: number) => {
+    if (busy) return;
+    setBusy(true);
+    setRefused('');
+    const r = await setGrant(key, s > 0, s);
+    if (!r.ok) setRefused(r.error || 'the box refused that');
+    refresh();
+    setBusy(false);
+  };
+  const hhmm = (ms: number) =>
+    new Date(ms).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  return (
+    <section className="oz-blk" data-testid="fa-block">
+      <h2>full access</h2>
+      {st === null ? (
+        <p className="note pt-3!">checking the box&hellip;</p>
+      ) : !st.enabled ? (
+        <p className="note pt-3!">not set up on this box</p>
+      ) : !st.enrolled || hasKey === null || !hasKey ? (
+        <div>
+          <div>
+            <input
+              value={code}
+              onChange={(e) => {
+                setCode(e.target.value);
+                setRefused('');
+              }}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') {
+                  e.preventDefault();
+                  void save();
+                }
+              }}
+              placeholder="the enrollment code"
+              aria-label="full access enrollment code"
+              data-testid="fa-code"
+              className="oz-field"
+              autoComplete="off"
+              spellCheck={false}
+            />
+          </div>
+          <div className="mt-2.5 flex gap-1.5">
+            <button onClick={() => void save()} disabled={busy || !code.trim()} className="oz-k ok flex-1" data-testid="fa-save">
+              {busy ? 'checking…' : 'save key'}
+            </button>
+          </div>
+          <p className="note">
+            type the code from full-access-enroll.sh once — it stays on this phone
+          </p>
+        </div>
+      ) : (
+        <>
+          <div className="oz-chips">
+            <button
+              aria-pressed={!on}
+              disabled={busy}
+              data-testid="fa-off"
+              onClick={() => void flip(0)}
+            >
+              off
+            </button>
+            {[3600, 4 * 3600].map((s) => (
+              <button
+                key={s}
+                aria-pressed={false}
+                disabled={busy}
+                data-testid={s === 3600 ? 'fa-1h' : 'fa-4h'}
+                onClick={() => void flip(s)}
+              >
+                {s === 3600 ? '1 h' : '4 h'}
+              </button>
+            ))}
+          </div>
+          <p className="note" data-testid="fa-status">
+            {on
+              ? `on until ${hhmm(until!)} — its turns run outside the sandbox`
+              : 'off — its turns run in the sandbox'}
+          </p>
+        </>
+      )}
+      {refused && <Refusal msg={refused} />}
+    </section>
   );
 }
 
@@ -634,6 +787,10 @@ export default function SessionSettingsView() {
           ))}
         </div>
       </section>
+
+      {/* FULL ACCESS — the owner grants a terminal-continued conversation a run outside the
+          sandbox (off by default, ≤4 h, signed from this phone); nothing here for the rest */}
+      <FullAccessBlock h={info?.harness} />
 
       {/* DELETE — two taps; sub-sessions cascade server-side, then back to
           the list (which no longer shows the deleted row). MAIN has none:

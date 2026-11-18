@@ -32,6 +32,10 @@ const ALLOWED: [string, RegExp][] = [
   ['POST', /^h\/(claude|antigravity|opencode)\/[A-Za-z0-9_-]{1,80}\/(input|key|answer)$/],
   ['GET', /^s\/[0-9a-f-]{36}\/(history|stream|screen|term)$/],
   ['POST', /^s\/[0-9a-f-]{36}\/(input|key|answer|term|term\/size)$/],
+  // full access (11-17): its state, and the owner's signed grant / key check (the signature is
+  // made on the phone; the body carries nothing secret — see lib/full-access.ts)
+  ['GET', /^access$/],
+  ['POST', /^access\/(grant|check)$/],
 ];
 
 export function allowed(method: string, path: string): boolean {
