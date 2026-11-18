@@ -25,6 +25,10 @@ tell() { # the verdict, into the asking session (a new turn there)
 
 echo "== brain tests $(date +%T)"
 command -v cargo >/dev/null || { tell "== DEPLOY: RED (no cargo on PATH)"; exit 1; }
+# this shell must be able to build the app and restart units, or nothing is touched (11-18: a seat that
+# could not run node restarted the brain twice and then failed the app build)
+node -e 'process.exit(0)' >/dev/null 2>&1 || { tell "== DEPLOY: RED (node cannot run in this shell — a sandbox without JIT; nothing was restarted, run it from a normal shell)"; exit 1; }
+systemctl --user show-environment >/dev/null 2>&1 || { tell "== DEPLOY: RED (no user systemd in this shell; nothing was restarted)"; exit 1; }
 # (pipefail: a failing cargo fails the subshell, whatever grep finds)
 ( cd "$ROOT" && cargo test --release 2>&1 | grep -E '^test result|FAILED|panicked|error(\[|:)' ); rc=$?
 [ "$rc" = 0 ] || { tell "== DEPLOY: RED (cargo test, exit $rc)"; exit 1; }
