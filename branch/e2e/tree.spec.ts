@@ -92,7 +92,9 @@ test('home: the tree nests 3 deep under MAIN, cards speak, closed sessions wait'
       .filter((el) => !el.closest('.oz-kids')) // the top-level rows only
       .map((el) => (el.querySelector('.t')?.textContent || '').replace(/^\[[A-Z]{3}\]\s*/, ''))
   );
-  const at = new Map(((await (await request.get('/api/session')).json()) as { title: string; userAt?: number }[]).map((r) => [r.title, r.userAt || 0]));
+  const listed = (await (await request.get('/api/session')).json()) as { title: string; userAt?: number }[];
+  const once = (t: string) => listed.filter((r) => r.title === t).length === 1; // two sessions may share a title
+  const at = new Map(listed.filter((r) => once(r.title)).map((r) => [r.title, r.userAt || 0]));
   const tops = order.filter((t) => at.has(t));
   expect(tops.length).toBeGreaterThan(1);
   for (let i = 1; i < tops.length; i++) expect(at.get(tops[i - 1])!, `${tops[i - 1]} before ${tops[i]}`).toBeGreaterThanOrEqual(at.get(tops[i])!);

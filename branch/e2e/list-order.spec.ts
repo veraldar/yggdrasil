@@ -88,7 +88,9 @@ test("a reply never moves a session up; the owner's own message does", async ({ 
   expect(order.indexOf(B.name), 'on the phone too').toBeLessThan(order.indexOf(A.name));
   // the whole list, not only these two: the top-level rows follow the owner's own messages
   // (MAIN's sub-sessions no longer sit above the rest)
-  const at = new Map((await rows(request)).map((x) => [x.title, x.userAt || 0]));
+  const all = await rows(request);
+  const once = (t: string) => all.filter((x) => x.title === t).length === 1; // two sessions may share a title
+  const at = new Map(all.filter((x) => once(x.title)).map((x) => [x.title, x.userAt || 0]));
   const tops = (
     await page.locator('.oz-row').evaluateAll((els) =>
       els.filter((el) => !el.closest('.oz-kids')).map((el) => (el.querySelector('.t')?.textContent || '').replace(/^\[[A-Z]{3}\]\s*/, ''))
