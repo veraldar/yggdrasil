@@ -9,7 +9,7 @@
 //!   the asking root, which cards the proxy and delivers to its parent like any local report.
 //! - Talking to a proxy (tree tools or the phone) forwards to the peer; reading it reads there.
 //! - `GET /root` describes a root (models + tiers, profiles, hardware, load, note), so the
-//!   coordinator can place work where the hardware fits; peers are polled every 60 s.
+//!   coordinator can place work where the hardware fits; peers are polled every 30 s.
 //!
 //! Env: YGG_ROOT_NAME (default: hostname) · YGG_PEERS `name=url,…` · YGG_PEER_TOKEN shared
 //! secret (sent as `x-ygg-peer`, required on `/tree/report` when set) · YGG_ROOT_NOTE free text.
@@ -58,6 +58,8 @@ pub struct Peers {
     pub own_main: bool,
     /// roots removed on purpose (`DELETE /root/peers/{name}`): never a peer again in this process
     pub removed: Mutex<HashSet<String>>,
+    /// name → when a call to it last failed to reach it: off at once, not 3 minutes later
+    pub failed: Mutex<HashMap<String, u64>>,
 }
 
 /// Work passed from root to root more often than this is refused (L6): two MAINs can never hand
@@ -158,6 +160,7 @@ impl Peers {
             home: None,
             own_main: false,
             removed: Mutex::new(HashSet::new()),
+            failed: Mutex::new(HashMap::new()),
         }
     }
 
@@ -276,13 +279,21 @@ pub async fn call(st: &AppState, root: &str, method: &str, path: &str, body: Opt
     if let Some(b) = body {
         req = req.json(&b);
     }
-    let resp = req.send().await.map_err(|e| format!("root {root} unreachable: {e}"))?;
+    let resp = match req.send().await {
+        Ok(r) => r,
+        Err(e) => {
+            p.failed.lock().unwrap().insert(root.to_string(), now_ms());
+            return Err(format!("root {root} unreachable: {e}"));
+        }
+    };
     let status = resp.status();
     // any answer from the peer proves the line is up: keep the [roots] view fresh between polls
     if proves_line_up(status.as_u16()) {
         if let Some(e) = p.seen.lock().unwrap().get_mut(root) {
             e.0 = now_ms();
         }
+    } else {
+        p.failed.lock().unwrap().insert(root.to_string(), now_ms());
     }
     let text = resp.text().await.map_err(|e| e.to_string())?;
     if !status.is_success() {
@@ -363,10 +374,10 @@ fn view(me: &str, peers: &[(String, String)], seen: &HashMap<String, (u64, Value
     out
 }
 
-/// When a peer's `/root` is read next: a minute after it answered (or once it has ever answered),
-/// 15 s while it never has.
+/// When a peer's `/root` is read next: 30 s after it answered (or once it has ever answered: the
+/// phone's roots sheet says "off" within that), 15 s while it never has.
 fn next_poll(now: u64, answered: bool, ever_seen: bool) -> u64 {
-    now + if answered || ever_seen { 60_000 } else { 15_000 }
+    now + if answered || ever_seen { 30_000 } else { 15_000 }
 }
 
 /// Polls every peer's `/root` — every 15 s until it has answered, then once a minute (the view
@@ -573,8 +584,8 @@ mod tests {
     #[test]
     fn polling_cadence_and_gateway_errors() {
         assert_eq!(next_poll(0, false, false), 15_000);
-        assert_eq!(next_poll(0, true, true), 60_000);
-        assert_eq!(next_poll(0, false, true), 60_000);
+        assert_eq!(next_poll(0, true, true), 30_000);
+        assert_eq!(next_poll(0, false, true), 30_000);
         assert!(proves_line_up(200) && proves_line_up(404) && proves_line_up(500));
         assert!(!proves_line_up(502) && !proves_line_up(503) && !proves_line_up(504));
     }

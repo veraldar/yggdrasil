@@ -113,6 +113,7 @@ pub fn health(st: &AppState) -> Vec<Value> {
     let p = &st.config.peers;
     let peers = p.all();
     let seen = p.seen.lock().unwrap().clone();
+    let failed = p.failed.lock().unwrap().clone();
     let sessions = st.sessions.lock().unwrap();
     let now = now_ms();
     peers
@@ -122,7 +123,8 @@ pub fn health(st: &AppState) -> Vec<Value> {
             let hw = &r["hardware"];
             json!({
                 "name": name,
-                "reachable": at > 0 && now.saturating_sub(at) < 180_000,
+                // answered in the last 3 minutes, and no call failed to reach it since
+                "reachable": at > 0 && now.saturating_sub(at) < 180_000 && failed.get(name).is_none_or(|f| *f < at),
                 "seen": at,
                 "os": hw["os"], "arch": hw["arch"], "cpus": hw["cpus"], "mem_gb": hw["mem_gb"],
                 "running": r["load"]["running"], "sessions": r["load"]["sessions"],
@@ -618,6 +620,19 @@ mod tests {
         assert_eq!(peers::forget_unlisted(&mut learned, &["lab".into()], &removed), vec!["mac".to_string()]);
         let ids: Vec<String> = vec!["lab".into()].into_iter().filter(|i: &String| !removed.contains(i)).collect();
         assert!(peers::merge(&[], &mut learned, "home", "http://x/{id}", &ids).is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_root_that_stops_answering_is_off_at_once() {
+        let st = state("off", peers_of("home", "lab=http://127.0.0.1:1", None));
+        st.config.peers.seen.lock().unwrap().insert("lab".into(), (now_ms(), json!({ "name": "lab", "main": "ses_m" })));
+        let on = |st: &AppState| health(st)[0]["reachable"].as_bool();
+        assert_eq!(on(&st), Some(true));
+        assert!(peers::call(&st, "lab", "GET", "/root", None, 2).await.is_err());
+        assert_eq!(on(&st), Some(false), "a call that could not reach it: off now, not in 3 minutes");
+        // it answers again: on
+        st.config.peers.seen.lock().unwrap().insert("lab".into(), (now_ms() + 1, json!({ "name": "lab" })));
+        assert_eq!(on(&st), Some(true));
     }
 
     #[test]
