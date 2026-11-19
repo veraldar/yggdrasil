@@ -53,6 +53,12 @@ export async function uploadFile(blob: Blob, name: string, mime: string): Promis
       have = d.have;
       continue;
     }
+    if (r.status >= 500 && ++misses <= 4) {
+      // a piece that failed on the way (the trunk's channel, a busy server): sending it again is
+      // safe — the brain takes each piece once and says where it is (409 {have})
+      await new Promise((ok) => setTimeout(ok, 400 * misses));
+      continue;
+    }
     if (!r.ok) {
       return {
         error: typeof d.error === 'string' ? d.error : `could not send ${name} (${r.status})`,
