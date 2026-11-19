@@ -6,6 +6,7 @@ full-text search, with the keywords of each session; agents also keep facts per 
 served through the extension interface (yggdrasil src/ext.rs), all scope "self":
 
   search(query, limit, since_minutes)  find what was said, in any session, with where and when
+                                       (roots="all": the brain also asks every other root)
   recent(minutes)                      what happened lately: every session that changed, its agent,
                                        status, headline and keywords
   remember(topic, fact)                keep a fact for later (a decision, a preference, a path)
@@ -48,7 +49,9 @@ MANIFEST = {
          "parameters": {"type": "object", "properties": {
              "query": {"type": "string", "description": "words to look for"},
              "limit": {"type": "integer", "description": "max hits (default 8)"},
-             "since_minutes": {"type": "integer", "description": "only what was said in the last N minutes"}},
+             "since_minutes": {"type": "integer", "description": "only what was said in the last N minutes"},
+             # the brain handles it (ext.rs fan-out): the librarian never sees `roots`
+             "roots": {"type": "string", "description": "\"all\" = also search the other computers in the tree"}},
              "required": ["query"]}},
         {"name": "recent", "scope": "self",
          "description": "What happened lately: every session that changed in the last N minutes with its agent, status, headline and keywords.",

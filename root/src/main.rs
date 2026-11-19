@@ -80,6 +80,7 @@ mod harness;
 mod peers;
 mod profiles;
 mod rollup;
+mod roots;
 mod tools;
 mod tree;
 
@@ -821,6 +822,16 @@ async fn create_session(State(st): State<AppState>, body: Option<Json<Value>>) -
         return attach_harness(&st, &body);
     }
     let title = body["title"].as_str().filter(|t| !t.is_empty()).unwrap_or("New session");
+    // the phone starts a session on another root (the roots sheet): made there, a proxy here
+    if let Some(root) = body["root"].as_str().filter(|r| !r.is_empty() && *r != st.config.peers.me) {
+        if body["report_to"].is_object() {
+            return bad_request("a session another root asks for runs here (no root)");
+        }
+        return match roots::create_remote(&st, root, title, body["agent"].as_str()).await {
+            Ok(info) => Json(info).into_response(),
+            Err(e) => (StatusCode::BAD_GATEWAY, Json(json!({ "error": e }))).into_response(),
+        };
+    }
     let model = body["model"].as_str().or(body["model"]["id"].as_str());
     let info = new_session(&st, title, body["parentID"].as_str(), body["agent"].as_str(), model, body["variant"].as_str());
     // G7.2: an e2e / voice-test session is marked once at birth. GET /session still lists it
@@ -835,11 +846,15 @@ async fn create_session(State(st): State<AppState>, body: Option<Json<Value>>) -
             return Json(i).into_response();
         }
     }
-    // a peer root asked for this session: its turns report home (peers.rs)
+    // a peer root asked for this session: its turns report home (peers.rs); the hop count rides
+    // with it (L6: work passed on past peers::MAX_HOPS is refused)
     if body["report_to"]["root"].is_string() && body["report_to"]["session"].is_string() {
         let id = info["id"].as_str().unwrap_or_default().to_string();
         if let Some(i) = with_session(&st, &id, |s| {
             s.info["report_to"] = body["report_to"].clone();
+            if let Some(h) = body["hops"].as_u64().filter(|h| *h > 0) {
+                s.info["hops"] = json!(h.min(10));
+            }
             s.info.clone()
         }) {
             return Json(i).into_response();
@@ -2107,6 +2122,13 @@ fn sender_of(v: &Value) -> Option<Value> {
     let mut out = json!({ "session": session, "title": title });
     if let Some(r) = f("root") {
         out["root"] = json!(r);
+        // the proxy on that root it spoke through (its answer goes back there) and the hop count
+        if let Some(p) = f("proxy") {
+            out["proxy"] = json!(p);
+        }
+        if let Some(h) = v["hops"].as_u64() {
+            out["hops"] = json!(h.min(10));
+        }
     }
     Some(out)
 }
@@ -2124,6 +2146,8 @@ fn sender_label(from: &Value) -> Option<String> {
 /// user message, the per-request event stream, and the run's result.
 fn submit(st: &AppState, id: &str, turn: Turn) -> Result<Submitted, Response> {
     let Turn { parts, modality, auto_turn, internal, origin, completes, from, digest_hint } = turn;
+    // a session on another root asked (peers::send): this turn's answer goes back to its proxy there
+    let asker = from.as_ref().and_then(|f| Some(tree::Target::Peer { root: f["root"].as_str()?.to_string(), proxy: f["proxy"].as_str()?.to_string() }));
     // Text parts go upstream; file parts (data: URLs) are stored so the transcript keeps them.
     let parts: Vec<Value> = parts
         .into_iter()
@@ -2227,7 +2251,7 @@ fn submit(st: &AppState, id: &str, turn: Turn) -> Result<Submitted, Response> {
         drop(ticket);
         // root-coord: a session under a manager reports into its inbox (digest + card + wake);
         // a plain async origin outside the tree keeps the 11-12 completion turn
-        match tree::report_target(&st, &id, origin.as_deref()) {
+        match asker.or_else(|| tree::report_target(&st, &id, origin.as_deref())) {
             Some(target) => tree::on_turn_end(&st, &id, target, result),
             None => {
                 if let Some(origin) = origin {
@@ -2929,16 +2953,60 @@ async fn harness_loop(st: &AppState, id: &str, prompt: String, tx: &mpsc::Sender
     // G1: a harness turn's context is the prompt + the system we hand it + its argv (secrets masked)
     let (argv, _) = kind.argv(model.as_deref(), resume.as_deref(), &cwd, &prompt, system.as_deref(), attach);
     context::capture_harness(st, id, run.upstream_calls as usize + 1, &prompt, system.as_deref().unwrap_or_default(), &argv);
-    let _slot = st.harness_slots.acquire().await.map_err(|e| e.to_string())?;
+    // a harness turn says it is alive once a minute — while it waits for a slot, and inside one
+    // long quiet command — so whoever watches the event stream never takes it for a hung run
+    // (the app stops a run that is silent for ten minutes). After an hour without a word from
+    // the harness it stops saying so.
+    let alive = || publish(st, "session.status", json!({ "sessionID": id, "status": { "type": "busy" } }));
+    let mut beat = tokio::time::interval(Duration::from_secs(60));
+    beat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let _slot = {
+        let slot = st.harness_slots.acquire();
+        tokio::pin!(slot);
+        loop {
+            tokio::select! {
+                s = &mut slot => break s.map_err(|e| e.to_string())?,
+                _ = beat.tick() => alive(),
+            }
+        }
+    };
     let (etx, mut erx) = mpsc::unbounded_channel::<harness::Ev>();
     let fut = harness::run(kind, model.as_deref(), resume.as_deref(), &cwd, &prompt, system.as_deref(), attach, move |ev| {
         let _ = etx.send(ev.clone());
     });
     tokio::pin!(fut);
+    let mut heard = std::time::Instant::now();
+    // the conversation's id is kept as soon as the conversation has said or done something: a
+    // turn that then fails or is cut (a usage limit, a restart) goes on in the same conversation
+    // on the next message, never in a new one. (A copy's first turn keeps the old rule.)
+    let mut said: Option<String> = None;
     let result = loop {
         tokio::select! {
             r = &mut fut => break r,
-            Some(ev) = erx.recv() => harness_event(st, id, tx, run, ev).await,
+            Some(ev) = erx.recv() => {
+                heard = std::time::Instant::now();
+                match &ev {
+                    harness::Ev::Session(sid) if !sid.is_empty() && !fork_now => said = Some(sid.clone()),
+                    harness::Ev::Text(_) | harness::Ev::Delta(_) | harness::Ev::Tool { .. } => {
+                        if let Some(sid) = said.take() {
+                            with_session(st, id, |s| {
+                                if !s.info["harness"].is_object() {
+                                    s.info["harness"] = json!({});
+                                }
+                                s.info["harness"]["kind"] = json!(kind.name());
+                                s.info["harness"]["id"] = json!(sid);
+                            });
+                        }
+                    }
+                    _ => {}
+                }
+                harness_event(st, id, tx, run, ev).await
+            }
+            _ = beat.tick() => {
+                if heard.elapsed() < Duration::from_secs(3600) {
+                    alive();
+                }
+            }
         }
     };
     while let Ok(ev) = erx.try_recv() {
@@ -3998,7 +4066,7 @@ async fn main() {
         tools: Arc::new(tool_env),
         upstream: Arc::new(tokio::sync::Semaphore::new(max_inflight)),
         wakes: Arc::default(),
-        harness_slots: Arc::new(tokio::sync::Semaphore::new(env_num("YGG_MAX_HARNESS", 3).max(1) as usize)),
+        harness_slots: Arc::new(tokio::sync::Semaphore::new(env_num("YGG_MAX_HARNESS", 8).max(1) as usize)),
         harness_models: Arc::new(Mutex::new(HashMap::from([
             ("claude".to_string(), vec!["opus".to_string(), "sonnet".to_string(), "haiku".to_string()]),
             ("opencode".to_string(), vec!["default".to_string()]),
@@ -4038,6 +4106,8 @@ async fn main() {
         .route("/agent", get(list_agents))
         .route("/shared-prompt", get(get_shared).put(put_shared))
         .route("/extensions", get(|State(st): State<AppState>| async move { Json(st.config.ext.describe()) }))
+        // B7b: a peer root runs this root's extension tool (peer token only; ext.rs)
+        .route("/ext/{name}/call", post(ext::peer_route))
         .route("/agent/{name}", get(get_agent).put(put_agent).delete(delete_agent))
         .route("/harness/claude/sessions", get(claude_sessions))
         .route("/event", get(events))
@@ -4049,8 +4119,15 @@ async fn main() {
         .route("/admin/drain", post(admin_drain))
         .route("/session/{id}/notice", get(get_notice))
         .route("/session/{id}/close", post(close_session))
+        .route("/root/{name}/sessions", get(roots::get_sessions))
+        .route("/root/{name}/adopt", post(roots::post_adopt))
+        .route("/root/peers/{name}", axum::routing::delete(roots::delete_peer))
+        .route("/tree/placed", post(roots::post_placed))
+        // L8: a call from another root carries the peer token, whatever route it names
+        .layer(axum::middleware::from_fn_with_state(state.clone(), peers::gate))
         .with_state(state.clone());
     tree::recover(&state, interrupted);
+    roots::ensure_main(&state);
     peers::spawn_watch(&state);
     ext::spawn_watch(&state);
     spawn_harness_models(&state);

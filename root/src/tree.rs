@@ -282,6 +282,8 @@ pub async fn run(st: &AppState, caller: &str, name: &str, input: &Value) -> Out 
 }
 
 /// The tree tools on another root: start there, or act on a proxy (peers.rs). `None` = local.
+/// Work placed on another root carries its hop count; past `peers::MAX_HOPS` it is refused (L6),
+/// and an approval never travels to another root either.
 async fn run_remote(st: &AppState, caller: &str, name: &str, input: &Value) -> Option<Out> {
     let me = st.config.peers.me.clone();
     if name == "session_start" {
@@ -291,8 +293,15 @@ async fn run_remote(st: &AppState, caller: &str, name: &str, input: &Value) -> O
         if brief.trim().is_empty() {
             return Some(err("brief required".into()));
         }
+        if relays_approval(brief) {
+            return Some(err(RELAY_REFUSED.into()));
+        }
+        let hops = crate::roots::hops_here(st, caller) + 1;
+        if let Some(no) = crate::roots::hop_refusal(st, hops) {
+            return Some(err(no));
+        }
         let title = unique_title(&st.sessions.lock().unwrap(), title);
-        return Some(match crate::peers::start(st, caller, root, &title, profile, brief, input["model"].as_str(), input["variant"].as_str()).await {
+        return Some(match crate::peers::start(st, caller, root, &title, profile, brief, input["model"].as_str(), input["variant"].as_str(), hops).await {
             Ok(pid) => {
                 publish(st, "tree.updated", json!({ "sessionID": pid, "parentID": caller }));
                 ok(format!("STARTED, NOT DONE YET: id={pid} \"{title}\" ({profile}) on root {root} reports back when finished. Tell the user it is on its way (→ {title}); never say it is done."))
@@ -308,8 +317,18 @@ async fn run_remote(st: &AppState, caller: &str, name: &str, input: &Value) -> O
     Some(match name {
         "session_send" => {
             let msg = input["message"].as_str().unwrap_or_default();
+            if msg.trim().is_empty() {
+                return Some(err("message required".into()));
+            }
+            if relays_approval(msg) {
+                return Some(err(RELAY_REFUSED.into()));
+            }
+            let hops = crate::roots::hops_here(st, caller) + 1;
+            if let Some(no) = crate::roots::hop_refusal(st, hops) {
+                return Some(err(no));
+            }
             with_session(st, &target, |s| s.info["card"]["status"] = json!("working"));
-            match crate::peers::send(st, &root, &rid, msg, caller).await {
+            match crate::peers::send(st, &root, &rid, msg, caller, &target, hops).await {
                 Ok(()) => ok(format!("SENT, NOT DONE YET: id={target} on root {root} reports back when finished. Tell the user it is on its way; never say it is done.")),
                 Err(e) => err(e),
             }
@@ -325,6 +344,9 @@ async fn run_remote(st: &AppState, caller: &str, name: &str, input: &Value) -> O
             }
         }
         "session_close" => {
+            if st.sessions.lock().unwrap().get(&target).is_some_and(crate::roots::is_root_main) {
+                return Some(err(format!("that is {root}'s MAIN — it is never closed from another computer")));
+            }
             let reason = input["reason"].as_str().unwrap_or("closed");
             let _ = crate::peers::call(st, &root, "POST", &format!("/session/{rid}/close"), Some(json!({ "reason": reason })), 15).await;
             archive_family(st, &target, reason);
@@ -345,11 +367,13 @@ pub(crate) fn card_line(st: &AppState, id: &str, s: &Session, indent: usize) -> 
     let on = s.info["remote"]["root"].as_str().map(|r| format!(" on {r}"))
         .or_else(|| s.info["report_to"]["root"].as_str().map(|r| format!(" for root {r}")))
         .unwrap_or_default();
+    // another root's MAIN (roots.rs): named as what it is, not by the stand-in agent here
+    let who = if crate::roots::is_root_main(s) { "MAIN".to_string() } else { crate::profile_name_of(st, &s.info) };
     format!(
         "{}- \"{}\" [{}{on}, {}, {} ago] {}{} (id={id})",
         "  ".repeat(indent),
         title_of(s),
-        crate::profile_name_of(st, &s.info),
+        who,
         status,
         ago(s.info["time"]["updated"].as_u64().unwrap_or(0)),
         one_line(head, 160),
@@ -388,7 +412,7 @@ fn find(st: &AppState, caller: &str, input: &Value) -> Out {
 }
 
 /// A title unique by slug (the phone resolves sessions by title slug) and never MAIN's.
-fn unique_title(sessions: &HashMap<String, Session>, want: &str) -> String {
+pub(crate) fn unique_title(sessions: &HashMap<String, Session>, want: &str) -> String {
     let base = one_line(want, 80);
     let base = if base.is_empty() || crate::slug(&base) == "main" { "work".to_string() } else { base };
     let taken: HashSet<String> = sessions.values().map(|s| crate::slug(&title_of(s))).collect();
@@ -962,6 +986,8 @@ pub fn accept_report(st: &AppState, proxy: &str, mut ev: Value) -> bool {
         let Some(s) = sessions.get(proxy).filter(|s| s.info["remote"].is_object()) else { return false };
         (parent_of(s), title_of(s))
     };
+    // home holds a copy of this work (placed between two other roots): it gets the report too
+    crate::roots::forward_home(st, proxy, &ev);
     ev["from"] = json!(proxy);
     ev["title"] = json!(title);
     ev["delivered"] = json!(false);
