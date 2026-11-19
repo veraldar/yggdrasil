@@ -57,8 +57,8 @@ cat >/etc/trunk-ap/ap.toml <<EOF
 # trunk access point (made by hand)
 [ap]
 listen = \"127.0.0.1:4443\"
-cert_path = \"/run/credentials/trunk-ap.service/cert\"
-key_path = \"/run/credentials/trunk-ap.service/key\"
+cert_path = \"/etc/trunk-ap/cert.pem\"
+key_path = \"/etc/trunk-ap/key.pem\"
 \$(grep '^bridge_token_sha256' /opt/ca/token.txt)
 proxy_protocol = true
 [[ap.tcp]]
@@ -72,9 +72,8 @@ Description=yggdrasil trunk access point (bifrost-net ap, :4443)
 After=network-online.target
 [Service]
 ExecStart=/usr/local/bin/trunk-ap ap -c /etc/trunk-ap/ap.toml
-LoadCredential=cert:/etc/trunk-ap/cert.pem
-LoadCredential=key:/etc/trunk-ap/key.pem
-# (the VPS's unit has DynamicUser=yes: inside docker a dynamic user cannot read its credentials)
+# (the VPS's unit reads them as systemd credentials, DynamicUser=yes; docker gives no /run/credentials —
+#  --adopt takes key.pem and cert.pem from the folder either way)
 Restart=always
 RestartSec=2
 [Install]
