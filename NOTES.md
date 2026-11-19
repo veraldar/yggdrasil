@@ -22,10 +22,12 @@ Build with `TMPDIR=~/.cache/p3-tmp` (/tmp is a shared 16 GB tmpfs, near full). R
 - independent review: 9 findings, all fixed (commit "review fixes"), 127 tests green, tree-e2e GREEN again
 - rig spec: 7a-7i (S10 brain side, L8 through the tunnel, S18 incl. 3rd hop refused), 7s/7z (sheet taps, remove)
 
-## Half done
-- sim/trunk-full-e2e.sh run with S10/S18: state ~/.cache/p3-tmp/tf, log ~/.cache/p3-tmp/tf-run.log
+- sim/trunk-full-e2e.sh TRUNK-FULL: GREEN, 31/31 steps (13 new: 7a-7i, 7s, 7z); screenshots artifacts/p3-s10-*.png
+- old public brain's data backed up: ~/.local/share/yggdrasil-backups/omarchy-lab-data-20261120-001112 (+ .sha256)
+
+## Waiting
+- omarchy-lab + a Linux container root on the REAL trunk: after P1 reports stage B (home renamed `omarchy`)
 
 ## Next
-1. rig green → copy STATE/p3-s10-*.png to artifacts, report to MAIN for the integrator (P1)
-2. omarchy-lab (old public brain) + a Linux container root on the REAL trunk only after P1 reports stage B (home = `omarchy`)
-3. tell P4: join-test.sh red before p3 (join.sh downloads bifrost-net; the test gives none)
+1. when P1 says stage B is done: join.sh --name omarchy-lab --dir ~/.local/share/yggdrasil-root-lab --no-start,
+   check the data path in its brain.env, copy the backup in, start; the owner approves on the phone
