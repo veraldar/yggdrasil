@@ -16,8 +16,17 @@ p2-reach-sim (sim helper). Temp files: ~/.cache/p2-reach/tmp (NOT /tmp: shared q
 - tree.rs/peers.rs: attach:true on session_start/send (local + remote), peers::send via relay,
   remote.made; coordinator prompt sentence for attach.
 
-## Next
-1. run two brains (home+lab) by hand: SSE through proxy, abort, link lost, file pull, artifact.
-2. merge app helper + sim helper work (both cut by the usage limit at 21:27; WIP committed).
-3. agent.py: no fallback re-post after the server accepted the turn.
-4. S3 / S16 / S17 in the namespace rig; screenshots; independent review of the diff.
+## Proven (00:20)
+- cargo test 120/120; tree-e2e full 131/131 GREEN incl. 41 package-2 checks
+  (log ~/.cache/p2-reach/tree-full-run1.log; `python3 sim/tree-e2e.py --only reach --port-base 4270`)
+- voice agent: branch/voice/test_no_resend.py GREEN (old agent: 2 POSTs on a 502, new: 1)
+
+## In flight
+- app helper (p2-reach-app): composer, /api/file, refs, artifact ?root=, Playwright Pixel 7
+- sim helper (p2-reach-sim): S16, S17 in the namespace rig
+- review agent: independent review of root/src diff (report only)
+
+## Next (me)
+1. S3 on a twin (image marker word reaches a worker, attach:true) — sim/acceptance/twin-up.sh
+2. merge app branch, run its specs against the real brain, screenshots
+3. fix review findings; report branch to MAIN for P1
