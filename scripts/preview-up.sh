@@ -62,7 +62,7 @@ for i in "${!ENVV[@]}"; do
   case "${ENVV[$i]}" in
     PATH=*) p=":${ENVV[$i]#PATH=}:"
       p=${p//":$MISE/gemini/latest/node_modules/.bin:"/:}
-      for d in "$MISE/node/latest/bin" "$HOME/.local/bin" "$HOME/.cargo/bin"; do
+      for d in "$MISE/node/latest/bin" "$HOME/.local/bin" "$HOME/.cargo/bin" "$MISE/uv/latest/.mise-bins"; do
         case "$p" in *":$d:"*) ;; *) p=":$d$p" ;; esac
       done
       p=${p#:}; ENVV[$i]="PATH=${p%:}" ;;
