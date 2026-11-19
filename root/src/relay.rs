@@ -508,6 +508,9 @@ async fn follow(st: AppState, root: String, fo: Arc<Follower>) {
     let (mut after, mut epoch): (Option<u64>, Option<String>) = (None, None);
     let mut last_ok = now_ms();
     let mut fails = 0u32;
+    // the link counts as lost `lost_ms` after the last answer, even while a call still hangs
+    // (a root that froze or a tunnel that went quiet never answers at all)
+    let mut lost_said = false;
     loop {
         let rids: Vec<String> = {
             let mut ws = st.relay.watches.lock().unwrap();
@@ -523,13 +526,20 @@ async fn follow(st: AppState, root: String, fo: Arc<Follower>) {
         let wait = if after.is_some() { FEED_WAIT_S } else { 0 };
         let body = json!({ "after": after, "epoch": epoch, "sessions": rids, "wait": wait });
         let changed = fo.changed.notified();
+        let lost_in = Duration::from_millis((last_ok + lost_ms()).saturating_sub(now_ms()));
         let r = tokio::select! {
-            r = crate::peers::call(&st, &root, "POST", "/event/feed", Some(body), wait + 20) => r,
+            r = crate::peers::call(&st, &root, "POST", "/event/feed", Some(body), wait + 15) => r,
             _ = changed => continue,
+            _ = tokio::time::sleep(lost_in), if !lost_said => {
+                lost_said = true;
+                link_lost(&st, &root);
+                continue;
+            }
         };
         match r {
             Ok(v) => {
                 fails = 0;
+                lost_said = false;
                 last_ok = now_ms();
                 let fresh = epoch.as_deref() != v["epoch"].as_str();
                 epoch = v["epoch"].as_str().map(String::from);
@@ -580,7 +590,8 @@ async fn follow(st: AppState, root: String, fo: Arc<Follower>) {
                 if fails == 1 || fails % 10 == 0 {
                     eprintln!("relay: feed of {root}: {e}");
                 }
-                if now_ms().saturating_sub(last_ok) >= lost_ms() {
+                if !lost_said && now_ms().saturating_sub(last_ok) >= lost_ms() {
+                    lost_said = true;
                     link_lost(&st, &root);
                 }
                 tokio::time::sleep(Duration::from_secs(fails.min(5) as u64)).await;

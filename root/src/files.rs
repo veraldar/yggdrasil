@@ -95,6 +95,7 @@ pub fn safe_name(name: &str) -> String {
 /// "6.1 MB", "512 KB", "37 bytes" — how a size reads in a line the model or the owner sees.
 pub fn human_size(n: u64) -> String {
     match n {
+        n if n >= 10 << 20 => format!("{} MB", (n as f64 / (1u64 << 20) as f64).round()),
         n if n >= 1 << 20 => format!("{:.1} MB", n as f64 / (1u64 << 20) as f64),
         n if n >= 1024 => format!("{} KB", n.div_ceil(1024)),
         n => format!("{n} bytes"),
@@ -286,10 +287,8 @@ pub async fn upload_piece(State(st): State<AppState>, UrlPath(id): UrlPath<Strin
         let mut ups = st.files.uploads.lock().unwrap();
         let Some(u) = ups.get_mut(&id) else { return err(StatusCode::NOT_FOUND, "no such upload (it may have expired: start it again)") };
         if offset != u.have {
-            if offset + len <= u.have {
-                return Json(json!({ "have": u.have })).into_response();
-            }
-            return (StatusCode::CONFLICT, Json(json!({ "error": "out of order", "have": u.have }))).into_response();
+            // a piece sent again (its answer was lost) or one that skips ahead: go on from `have`
+            return (StatusCode::CONFLICT, Json(json!({ "error": "go on from have", "have": u.have }))).into_response();
         }
         if u.have + len > u.size {
             return err(StatusCode::BAD_REQUEST, "more bytes than the size given at the start");
@@ -778,6 +777,8 @@ mod tests {
         assert_eq!(safe_name(""), "file");
         assert_eq!(human_size(6 * (1 << 20) + 100_000), "6.1 MB");
         assert_eq!(human_size(2000), "2 KB");
+        assert_eq!(human_size(140_000_000), "134 MB");
+        assert_eq!(human_size(100 << 20), "100 MB");
         assert_eq!(human_size(37), "37 bytes");
         assert!(valid_hash(&"a".repeat(64)) && !valid_hash(&"A".repeat(64)) && !valid_hash("abc"));
         assert!(safe_artifact_name("marker.html") && !safe_artifact_name("../x") && !safe_artifact_name(".x") && !safe_artifact_name("a/b"));
