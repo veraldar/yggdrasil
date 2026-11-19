@@ -13,7 +13,8 @@
 #   hub-units.sh status
 #
 # Config (mode 600, made once by hand from the old stack's state — see NOTES.md):
-#   ~/.config/yggdrasil/hub/{app-public.env,bridge-public.toml,admin-token,peer-token}
+#   ~/.config/yggdrasil/hub/{app-public.env,bridge-public.toml,voice-agent.env,admin-token,peer-token}
+#   the voice agent's venv: state/voice-venv (uv sync --frozen in current/voice, UV_PROJECT_ENVIRONMENT)
 #   ~/.local/share/yggdrasil/hub/state/{devices.json,bridge-dtls.json}
 # Never run a plain install.sh on omarchy (AP-31): it would take the daily stack's files and ports.
 set -euo pipefail
@@ -83,8 +84,28 @@ StandardError=append:$LOGS/bridge.log
 [Install]
 WantedBy=default.target
 EOF
+  # the voice agent (LiveKit worker → the brain). AGENT_LOAD=off in its env: the load LiveKit is told
+  # is the whole login's cpu, so a busy box (sessions building) read as a full worker and no call was
+  # answered (11-19: load 26 on 16 cores, the mic dead on both doors)
+  cat >"$UNITS/hub-voice-agent.service" <<EOF
+[Unit]
+Description=yggdrasil home root: the voice agent (hold to talk) → brain :4101
+After=network-online.target
+
+[Service]
+WorkingDirectory=$HUB/current/voice
+EnvironmentFile=$CONF/voice-agent.env
+ExecStart=$HUB/state/voice-venv/bin/python agent.py start
+Restart=on-failure
+RestartSec=3
+StandardOutput=append:$LOGS/voice-agent.log
+StandardError=append:$LOGS/voice-agent.log
+
+[Install]
+WantedBy=default.target
+EOF
   systemctl --user daemon-reload
-  echo "rendered: hub-app.service hub-bridge.service"
+  echo "rendered: hub-app.service hub-bridge.service hub-voice-agent.service"
 }
 
 wait_http() { for _ in $(seq 1 60); do curl -sf -m 2 -o /dev/null "$1" && return 0; sleep 0.5; done; return 1; }
@@ -94,6 +115,7 @@ public_up() {
   render
   # the access point keeps one bridge link: the old one goes first (its files stay: public-back)
   for u in trunk-preview-bridge trunk-preview-app; do systemctl --user stop "$u" 2>/dev/null || true; done
+  systemctl --user restart hub-voice-agent
   systemctl --user restart hub-app
   wait_http http://127.0.0.1:4502/api/build || die "hub-app did not answer on :4502 (log: $LOGS/app.log)"
   systemctl --user restart hub-bridge
@@ -102,13 +124,13 @@ public_up() {
 }
 
 public_back() {
-  systemctl --user stop hub-bridge hub-app 2>/dev/null || true
+  systemctl --user stop hub-bridge hub-app hub-voice-agent 2>/dev/null || true
   [ -x "$OLD/hub-up.sh" ] || die "no $OLD/hub-up.sh"
   bash "$OLD/hub-up.sh"
 }
 
 status() {
-  for u in hub-app hub-bridge; do printf '%-12s %s\n' "$u" "$(systemctl --user is-active "$u" 2>/dev/null || true)"; done
+  for u in hub-app hub-bridge hub-voice-agent; do printf '%-12s %s\n' "$u" "$(systemctl --user is-active "$u" 2>/dev/null || true)"; done
   echo "release: $(readlink "$HUB/current" 2>/dev/null || echo none)"
   printf 'app :4502 /api/build → %s\n' "$(curl -s -m 3 http://127.0.0.1:4502/api/build || echo down)"
   tail -n 3 "$LOGS/bridge.log" 2>/dev/null | sed 's/^/bridge: /' || true

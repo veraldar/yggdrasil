@@ -83,6 +83,22 @@ test('ap.veraldar.org on a phone: pair, end to end, type, talk, hear, same turns
       (window as unknown as { __ttsTapB64: (b: string) => void }).__ttsTapB64(btoa(bin));
     };
   });
+  // what the phone actually played (the deck plays the reply as audio pieces): seconds heard
+  await ctx.addInitScript(() => {
+    const w = window as unknown as { __played: number[] };
+    w.__played = [];
+    const orig = HTMLMediaElement.prototype.play;
+    HTMLMediaElement.prototype.play = function (this: HTMLMediaElement) {
+      const el = this;
+      let max = 0;
+      const at = w.__played.push(0) - 1;
+      el.addEventListener('timeupdate', () => {
+        max = Math.max(max, el.currentTime);
+        w.__played[at] = max;
+      });
+      return orig.call(el);
+    };
+  });
   const phone = await ctx.newPage();
   let deviceId = '';
   try {
@@ -133,7 +149,7 @@ test('ap.veraldar.org on a phone: pair, end to end, type, talk, hear, same turns
     await box.fill(`Reply with exactly: ${tag}`);
     const tType = Date.now();
     await phone.getByRole('button', { name: 'send' }).tap();
-    await expect(phone.locator('[data-k="assistant"]').getByText(tag)).toBeVisible({ timeout: 180_000 });
+    await expect(phone.getByText(tag, { exact: true })).toBeVisible({ timeout: 180_000 });
     note(`typed turn answered on the phone in ${Date.now() - tType} ms ("${tag}")`);
     await shot(phone, '2-typed-turn');
 
@@ -160,15 +176,17 @@ test('ap.veraldar.org on a phone: pair, end to end, type, talk, hear, same turns
     const speakAt = Date.now();
     await shot(phone, '3-speaking');
     await expect(roots).not.toHaveAttribute('data-phase', 'speaking', { timeout: 120_000 });
-    expect(room.bytes, 'the reply arrived as sound over the voice room').toBeGreaterThan(16_000);
-    note(`answer spoken: speaking ${speakAt - released} ms after release, ${room.bytes} bytes of audio over the room`);
+    const heard = await phone.evaluate(() => (window as unknown as { __played: number[] }).__played.reduce((a, b) => a + b, 0));
+    expect(heard, 'the phone played the answer').toBeGreaterThan(0.5);
+    const reply = (await msgs()).filter((m) => m.info.role === 'assistant').pop()!;
+    note(`answer spoken: speaking ${speakAt - released} ms after release, ${heard.toFixed(1)} s played (${room.bytes ? `${room.bytes} bytes over the voice room` : 'over the pinned channel (the agent had left the room)'}); MAIN of voice-test said "${textOf(reply).slice(0, 80)}"`);
 
     // ---- the same turns on the tailnet door
     const t = await browser.newContext({ ...devices['Pixel 7'], storageState: { cookies: [], origins: [{ origin: TAILNET, localStorage: [{ name: 'bifrost-door', value: 'v2' }, { name: 'bifrost-first-turn', value: '1' }] }] } });
     const home = await t.newPage();
     await home.goto(`${TAILNET}/session/voice-test`);
-    await expect(home.locator('[data-k="assistant"]').getByText(tag)).toBeVisible({ timeout: 60_000 });
-    await expect(home.locator('[data-k="user"]').getByText(/two plus two|2 ?\+ ?2/i).last()).toBeVisible({ timeout: 30_000 });
+    await expect(home.getByText(tag, { exact: true })).toBeVisible({ timeout: 60_000 });
+    await expect(home.getByText(/two plus two|2 ?\+ ?2/i).last()).toBeVisible({ timeout: 30_000 });
     await shot(home, '4-same-turns-on-8447');
     note('the same typed and spoken turns are on :8447');
     await t.close();
