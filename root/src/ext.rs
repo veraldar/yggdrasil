@@ -74,6 +74,9 @@ impl Extensions {
         };
         tools
             .into_iter()
+            // `internal` tools are for the brain itself (the context viewer's memory part, …),
+            // never offered to an agent
+            .filter(|(_, t)| t["scope"] != "internal")
             .filter_map(|(ext, t)| {
                 let name = format!("{ext}_{}", t["name"].as_str()?);
                 self.allows(prof, &name).then(|| {
@@ -86,6 +89,27 @@ impl Extensions {
                 })
             })
             .collect()
+    }
+
+    /// An internal tool the brain itself calls (`<ext>_<tool>` naming, no profile check, no
+    /// schemas exposure): returns the output text.
+    pub async fn call_internal(&self, st: &AppState, ext: &str, tool: &str, input: &Value) -> Result<String, String> {
+        let Some((_, url)) = self.list.iter().find(|(n, _)| n == ext) else {
+            return Err(format!("extension {ext} is not configured"));
+        };
+        let body = json!({ "input": input, "session": "", "root": st.config.peers.me, "internal": true });
+        let reply = self
+            .post(st, format!("{url}/call/{tool}"), body, 30)
+            .send()
+            .await
+            .map_err(|e| format!("extension {ext} unreachable: {e}"))?
+            .json::<Value>()
+            .await
+            .map_err(|e| format!("unreadable answer: {e}"))?;
+        match reply["error"].as_str() {
+            Some(e) => Err(e.to_string()),
+            None => Ok(reply["output"].as_str().unwrap_or_default().to_string()),
+        }
     }
 
     /// What the extensions that are up ask every agent to know (their manifest `prompt`), as one
@@ -212,5 +236,18 @@ mod tests {
         assert_eq!(x.prompt(), None, "no manifest prompt, nothing added");
         x.manifests.lock().unwrap().get_mut("librarian").unwrap()["prompt"] = json!("Search past work before saying you don't know.");
         assert_eq!(x.prompt().as_deref(), Some("[extensions]\n- librarian: Search past work before saying you don't know."));
+    }
+
+    #[test]
+    fn internal_tools_are_never_offered() {
+        let x = with(json!({ "tools": [
+            { "name": "search", "description": "find", "scope": "self", "parameters": { "type": "object", "properties": {} } },
+            { "name": "forget", "description": "delete a fact", "scope": "internal", "parameters": { "type": "object", "properties": {} } },
+        ]}));
+        let ps = Profiles::load(None);
+        let door = ps.get("coordinator").unwrap();
+        let names: Vec<String> = x.schemas(door).iter().map(|s| s["function"]["name"].as_str().unwrap().to_string()).collect();
+        assert_eq!(names, vec!["librarian_search"], "internal stays out of the schemas");
+        assert!(x.owns("librarian_forget"), "call_internal can still resolve it");
     }
 }

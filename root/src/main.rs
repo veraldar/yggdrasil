@@ -816,6 +816,18 @@ async fn create_session(State(st): State<AppState>, body: Option<Json<Value>>) -
     let title = body["title"].as_str().filter(|t| !t.is_empty()).unwrap_or("New session");
     let model = body["model"].as_str().or(body["model"]["id"].as_str());
     let info = new_session(&st, title, body["parentID"].as_str(), body["agent"].as_str(), model, body["variant"].as_str());
+    // G7.2: an e2e / voice-test session is marked once at birth. GET /session still lists it
+    // (resolveId finds by slug), but tree::snapshot and sessions_find skip it, so MAIN's [tree]
+    // stays clean; the librarian's skip of these is phase 2.
+    if body["test"] == true {
+        let id = info["id"].as_str().unwrap_or_default().to_string();
+        if let Some(i) = with_session(&st, &id, |s| {
+            s.info["test"] = json!(true);
+            s.info.clone()
+        }) {
+            return Json(i).into_response();
+        }
+    }
     // a peer root asked for this session: its turns report home (peers.rs)
     if body["report_to"]["root"].is_string() && body["report_to"]["session"].is_string() {
         let id = info["id"].as_str().unwrap_or_default().to_string();
@@ -1398,10 +1410,27 @@ fn shared_prompt(st: &AppState) -> String {
     }
 }
 
+/// G6.1 (interim): the shared prompt for a harness session. A harness kind whose MCP bridge is
+/// not wired yet must not be told about extension tools it does not have, so its prompt is the
+/// owner's shared text WITHOUT the extensions' `[extensions]` lines. A root (brain-native)
+/// session keeps the full shared prompt (Some(Kind) = a harness session).
+fn shared_prompt_for(st: &AppState, harness: Option<&harness::Kind>) -> String {
+    let shared = st.config.profiles.read().unwrap().shared.clone();
+    match harness {
+        None => shared_prompt(st),
+        Some(_) => shared,
+    }
+}
+
 /// What a Claude Code agent appends to Claude Code's own prompt: the shared prompt, then its role.
 fn harness_system(shared: &str, prof: &profiles::Profile) -> String {
     let role = prof.role_for("full");
     if role.trim().is_empty() { shared.to_string() } else { format!("{shared}\n\n{role}") }
+}
+
+/// Loads the store fresh for the one-time G3 refold (runs before the AppState exists).
+fn st_sessions_for_refold(dir: &std::path::Path) -> HashMap<String, Session> {
+    load_sessions(dir)
 }
 
 /// `GET /shared-prompt` — what every agent reads first; `custom` = edited by the owner.
@@ -1654,7 +1683,7 @@ async fn post_message(
     }
     // a session on another root speaking (peers::send): its sender rides `meta.from`
     let from = body.meta.as_ref().and_then(|m| sender_of(&m["from"]));
-    let turn = Turn { parts: body.parts, modality: body.modality, auto_turn, internal, origin: origin.clone(), completes: None, from };
+    let turn = Turn { parts: body.parts, modality: body.modality, auto_turn, internal, origin: origin.clone(), completes: None, from, digest_hint: None };
     let (user_msg, rx, done_rx) = match submit(&st, &id, turn) {
         Ok(t) => t,
         Err(r) => return r,
@@ -1706,6 +1735,10 @@ struct Turn {
     /// Who sent it when not the owner: `{session, title, root?}` — another session here (the tree
     /// tools) or on another root (its `meta.from`). Stored as `meta.from`.
     from: Option<Value>,
+    /// G3: the report headlines this wake carries, joined `"title" (status): headline; …` —
+    /// stored as `meta.digest_hint`, so a station digest can carry content, not just the
+    /// wake's header line. `None` for turns that are not wakes.
+    digest_hint: Option<String>,
 }
 
 type Submitted = (Value, mpsc::Receiver<Event>, oneshot::Receiver<Result<Value, String>>);
@@ -1739,7 +1772,7 @@ fn sender_label(from: &Value) -> Option<String> {
 /// Stores the user message at once, takes a gate ticket, spawns the run. Returns the stored
 /// user message, the per-request event stream, and the run's result.
 fn submit(st: &AppState, id: &str, turn: Turn) -> Result<Submitted, Response> {
-    let Turn { parts, modality, auto_turn, internal, origin, completes, from } = turn;
+    let Turn { parts, modality, auto_turn, internal, origin, completes, from, digest_hint } = turn;
     // Text parts go upstream; file parts (data: URLs) are stored so the transcript keeps them.
     let parts: Vec<Value> = parts
         .into_iter()
@@ -1776,6 +1809,10 @@ fn submit(st: &AppState, id: &str, turn: Turn) -> Result<Submitted, Response> {
     }
     if let Some(c) = completes {
         user_msg["info"]["meta"]["async"] = c;
+    }
+    // G3: the wake's report headlines, frozen at creation (the digest renders from it — cache law)
+    if let Some(h) = digest_hint.filter(|h| !h.trim().is_empty()) {
+        user_msg["info"]["meta"]["digest_hint"] = json!(h);
     }
     let prof = session_profile(st, id);
     // root-coord: the door's owner turn carries every undelivered report, frozen on the
@@ -1889,7 +1926,7 @@ fn post_completion(st: &AppState, origin: &str, target: &str, turn_id: &str, res
     let text = completion_text(target, &title, turn_id, result);
     let done = json!({ "turn_id": turn_id, "sessionID": target, "status": status, "replyID": reply_id });
     let turn = Turn { parts: vec![text_part(&text)], modality: None, auto_turn: true, internal: false, origin: None,
-        completes: Some(done.clone()), from: None };
+        completes: Some(done.clone()), from: None, digest_hint: None };
     match submit(st, origin, turn) {
         Ok((msg, _, _)) => {
             let cid = msg["info"]["id"].clone();
@@ -2102,14 +2139,76 @@ fn collapse_stale_station(messages: &mut [Value]) {
             .unwrap_or(messages.len());
         let replies: Vec<usize> = (i + 1..end).filter(|&j| messages[j]["info"]["role"] == "assistant").collect();
         let first_done = replies.iter().copied().find(|&j| messages[j]["info"]["time"]["completed"].is_number());
+        let ask = station_ask_of(&messages[i]);
         let line = match first_done {
-            Some(j) => format!("[station turn] {} => {}", first_line(&message_text(&messages[i]), 160), first_line(&message_text(&messages[j]), 160)),
-            None => format!("[station turn] {}", first_line(&message_text(&messages[i]), 160)),
+            Some(j) => format!("[station turn] {ask} => {}", first_line(&message_text(&messages[j]), 160)),
+            None => format!("[station turn] {ask}"),
         };
         messages[i]["info"]["meta"]["digest"] = json!(line);
         for j in replies {
             messages[j]["info"]["meta"]["folded"] = json!(true);
         }
+    }
+}
+
+/// G3: what a station turn asked, WITH the content (the reports it carried), not just the wake
+/// header. Order: the stored `meta.digest_hint` (new wakes), the `- "title" (status): headline`
+/// lines of the stored wake text (older ones), else the plain first line (non-wake autos).
+pub(crate) fn station_ask_of(msg: &Value) -> String {
+    if let Some(h) = msg["info"]["meta"]["digest_hint"].as_str().filter(|h| !h.trim().is_empty()) {
+        return format!("reports: {}", first_line(h, 220));
+    }
+    let text = message_text(msg);
+    let parsed: Vec<String> = text
+        .lines()
+        .filter_map(|l| l.trim().strip_prefix("- \""))
+        .filter(|l| l.contains("\" ("))
+        .map(|l| format!("\"{}", l.chars().take(89).collect::<String>()))
+        .take(3)
+        .collect();
+    if !parsed.is_empty() && text.starts_with("[inbox]") {
+        return format!("reports: {}", parsed.join("; "));
+    }
+    first_line(&text, 160)
+}
+
+/// G3, one-time refold (YGG_REFOLD_STATION=1): recomputes ONLY the digests that match the old
+/// header-only pattern (`[station turn] [inbox] Reports from your sessions since the user last
+/// heard from you: => …`), from their stored wake text. Older digests keep their bytes except
+/// these. Marks `data/.migrations` so it runs once; the cost is one prompt-cache miss for MAIN.
+pub(crate) fn refold_station_digests(messages: &mut [Value]) -> usize {
+    const BAD: &str = "[station turn] [inbox]";
+    let autos: Vec<usize> = (0..messages.len())
+        .filter(|&i| {
+            messages[i]["info"]["role"] == "user"
+                && messages[i]["info"]["meta"]["auto"] == true
+                && messages[i]["info"]["meta"]["digest"].as_str().is_some_and(|d| d.starts_with(BAD))
+        })
+        .collect();
+    let mut n = 0;
+    for i in autos {
+        let ask = station_ask_of(&messages[i]);
+        let old = messages[i]["info"]["meta"]["digest"].as_str().unwrap_or_default().to_string();
+        // the tail after the old header is the folded reply's first line — keep it
+        let tail = old.split(" => ").nth(1).map(|t| format!(" => {t}")).unwrap_or_default();
+        messages[i]["info"]["meta"]["digest"] = json!(format!("[station turn] {ask}{tail}"));
+        if messages[i]["info"]["meta"]["digest"].as_str() != Some(old.as_str()) {
+            n += 1;
+        }
+    }
+    n
+}
+
+/// Ran the G3 refold already? (`data/.migrations` holds the marks.)
+fn migration_done(dir: &std::path::Path, mark: &str) -> bool {
+    std::fs::read_to_string(dir.join(".migrations")).is_ok_and(|s| s.lines().any(|l| l.trim() == mark))
+}
+
+fn mark_migration(dir: &std::path::Path, mark: &str) {
+    use std::io::Write;
+    let path = dir.join(".migrations");
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+        let _ = writeln!(f, "{mark}");
     }
 }
 
@@ -2468,7 +2567,7 @@ async fn harness_loop(st: &AppState, id: &str, prompt: String, tx: &mpsc::Sender
         None => st.tools.project_dir.clone(),
     };
     // the shared prompt + the agent's own instructions ride on top of the harness's (Claude Code)
-    let system = Some(harness_system(&shared_prompt(st), &session_profile(st, id)));
+    let system = Some(harness_system(&shared_prompt_for(st, Some(&kind)), &session_profile(st, id)));
     let _slot = st.harness_slots.acquire().await.map_err(|e| e.to_string())?;
     let (etx, mut erx) = mpsc::unbounded_channel::<harness::Ev>();
     let fut = harness::run(kind, model.as_deref(), resume.as_deref(), &cwd, &prompt, system.as_deref(), attach, move |ev| {
@@ -3443,6 +3542,21 @@ async fn main() {
         }
     }
     let max_inflight = env_num("YGG_MAX_INFLIGHT", 6).max(1) as usize;
+
+    // G3 one-time refold (owner opt-in): only header-only station digests, from their stored
+    // wake text. Marked in data/.migrations; costs MAIN one prompt-cache miss.
+    if std::env::var("YGG_REFOLD_STATION").is_ok_and(|v| v == "1") && !migration_done(&data_dir, "refold-station-digests") {
+        let mut total = 0;
+        let mut sessions = st_sessions_for_refold(&data_dir);
+        for s in sessions.values_mut() {
+            total += refold_station_digests(&mut s.messages);
+        }
+        for (id, s) in sessions.iter() {
+            persist(&data_dir, id, s);
+        }
+        mark_migration(&data_dir, "refold-station-digests");
+        eprintln!("REFOLD: rewrote {total} header-only station digest(s)");
+    }
 
     // Antigravity's picker before `agy models` answers (or when it cannot): Google's current models
     let floor_models = harness::antigravity::models(None, harness::antigravity::api_key());
