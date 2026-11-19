@@ -21,12 +21,14 @@ p2-reach-sim (sim helper). Temp files: ~/.cache/p2-reach/tmp (NOT /tmp: shared q
   (log ~/.cache/p2-reach/tree-full-run1.log; `python3 sim/tree-e2e.py --only reach --port-base 4270`)
 - voice agent: branch/voice/test_no_resend.py GREEN (old agent: 2 POSTs on a 502, new: 1)
 
+- S3 GREEN (sim/reach/s3.py, scratch brain, real upstream; MAIN attach:true; Claude Code reads path)
+- S17 real-model GREEN (sim/reach/s17_real.py: two scratch brains, real Claude Code haiku on lab)
+
 ## In flight
 - app helper (p2-reach-app): composer, /api/file, refs, artifact ?root=, Playwright Pixel 7
 - sim helper (p2-reach-sim): S16, S17 in the namespace rig
 - review agent: independent review of root/src diff (report only)
 
 ## Next (me)
-1. S3 on a twin (image marker word reaches a worker, attach:true) — sim/acceptance/twin-up.sh
 2. merge app branch, run its specs against the real brain, screenshots
 3. fix review findings; report branch to MAIN for P1
