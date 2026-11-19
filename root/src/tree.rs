@@ -334,7 +334,7 @@ async fn run_remote(st: &AppState, caller: &str, name: &str, input: &Value) -> O
     })
 }
 
-fn card_line(st: &AppState, id: &str, s: &Session, indent: usize) -> String {
+pub(crate) fn card_line(st: &AppState, id: &str, s: &Session, indent: usize) -> String {
     let card = &s.info["card"];
     // live truth first: a run in flight is `running` whatever the last card said
     let running = st.running.lock().unwrap().contains_key(id);
@@ -524,7 +524,7 @@ fn send(st: &AppState, caller: &str, input: &Value) -> Out {
     }
 }
 
-fn read(st: &AppState, caller: &str, input: &Value) -> Out {
+pub(crate) fn read(st: &AppState, caller: &str, input: &Value) -> Out {
     let t = match target_of(st, caller, input) {
         Ok(t) => t,
         Err(o) => return o,
@@ -1247,21 +1247,31 @@ fn lead_wake_text(events: &[Value]) -> String {
     t
 }
 
+/// The one line an inbox event renders as (shared by the owner turn and the G1 preview — one
+/// format, so a preview reads exactly like the real next turn will).
+pub(crate) fn inbox_line(e: &Value) -> String {
+    format!(
+        "\"{}\" ({}, {}): {}{}",
+        e["title"].as_str().unwrap_or("?"),
+        e["status"].as_str().unwrap_or("?"),
+        e["relevance"].as_str().unwrap_or("?"),
+        e["headline"].as_str().unwrap_or_default(),
+        e["needs"].as_str().filter(|n| !n.is_empty()).map(|n| format!(" — asks: {n}")).unwrap_or_default()
+    )
+}
+
 /// The door's owner turn takes every undelivered event as frozen `[inbox]` lines.
 pub fn owner_inbox_lines(st: &AppState, sid: &str) -> Vec<String> {
-    take_events(st, sid, false)
-        .iter()
-        .map(|e| {
-            format!(
-                "\"{}\" ({}, {}): {}{}",
-                e["title"].as_str().unwrap_or("?"),
-                e["status"].as_str().unwrap_or("?"),
-                e["relevance"].as_str().unwrap_or("?"),
-                e["headline"].as_str().unwrap_or_default(),
-                e["needs"].as_str().filter(|n| !n.is_empty()).map(|n| format!(" — asks: {n}")).unwrap_or_default()
-            )
-        })
-        .collect()
+    take_events(st, sid, false).iter().map(inbox_line).collect()
+}
+
+/// G1 (TRAP 1): the read-only twin of `owner_inbox_lines` for the context preview — the same
+/// lines, but it NEVER calls `take_events`, so `delivered` stays false and MAIN's pending
+/// reports survive a preview.
+pub fn peek_owner_inbox_lines(st: &AppState, sid: &str) -> Vec<String> {
+    let sessions = st.sessions.lock().unwrap();
+    let Some(s) = sessions.get(sid) else { return Vec::new() };
+    s.inbox.iter().filter(|e| e["delivered"] != true).map(inbox_line).collect()
 }
 
 /// An automated post to the door (watcher landings, lane verdict requests, external async
