@@ -33,6 +33,8 @@
 #   sim/own-trunk-e2e.sh                 every stage; exit 0 = all PASS (the table at the end)
 #   OT_STAGES=a,b,c,j,v,u (subset) · OT_REAL_RELEASE=1 adds stage r: trunk.sh against the REAL GitHub release
 #   OT_KEEP=1 leaves the containers up · OT_STATE=DIR keeps state + logs there
+#   OT_JOINER=deb443: the third machine is a clean Debian 12 whose firewall lets ONLY tcp 443 out (iptables,
+#   loopback aside); it fetches the release from the fake GitHub over https on 443 (a CA made for this run)
 #   OT_VERSION (0.9.0) · OT_REUSE_BUILD=1: re-stage the last release build (release.sh --no-build) instead of
 #   building the working tree again (--dirty)
 #
@@ -60,6 +62,8 @@ FILES_URL=http://files.tree.test:8000
 # trunk.sh / install.sh / join.sh: the fake GitHub's releases, signed by this run's key
 REL="TRUNK_RELEASES=$FILES_URL/releases YGG_RELEASE_TEST_SIGNERS=$TS"
 HREL="YGG_RELEASES=$FILES_URL/releases YGG_RELEASE_TEST_SIGNERS=$TS"
+JOINER=${OT_JOINER:-ubuntu}; JREL=$HREL   # what the third machine runs join.sh with
+[ "$JOINER" = deb443 ] && JREL="YGG_RELEASES=https://files.tree.test/releases YGG_RELEASE_TEST_SIGNERS=$TS"
 
 say()  { printf '\033[1m==>\033[0m %s\n' "$*"; }
 note() { printf '    %s\n' "$*"; }
@@ -167,6 +171,20 @@ say "network $NET ($SUBNET) — state + logs: $STATE"
 docker network create --subnet "$SUBNET" "$NET" >/dev/null || exit 2
 docker run -d --name ot-files --hostname files --network "$NET" --ip "$IP_FILES" --network-alias files.tree.test \
   -v "$STATE/files:/files:ro" -v "$STATE/sim:/sim" node:24 python3 -m http.server 8000 -d /files >/dev/null
+if [ "$JOINER" = deb443 ]; then # the fake GitHub on https :443 too, with a certificate from a CA made for this run
+  openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -days 2 -subj /CN=rig-ca \
+    -keyout "$STATE/sim/rig-ca.key" -out "$STATE/sim/rig-ca.pem" 2>/dev/null &&
+  openssl req -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -subj /CN=files.tree.test \
+    -keyout "$STATE/sim/files.key" -out "$STATE/sim/files.csr" 2>/dev/null &&
+  openssl x509 -req -in "$STATE/sim/files.csr" -CA "$STATE/sim/rig-ca.pem" -CAkey "$STATE/sim/rig-ca.key" -CAcreateserial \
+    -days 2 -extfile <(printf 'subjectAltName=DNS:files.tree.test\n') -out "$STATE/sim/files.pem" 2>/dev/null || exit 2
+  chmod 644 "$STATE/sim/files.key" "$STATE/sim/files.pem" "$STATE/sim/rig-ca.pem"
+  docker exec -d ot-files python3 -c 'import http.server, ssl, functools
+h = functools.partial(http.server.SimpleHTTPRequestHandler, directory="/files")
+s = http.server.ThreadingHTTPServer(("0.0.0.0", 443), h)
+c = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER); c.load_cert_chain("/sim/files.pem", "/sim/files.key")
+s.socket = c.wrap_socket(s.socket, server_side=True); s.serve_forever()'
+fi
 docker run -d --name ot-pebble --network "$NET" --ip "$IP_PEBBLE" --network-alias pebble \
   -e PEBBLE_VA_NOSLEEP=1 -e PEBBLE_WFE_NONCEREJECT=0 -e PEBBLE_AUTHZREUSE=0 \
   -v "$STATE/pebble.json:/pebble.json:ro" ghcr.io/letsencrypt/pebble:latest -config /pebble.json >/dev/null
@@ -187,7 +205,7 @@ reg_sum() { homesh 'sha256sum < ~/.local/state/bifrost/devices.json' | cut -c1-1
 run_phone() { # SCOPE AP_URL AP_IP STEPS_FILE
   ( cd "$ROOT/branch" && OT_SCOPE=$1 OT_AP_URL=$2 OT_AP_IP=$3 OT_STATE="$STATE/sim" OT_STEPS=$4 OT_PHONE_IP=$PHONE_IP \
       OT_HUB_NAME=home-pc OT_HOME_USER=$HU OT_INSTALL_CMD="bash $HH/install.sh" \
-      OT_JOIN_CMD="$HREL bash /home/ubuntu/join.sh" \
+      OT_JOIN_CMD="$JREL bash /home/ubuntu/join.sh" \
       PW_BASE_URL=$2 npx playwright test e2e/own-trunk.spec.ts --reporter=list ) >>"$STATE/log/phone.log" 2>&1
 }
 INSTALL_ARGS="--direct --skip voice,livekit,agent --upstream-env ~/model.env"
@@ -280,6 +298,8 @@ if stage a; then
       grep -q 'token kept' '$STATE/log/a5-rerun.log' && ! grep -q 'token=' '$STATE/log/a5-rerun.log' && \
       grep -q 'pin: sha-256 $PIN_A' '$STATE/log/a5-rerun.log' && grep -q 'binary: .*unchanged' '$STATE/log/a5-rerun.log'"
   docker cp ot-vps-a:/etc/yggdrasil-trunk/cert.pem "$STATE/sim/trunk-ca.pem" >/dev/null; chmod 644 "$STATE/sim/trunk-ca.pem"
+  # deb443: the third machine's --cacert also has to trust the fake GitHub's https (the real one is a public CA)
+  [ "$JOINER" = deb443 ] && cat "$STATE/sim/rig-ca.pem" >>"$STATE/sim/trunk-ca.pem"
   # the weekly update trusts this run's throwaway key too (a drop-in: test plumbing, not trunk.sh's)
   vps ot-vps-a "mkdir -p /etc/systemd/system/yggdrasil-trunk-update.service.d && printf '[Service]\nEnvironment=YGG_RELEASE_TEST_SIGNERS=$TS\n' \
     >/etc/systemd/system/yggdrasil-trunk-update.service.d/test-signers.conf && systemctl daemon-reload"
@@ -342,9 +362,20 @@ if stage a; then
       [ \"\$(curl -sk -o /dev/null -w '%{http_code}' https://$A/_roots)\" = 404 ]"
 
   # ------------------------------------------------------------------------------- the third machine
-  docker run -d --name ot-mac --hostname mac-studio --network "$NET" --ip "$IP_MAC" \
-    -v "$ROOT/root/mock:/mock:ro" -v "$STATE/sim:/sim" ubuntu:24.04 sleep infinity >/dev/null
+  JIMG=ubuntu:24.04 JCAP=(); [ "$JOINER" = deb443 ] && JIMG=debian:12 JCAP=(--cap-add NET_ADMIN)
+  docker run -d --name ot-mac --hostname mac-studio --network "$NET" --ip "$IP_MAC" "${JCAP[@]}" \
+    -v "$ROOT/root/mock:/mock:ro" -v "$STATE/sim:/sim" "$JIMG" sleep infinity >/dev/null
   dx ot-mac bash -c 'apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends python3 ca-certificates curl openssh-client procps >/dev/null && (id ubuntu >/dev/null 2>&1 || useradd -m ubuntu)' >"$STATE/log/mac-apt.log" 2>&1
+  if [ "$JOINER" = deb443 ]; then # from here on ONLY tcp 443 leaves this machine (loopback aside: docker's DNS, the mock)
+    dx ot-mac bash -c 'DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends iptables >/dev/null &&
+      iptables -A OUTPUT -o lo -j ACCEPT && iptables -A OUTPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT &&
+      iptables -A OUTPUT -p tcp --dport 443 -j ACCEPT && iptables -P OUTPUT DROP &&
+      ip6tables -A OUTPUT -o lo -j ACCEPT && ip6tables -P OUTPUT DROP' >>"$STATE/log/mac-apt.log" 2>&1
+    check j0 "the third machine: Debian 12, only tcp 443 out (:8000 and udp are dropped, https :443 answers)" \
+      bash -c "docker exec ot-mac grep -q 'VERSION_ID=\"12\"' /etc/os-release && \
+        ! docker exec ot-mac curl -s -m 5 -o /dev/null http://files.tree.test:8000/ && \
+        docker exec ot-mac curl -sf -m 5 --cacert /sim/rig-ca.pem -o /dev/null https://files.tree.test/releases/download/v$VER/SHA256SUMS"
+  fi
   docker cp "$DIST/join.sh" ot-mac:/home/ubuntu/join.sh >/dev/null && dx ot-mac chown ubuntu:ubuntu /home/ubuntu/join.sh
   to_box ot-mac
   dx -u ubuntu ot-mac bash -c 'mkdir -p ~/mock && cd ~/mock && (setsid nohup python3 /mock/mock_upstream.py 18397 >mock.log 2>&1 &) &&
@@ -626,7 +657,7 @@ if stage u; then
         ! docker exec ot-home ps -eo stat=,args= | grep -v '^Z' | grep -E 'bifrost-net|yggdrasil|server\.mjs'"
   fi
   if up ot-mac; then
-    dx -u ubuntu ot-mac bash -c "$HREL bash ~/join.sh --uninstall -y" >"$STATE/log/u2-mac.log" 2>&1; rc=$?
+    dx -u ubuntu ot-mac bash -c "$JREL bash ~/join.sh --uninstall -y" >"$STATE/log/u2-mac.log" 2>&1; rc=$?
     sleep 1
     check u2 "the third machine: join.sh --uninstall -y — its root, units and the unpacked release gone, nothing running" \
       bash -c "[ $rc = 0 ] && ! docker exec ot-mac test -e /home/ubuntu/.local/share/yggdrasil-root && \
