@@ -4038,6 +4038,8 @@ async fn main() {
         .route("/agent", get(list_agents))
         .route("/shared-prompt", get(get_shared).put(put_shared))
         .route("/extensions", get(|State(st): State<AppState>| async move { Json(st.config.ext.describe()) }))
+        // B7b: a peer root runs this root's extension tool (peer token only; ext.rs)
+        .route("/ext/{name}/call", post(ext::peer_route))
         .route("/agent/{name}", get(get_agent).put(put_agent).delete(delete_agent))
         .route("/harness/claude/sessions", get(claude_sessions))
         .route("/event", get(events))
