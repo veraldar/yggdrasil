@@ -234,7 +234,7 @@ export function RootsSheet({
       const p = await reach(r.id, id, m?.proxy || r.main_proxy, m?.title);
       if (!p) return setFailed('failed');
       // never the slug `main`: that is this root's own MAIN, with its own page
-      const t = p.title && !isMainSlug(slugify(p.title)) ? p.title : `MAIN · ${r.id}`;
+      const t = p.title && !isMainSlug(slugify(p.title)) ? p.title : `[MAIN] ${r.id}`;
       open(p.proxy, t);
     });
 
