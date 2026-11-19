@@ -87,6 +87,9 @@ EOF
 chmod 755 /usr/local/sbin/trunk-ap-cert.sh
 printf '[Unit]\nDescription=renew the trunk access point certificate\n[Service]\nType=oneshot\nExecStart=/usr/local/sbin/trunk-ap-cert.sh\n' >/etc/systemd/system/trunk-ap-cert.service
 printf '[Unit]\nDescription=renew\n[Timer]\nOnCalendar=*-*-01,15 04:17\n[Install]\nWantedBy=timers.target\n' >/etc/systemd/system/trunk-ap-cert.timer
+# a backup of the folder (mentions it, no certbot, no --webroot): adopt must leave it alone
+printf '[Service]\nType=oneshot\nExecStart=/bin/tar czf /root/trunk-ap-backup.tgz /etc/trunk-ap\n' >/etc/systemd/system/trunk-ap-backup.service
+printf '[Timer]\nOnCalendar=daily\n[Install]\nWantedBy=timers.target\n' >/etc/systemd/system/trunk-ap-backup.timer
 # the website on 127.0.0.1:8443 (what :443 sends every other name to)
 openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -days 30 -subj /CN=www.tree.test -keyout /opt/www/k.pem -out /opt/www/c.pem 2>/dev/null
 echo 'the website' >/opt/www/index.html
@@ -97,7 +100,7 @@ ExecStart=/usr/bin/python3 -c 'import http.server,ssl,functools; h=functools.par
 WantedBy=multi-user.target
 EOF
 systemctl daemon-reload
-systemctl enable --now -q trunk-ap website yggdrasil-sni-443 trunk-ap-cert.timer" >"$STATE/setup.log" 2>&1 || { tail "$STATE/setup.log"; exit 2; }
+systemctl enable --now -q trunk-ap website yggdrasil-sni-443 trunk-ap-cert.timer trunk-ap-backup.timer" >"$STATE/setup.log" 2>&1 || { tail "$STATE/setup.log"; exit 2; }
 sleep 2
 TOKEN=$(docker exec "$C" sed -n 's/^token = "\([0-9a-f]*\)".*/\1/p' /opt/ca/token.txt)   # the hub's (test only)
 outside() { vps "curl -sk -o /dev/null -w '%{http_code}' --resolve $NAME:443:$IP --resolve www.tree.test:443:$IP $*"; }
@@ -110,6 +113,13 @@ PIN0=$(pin) FP0=$(certfp) SUM0=$(etcsum)
 check b1 "before: the hand-made ap answers through :443 (/pair 503: no hub), the hub's token 400 (no upgrade), a wrong one 401, the website 200" \
   bash -c "[ \"\$(outside https://$NAME/pair)\" = 503 ] && [ \"\$(outside -H 'Authorization:\ Bearer\ $TOKEN' https://$NAME/ap)\" = 400 ] &&
     [ \"\$(outside -H 'Authorization:\ Bearer\ 0123456789abcdef0123456789abcdef' https://$NAME/ap)\" = 401 ] && [ \"\$(outside https://www.tree.test/)\" = 200 ] && [ -n '$PIN0' ]"
+
+# ------------------------------------------- 0. an ap.toml whose PROXY mode cannot be adopted: refused, nothing changes
+vps 'cp -a /etc/trunk-ap /opt/ap-noproxy && sed -i "s/^proxy_protocol = true/proxy_protocol = false/" /opt/ap-noproxy/ap.toml'
+vps "cd /opt/trunk/install && bash trunk.sh --adopt /opt/ap-noproxy --binary /usr/local/bin/trunk-ap -y" >"$STATE/0-noproxy.log" 2>&1; rc=$?
+check n1 "loopback without the PROXY line: refused (exit 64), nothing installed, trunk-ap untouched" \
+  bash -c "[ $rc = 64 ] && grep -q 'without the PROXY line' '$STATE/0-noproxy.log' && ! docker exec $C test -e /etc/yggdrasil-trunk &&
+    docker exec $C systemctl is-active -q trunk-ap"
 
 # ------------------------------------------------------------------------ 1. a failed adopt puts it back
 vps 'printf "#!/bin/sh\ncase \$1 in ap-token) exec /usr/local/bin/trunk-ap ap-token ;; *) exit 1 ;; esac\n" >/opt/broken-net && chmod 755 /opt/broken-net'
@@ -139,6 +149,7 @@ set -e
 systemctl is-active -q yggdrasil-trunk; systemctl is-enabled -q yggdrasil-trunk
 ! systemctl is-active -q trunk-ap; ! systemctl is-enabled -q trunk-ap
 ! systemctl is-enabled -q trunk-ap-cert.timer; systemctl is-active -q yggdrasil-trunk-cert.timer
+systemctl is-enabled -q trunk-ap-backup.timer   # not a renewal: left alone
 systemctl is-enabled -q yggdrasil-sni-443
 tr '\0' ' ' </proc/"$(systemctl show -p MainPID --value yggdrasil-sni-443)"/cmdline | grep -q -- '-c /etc/yggdrasil-trunk/sni-443.conf'
 EOF

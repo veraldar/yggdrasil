@@ -128,9 +128,10 @@ sign() { # FILE → FILE.sig: through ssh-agent when it holds the key (a passphr
 # AP-21: no private key in what is built (the all-A / all-0 placeholders of the tests are not keys). Only the
 # place is printed, never the line.
 if [ $DIRTY = 1 ]; then GREP_IN=(--untracked); else GREP_IN=(HEAD); fi
-leaks=$(git -C "$ROOT" grep -nE 'private_key[[:space:]]*=[[:space:]]*"?[A-Za-z0-9+/]{40,}' "${GREP_IN[@]}" -- . 2>/dev/null |
-  grep -vE 'private_key[[:space:]]*=[[:space:]]*"?(A{40,}|0{40,})=*"?[[:space:]]*$' |
-  sed -E 's/^(HEAD:)?([^:]*):([0-9]+):.*/\2:\3/' || true)
+KEYRE="private_key[[:space:]]*[:=][[:space:]]*[\"']?"
+leaks=$(git -C "$ROOT" grep -nE "${KEYRE}[A-Za-z0-9+/]{40,}" "${GREP_IN[@]}" -- . 2>/dev/null |
+  grep -vE "${KEYRE}(A{40,}|0{40,})=*[\"']?[[:space:]]*\$" |
+  sed -nE 's/^(HEAD:)?(.*):([0-9]+):[^:]*private_key.*/\2:\3/p' || true)
 [ -z "$leaks" ] || die "a private key is in the tree — remove it (and rotate it) before any release: $(echo $leaks)"
 # AP-30: a real release's tag is made here, at the commit it is built from; one that points elsewhere stops it
 TAG=v$VERSION
@@ -145,12 +146,19 @@ if [ $TEST = 0 ]; then
   else
     warn "could not ask origin about tag $TAG (offline?): checked the local tag only"
   fi
+fi
+make_tag() { # the real release's tag, at the commit it was built from — made once the release is signed
+  [ $TEST = 0 ] || return 0
   if [ -z "$(git -C "$ROOT" tag -l "$TAG")" ]; then
-    git -C "$ROOT" tag -a "$TAG" -m "yggdrasil $VERSION" HEAD || die "could not create tag $TAG"
-    say "tag $TAG made at ${HEAD_COMMIT:0:12} (local: push it with the release — git push origin $TAG)"
+    if [ -n "${rt:-}" ]; then   # origin has it (at HEAD, checked above): take that one, never a second tag object
+      git -C "$ROOT" fetch -q origin "refs/tags/$TAG:refs/tags/$TAG" || die "could not fetch origin's tag $TAG"
+    else
+      git -C "$ROOT" tag -a "$TAG" -m "yggdrasil $VERSION" HEAD || die "could not create tag $TAG"
+      say "tag $TAG made at ${HEAD_COMMIT:0:12} (local: push it with the release — git push origin $TAG)"
+    fi
   fi
   [ "$(git -C "$ROOT" rev-parse "$TAG^{commit}")" = "$HEAD_COMMIT" ] || die "tag $TAG is not HEAD"
-fi
+}
 
 # ------------------------------------------------------------------------------------- sources
 if [ $BUILD = 1 ]; then
@@ -167,7 +175,9 @@ if [ $BUILD = 1 ]; then
     (cd "$ROOT" && git ls-files -co --exclude-standard -z | tar --null -cf - -T -) | tar -xf - -C "$SRC"
   fi
   printf '%s\n' "$DESCRIBE" >"$CACHE/describe"
-  if [ $DIRTY = 0 ]; then git -C "$ROOT" rev-parse HEAD >"$CACHE/commit"; else echo "dirty-$(date +%s)" >"$CACHE/commit"; fi
+  # which build the cache holds: written only once the build below has succeeded (a failed one leaves none)
+  rm -f "$CACHE/commit"
+  if [ $DIRTY = 0 ]; then BUILD_COMMIT=$(git -C "$ROOT" rev-parse HEAD); else BUILD_COMMIT="dirty-$(date +%s)"; fi
   EPOCH=$(git -C "$ROOT" log -1 --format=%ct); printf '%s\n' "$EPOCH" >"$CACHE/epoch"
 else
   [ -d "$SRC" ] && [ -x "$CACHE/target-bullseye/root/release/yggdrasil" ] && [ -d "$CACHE/app/standalone" ] || die "--no-build: nothing built yet"
@@ -200,7 +210,9 @@ if [ $BUILD = 1 ]; then
         cp -a .next/standalone /out/standalone && cp -a .next/static /out/standalone/.next/static &&
         cp -a public artifacts-builtin server.mjs /out/standalone/; } || rc=\$?
       chown -R $UIDGID /src /root/.npm /out; exit \$rc" || { tail -30 "$CACHE/app/build.log" 2>/dev/null; die "app build failed"; }
+  printf '%s\n' "$BUILD_COMMIT" >"$CACHE/commit"
 fi
+[ -s "$CACHE/commit" ] || die "--no-build: the last build did not finish — build it (no --no-build)"
 
 # macOS arm64 (AP-32): the brain and the node's root build, compiled ON the Mac from the same sources, pulled back
 # here; the signing key never leaves this machine. --no-build reuses them when they were built from this commit.
@@ -374,6 +386,7 @@ if [ $TEST = 1 ]; then VERIFY_SIGNERS=$(mktemp); printf '%s\n' "$SIGNER" >"$VERI
 ssh-keygen -Y verify -f "$VERIFY_SIGNERS" -I release@yggdrasil -n yggdrasil-release -s "$OUT/SHA256SUMS.sig" \
   <"$OUT/SHA256SUMS" >/dev/null || die "the fresh signature does not verify (signer: $SIGNER)"
 (cd "$OUT" && sha256sum -c --quiet SHA256SUMS) || die "SHA256SUMS does not match dist"
+make_tag
 echo
 (cd "$OUT" && for f in *; do printf '    %8s  %s\n' "$(du -k "$f" | cut -f1)K" "$f"; done)
 # the lay guides name the release in their download lines: say so when they name another one
@@ -392,7 +405,7 @@ cat <<EOF
   dist/$VERSION is signed (SHA256SUMS.sig, key $(ssh-keygen -lf "$KEY" | awk '{print $2}')).
   Tag:     $TAG at $(git -C "$ROOT" rev-parse --short=12 "$TAG^{commit}") (local) — push it before the release: git push origin $TAG
   Publish: a DRAFT first — gh release create $TAG --draft --verify-tag dist/$VERSION/* ; test it; then un-draft.
-  Notes:   add the line: $NOTE
+$( [ "$VERSION" = 0.9.1 ] && printf '  Notes:   add the line: %s' "$NOTE")
   Check one:  ssh-keygen -Y verify -f allowed_signers -I release@yggdrasil -n yggdrasil-release \\
                 -s SHA256SUMS.sig < SHA256SUMS && sha256sum -c SHA256SUMS
 EOF

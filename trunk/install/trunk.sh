@@ -71,11 +71,11 @@ die()  { printf '\033[1;31mxx\033[0m  %s\n' "$1" >&2; exit "${2:-1}"; }
 on_err() {
   local rc=$?
   printf '\033[1;31mxx\033[0m  trunk.sh stopped at line %s: %s\n' "$1" "$2" >&2
+  if [ "${ADOPT_STOPPED:-0}" = 1 ] && [ "${ADOPT_BACK:-0}" = 0 ]; then   # adopting: the access point you had comes back
+    ADOPT_BACK=1; ROLLING=1; adopt_back && warn "the access point you had ($ADOPT_UNIT) is back and answering"
+  fi
   if [ "${HAVE_PREV:-0}" = 1 ] && [ "${CHANGED:-0}" = 1 ] && [ "${ROLLING:-0}" = 0 ]; then
     ROLLING=1; rollback && warn "the previous trunk is back and answering"
-  fi
-  if [ "${ADOPT_STOPPED:-0}" = 1 ] && [ "${ROLLING:-0}" = 0 ]; then
-    ROLLING=1; adopt_back && warn "the access point you had ($ADOPT_UNIT) is back and answering"
   fi
   exit "$rc"
 }
@@ -184,7 +184,14 @@ if [ -n "$ADOPT" ]; then
   # the [ap] table's own listen (the first one), the ICE forward's (the [[ap.tcp]] named livekit-ice)
   A_LISTEN=$(sed -n 's/^listen *= *"\(.*\)".*/\1/p' "$ADOPT/ap.toml" | head -1)
   A_ICE=$(awk -F'"' '/^name *= *"livekit-ice"/ {f = 1; next} f && /^listen *=/ {n = split($2, a, ":"); print a[n]; exit}' "$ADOPT/ap.toml")
-  case $A_LISTEN in 127.0.0.1:*|localhost:*) BEHIND=${BEHIND:-1} ;; *) BEHIND=${BEHIND:-0} ;; esac
+  A_PROXY=$(sed -n 's/^proxy_protocol *= *\(true\|false\).*/\1/p' "$ADOPT/ap.toml" | head -1)
+  case $A_LISTEN/${A_PROXY:-false} in
+    127.0.0.1:*/true|localhost:*/true|\[::1\]:*/true) BEHIND=${BEHIND:-1} ;;
+    127.0.0.1:*/false|localhost:*/false|\[::1\]:*/false)
+      die "--adopt: $ADOPT/ap.toml listens on $A_LISTEN without the PROXY line — a router in front that sends none is not supported" 64 ;;
+    */true) die "--adopt: $ADOPT/ap.toml takes a PROXY line on a public address ($A_LISTEN) — not supported" 64 ;;
+    *) BEHIND=${BEHIND:-0} ;;
+  esac
   PORT=${PORT:-${A_LISTEN##*:}}
   [ -n "$A_ICE" ] && ICE_PORT=${ICE_PORT:-$A_ICE}
   [ -n "$NAME" ] || NAME=$(openssl x509 -in "$ADOPT/cert.pem" -noout -ext subjectAltName 2>/dev/null | tr ',' '\n' |
@@ -193,7 +200,7 @@ if [ -n "$ADOPT" ]; then
   if [ "$(openssl x509 -in "$ADOPT/cert.pem" -noout -issuer | sed 's/^issuer=//')" != "$(openssl x509 -in "$ADOPT/cert.pem" -noout -subject | sed 's/^subject=//')" ]; then
     A_CERT=acme; else A_CERT=self-signed; fi
   CERTMODE=${CERTMODE:-$A_CERT}
-  # the units that ran it: the service whose ExecStart reads its ap.toml, the timers whose service touches the folder
+  # the units that ran it: the service whose ExecStart reads its ap.toml, the timer that renews its certificate
   for u in /etc/systemd/system/*.service; do
     [ -f "$u" ] || continue
     if grep -q "^ExecStart=.* -c $ADOPT/ap.toml" "$u"; then ADOPT_UNIT=$(basename "$u"); fi
@@ -203,9 +210,9 @@ if [ -n "$ADOPT" ]; then
     case $(basename "$t") in yggdrasil-trunk-*) continue ;; esac   # ours (this script names the folder in its help)
     sv=/etc/systemd/system/$(basename "$t" .timer).service; [ -f "$sv" ] || continue
     ex=$(sed -n 's/^ExecStart=//p' "$sv" | awk '{print $1}')
-    if grep -qs -- "$ADOPT" "$sv" "$ex"; then
+    if grep -qs -- "$ADOPT" "$sv" "$ex" && grep -qs certbot "$sv" "$ex"; then   # its certificate renewal (nothing else)
       ADOPT_TIMERS="$ADOPT_TIMERS $(basename "$t")"
-      if [ -z "$WEBROOT" ]; then WEBROOT=$(grep -hos -- '--webroot -w [^ ]*' "$sv" "$ex" | head -1 | awk '{print $3}'); fi
+      if [ -z "$WEBROOT" ]; then WEBROOT=$(grep -hos -- '--webroot -w [^ ]*' "$sv" "$ex" | head -1 | awk '{print $3}' || true); fi
     fi
   done
   # what this run takes over (written once: a re-run of --adopt finds them in place)

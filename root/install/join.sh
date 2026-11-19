@@ -114,6 +114,8 @@ if [ -z "$PY" ] || ! "$PY" -c 'import ssl, json, urllib.request, zlib, fcntl' 2>
   die "python3 (with ssl) is needed — $(pkg_hint python3 ca-certificates)"
 fi
 ARCH=$(uname -m); case $ARCH in amd64) ARCH=x86_64 ;; arm64) ARCH=aarch64 ;; esac
+# a shell under Rosetta on an Apple-silicon Mac says x86_64: the machine itself is arm64
+[ $OS = macos ] && [ "$(sysctl -n hw.optional.arm64 2>/dev/null)" = 1 ] && ARCH=aarch64
 case $OS/$ARCH in   # the release archive for this machine ('' = none: build from a checkout)
   linux/x86_64|wsl/x86_64) PLAT=linux-x86_64 ;;
   macos/aarch64) PLAT=macos-aarch64 ;;
@@ -186,7 +188,8 @@ bootstrap() { # WHY — the signed release (--version, else max(this script's, t
     release_sums "$base"
     [ -n "$want" ] || want=$(sed -n "s/^[0-9a-f]\{64\}  yggdrasil-\([0-9][0-9A-Za-z.+-]*\)-$PLAT\.tar\.gz\$/\1/p" "$REL_DIR/SHA256SUMS" | head -1)
     tgz=yggdrasil-$want-$PLAT.tar.gz
-    [ -n "$want" ] && [ -n "$(sum_of "$tgz")" ] || die "the release${want:+ v$want} has no $tgz (signed SHA256SUMS)"
+    [ -n "$want" ] && [ -n "$(sum_of "$tgz")" ] || die "the release${want:+ v$want} has no build for $OS $ARCH ($tgz) —
+    from a git checkout, with Rust and a C compiler: bash root/install/join.sh --build …"
     # this very script, when it belongs to that release: the one the release signed, or stop here
     if [ -n "$YGG_RELEASE" ] && [ "$want" = "$YGG_RELEASE" ] && [ -f "$0" ] && [ -n "$(sum_of join.sh)" ] &&
        [ "$(sha256 <"$0")" != "$(sum_of join.sh)" ]; then
