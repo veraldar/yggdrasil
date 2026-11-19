@@ -143,21 +143,18 @@ export default function SettingsPage() {
         </div>
       </section>
 
+      {/* the simple menu (owner feedback): three rows, nothing else —
+          agents opens the types; walk-through re-walks in the test room;
+          voice tests toggle their own room */}
       <section className="oz-blk">
-        <h2>agents</h2>
-        <div>
-          <Link href="/agents" data-testid="agents-link" className="oz-pick">
-            <span>agent types</span>
-            <span>›</span>
-          </Link>
-        </div>
-      </section>
-
-      {/* the three ways, walked again — the door's first-turn card, one turn
-          each; in the test room, so practice never writes into MAIN */}
-      <section className="oz-blk">
-        <h2>the three ways</h2>
         <ul className="oz-kv">
+          <li>
+            <span>agents</span>
+            <span />
+            <Link href="/agents" data-testid="agents-link" className="oz-k sm">
+              ›
+            </Link>
+          </li>
           <li>
             <span>walk-through</span>
             <span />
@@ -171,16 +168,8 @@ export default function SettingsPage() {
               walk it
             </button>
           </li>
-        </ul>
-        {walkErr && <p className="note text-[var(--oz-danger)]">{walkErr}</p>}
-      </section>
-
-      {/* testing the voice must never write into MAIN */}
-      <section className="oz-blk">
-        <h2>voice tests</h2>
-        <ul className="oz-kv">
           <li>
-            <span>test room</span>
+            <span>voice tests</span>
             <span data-testid="voice-test-state">
               {vt && <Link href={`/session/${VOICE_TEST_SLUG}`}>{VOICE_TEST_SLUG} ›</Link>}
             </span>
@@ -198,6 +187,7 @@ export default function SettingsPage() {
             </button>
           </li>
         </ul>
+        {walkErr && <p className="note text-[var(--oz-danger)]">{walkErr}</p>}
         {vtErr && <p className="note text-[var(--oz-danger)]">{vtErr}</p>}
       </section>
     </main>
