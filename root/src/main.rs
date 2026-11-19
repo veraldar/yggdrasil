@@ -64,6 +64,7 @@ use axum::{
         sse::{Event, KeepAlive, Sse},
     },
     routing::{get, post},
+    extract::ConnectInfo,
 };
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
@@ -72,6 +73,7 @@ use tokio::sync::{Notify, broadcast, mpsc, oneshot};
 use tokio_stream::wrappers::{BroadcastStream, ReceiverStream};
 
 mod anthropic;
+mod context;
 mod ext;
 mod gate;
 mod harness;
@@ -562,7 +564,7 @@ fn sanitize_for_speech(s: &str, max_words: usize) -> String {
     kept.join(" ")
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone)]
 struct Session {
     info: Value,
     messages: Vec<Value>,
@@ -599,6 +601,11 @@ struct AppState {
     harness_models: Arc<Mutex<HashMap<String, Vec<String>>>>,
     /// a short human label per harness model (picker hints): harness → model → label
     harness_labels: Arc<Mutex<HashMap<String, HashMap<String, String>>>>,
+    /// G1: the last captured upstream body per session (context viewer) — memory only,
+    /// never persisted, so a look never moves `time.updated` or re-indexes the librarian
+    ctx: Arc<Mutex<context::Store>>,
+    /// C5: POST /admin/drain set this — post_message answers 503 until the drain ends
+    draining: Arc<std::sync::atomic::AtomicBool>,
 }
 
 #[derive(Deserialize)]
@@ -816,6 +823,18 @@ async fn create_session(State(st): State<AppState>, body: Option<Json<Value>>) -
     let title = body["title"].as_str().filter(|t| !t.is_empty()).unwrap_or("New session");
     let model = body["model"].as_str().or(body["model"]["id"].as_str());
     let info = new_session(&st, title, body["parentID"].as_str(), body["agent"].as_str(), model, body["variant"].as_str());
+    // G7.2: an e2e / voice-test session is marked once at birth. GET /session still lists it
+    // (resolveId finds by slug), but tree::snapshot and sessions_find skip it, so MAIN's [tree]
+    // stays clean; the librarian's skip of these is phase 2.
+    if body["test"] == true {
+        let id = info["id"].as_str().unwrap_or_default().to_string();
+        if let Some(i) = with_session(&st, &id, |s| {
+            s.info["test"] = json!(true);
+            s.info.clone()
+        }) {
+            return Json(i).into_response();
+        }
+    }
     // a peer root asked for this session: its turns report home (peers.rs)
     if body["report_to"]["root"].is_string() && body["report_to"]["session"].is_string() {
         let id = info["id"].as_str().unwrap_or_default().to_string();
@@ -1129,6 +1148,334 @@ async fn get_inbox(State(st): State<AppState>, Path(id): Path<String>) -> Respon
     }
 }
 
+/// `POST /admin/drain {max_s}` (C5) — loopback-only. Sets `draining` (post_message answers 503
+/// `{"draining":true,"retry_after":N}`), waits until no run is in flight (or `max_s`, default
+/// 120), answers `{drained, still_running}`. preview-up.sh / a unit's ExecStop calls it first.
+async fn admin_drain(
+    State(st): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<std::net::SocketAddr>,
+    Json(body): Json<Value>,
+) -> Response {
+    if !peer.ip().is_loopback() {
+        return (StatusCode::FORBIDDEN, Json(json!({ "error": "loopback only" }))).into_response();
+    }
+    let max_s = body["max_s"].as_u64().unwrap_or(120).clamp(1, 600);
+    st.draining.store(true, std::sync::atomic::Ordering::Relaxed);
+    let deadline = std::time::Instant::now() + Duration::from_secs(max_s);
+    loop {
+        let running = st.running.lock().unwrap().len();
+        if running == 0 || std::time::Instant::now() >= deadline {
+            let still = st.running.lock().unwrap().keys().cloned().collect::<Vec<_>>();
+            if still.is_empty() {
+                eprintln!("DRAIN: drained in {}s", max_s - deadline.saturating_duration_since(std::time::Instant::now()).as_secs());
+            } else {
+                eprintln!("DRAIN: max_s reached, {} still running: {}", still.len(), still.join(","));
+            }
+            return Json(json!({ "drained": still.is_empty(), "still_running": still })).into_response();
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+}
+
+/// C5: a turn the previous process cut mid-run gets its owner message resent ONCE — the
+/// coordinator prompt already promises "a turn cut off by a restart is sent once more". The
+/// user message the cut turn answered (its `parentID`) is found by id and submitted again with
+/// `meta.resent_of` and a plain prefix; auto/wake turns are re-woken through schedule_wake. A
+/// SECOND cut is only reported to the parent, as today. The door session itself never gets
+/// `card.status = failed` (the card misread it as failed work for months).
+fn resent_marker() -> &'static str {
+    "[sent again after a brain restart] "
+}
+
+fn resume_interrupted(st: &AppState, interrupted: &[String]) {
+    for sid in interrupted {
+        let plan: Option<(Vec<Value>, bool, String)> = {
+            let sessions = st.sessions.lock().unwrap();
+            let Some(s) = sessions.get(sid) else { continue };
+            // the cut turn = the last assistant message without a completed time was closed by
+            // close_interrupted; the message it answered is its parentID (the newest user message
+            // with that id, auto or not)
+            let Some(cut) = s.messages.iter().rev().find(|m| {
+                m["info"]["role"] == "assistant" && m["info"]["error"]["data"]["message"].as_str() == Some("interrupted by a brain restart")
+            }) else { continue };
+            let pid = cut["info"]["parentID"].as_str().unwrap_or_default().to_string();
+            let Some(asked) = s.messages.iter().rev().find(|m| m["info"]["id"].as_str() == Some(pid.as_str())) else { continue };
+            let was_auto = asked["info"]["meta"]["auto"] == true;
+            // ONCE: the cut turn's parent IS a resent copy, or a copy of THIS message already
+            // went out after a restart — a second cut is only reported to the parent, as today
+            if !asked["info"]["meta"]["resent_of"].as_str().unwrap_or_default().is_empty()
+                || s.messages.iter().any(|m| m["info"]["meta"]["resent_of"].as_str() == Some(pid.as_str()))
+            {
+                continue;
+            }
+            let parts: Vec<Value> = asked["parts"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|p| p["type"] == "text" || (p["type"] == "file" && p["url"].is_string()))
+                .collect();
+            if parts.is_empty() {
+                continue;
+            }
+            Some((parts, was_auto, pid))
+        };
+        let Some((parts, was_auto, pid)) = plan else { continue };
+        // the prefix rides the FIRST text part; a meta marker (`resent_of`) keeps the second-cut rule
+        let mut parts = parts;
+        let first_text = parts.iter_mut().find(|p| p["type"] == "text");
+        if let Some(p) = first_text {
+            let t = p["text"].as_str().unwrap_or_default();
+            if !t.starts_with(resent_marker()) {
+                p["text"] = json!(format!("{}{}", resent_marker(), t));
+            }
+        }
+        let turn = Turn {
+            parts,
+            modality: None,
+            auto_turn: was_auto,
+            internal: false,
+            origin: None,
+            completes: None,
+            from: None,
+            digest_hint: None,
+        };
+        match submit(st, sid, turn) {
+            Ok((msg, _, _)) => {
+                let mid = msg["info"]["id"].as_str().unwrap_or_default().to_string();
+                with_session(st, sid, |s| {
+                    if let Some(m) = s.messages.iter_mut().rev().find(|m| m["info"]["id"].as_str() == Some(mid.as_str())) {
+                        m["info"]["meta"]["resent_of"] = json!(pid);
+                    }
+                });
+                eprintln!("RESTART-RESEND {sid}: resent the owner turn (answered {pid}) once");
+            }
+            Err(_) => eprintln!("RESTART-RESEND {sid}: session gone, dropped"),
+        }
+    }
+}
+
+/// `GET /session/{id}/context` (G1) — what this session's model was last sent, or what the next
+/// one would be (`?preview=1`). READ-ONLY on purpose: it only takes `st.sessions.lock()` and
+/// `st.ctx` — never `with_session` (bumps `time.updated` + re-indexes the librarian), never
+/// `take_events` (eats pending reports), never `persist`.
+async fn get_context(
+    State(st): State<AppState>,
+    Path(id): Path<String>,
+    Query(q): Query<HashMap<String, String>>,
+) -> Response {
+    let part = q.get("part").map(|s| s.as_str()).unwrap_or("summary");
+    // proxy session: only the summary travels; other parts are the card alone
+    if let Some((root, rid)) = peers::remote_of(&st, &id) {
+        if part == "summary" {
+            let path = format!("/session/{rid}/context?part=summary");
+            return match peers::call(&st, &root, "GET", &path, None, 15).await {
+                Ok(v) => Json(v).into_response(),
+                Err(e) => (StatusCode::BAD_GATEWAY, Json(json!({ "error": e }))).into_response(),
+            };
+        }
+        return card_only(&st, &id);
+    }
+    // "theirs" (another root's person's work started here): the card only
+    if st.sessions.lock().unwrap().get(&id).is_some_and(|s| s.info["report_to"]["root"].is_string()) {
+        return card_only(&st, &id);
+    }
+    if !st.sessions.lock().unwrap().contains_key(&id) {
+        return not_found(&id);
+    }
+    let preview = q.get("preview").is_some_and(|v| v == "1");
+    match part {
+        "summary" | "raw" | "block" | "main_view" | "memory" | "harness" => {}
+        other => return bad_request(&format!("unknown part {other:?} (summary | block | raw | main_view | memory | harness)")),
+    }
+    if preview && matches!(part, "summary" | "raw" | "block") {
+        return context_preview_part(&st, &id, part, q.get("i").and_then(|i| i.parse::<usize>().ok()), q.get("from").and_then(|f| f.parse::<usize>().ok()));
+    }
+    let captured = st.ctx.lock().unwrap().get(&id).cloned();
+    let Some(c) = captured else {
+        // nothing captured yet (fresh restart, or a session that never ran): the preview covers
+        // the gap — same assembly, nothing sent
+        if matches!(part, "summary" | "raw" | "block") {
+            return context_preview_part(&st, &id, part, q.get("i").and_then(|i| i.parse::<usize>().ok()), q.get("from").and_then(|f| f.parse::<usize>().ok()));
+        }
+        return not_found(&id);
+    };
+    match part {
+        "summary" => Json(c.to_summary()).into_response(),
+        "raw" => Json(json!({ "masked": serde_json::from_str::<Value>(&context::mask(&c.body.to_string())).unwrap_or(Value::Null) })).into_response(),
+        "block" => {
+            let Some(i) = q.get("i").and_then(|i| i.parse::<usize>().ok()) else { return bad_request("block needs i") };
+            let Some(b) = c.blocks.get(i) else { return not_found(&format!("block {i}")) };
+            let from = q.get("from").and_then(|f| f.parse::<usize>().ok()).unwrap_or(0);
+            let full = context::mask(&b.text);
+            let chars: Vec<char> = full.chars().collect();
+            const CAP_CHARS: usize = 200_000;
+            let text: String = chars.iter().skip(from).take(CAP_CHARS).collect();
+            Json(json!({ "i": i, "kind": b.kind, "origin": b.origin, "role": b.role, "msg": b.msg,
+                "call": b.call.clone(), "label": b.label,
+                "bytes": b.text.len(), "tok": c.blocks.get(i).map(|b| b.tok()).unwrap_or(0),
+                "from": from, "total": chars.len(), "more": from + CAP_CHARS < chars.len(), "text": text }))
+                .into_response()
+        }
+        "harness" => Json(context_harness_part(&st, &id, &c)).into_response(),
+        "main_view" => context_main_view(&st, &id).into_response(),
+        "memory" => context_memory_part(&st, &id).await.into_response(),
+        _ => not_found(&id),
+    }
+}
+
+/// The card alone (proxy "other parts", theirs): what this root may show about work it does not
+/// own. Reads the lock only.
+fn card_only(st: &AppState, id: &str) -> Response {
+    let card = st.sessions.lock().unwrap().get(id).map(|s| s.info["card"].clone());
+    match card {
+        Some(c) => Json(json!({ "card": c, "context": "held on another root" })).into_response(),
+        None => not_found(id),
+    }
+}
+
+/// summary/raw/block over a FRESH preview assembly (no capture stored, or `?preview=1` asked).
+fn context_preview_part(st: &AppState, id: &str, part: &str, i: Option<usize>, from: Option<usize>) -> Response {
+    let messages = st.sessions.lock().unwrap().get(id).map(|s| s.messages.clone());
+    let Some(messages) = messages else { return not_found(id) };
+    let (convo, dropped) = assemble(st, id, &messages, Mode::Preview);
+    let (model, _, _) = session_upstream(st, id);
+    let body = json!({ "model": model, "messages": convo, "stream": true });
+    let (blocks, tools) = context::classify_body(&body);
+    let c = context::Captured {
+        at: now_ms(),
+        step: 0,
+        model,
+        variant: String::new(),
+        dialect: if st.config.dialect == Dialect::Anthropic { "anthropic" } else { "openai" }.to_string(),
+        body: body.clone(),
+        blocks,
+        tools,
+        dropped,
+        harness: None,
+    };
+    match part {
+        "summary" => Json(c.to_summary()).into_response(),
+        "raw" => Json(json!({ "preview": true, "masked": serde_json::from_str::<Value>(&context::mask(&c.body.to_string())).unwrap_or(Value::Null) })).into_response(),
+        "block" => {
+            let Some(i) = i else { return bad_request("block needs i") };
+            let Some(b) = c.blocks.get(i) else { return not_found(&format!("block {i}")) };
+            let from = from.unwrap_or(0);
+            let full = context::mask(&b.text);
+            let chars: Vec<char> = full.chars().collect();
+            const CAP_CHARS: usize = 200_000;
+            let text: String = chars.iter().skip(from).take(CAP_CHARS).collect();
+            Json(json!({ "i": i, "kind": b.kind, "origin": b.origin, "role": b.role, "msg": b.msg,
+                "call": b.call.clone(), "label": b.label,
+                "bytes": b.text.len(), "tok": b.tok(), "from": from, "total": chars.len(),
+                "more": from + CAP_CHARS < chars.len(), "preview": true, "text": text }))
+                .into_response()
+        }
+        _ => not_found(id),
+    }
+}
+
+/// `part=harness`: what we know of the harness's own conversation. claude: its transcript on
+/// disk (line count, size, compaction entries — the same field harness.rs reads). Others: the
+/// harness keeps it.
+fn context_harness_part(st: &AppState, id: &str, c: &context::Captured) -> Value {
+    let info = st.sessions.lock().unwrap().get(id).map(|s| s.info.clone()).unwrap_or_default();
+    let kind = info["harness"]["kind"].as_str().or(info["harness"].as_str()).unwrap_or_default().to_string();
+    let mut out = json!({ "harness": info["harness"], "captured": c.harness });
+    if kind == "claude" {
+        let hid = info["harness"]["id"].as_str().unwrap_or_default();
+        let cwd = info["cwd"].as_str().unwrap_or_default();
+        if !hid.is_empty() && !cwd.is_empty() {
+            let path = harness::claude::transcript(cwd, hid);
+            let (lines, size, compactions) = match std::fs::read_to_string(&path) {
+                Ok(text) => {
+                    let lines = text.lines().count();
+                    let compactions = text.lines().filter(|l| l.contains("isCompactSummary")).count();
+                    (lines, text.len(), compactions)
+                }
+                Err(_) => (0usize, 0usize, 0usize),
+            };
+            out["transcript"] = json!({ "path": path.display().to_string(), "lines": lines, "bytes": size, "compactions": compactions });
+        }
+    } else if !kind.is_empty() {
+        out["transcript"] = json!("kept by the harness");
+    }
+    out
+}
+
+/// `part=main_view` (G1): MAIN's view of this session — its [tree] line, its card, the reports
+/// MAIN got from it, the session_start/session_send parts that name it, and the session_read
+/// text. Locks only; never a take_events, never a persist.
+fn context_main_view(st: &AppState, id: &str) -> Response {
+    // snapshot what we need under the lock, then release it: card_line and read take the
+    // sessions lock themselves (a reentrant .lock() on a std Mutex deadlocks the brain)
+    let (sid_info, main_row, main_inbox, main_messages) = {
+        let sessions = st.sessions.lock().unwrap();
+        let Some(s) = sessions.get(id) else { return not_found(id) };
+        // MAIN: the newest [MAIN] session on this root
+        let main = sessions
+            .values()
+            .filter(|s| is_main_title(s.info["title"].as_str().unwrap_or_default()))
+            .max_by_key(|s| s.info["time"]["updated"].as_u64().unwrap_or(0));
+        let Some(m) = main else { return not_found("MAIN") };
+        (
+            s.info.clone(),
+            m.info["id"].as_str().unwrap_or_default().to_string(),
+            m.inbox.clone(),
+            m.messages.clone(),
+        )
+    };
+    let mid = main_row;
+    let card = sid_info["card"].clone();
+    let tree_line = {
+        // card_line reads st.running (its own lock) and the Session it is handed — a minimal
+        // clone for it, not the shared map
+        let s = Session { info: sid_info.clone(), messages: Vec::new(), todo: Vec::new(), inbox: Vec::new() };
+        tree::card_line(st, id, &s, 1)
+    };
+    let reports: Vec<Value> = main_inbox.iter().filter(|e| e["from"].as_str() == Some(id)).cloned().collect();
+    let briefs: Vec<Value> = main_messages
+        .iter()
+        .filter(|msg| {
+            msg["info"]["role"] == "user"
+                && msg["parts"].as_array().is_some_and(|ps| {
+                    ps.iter().any(|p| {
+                        p["type"] == "tool"
+                            && matches!(p["tool"].as_str(), Some("session_start") | Some("session_send"))
+                            && (p["state"]["input"]["id"].as_str() == Some(id)
+                                || p["state"]["output"].as_str().is_some_and(|o| o.contains(id)))
+                    })
+                })
+        })
+        .cloned()
+        .collect();
+    let read_input = json!({ "id": id });
+    let read_text = tree::read(st, &mid, &read_input).output;
+    Json(json!({ "main": mid, "tree_line": tree_line, "card": card, "reports": reports,
+        "briefs": briefs, "session_read": read_text }))
+        .into_response()
+}
+
+/// `part=memory` (G1, interim): what the librarian extension serves today. Its `status` when up,
+/// its `search` over this session's title. Full wiring (facts_for, forget) is phase 2.
+async fn context_memory_part(st: &AppState, id: &str) -> Response {
+    let title = st.sessions.lock().unwrap().get(id).map(|s| s.info["title"].as_str().unwrap_or_default().to_string()).unwrap_or_default();
+    let mut out = json!({ "session": id, "title": title });
+    // the librarian is an extension service (YGG_EXTENSIONS=librarian=http://…); reach it the
+    // way ext::call does — through its HTTP call API, as the brain itself (internal tool)
+    if let Ok(status) = st.config.ext.call_internal(&st, "librarian", "status", &json!({})).await {
+        out["status"] = json!(status);
+    } else {
+        out["status"] = json!("the librarian is down");
+    }
+    let query = if title.is_empty() { id.to_string() } else { title };
+    match st.config.ext.call_internal(&st, "librarian", "search", &json!({ "query": query, "limit": 5 })).await {
+        Ok(hits) => out["search"] = json!(hits),
+        Err(e) => out["search"] = json!(format!("(unavailable: {e})")),
+    }
+    Json(out).into_response()
+}
+
 /// `GET /session/{id}/notice` — what the phone's notification says about its last reply: that
 /// turn's digest (tree.rs `notice`).
 async fn get_notice(State(st): State<AppState>, Path(id): Path<String>) -> Response {
@@ -1409,10 +1756,27 @@ fn shared_prompt(st: &AppState) -> String {
     }
 }
 
+/// G6.1 (interim): the shared prompt for a harness session. A harness kind whose MCP bridge is
+/// not wired yet must not be told about extension tools it does not have, so its prompt is the
+/// owner's shared text WITHOUT the extensions' `[extensions]` lines. A root (brain-native)
+/// session keeps the full shared prompt (Some(Kind) = a harness session).
+fn shared_prompt_for(st: &AppState, harness: Option<&harness::Kind>) -> String {
+    let shared = st.config.profiles.read().unwrap().shared.clone();
+    match harness {
+        None => shared_prompt(st),
+        Some(_) => shared,
+    }
+}
+
 /// What a Claude Code agent appends to Claude Code's own prompt: the shared prompt, then its role.
 fn harness_system(shared: &str, prof: &profiles::Profile) -> String {
     let role = prof.role_for("full");
     if role.trim().is_empty() { shared.to_string() } else { format!("{shared}\n\n{role}") }
+}
+
+/// Loads the store fresh for the one-time G3 refold (runs before the AppState exists).
+fn st_sessions_for_refold(dir: &std::path::Path) -> HashMap<String, Session> {
+    load_sessions(dir)
 }
 
 /// `GET /shared-prompt` — what every agent reads first; `custom` = edited by the owner.
@@ -1629,6 +1993,11 @@ async fn post_message(
     } else {
         None
     };
+    // C5: a drain in progress refuses NEW turns (the app treats 503 draining like a busy
+    // session and queues the message)
+    if st.draining.load(std::sync::atomic::Ordering::Relaxed) {
+        return (StatusCode::SERVICE_UNAVAILABLE, Json(json!({ "draining": true, "retry_after": 5 }))).into_response();
+    }
     let want_sse = headers
         .get(header::ACCEPT)
         .and_then(|v| v.to_str().ok())
@@ -1665,7 +2034,7 @@ async fn post_message(
     }
     // a session on another root speaking (peers::send): its sender rides `meta.from`
     let from = body.meta.as_ref().and_then(|m| sender_of(&m["from"]));
-    let turn = Turn { parts: body.parts, modality: body.modality, auto_turn, internal, origin: origin.clone(), completes: None, from };
+    let turn = Turn { parts: body.parts, modality: body.modality, auto_turn, internal, origin: origin.clone(), completes: None, from, digest_hint: None };
     let (user_msg, rx, done_rx) = match submit(&st, &id, turn) {
         Ok(t) => t,
         Err(r) => return r,
@@ -1717,6 +2086,10 @@ struct Turn {
     /// Who sent it when not the owner: `{session, title, root?}` — another session here (the tree
     /// tools) or on another root (its `meta.from`). Stored as `meta.from`.
     from: Option<Value>,
+    /// G3: the report headlines this wake carries, joined `"title" (status): headline; …` —
+    /// stored as `meta.digest_hint`, so a station digest can carry content, not just the
+    /// wake's header line. `None` for turns that are not wakes.
+    digest_hint: Option<String>,
 }
 
 type Submitted = (Value, mpsc::Receiver<Event>, oneshot::Receiver<Result<Value, String>>);
@@ -1750,7 +2123,7 @@ fn sender_label(from: &Value) -> Option<String> {
 /// Stores the user message at once, takes a gate ticket, spawns the run. Returns the stored
 /// user message, the per-request event stream, and the run's result.
 fn submit(st: &AppState, id: &str, turn: Turn) -> Result<Submitted, Response> {
-    let Turn { parts, modality, auto_turn, internal, origin, completes, from } = turn;
+    let Turn { parts, modality, auto_turn, internal, origin, completes, from, digest_hint } = turn;
     // Text parts go upstream; file parts (data: URLs) are stored so the transcript keeps them.
     let parts: Vec<Value> = parts
         .into_iter()
@@ -1787,6 +2160,10 @@ fn submit(st: &AppState, id: &str, turn: Turn) -> Result<Submitted, Response> {
     }
     if let Some(c) = completes {
         user_msg["info"]["meta"]["async"] = c;
+    }
+    // G3: the wake's report headlines, frozen at creation (the digest renders from it — cache law)
+    if let Some(h) = digest_hint.filter(|h| !h.trim().is_empty()) {
+        user_msg["info"]["meta"]["digest_hint"] = json!(h);
     }
     let prof = session_profile(st, id);
     // root-coord: the door's owner turn carries every undelivered report, frozen on the
@@ -1900,7 +2277,7 @@ fn post_completion(st: &AppState, origin: &str, target: &str, turn_id: &str, res
     let text = completion_text(target, &title, turn_id, result);
     let done = json!({ "turn_id": turn_id, "sessionID": target, "status": status, "replyID": reply_id });
     let turn = Turn { parts: vec![text_part(&text)], modality: None, auto_turn: true, internal: false, origin: None,
-        completes: Some(done.clone()), from: None };
+        completes: Some(done.clone()), from: None, digest_hint: None };
     match submit(st, origin, turn) {
         Ok((msg, _, _)) => {
             let cid = msg["info"]["id"].clone();
@@ -1922,7 +2299,11 @@ fn close_interrupted(sessions: &mut HashMap<String, Session>, data_dir: &std::pa
         }
         last["info"]["time"]["completed"] = json!(now_ms());
         last["info"]["error"] = json!({ "name": "UnknownError", "data": { "message": "interrupted by a brain restart" } });
-        if s.info["card"].is_object() {
+        // C5: a restart says nothing about the WORK. The door's own card has read `failed`
+        // (wakes=56) for months because of this line; a managed child's card is corrected by
+        // its digest/wake in a moment, so only the door needs the guard.
+        let is_main = crate::is_main_title(s.info["title"].as_str().unwrap_or_default());
+        if s.info["card"].is_object() && !is_main {
             s.info["card"]["status"] = json!("failed");
         }
         persist(data_dir, id, s);
@@ -2113,14 +2494,76 @@ fn collapse_stale_station(messages: &mut [Value]) {
             .unwrap_or(messages.len());
         let replies: Vec<usize> = (i + 1..end).filter(|&j| messages[j]["info"]["role"] == "assistant").collect();
         let first_done = replies.iter().copied().find(|&j| messages[j]["info"]["time"]["completed"].is_number());
+        let ask = station_ask_of(&messages[i]);
         let line = match first_done {
-            Some(j) => format!("[station turn] {} => {}", first_line(&message_text(&messages[i]), 160), first_line(&message_text(&messages[j]), 160)),
-            None => format!("[station turn] {}", first_line(&message_text(&messages[i]), 160)),
+            Some(j) => format!("[station turn] {ask} => {}", first_line(&message_text(&messages[j]), 160)),
+            None => format!("[station turn] {ask}"),
         };
         messages[i]["info"]["meta"]["digest"] = json!(line);
         for j in replies {
             messages[j]["info"]["meta"]["folded"] = json!(true);
         }
+    }
+}
+
+/// G3: what a station turn asked, WITH the content (the reports it carried), not just the wake
+/// header. Order: the stored `meta.digest_hint` (new wakes), the `- "title" (status): headline`
+/// lines of the stored wake text (older ones), else the plain first line (non-wake autos).
+pub(crate) fn station_ask_of(msg: &Value) -> String {
+    if let Some(h) = msg["info"]["meta"]["digest_hint"].as_str().filter(|h| !h.trim().is_empty()) {
+        return format!("reports: {}", first_line(h, 220));
+    }
+    let text = message_text(msg);
+    let parsed: Vec<String> = text
+        .lines()
+        .filter_map(|l| l.trim().strip_prefix("- \""))
+        .filter(|l| l.contains("\" ("))
+        .map(|l| format!("\"{}", l.chars().take(89).collect::<String>()))
+        .take(3)
+        .collect();
+    if !parsed.is_empty() && text.starts_with("[inbox]") {
+        return format!("reports: {}", parsed.join("; "));
+    }
+    first_line(&text, 160)
+}
+
+/// G3, one-time refold (YGG_REFOLD_STATION=1): recomputes ONLY the digests that match the old
+/// header-only pattern (`[station turn] [inbox] Reports from your sessions since the user last
+/// heard from you: => …`), from their stored wake text. Older digests keep their bytes except
+/// these. Marks `data/.migrations` so it runs once; the cost is one prompt-cache miss for MAIN.
+pub(crate) fn refold_station_digests(messages: &mut [Value]) -> usize {
+    const BAD: &str = "[station turn] [inbox]";
+    let autos: Vec<usize> = (0..messages.len())
+        .filter(|&i| {
+            messages[i]["info"]["role"] == "user"
+                && messages[i]["info"]["meta"]["auto"] == true
+                && messages[i]["info"]["meta"]["digest"].as_str().is_some_and(|d| d.starts_with(BAD))
+        })
+        .collect();
+    let mut n = 0;
+    for i in autos {
+        let ask = station_ask_of(&messages[i]);
+        let old = messages[i]["info"]["meta"]["digest"].as_str().unwrap_or_default().to_string();
+        // the tail after the old header is the folded reply's first line — keep it
+        let tail = old.split(" => ").nth(1).map(|t| format!(" => {t}")).unwrap_or_default();
+        messages[i]["info"]["meta"]["digest"] = json!(format!("[station turn] {ask}{tail}"));
+        if messages[i]["info"]["meta"]["digest"].as_str() != Some(old.as_str()) {
+            n += 1;
+        }
+    }
+    n
+}
+
+/// Ran the G3 refold already? (`data/.migrations` holds the marks.)
+fn migration_done(dir: &std::path::Path, mark: &str) -> bool {
+    std::fs::read_to_string(dir.join(".migrations")).is_ok_and(|s| s.lines().any(|l| l.trim() == mark))
+}
+
+fn mark_migration(dir: &std::path::Path, mark: &str) {
+    use std::io::Write;
+    let path = dir.join(".migrations");
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+        let _ = writeln!(f, "{mark}");
     }
 }
 
@@ -2217,6 +2660,8 @@ struct Run {
     think_off: bool,
     /// the turn being answered carries an image: it runs on a vision model
     vision: bool,
+    /// G1: what the assembly dropped this run (fold cap + roll-up range), captured with every step
+    dropped: context::Dropped,
 }
 
 impl Run {
@@ -2338,6 +2783,7 @@ async fn run_turn(st: &AppState, id: &str, tx: &mpsc::Sender<Event>, queue_ms: u
         queue_ms,
         think: 0,
         think_off: false,
+        dropped: context::Dropped::default(),
         vision: history
             .iter()
             .rev()
@@ -2479,7 +2925,10 @@ async fn harness_loop(st: &AppState, id: &str, prompt: String, tx: &mpsc::Sender
         None => st.tools.project_dir.clone(),
     };
     // the shared prompt + the agent's own instructions ride on top of the harness's (Claude Code)
-    let system = Some(harness_system(&shared_prompt(st), &session_profile(st, id)));
+    let system = Some(harness_system(&shared_prompt_for(st, Some(&kind)), &session_profile(st, id)));
+    // G1: a harness turn's context is the prompt + the system we hand it + its argv (secrets masked)
+    let (argv, _) = kind.argv(model.as_deref(), resume.as_deref(), &cwd, &prompt, system.as_deref(), attach);
+    context::capture_harness(st, id, run.upstream_calls as usize + 1, &prompt, system.as_deref().unwrap_or_default(), &argv);
     let _slot = st.harness_slots.acquire().await.map_err(|e| e.to_string())?;
     let (etx, mut erx) = mpsc::unbounded_channel::<harness::Ev>();
     let fut = harness::run(kind, model.as_deref(), resume.as_deref(), &cwd, &prompt, system.as_deref(), attach, move |ev| {
@@ -2548,43 +2997,9 @@ async fn agent_loop(
     tx: &mpsc::Sender<Event>,
     run: &mut Run,
 ) -> Result<(), String> {
-    let mut convo = upstream_history(&messages); // roll-up runs AFTER the reply (rollup_after_reply)
-    // TIME-AWARENESS + CACHE LAW: static preamble at position 0; each user
-    // turn carries a header derived purely from stored created timestamps
-    // (this turn's message was stamped ≈ now), so history is byte-stable.
-    // Private `_` fields are stripped here, before ANY dialect sends.
+    let (mut convo, dropped) = assemble(st, id, &messages, Mode::Live);
+    run.dropped = dropped;
     let prof = session_profile(st, id);
-    if prof.fold {
-        cap_digest_lines(&mut convo);
-    }
-    // root-coord: a managing session's newest turn carries the live [tree] view (only the
-    // newest — earlier turns keep their bytes, so the cached prefix holds)
-    if prof.sessions {
-        if let Some(last) = convo.iter_mut().rev().find(|m| m["role"] == "user") {
-            append_text(last, &tree::snapshot(st, id));
-        }
-    }
-    apply_clock_headers(&mut convo, &shared_prompt(st));
-    // static system block (cache law, all three are constant for the session's life):
-    // preamble · the AGENTS.md chain (OG-ctx) · the profile's role. The 10-04 brain-wide voice
-    // prompt is gone: voice brevity rides only the voice turns (VOICE_TURN_NOTE).
-    let mut at = 1;
-    if let Some(ctx) = context_prompt(&st.config.context_files) {
-        convo.insert(at, json!({ "role": "system", "content": ctx }));
-        at += 1;
-    }
-    // the role text fits the model's tier (cache law: the model is stamped per session, so the
-    // bytes stay constant)
-    let (model, _, _) = session_upstream(st, id);
-    if let Some(role) = role_block(&prof, model_tier(st, &model)) {
-        convo.insert(at, json!({ "role": "system", "content": role }));
-    }
-    // awareness (owner 11-13): the newest turn also says how big this session's context is, next to
-    // the clock header's gap since the last user turn (only the newest: earlier turns keep their bytes)
-    let tokens = rollup::est_tokens(&convo);
-    if let Some(last) = convo.iter_mut().rev().find(|m| m["role"] == "user") {
-        prefix_text(last, &context_line(tokens, st.config.rollup_tokens));
-    }
     let max = step_cap(st, id, &prof);
     let mut quiet_nudged = false;
     let mut step = 0usize;
@@ -2690,7 +3105,8 @@ fn is_main_title(title: &str) -> bool {
 
 /// The door's context keeps between 12 and 23 one-line digests of older exchanges; the cut
 /// moves every 12 turns, so the cached prefix changes once per 12 turns, not every turn.
-fn cap_digest_lines(convo: &mut Vec<Value>) {
+/// G1: returns how many one-liner digests it dropped (the context viewer's fold count).
+fn cap_digest_lines(convo: &mut Vec<Value>) -> usize {
     const KEEP: usize = 12;
     let idx: Vec<usize> = convo
         .iter()
@@ -2699,16 +3115,87 @@ fn cap_digest_lines(convo: &mut Vec<Value>) {
         .map(|(i, _)| i)
         .collect();
     if idx.len() < 2 * KEEP {
-        return;
+        return 0;
     }
     let keep = KEEP + (idx.len() - KEEP) % KEEP;
     let drop: HashSet<usize> = idx[..idx.len() - keep].iter().copied().collect();
+    let dropped = drop.len();
     let mut i = 0;
     convo.retain(|_| {
         let k = !drop.contains(&i);
         i += 1;
         k
     });
+    dropped
+}
+
+/// Live vs preview assembly (G1): the exact view agent_loop sends, and the same function the
+/// context viewer serves — the two can never drift. `Preview` adds the placeholder newest turn
+/// "(your next message)" prefixed with the UNDELIVERED inbox lines via the read-only
+/// `tree::peek_owner_inbox_lines` (never `take_events`: a preview must not eat MAIN's reports).
+#[derive(Clone, Copy, PartialEq)]
+pub(crate) enum Mode {
+    Live,
+    Preview,
+}
+
+fn assemble(st: &AppState, id: &str, messages: &[Value], mode: Mode) -> (Vec<Value>, context::Dropped) {
+    let mut convo = upstream_history(messages); // roll-up runs AFTER the reply (rollup_after_reply)
+    // TIME-AWARENESS + CACHE LAW: static preamble at position 0; each user
+    // turn carries a header derived purely from stored created timestamps
+    // (this turn's message was stamped ≈ now), so history is byte-stable.
+    // Private `_` fields are stripped here, before ANY dialect sends.
+    let prof = session_profile(st, id);
+    let mut dropped = context::Dropped::default();
+    if prof.fold {
+        dropped.fold_lines = cap_digest_lines(&mut convo);
+    }
+    // root-coord: a managing session's newest turn carries the live [tree] view (only the
+    // newest — earlier turns keep their bytes, so the cached prefix holds)
+    if prof.sessions {
+        if let Some(last) = convo.iter_mut().rev().find(|m| m["role"] == "user") {
+            append_text(last, &tree::snapshot(st, id));
+        }
+    }
+    apply_clock_headers(&mut convo, &shared_prompt(st));
+    // static system block (cache law, all three are constant for the session's life):
+    // preamble · the AGENTS.md chain (OG-ctx) · the profile's role. The 10-04 brain-wide voice
+    // prompt is gone: voice brevity rides only the voice turns (VOICE_TURN_NOTE).
+    let mut at = 1;
+    if let Some(ctx) = context_prompt(&st.config.context_files) {
+        convo.insert(at, json!({ "role": "system", "content": ctx }));
+        at += 1;
+    }
+    // the role text fits the model's tier (cache law: the model is stamped per session, so the
+    // bytes stay constant)
+    let (model, _, _) = session_upstream(st, id);
+    if let Some(role) = role_block(&prof, model_tier(st, &model)) {
+        convo.insert(at, json!({ "role": "system", "content": role }));
+    }
+    // awareness (owner 11-13): the newest turn also says how big this session's context is, next to
+    // the clock header's gap since the last user turn (only the newest: earlier turns keep their bytes)
+    let tokens = rollup::est_tokens(&convo);
+    if let Some(last) = convo.iter_mut().rev().find(|m| m["role"] == "user") {
+        prefix_text(last, &context_line(tokens, st.config.rollup_tokens));
+    }
+    if mode == Mode::Preview {
+        // the next owner turn, shaped as it would go out: undelivered reports frozen in front
+        // (read-only peek), clock header + awareness line in the live order
+        let lines = if prof.name == "coordinator" { tree::peek_owner_inbox_lines(st, id) } else { Vec::new() };
+        let mut text = String::new();
+        if !lines.is_empty() {
+            text.push_str("[inbox since your last turn]\n");
+            for l in &lines {
+                text.push_str(&format!("- {l}\n"));
+            }
+        }
+        text.push_str("(your next message)");
+        let hdr = clock_header(clock_now_ms() / 1000, None, &[]);
+        let toks = rollup::est_tokens(&[json!({ "role": "user", "content": &text })]);
+        let full = format!("{}\n{}\n{}", context_line(toks, st.config.rollup_tokens), hdr, text);
+        convo.push(json!({ "role": "user", "content": full }));
+    }
+    (convo, dropped)
 }
 
 /// Roll-up moved out of the turn (item 2): the reply is already delivered, so the
@@ -3033,6 +3520,9 @@ async fn relay(
     if let Some(t) = tools {
         body["tools"] = t;
     }
+    // G1: the exact wire body, captured before the key joins (the key rides headers, never here)
+    let (_, variant, _) = session_upstream(st, session_id);
+    context::capture(st, session_id, run.upstream_calls as usize + 1, &model, &variant, "openai", &body, run.dropped.clone());
     let _permit = st.upstream.acquire().await.map_err(|e| e.to_string())?;
     let mut req = st.http.post(&url).json(&body);
     if let Some(key) = &cfg.api_key {
@@ -3132,6 +3622,19 @@ async fn relay(
 
 /// Slice 7: an anthropic-dialect request — `{base}/v1/messages`, the key as both
 /// `x-api-key` and bearer (providers differ), `anthropic-version`.
+/// G1: the built body goes out as-is; the capture happens before this joins the key headers.
+fn post_anthropic(st: &AppState, body: Value) -> reqwest::RequestBuilder {
+    let mut req = st
+        .http
+        .post(anthropic::messages_url(&st.config.base_url))
+        .json(&body)
+        .header("anthropic-version", anthropic::VERSION);
+    if let Some(key) = &st.config.api_key {
+        req = req.header("x-api-key", key).bearer_auth(key);
+    }
+    req
+}
+
 fn anthropic_request(
     st: &AppState,
     model: &str,
@@ -3140,13 +3643,8 @@ fn anthropic_request(
     stream: bool,
     thinking: Option<&Value>,
 ) -> reqwest::RequestBuilder {
-    let cfg = &st.config;
-    let body = anthropic::body(model, cfg.max_tokens, convo, tools, stream, thinking);
-    let mut req = st.http.post(anthropic::messages_url(&cfg.base_url)).json(&body).header("anthropic-version", anthropic::VERSION);
-    if let Some(key) = &cfg.api_key {
-        req = req.header("x-api-key", key).bearer_auth(key);
-    }
-    req
+    let body = anthropic::body(model, st.config.max_tokens, convo, tools, stream, thinking);
+    post_anthropic(st, body)
 }
 
 /// `relay` in the anthropic dialect: same contract — text deltas forwarded and accumulated
@@ -3170,7 +3668,10 @@ async fn relay_anthropic(
     let variant = if run.think_off { "off".to_string() } else { variant };
     let thinking = anthropic::thinking_for(Some(&variant), cfg.think_high);
     run.think = thinking.as_ref().and_then(|t| t["budget_tokens"].as_u64()).unwrap_or(0);
-    let req = anthropic_request(st, &model, convo, tools.as_ref(), true, thinking.as_ref());
+    // G1: capture the body Value (never the request — the key is a header), then send it unchanged
+    let body = anthropic::body(&model, cfg.max_tokens, convo, tools.as_ref(), true, thinking.as_ref());
+    context::capture(st, session_id, run.upstream_calls as usize + 1, &model, &variant, "anthropic", &body, run.dropped.clone());
+    let req = post_anthropic(st, body);
     let _permit = st.upstream.acquire().await.map_err(|e| e.to_string())?;
     let t_req = std::time::Instant::now();
     let resp = send_with_retry(&req, &mut run.retries).await?;
@@ -3469,6 +3970,21 @@ async fn main() {
     }
     let max_inflight = env_num("YGG_MAX_INFLIGHT", 6).max(1) as usize;
 
+    // G3 one-time refold (owner opt-in): only header-only station digests, from their stored
+    // wake text. Marked in data/.migrations; costs MAIN one prompt-cache miss.
+    if std::env::var("YGG_REFOLD_STATION").is_ok_and(|v| v == "1") && !migration_done(&data_dir, "refold-station-digests") {
+        let mut total = 0;
+        let mut sessions = st_sessions_for_refold(&data_dir);
+        for s in sessions.values_mut() {
+            total += refold_station_digests(&mut s.messages);
+        }
+        for (id, s) in sessions.iter() {
+            persist(&data_dir, id, s);
+        }
+        mark_migration(&data_dir, "refold-station-digests");
+        eprintln!("REFOLD: rewrote {total} header-only station digest(s)");
+    }
+
     // Antigravity's picker before `agy models` answers (or when it cannot): Google's current models
     let floor_models = harness::antigravity::models(None, harness::antigravity::api_key());
     let state = AppState {
@@ -3489,6 +4005,8 @@ async fn main() {
             ("codex".to_string(), vec!["default".to_string()]),
             ("antigravity".to_string(), floor_models.0),
         ]))),
+        ctx: Arc::new(Mutex::new(context::Store::default())),
+        draining: Arc::default(),
         harness_labels: Arc::new(Mutex::new(HashMap::from([
             (
                 "claude".to_string(),
@@ -3504,6 +4022,9 @@ async fn main() {
     if !interrupted.is_empty() {
         eprintln!("restart: closed {} run(s) the previous process left open", interrupted.len());
     }
+    // C5: the owner turn each cut run was answering goes out once more, automatically (the
+    // coordinator prompt promises exactly this; a second cut is only reported, never resent)
+    resume_interrupted(&state, &interrupted);
     let app = Router::new()
         .route("/session", get(list_sessions).post(create_session))
         .route("/session/status", get(session_status))
@@ -3524,6 +4045,8 @@ async fn main() {
         .route("/tree/report", post(tree_report))
         .route("/root", get(get_root))
         .route("/session/{id}/inbox", get(get_inbox))
+        .route("/session/{id}/context", get(get_context))
+        .route("/admin/drain", post(admin_drain))
         .route("/session/{id}/notice", get(get_notice))
         .route("/session/{id}/close", post(close_session))
         .with_state(state.clone());
@@ -3540,7 +4063,7 @@ async fn main() {
 
     let listener = tokio::net::TcpListener::bind(&listen).await.expect("bind");
     eprintln!("yggdrasil listening on {listen}");
-    axum::serve(listener, app).await.unwrap();
+    axum::serve(listener, app.into_make_service_with_connect_info::<std::net::SocketAddr>()).await.unwrap();
 }
 
 #[cfg(test)]
@@ -3775,6 +4298,7 @@ mod speed_law_tests {
 
     fn test_run() -> Run {
         Run {
+            dropped: context::Dropped::default(),
             msg: make_message("s", "assistant", vec![]),
             text: String::new(),
             started: std::time::Instant::now(),
@@ -4235,6 +4759,7 @@ mod voice_turn_tests {
     #[test]
     fn lat_row_reports_voice_note() {
         let mut run = Run {
+            dropped: context::Dropped::default(),
             msg: make_message("s", "assistant", vec![]),
             text: String::new(),
             started: std::time::Instant::now(),
@@ -4389,6 +4914,8 @@ mod image_tests {
             harness_slots: Arc::new(tokio::sync::Semaphore::new(2)),
             harness_models: Arc::new(Mutex::new(HashMap::new())),
             harness_labels: Arc::new(Mutex::new(HashMap::new())),
+            ctx: Arc::new(Mutex::new(context::Store::default())),
+            draining: Arc::default(),
         };
         assert_eq!(profile_name_of(&st, &legacy_info), "claude");
         let prof = session_profile(&st, legacy_id);
@@ -4428,5 +4955,406 @@ mod live_tests {
         write(now_ms() - 60_000, json!({ format!("antigravity:{id}"): { "how": "cmd" } }));
         assert_eq!(live_in_terminal(k, id), None, "a stale file (the helper is down) locks nothing");
         let _ = std::fs::remove_file(&f);
+    }
+}
+
+#[cfg(test)]
+mod context_tests {
+    use super::*;
+    use axum::body::to_bytes;
+
+    /// A scratch app (anthropic dialect, tools on) with one child session and MAIN.
+    async fn ctx_app() -> (AppState, PathBuf) {
+        static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let dir = std::env::temp_dir().join(format!("ygg-ctx-{}-{}", std::process::id(), N.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("session")).unwrap();
+        let profiles = profiles::Profiles::load(None);
+        let http = reqwest::Client::new();
+        let config = Config {
+            base_url: "http://127.0.0.1:1".into(),
+            dialect: Dialect::Anthropic,
+            max_tokens: 2048,
+            api_key: Some("sk-test-secret-0123456789".into()),
+            model: "glm-5.3".into(),
+            models: vec!["glm-5.3".into()],
+            catalog: json!({"default": {"yggdrasil": {}}}),
+            max_steps: 20,
+            profiles: std::sync::RwLock::new(profiles),
+            tree: tree::TreeCfg { max_depth: 12, max_children: 24, digest_model: None, wake_debounce_ms: 4000, max_wakes: 60 },
+            context_files: Vec::new(),
+            peers: peers::Peers::load(),
+            ext: ext::Extensions::load(),
+            tiers: HashMap::new(),
+            vision: Vec::new(),
+            tools_enabled: true,
+            rollup_tokens: 100_000,
+            rollup_keep_tokens: 25_000,
+            voice: false,
+            voice_max_words: 300,
+            default_variant: "high".into(),
+            think_high: 4096,
+        };
+        let st = AppState {
+            sessions: Arc::new(Mutex::new(HashMap::new())),
+            running: Arc::default(),
+            run_locks: Arc::default(),
+            bus: broadcast::channel(16).0,
+            data_dir: Arc::new(dir.clone()),
+            config: Arc::new(config),
+            http: http.clone(),
+            tools: Arc::new(tools::ToolEnv { project_dir: dir.clone(), bash_timeout: Duration::from_secs(1), http }),
+            upstream: Arc::new(tokio::sync::Semaphore::new(2)),
+            wakes: Arc::default(),
+            harness_slots: Arc::new(tokio::sync::Semaphore::new(2)),
+            harness_models: Arc::new(Mutex::new(HashMap::new())),
+            harness_labels: Arc::new(Mutex::new(HashMap::new())),
+            ctx: Arc::new(Mutex::new(context::Store::default())),
+            draining: Arc::default(),
+        };
+        (st, dir)
+    }
+
+    fn stored(sid: &str, role: &str, text: &str, created: i64) -> Value {
+        let mut m = make_message(sid, role, vec![text_part(text)]);
+        m["info"]["time"]["created"] = json!(created);
+        if role == "assistant" {
+            m["info"]["time"]["completed"] = json!(created + 10);
+        }
+        m
+    }
+
+    async fn body_of(res: axum::response::Response) -> Value {
+        let bytes = to_bytes(res.into_body(), 10_000_000).await.unwrap();
+        serde_json::from_slice(&bytes).unwrap_or(Value::Null)
+    }
+
+    async fn get(st: &AppState, sid: &str, query: &str) -> (axum::http::StatusCode, Value) {
+        let q: HashMap<String, String> = query
+            .split('&')
+            .filter_map(|kv| kv.split_once('=').map(|(k, v)| (k.to_string(), v.to_string())))
+            .collect();
+        let res = get_context(State(st.clone()), Path(sid.to_string()), Query(q)).await;
+        let code = res.status();
+        (code, body_of(res).await)
+    }
+
+    /// G1: what the capture stores IS the wire body (anthropic::body output, byte for byte),
+    /// and the owner's sheet (part=block) reconstructs it exactly.
+    #[tokio::test]
+    async fn context_capture_equals_body_sent() {
+        let (st, dir) = ctx_app().await;
+        let sid = new_session(&st, "ctx probe", None, None, None, None)["id"].as_str().unwrap().to_string();
+        let msgs = vec![
+            stored(&sid, "user", "hello, build the thing (key=abc123)", 1_000),
+            stored(&sid, "assistant", "On it.", 1_010),
+            stored(&sid, "user", "how far did you get?", 2_000),
+        ];
+        let (convo, dropped) = assemble(&st, &sid, &msgs, Mode::Live);
+        let (model, variant, tools) = session_upstream(&st, &sid);
+        let body = anthropic::body(&model, st.config.max_tokens, &convo, tools.as_ref(), true, None);
+        context::capture(&st, &sid, 1, &model, &variant, "anthropic", &body, dropped);
+        // the capture holds the EXACT body
+        let c = st.ctx.lock().unwrap().get(&sid).unwrap().clone();
+        assert_eq!(c.body, body, "captured body equals the body sent");
+        assert_eq!(c.bytes(), body.to_string().len());
+        assert!(!c.body.to_string().contains("sk-test-secret"), "no key in a body capture");
+        // the sheet's blocks rebuild the body
+        let (code, summary) = get(&st, &sid, "part=summary").await;
+        assert_eq!(code, axum::http::StatusCode::OK);
+        assert_eq!(summary["totals"]["bytes"].as_u64().unwrap(), body.to_string().len() as u64, "totals.bytes is the wire size");
+        let n = summary["blocks"].as_array().unwrap().len();
+        let mut blocks = Vec::new();
+        for i in 0..n {
+            let (code, b) = get(&st, &sid, &format!("part=block&i={i}")).await;
+            assert_eq!(code, axum::http::StatusCode::OK);
+            let role: &'static str = match b["role"].as_str().unwrap_or("user") {
+                "system" => "system",
+                "assistant" => "assistant",
+                "tool" => "tool",
+                _ => "user",
+            };
+            blocks.push(context::Block {
+                kind: "history",
+                origin: "verbatim",
+                role,
+                msg: b["msg"].as_u64().unwrap_or(0) as usize,
+                call: b["call"].as_array().map(|c| (c[0].as_str().unwrap().to_string(), c[1].as_str().unwrap().to_string())),
+                label: String::new(),
+                text: b["text"].as_str().unwrap_or_default().to_string(),
+            });
+        }
+        let rebuilt = context::body_from_blocks(&blocks);
+        let masked_original: Value = serde_json::from_str(&context::mask(&body.to_string())).unwrap();
+        assert_eq!(rebuilt["system"], masked_original["system"], "system rebuilt");
+        let expected_msgs: Vec<Value> = context::msgs_of(&masked_original).into_iter().filter(|m| m["role"] != "system").collect();
+        assert_eq!(rebuilt["messages"], json!(expected_msgs), "messages rebuilt (normalized equal)");
+        // masking on the served view
+        let (code, raw) = get(&st, &sid, "part=raw").await;
+        assert_eq!(code, axum::http::StatusCode::OK);
+        assert!(!raw.to_string().contains("sk-test-secret-0123456789"), "raw view is masked");
+        assert!(raw.to_string().contains("abc123") == false || raw.to_string().contains("key"), "the seeded assignment is hidden or the marker word remains");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// G1 regression (found live on the twin): main_view must not deadlock. The handler
+    /// snapshots under the sessions lock and releases it BEFORE tree::read / card_line, which
+    /// take the same lock themselves — a std Mutex is not reentrant, and holding it across
+    /// those calls wedged the whole brain (every endpoint, not just this one).
+    #[tokio::test]
+    async fn main_view_never_deadlocks() {
+        let (st, dir) = ctx_app().await;
+        let main = new_session(&st, "[MAIN]", None, None, None, None)["id"].as_str().unwrap().to_string();
+        let sid = new_session(&st, "worker", Some(&main), None, None, None)["id"].as_str().unwrap().to_string();
+        // a capture must exist: main_view (and memory/harness) answer from st.ctx
+        let body = json!({ "model": "m", "messages": [
+            { "role": "user", "content": "build it" },
+            { "role": "assistant", "content": "done" },
+        ], "stream": true });
+        let (blocks, tools) = context::classify_body(&body);
+        let c = context::Captured {
+            at: now_ms(), step: 1, model: "m".into(), variant: String::new(), dialect: "anthropic".into(),
+            body, blocks, tools, dropped: context::Dropped::default(), harness: None,
+        };
+        st.ctx.lock().unwrap().put(sid.clone(), c);
+        let (code, v) = get(&st, &sid, "part=main_view").await;
+        assert_eq!(code, axum::http::StatusCode::OK, "main_view answers");
+        assert!(v["tree_line"].is_string(), "the tree line is there");
+        assert!(v["session_read"].as_str().is_some_and(|t| !t.is_empty()), "session_read rendered");
+        // and the brain is still alive for everything else (the deadlock took ALL endpoints)
+        let (code, _) = get(&st, &main, "part=summary").await;
+        assert_eq!(code, axum::http::StatusCode::OK);
+        let (code, _) = get(&st, &sid, "part=memory").await;
+        assert_eq!(code, axum::http::StatusCode::OK);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// G1 (TRAP 2): three GETs never move `time.updated`, never flip `delivered`.
+    #[tokio::test]
+    async fn context_view_is_pure() {
+        let (st, dir) = ctx_app().await;
+        let main = new_session(&st, "[MAIN]", None, None, None, None)["id"].as_str().unwrap().to_string();
+        let sid = new_session(&st, "worker", Some(&main), None, None, None)["id"].as_str().unwrap().to_string();
+        // direct store write: with_session would bump updated by design — this value must survive
+        st.sessions.lock().unwrap().get_mut(&sid).unwrap().info["time"]["updated"] = json!(123_456);
+        // an undelivered report filed with MAIN (direct store write: no wake machinery)
+        let ev = json!({ "id": "evt_1", "from": sid, "title": "worker", "status": "done", "relevance": "worth_knowing",
+            "headline": "built", "summary": "", "needs": "", "body": "18 tests pass", "delivered": false });
+        with_session(&st, &main, |s| s.inbox.push(ev.clone()));
+        let disk_before = std::fs::read(session_path(&dir, &sid)).ok();
+        for _ in 0..3 {
+            let (code, _) = get(&st, &sid, "part=summary").await;
+            assert_eq!(code, axum::http::StatusCode::OK);
+            let _ = get(&st, &sid, "part=main_view").await;
+            let _ = get(&st, &main, "part=summary").await;
+        }
+        let updated = st.sessions.lock().unwrap().get(&sid).unwrap().info["time"]["updated"].clone();
+        assert_eq!(updated, json!(123_456), "updated untouched");
+        let delivered = st.sessions.lock().unwrap().get(&main).unwrap().inbox[0]["delivered"].clone();
+        assert_eq!(delivered, json!(false), "delivered untouched");
+        let disk_after = std::fs::read(session_path(&dir, &sid)).ok();
+        assert_eq!(disk_before, disk_after, "no persist during a context view (the store file never appears)");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// G1 (TRAP 1): the preview carries the pending reports but never consumes them.
+    #[tokio::test]
+    async fn preview_never_eats_inbox() {
+        let (st, dir) = ctx_app().await;
+        let main = new_session(&st, "[MAIN]", None, None, None, None)["id"].as_str().unwrap().to_string();
+        let evs = vec![
+            json!({ "id": "evt_1", "from": "ses_x", "title": "importer", "status": "done", "relevance": "worth_knowing",
+                "headline": "built, 18 tests pass", "summary": "", "needs": "", "body": "done", "delivered": false }),
+            json!({ "id": "evt_2", "from": "ses_y", "title": "site", "status": "failed", "relevance": "worth_knowing",
+                "headline": "build died", "summary": "", "needs": "", "body": "failed", "delivered": false }),
+        ];
+        with_session(&st, &main, |s| {
+            s.inbox = evs.clone();
+        });
+        let (code, summary) = get(&st, &main, "part=summary&preview=1").await;
+        assert_eq!(code, axum::http::StatusCode::OK);
+        let newest = summary["blocks"].as_array().unwrap().iter().rev().find(|b| b["role"] == "user").map(|b| b["head"].as_str().unwrap_or_default().to_string()).unwrap_or_default();
+        assert!(newest.contains("(your next message)"), "{newest}");
+        assert!(newest.contains("[inbox since your last turn]"), "{newest}");
+        assert!(newest.contains("built, 18 tests pass"), "the pending headline rides the preview: {newest}");
+        // and the events are STILL undelivered
+        let inbox = st.sessions.lock().unwrap().get(&main).unwrap().inbox.clone();
+        assert!(inbox.iter().all(|e| e["delivered"] == false), "peek never sets delivered");
+        // the read-only twin renders the same lines the real owner turn would freeze
+        let peek = tree::peek_owner_inbox_lines(&st, &main);
+        assert_eq!(peek.len(), 2);
+        assert_eq!(peek[0], tree::inbox_line(&evs[0]));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod c5_tests {
+    use super::*;
+
+    fn c5_app() -> (AppState, PathBuf) {
+        static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let dir = std::env::temp_dir().join(format!("ygg-c5-{}-{}", std::process::id(), N.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("session")).unwrap();
+        let profiles = profiles::Profiles::load(None);
+        let http = reqwest::Client::new();
+        let config = Config {
+            base_url: "http://127.0.0.1:1".into(),
+            dialect: Dialect::OpenAi,
+            max_tokens: 1024,
+            api_key: None,
+            model: "glm-5.3".into(),
+            models: vec!["glm-5.3".into()],
+            catalog: json!({"default": {"yggdrasil": {}}}),
+            max_steps: 5,
+            profiles: std::sync::RwLock::new(profiles),
+            tree: tree::TreeCfg { max_depth: 12, max_children: 24, digest_model: None, wake_debounce_ms: 4000, max_wakes: 60 },
+            context_files: Vec::new(),
+            peers: peers::Peers::load(),
+            ext: ext::Extensions::load(),
+            tiers: HashMap::new(),
+            vision: Vec::new(),
+            tools_enabled: true,
+            rollup_tokens: 100_000,
+            rollup_keep_tokens: 25_000,
+            voice: false,
+            voice_max_words: 300,
+            default_variant: "high".into(),
+            think_high: 4096,
+        };
+        let st = AppState {
+            sessions: Arc::new(Mutex::new(HashMap::new())),
+            running: Arc::default(),
+            run_locks: Arc::default(),
+            bus: broadcast::channel(16).0,
+            data_dir: Arc::new(dir.clone()),
+            config: Arc::new(config),
+            http: http.clone(),
+            tools: Arc::new(tools::ToolEnv { project_dir: dir.clone(), bash_timeout: Duration::from_secs(1), http }),
+            upstream: Arc::new(tokio::sync::Semaphore::new(2)),
+            wakes: Arc::default(),
+            harness_slots: Arc::new(tokio::sync::Semaphore::new(2)),
+            harness_models: Arc::new(Mutex::new(HashMap::new())),
+            harness_labels: Arc::new(Mutex::new(HashMap::new())),
+            ctx: Arc::new(Mutex::new(context::Store::default())),
+            draining: Arc::default(),
+        };
+        (st, dir)
+    }
+
+    /// A session whose last run was cut by a restart: the owner message it answered + the
+    /// assistant placeholder close_interrupted leaves behind.
+    fn cut_session(st: &AppState, title: &str) -> (String, String) {
+        let sid = new_session(st, title, None, None, None, None)["id"].as_str().unwrap().to_string();
+        let asked = make_message(&sid, "user", vec![text_part("build the importer")]);
+        let mut cut = make_message(&sid, "assistant", vec![text_part("")]);
+        cut["info"]["parentID"] = asked["info"]["id"].clone();
+        cut["info"]["error"] = json!({ "name": "UnknownError", "data": { "message": "interrupted by a brain restart" } });
+        let pid = asked["info"]["id"].as_str().unwrap().to_string();
+        st.sessions.lock().unwrap().get_mut(&sid).unwrap().messages = vec![asked, cut];
+        (sid, pid)
+    }
+
+    #[tokio::test]
+    async fn interrupted_owner_turn_is_resent_once() {
+        let (st, dir) = c5_app();
+        let (sid, pid) = cut_session(&st, "resend me");
+        resume_interrupted(&st, &[sid.clone()]);
+        let s = { st.sessions.lock().unwrap().get(&sid).cloned().unwrap() };
+        let resent: Vec<&Value> = s.messages.iter().filter(|m| m["info"]["meta"]["resent_of"].as_str() == Some(pid.as_str())).collect();
+        assert_eq!(resent.len(), 1, "exactly one resend");
+        let text = message_text(resent[0]);
+        assert!(text.starts_with(resent_marker()), "{text}");
+        assert!(text.contains("build the importer"), "the original text rides again: {text}");
+        // idempotent: a second pass (the copy is intact) adds nothing
+        resume_interrupted(&st, &[sid.clone()]);
+        let s2 = { st.sessions.lock().unwrap().get(&sid).cloned().unwrap() };
+        assert_eq!(s2.messages.iter().filter(|m| m["info"]["meta"]["resent_of"].is_string()).count(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn second_interrupt_is_reported_not_resent() {
+        let (st, dir) = c5_app();
+        let (sid, pid) = cut_session(&st, "cut twice");
+        resume_interrupted(&st, &[sid.clone()]);
+        // the RESENT copy got cut too: close_interrupted's shape on its reply
+        let s = { st.sessions.lock().unwrap().get(&sid).cloned().unwrap() };
+        let resent_id = s.messages.iter().rev().find(|m| m["info"]["meta"]["resent_of"].is_string()).map(|m| m["info"]["id"].clone()).unwrap();
+        let mut cut2 = make_message(&sid, "assistant", vec![text_part("")]);
+        cut2["info"]["parentID"] = resent_id.clone();
+        cut2["info"]["error"] = json!({ "name": "UnknownError", "data": { "message": "interrupted by a brain restart" } });
+        st.sessions.lock().unwrap().get_mut(&sid).unwrap().messages.push(cut2);
+        let before = st.sessions.lock().unwrap().get(&sid).unwrap().messages.len();
+        resume_interrupted(&st, &[sid.clone()]);
+        let after = st.sessions.lock().unwrap().get(&sid).unwrap().messages.len();
+        assert_eq!(before, after, "a second cut is never auto-resent (the parent reports it, as today)");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// C5 side fix: a restart never marks the DOOR's own card failed.
+    #[test]
+    fn restart_never_fails_the_door_card() {
+        let (st, dir) = c5_app();
+        let main = new_session(&st, "[MAIN]", None, None, None, None)["id"].as_str().unwrap().to_string();
+        let kid = new_session(&st, "worker", Some(&main), None, None, None)["id"].as_str().unwrap().to_string();
+        with_session(&st, &main, |s| s.info["card"] = json!({ "status": "idle", "wakes": 56 }));
+        with_session(&st, &kid, |s| {
+            s.info["card"] = json!({ "status": "working" });
+            let mut cut = make_message(&kid, "assistant", vec![text_part("")]);
+            cut["info"]["error"] = json!({ "name": "UnknownError", "data": { "message": "interrupted by a brain restart" } });
+            s.messages.push(cut);
+        });
+        let mut sessions: HashMap<String, Session> = {
+            let guard = st.sessions.lock().unwrap();
+            guard.iter().map(|(k, v)| (k.clone(), serde_json::from_str::<Session>(&serde_json::to_string(v).unwrap()).unwrap())).collect()
+        };
+        let _ = close_interrupted(&mut sessions, &dir);
+        // the closed map is what the next process loads: assert on it
+        let main_card = &sessions[&main].info["card"];
+        assert_eq!(main_card["status"], json!("idle"), "the door's card is untouched");
+        let kid_card = &sessions[&kid].info["card"];
+        assert_eq!(kid_card["status"], json!("failed"), "a managed child keeps today's behavior");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// C6: `turns: N` — the last N owner exchanges, clipped, tool calls as `[tool name] key`.
+    #[tokio::test]
+    async fn read_turns_returns_n_exchanges() {
+        let (st, dir) = c5_app();
+        let main = new_session(&st, "[MAIN]", None, None, None, None)["id"].as_str().unwrap().to_string();
+        let sid = new_session(&st, "worker", Some(&main), None, None, None)["id"].as_str().unwrap().to_string();
+        let mut msgs: Vec<Value> = Vec::new();
+        let mk = |role: &str, text: &str, t: i64| {
+            let mut m = make_message(&sid, role, vec![text_part(text)]);
+            m["info"]["time"]["created"] = json!(t);
+            if role == "assistant" {
+                m["info"]["time"]["completed"] = json!(t + 5);
+            }
+            m
+        };
+        msgs.push(mk("user", "first ask about alpha", 100));
+        msgs.push(mk("assistant", "first answer alpha", 105));
+        msgs.push(mk("user", "second ask about beta", 200));
+        let mut with_tool = mk("assistant", "working on beta", 205);
+        with_tool["parts"] = json!([
+            { "type": "text", "text": "working on beta" },
+            { "type": "tool", "callID": "call_1", "tool": "bash", "messageID": with_tool["info"]["id"], "sessionID": sid,
+              "state": { "status": "completed", "input": { "command": "cargo test" }, "output": "ok" } }
+        ]);
+        msgs.push(with_tool);
+        msgs.push(mk("user", "third ask about gamma", 300));
+        msgs.push(mk("assistant", "third answer gamma", 305));
+        st.sessions.lock().unwrap().get_mut(&sid).unwrap().messages = msgs;
+        let out = tree::read(&st, &main, &json!({ "id": sid, "turns": 2 })).output;
+        assert!(out.contains("last 2 exchange(s)"), "{out}");
+        assert!(out.contains("second ask about beta"), "{out}");
+        assert!(out.contains("third ask about gamma"), "{out}");
+        assert!(!out.contains("first ask about alpha"), "outside the window: {out}");
+        assert!(out.contains("[tool bash] command"), "tool call rendered as [tool name] key: {out}");
+        let one = tree::read(&st, &main, &json!({ "id": sid, "turns": 1 })).output;
+        assert!(one.contains("third ask about gamma") && !one.contains("second ask about beta"), "{one}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

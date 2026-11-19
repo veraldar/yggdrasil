@@ -65,7 +65,7 @@ impl Kind {
     }
 
     /// argv (program first) + whether the prompt goes on stdin.
-    fn argv(self, model: Option<&str>, resume: Option<&str>, cwd: &Path, prompt: &str, system: Option<&str>, attach: Attach) -> (Vec<String>, bool) {
+    pub(crate) fn argv(self, model: Option<&str>, resume: Option<&str>, cwd: &Path, prompt: &str, system: Option<&str>, attach: Attach) -> (Vec<String>, bool) {
         let mut a: Vec<String> = Vec::new();
         let mut push = |xs: &[&str]| a.extend(xs.iter().map(|x| x.to_string()));
         match self {

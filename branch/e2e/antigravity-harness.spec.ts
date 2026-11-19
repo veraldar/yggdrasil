@@ -6,7 +6,7 @@ import { type Page, devices, expect, test } from '@playwright/test';
  *  PW_BASE_URL = an app whose brain is E2E_OC_URL. agy signed in (this tree, 11-14): a real turn
  *  answers and the next one resumes the same agy conversation. E2E_AGY_SIGNED_OUT=1 (a brain whose
  *  agy has no credentials): the session says plainly how to sign in. */
-const OC = process.env.E2E_OC_URL || 'http://127.0.0.1:4101';
+const OC = process.env.E2E_OC_URL || 'http://127.0.0.1:4250'; // the twin (e2e/GUARD.md)
 const SIGNED_OUT = process.env.E2E_AGY_SIGNED_OUT === '1';
 test.use({ ...devices['Pixel 7'] });
 

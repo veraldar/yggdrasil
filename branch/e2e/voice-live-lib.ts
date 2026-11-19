@@ -1,11 +1,11 @@
 /** Shared by the REAL voice specs (no mock): Chrome plays a spoken wav as the microphone, the
  *  real voice agent transcribes it, the root answers, and the app speaks the answer through
  *  /api/tts/stream. Point at a stack whose app dispatches its OWN agent — the root-coord preview:
- *  PW_BASE_URL=http://127.0.0.1:8101 E2E_OC_URL=http://127.0.0.1:4101. */
+ *  PW_BASE_URL=http://127.0.0.1:8250 E2E_OC_URL=http://127.0.0.1:4250 (the twin). */
 import { join } from 'node:path';
 import { type APIRequestContext, type Page, devices, test } from '@playwright/test';
 
-export const PV = process.env.E2E_OC_URL || 'http://127.0.0.1:4101';
+export const PV = process.env.E2E_OC_URL || 'http://127.0.0.1:4250'; // the twin (e2e/GUARD.md)
 
 /** a Pixel 7 whose microphone plays `wav` (one per spec file: the mic is a launch option) */
 export function realMic(wav: string) {

@@ -13,6 +13,7 @@ import { useRouter } from 'next/navigation';
 import { Room, RoomEvent, Track, createAudioAnalyser } from 'livekit-client';
 import Link from 'next/link';
 import { LineIcon, StopSquare } from '@/components/line-icon';
+import { ContextSheet } from '@/components/context-sheet';
 import { type Msg, SessionMessage, senderName, userProse } from '@/components/session-message';
 import { MessageHistory } from '@/components/message-history';
 import { useSwipeX } from '@/lib/use-swipe-x';
@@ -48,6 +49,7 @@ import {
   TEACH_KEY,
   TF_PREFS_KEY,
   isMainSlug,
+  MAIN_SLUG,
   isOnboardPrompt,
   isOnboardingSlug,
   line,
@@ -379,6 +381,7 @@ export default function SessionView({
   // transcript search — an overlay, NOT a mode: text/hands-free keep running
   // underneath; the bar filters nothing, it rings matches and jumps between them
   const [searchOpen, setSearchOpen] = useState(false);
+  const [ctxOpen, setCtxOpen] = useState(false);
   const [query, setQuery] = useState('');
   const [matchIdx, setMatchIdx] = useState(0);
   const matches = useMemo(() => {
@@ -2915,6 +2918,18 @@ export default function SessionView({
         >
           <LineIcon name="log" size={14} />
         </button>
+        {/* what this session's model was actually sent (G1): captured body,
+            MAIN's view of it, the memory, the harness — on every session,
+            MAIN included */}
+        <button
+          aria-label="what this session knows"
+          aria-pressed={ctxOpen}
+          data-testid="ctx-key"
+          onClick={() => setCtxOpen(true)}
+          className="oz-k sm"
+        >
+          <LineIcon name="context" size={14} />
+        </button>
         {/* search is not a mode — hands-free lives on the composer mic: tap
             to toggle, hold to talk (req 09-30) */}
         <button
@@ -3562,6 +3577,38 @@ export default function SessionView({
             )}
           </div>
         </>
+      )}
+
+      {/* what this session knows (G1) — read-only; the two actions land their
+          texts in the composer (this session, or MAIN's) */}
+      {ctxOpen && (
+        <ContextSheet
+          slug={slug}
+          onClose={() => setCtxOpen(false)}
+          onTellSession={() => {
+            setCtxOpen(false);
+            try {
+              localStorage.setItem('oz-draft:' + slug, '[missing context] ');
+            } catch {
+              /* private mode */
+            }
+            setInput('[missing context] ');
+            if (inputRef.current) inputRef.current.focus();
+          }}
+          onAskMain={() => {
+            setCtxOpen(false);
+            const to = MAIN_SLUG;
+            void (async () => {
+              const note = `[missing context] In "${slug}": I opened its context sheet and could not find what it needs — ask it for the missing piece.`;
+              try {
+                localStorage.setItem('oz-draft:' + to, note);
+              } catch {
+                /* private mode */
+              }
+              router.push(`/session/${to}`);
+            })();
+          }}
+        />
       )}
 
       {/* the exact-words line — glyph + sentence for every voice state. The
