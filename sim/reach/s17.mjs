@@ -26,10 +26,16 @@
  *  S17.7 "now write marker.html into your artifacts folder with the marker word and link it" → the
  *        file is in lab's artifacts folder; the phone shows the link
  *  S17.8 Ása taps the link → the page opens: 200, text/html, the marker word on it
+ *
+ * S17_HARNESS_UPLOAD=1: when the phone's upload fails (S17.4 FAIL stays in the table), a row
+ * "S17.4h" — labelled as the HARNESS, not the phone — uploads report.pdf to home in 1 MiB pieces
+ * and sends the question to the proxy with the ref (what the app does), so S17.4w-S17.8 still
+ * test the tunnel, Claude Code and the phone's link tap.
  */
 import { spawn, execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, openSync, readFileSync, writeFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
+import http from 'node:http';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
@@ -80,7 +86,7 @@ ctx.on('request', (r) => {
 });
 ctx.on('response', (r) => {
   if (r.url().includes('/api/artifact/') || r.url().includes('/api/file') || /\/api\/session\/[^/]+\/messages/.test(r.url()))
-    responses.push({ t: Date.now(), url: r.url(), status: r.status(), type: r.headers()['content-type'] || '', method: r.request().method(), kind: r.request().resourceType() });
+    responses.push({ t: Date.now(), url: r.url(), status: r.status(), type: r.headers()['content-type'] || '', via: r.headers()['x-bifrost-via'] || '', method: r.request().method(), kind: r.request().resourceType() });
 });
 const phone = await ctx.newPage();
 screens.push(['phone', phone], ['box', consolePage]);
@@ -189,6 +195,35 @@ try {
     must(existsSync(blob) && sha(readFileSync(blob)) === pdf.sha256, `lab has no files/blobs/${pdf.sha256.slice(0, 12)}…`);
     return `one message on lab: ${f.filename} ${f.mime} ${f.size} bytes, sha256 equal, ref ${f.url} (root ${f.root})`;
   });
+
+  if (!turn || !(turn.parts || []).some((p) => p.type === 'file')) {
+    if (env('S17_HARNESS_UPLOAD') === '1' && labId) {
+      await step('S17.4h', 'HARNESS, not the phone: report.pdf → home /file/upload in 1 MiB pieces, the question → the proxy with the ref', async () => {
+        const put = (path, data) => new Promise((done, fail) => {
+          const rq = http.request(`${HOME}${path}`, { method: 'PUT', headers: { 'content-type': 'application/octet-stream', 'content-length': data.length } }, (res) => {
+            const c = [];
+            res.on('data', (x) => c.push(x));
+            res.on('end', () => done({ status: res.statusCode, body: JSON.parse(Buffer.concat(c).toString() || '{}') }));
+          });
+          rq.on('error', fail);
+          rq.end(data);
+        });
+        const up = (await brain(HOME, '/file/upload', { method: 'POST', body: { name: 'report.pdf', mime: 'application/pdf', size: pdf.size } })).body;
+        must(up.upload && up.piece, `upload ${JSON.stringify(up)}`);
+        let last = {};
+        for (let off = 0; off < pdf.size; off += up.piece) last = await put(`/file/upload/${up.upload}?offset=${off}`, pdfBytes.subarray(off, off + up.piece));
+        const ref = last.body.file;
+        must(ref && ref.hash === pdf.sha256, `REF ${JSON.stringify(last)}`);
+        const r = await brain(HOME, `/session/${proxy}/message?async=1`, { method: 'POST', body: { parts: [
+          { type: 'text', text: 'what is the marker word in this pdf' },
+          { type: 'file', mime: ref.mime, filename: ref.name, url: `/file/${ref.hash}`, hash: ref.hash, size: ref.size, root: ref.root },
+        ] } });
+        must(r.status === 200, `proxy answered ${r.status}`);
+        turn = await poll(async () => (await labMsgs(labId)).filter((m) => m.info.role === 'user' && (m.parts || []).some((p) => p.type === 'file' && p.hash === pdf.sha256)).pop(), 120_000, 'the question with the file never reached lab');
+        return `${Math.ceil(pdf.size / up.piece)} pieces → REF ${ref.hash.slice(0, 12)}… root ${ref.root}; on lab: ${turn.info.id}`;
+      });
+    }
+  }
 
   await step('S17.4w', 'it crossed the WireGuard link in pieces: one whole-file call is refused there (4 MB cap), a 1 MiB piece passes; the hub node carried it', async () => {
     must(turn, 'needs S17.4');
