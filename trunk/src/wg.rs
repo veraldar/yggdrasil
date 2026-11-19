@@ -1931,9 +1931,10 @@ mod tests {
                 let mut body = vec![];
                 let _ = rq.as_reader().read_to_end(&mut body);
                 let peer_hdr = rq.headers().iter().find(|h| h.field.equiv("x-ygg-peer")).map(|h| h.value.to_string());
+                let via = rq.headers().iter().find(|h| h.field.equiv("x-ygg-via")).map(|h| h.value.to_string());
                 let leaked = rq.headers().iter().any(|h| h.field.equiv("authorization") || h.field.equiv("x-evil"));
                 let out = match rq.url() {
-                    "/root" => json!({ "name": name, "peer": peer_hdr, "leaked": leaked }).to_string().into_bytes(),
+                    "/root" => json!({ "name": name, "peer": peer_hdr, "via": via, "leaked": leaked }).to_string().into_bytes(),
                     "/echo" => body,
                     _ => b"{\"error\":\"no route\"}".to_vec(),
                 };
@@ -2066,9 +2067,11 @@ mod tests {
         let relay = fake_relay(a.udp, vec![("b", rb, b.udp), ("c", rc, c.udp), ("d", rd, d.udp)], ra);
 
         // B -> the hub's brain, and the hub -> B's brain, inside the tunnel
-        let (st, body) = http(b.http, "GET", "/_wg/local/root", b"", "x-ygg-peer: tok\r\nauthorization: Bearer no\r\nx-evil: 1\r\n");
+        let (st, body) = http(b.http, "GET", "/_wg/local/root", b"", "x-ygg-peer: tok\r\nauthorization: Bearer no\r\nx-evil: 1\r\nx-ygg-via: forged\r\n");
         let v: Value = serde_json::from_slice(&body).unwrap();
         assert_eq!((st, v["name"].as_str(), v["peer"].as_str(), v["leaked"].as_bool()), (200, Some("A"), Some("tok"), Some(false)), "{v}");
+        // the door marks every call it performs as another root's (L8), and a caller cannot forge the mark
+        assert_eq!(v["via"].as_str(), Some("trunk"), "{v}");
         let (st, body) = http(a.http, "GET", "/_wg/b/root", b"", "");
         assert_eq!((st, serde_json::from_slice::<Value>(&body).unwrap()["name"].as_str()), (200, Some("B")));
         let big: Vec<u8> = (0..300_000u32).map(|i| b"0123456789abcdef"[(i % 16) as usize]).collect();
