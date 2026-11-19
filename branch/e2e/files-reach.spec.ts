@@ -238,7 +238,7 @@ test('a file over the limit: the brain says so word for word, nothing is sent', 
   const r = await refused;
   expect(r.status()).toBe(413);
   const { error } = (await r.json()) as { error: string };
-  expect(error).toMatch(/^backup\.tar is .+\. The limit is \d+ MB per file\.$/);
+  expect(error).toMatch(/^backup\.tar is .+ MB\. The limit is [\d.]+ MB per file\.$/);
   // the brain's words, exactly, on the page (the error line: its text, then its keys)
   const alert = page.getByRole('alert').filter({ hasText: error });
   await expect(alert).toBeVisible();
