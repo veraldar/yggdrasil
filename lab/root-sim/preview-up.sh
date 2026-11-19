@@ -14,6 +14,17 @@ UI="$HOME/.cache/root-sim/$NAME"
 BIN=${1:-$HOME/Work/root-coord/lab/yggdrasil/target/release/yggdrasil}
 ART="$HOME/Work/root-coord-pwa/artifacts" # lib/artifacts.ts: the worktree's ../artifacts
 
+# run by an agent inside this brain (its shell lives in the brain's own unit): stopping the brain
+# would kill this script half-way and leave no brain (11-19 20:26) — go on in a unit of its own
+if [ -z "${PREVIEW_UP_DETACHED:-}" ] && grep -q "/$UNIT.service" /proc/self/cgroup 2>/dev/null; then
+  LOG="$HOME/.cache/root-sim/$NAME/preview-up.log"
+  systemd-run --user --unit "rc-$NAME-up-$(date +%s)" --collect -q -p "StandardOutput=append:$LOG" -p "StandardError=append:$LOG" \
+    --setenv=PREVIEW_UP_DETACHED=1 --setenv=PREVIEW="$NAME" ${CC_LIVE_DIR:+--setenv=CC_LIVE_DIR=$CC_LIVE_DIR} \
+    bash "$(readlink -f "$0")" "$@"
+  echo "the brain restarts outside this session (stopping it would stop this shell); this turn ends with it — log: $LOG"
+  exit 0
+fi
+
 # the running unit's environment (upstream key included) — reused as is, a few keys set
 # (systemd quotes values with spaces, e.g. YGG_ROOT_NOTE: split like a shell would)
 mapfile -t ENVV < <(systemctl --user show "$UNIT" -p Environment --value | python3 -c 'import shlex,sys; print("\n".join(shlex.split(sys.stdin.read())))' | grep -vE '^(YGG_MODELS|YGG_VISION_MODELS|YGG_ARTIFACTS_DIR|YGG_EXTENSIONS|YGG_HARNESS_LIVE|YGG_OPENCODE_XDG_DATA|YGG_OPENCODE_XDG_CONFIG|YGG_HARNESS_HELPER|YGG_HARNESS_HELPER_TOKEN|YGG_HARNESS_RUNNER)=')
