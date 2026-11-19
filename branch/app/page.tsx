@@ -6,7 +6,7 @@ import { useRouter } from 'next/navigation';
 import { LineIcon } from '@/components/line-icon';
 import { BAND_VIEWBOX, YggTree } from '@/components/ygg';
 import { Door } from '@/components/tree-door';
-import { Roots } from '@/components/roots';
+import { MainBar } from '@/components/main-bar';
 import { Marked } from '@/components/marked';
 import { ContinueTerminal } from '@/components/app/continue-claude';
 import { sessionTag } from '@/lib/agents';
@@ -830,7 +830,7 @@ export default function SessionsPage() {
 
       {/* the tree's roots, the ground of the page: MAIN — tap to open it,
           hold to talk to it from here */}
-      <Roots
+      <MainBar
         main={mainRow}
         branchWorking={branchWorking}
         onSettled={load}

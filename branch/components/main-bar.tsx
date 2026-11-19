@@ -1,6 +1,7 @@
 'use client';
 
-/** THE ROOTS (MAINFRAME-C, 10-26) — the front page's ground: the tree's
+/** MAIN's talk bar (AP-27: the machines are the roots sheet, components/roots-sheet.tsx).
+ *  THE ROOTS (MAINFRAME-C, 10-26) — the front page's ground: the tree's
  *  roots, full width at the bottom, and they ARE MAIN (the root is the
  *  tree's brain; MAIN is your line to it). One tree on the page: the band
  *  on top is the crown (the work), the list is the trunk, this is the roots.
@@ -48,7 +49,7 @@ const HINT_VISITS = 3;
 
 const OFF: RootsSnap = { phase: 'off', free: false, slug: '', reply: '', note: '' };
 
-export type RootsRow = {
+export type MainBarRow = {
   id: string;
   title: string;
   preview: string;
@@ -88,14 +89,14 @@ async function micPermission(): Promise<PermissionState | 'unknown'> {
   }
 }
 
-export function Roots({
+export function MainBar({
   main,
   branchWorking,
   onSettled,
   onWorking,
 }: {
   /** MAIN's row from the session list (or voice-test's, with voice tests on) */
-  main?: RootsRow;
+  main?: MainBarRow;
   /** a branch (any session but MAIN) works — the crown and the roots then
    *  share the band's 8 s clock: one thought on the screen at a time */
   branchWorking: boolean;
