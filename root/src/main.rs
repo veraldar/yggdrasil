@@ -63,7 +63,7 @@ use axum::{
         IntoResponse, Response,
         sse::{Event, KeepAlive, Sse},
     },
-    routing::{get, post},
+    routing::{delete, get, post},
     extract::ConnectInfo,
 };
 use futures::StreamExt;
@@ -1584,12 +1584,17 @@ fn transcript(messages: &[Value], with_internal: bool) -> Vec<Value> {
 }
 
 /// Owner-facing transcript: internal turns are dropped unless `?internal=1` (debug/e2e).
+/// B8: `?since=<msg id>` answers only that message (it may still be streaming) and everything
+/// after it; `?files=0` replaces `data:` payloads with "[file N KB]" — the librarian's
+/// incremental pass then pulls a couple of rows per turn instead of every byte ever sent.
 async fn list_messages(
     State(st): State<AppState>,
     Path(id): Path<String>,
     Query(q): Query<HashMap<String, String>>,
 ) -> Response {
     let with_internal = q.get("internal").is_some_and(|v| v == "1" || v == "true");
+    let since = q.get("since").cloned().unwrap_or_default();
+    let slim = q.get("files").is_some_and(|v| v == "0" || v == "false");
     // a proxy reads its peer: the phone opens a session on another root through this one
     if let Some((root, rid)) = peers::remote_of(&st, &id) {
         return match peers::call(&st, &root, "GET", &format!("/session/{rid}/message"), None, 20).await {
@@ -1597,9 +1602,80 @@ async fn list_messages(
             Err(e) => (StatusCode::BAD_GATEWAY, Json(json!({ "error": e }))).into_response(),
         };
     }
-    match st.sessions.lock().unwrap().get(&id) {
-        Some(s) => Json(Value::Array(transcript(&s.messages, with_internal))).into_response(),
-        None => not_found(&id),
+    let mut msgs = {
+        let guard = st.sessions.lock().unwrap();
+        match guard.get(&id) {
+            Some(s) => transcript(&s.messages, with_internal),
+            None => return not_found(&id),
+        }
+    };
+    if !since.is_empty() {
+        // the named message itself stays; everything before it goes. A `since` that names
+        // nothing the brain knows answers the full transcript (nothing lost).
+        if let Some(i) = msgs.iter().position(|m| m["info"]["id"].as_str() == Some(since.as_str())) {
+            msgs.drain(..i);
+        }
+    }
+    if slim {
+        for m in msgs.iter_mut() {
+            slim_files(m);
+        }
+    }
+    Json(Value::Array(msgs)).into_response()
+}
+
+/// `?files=0`: any `data:<mime>;base64,<bytes>` string becomes "[file N KB]" — the bytes stay
+/// in the session, only their size travels (indexing, debug views).
+fn slim_files(v: &mut Value) {
+    match v {
+        Value::String(s) => {
+            if let Some(next) = slim_str(s) {
+                *s = next;
+            }
+        }
+        Value::Array(a) => a.iter_mut().for_each(slim_files),
+        Value::Object(o) => o.values_mut().for_each(slim_files),
+        _ => {}
+    }
+}
+
+fn slim_str(s: &str) -> Option<String> {
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    let mut changed = false;
+    while let Some(i) = rest.find("data:") {
+        let tail = &rest[i..];
+        let Some(pos) = tail.find(";base64,") else { break };
+        let payload = &tail[pos + ";base64,".len()..];
+        let end = payload
+            .find(|c: char| c.is_whitespace() || matches!(c, '"' | '\'' | '\\' | ')' | ']' | '>' | '}' | ','))
+            .unwrap_or(payload.len());
+        if end == 0 {
+            break;
+        }
+        let kb = (end / 1024).max(1);
+        out.push_str(&rest[..i]);
+        out.push_str(&format!("[file {kb} KB]"));
+        rest = &payload[end..];
+        changed = true;
+    }
+    if changed {
+        out.push_str(rest);
+        Some(out)
+    } else {
+        None
+    }
+}
+
+/// `DELETE /memory/fact/{id}` (phase 2): the Memory tab's ✕ on a fact row — the librarian's
+/// internal `forget`, reached through `ext::call_internal` like every brain-only tool.
+async fn delete_memory_fact(State(st): State<AppState>, Path(id): Path<String>) -> Response {
+    let Ok(fid) = id.parse::<i64>() else {
+        return bad_request("the fact id is a number");
+    };
+    match st.config.ext.call_internal(&st, "librarian", "forget", &json!({ "id": fid })).await {
+        Ok(out) => Json(json!({ "ok": true, "output": out })).into_response(),
+        Err(e) => (StatusCode::BAD_GATEWAY, Json(json!({ "error": e }))).into_response(),
     }
 }
 
@@ -4005,6 +4081,7 @@ async fn main() {
         .route("/session/status", get(session_status))
         .route("/session/{id}", get(get_session).patch(patch_session).delete(delete_session))
         .route("/session/{id}/message", get(list_messages).post(post_message))
+        .route("/memory/fact/{id}", delete(delete_memory_fact))
         .route("/session/{id}/abort", post(abort_session))
         .route("/session/{id}/todo", get(get_todo))
         .route("/api/session/{id}/model", post(switch_model))
@@ -5069,6 +5146,54 @@ mod context_tests {
         assert_eq!(code, axum::http::StatusCode::OK);
         assert!(!raw.to_string().contains("sk-test-secret-0123456789"), "raw view is masked");
         assert!(raw.to_string().contains("abc123") == false || raw.to_string().contains("key"), "the seeded assignment is hidden or the marker word remains");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// B8: `?since=` answers only the tail (the named message included — it may still be
+    /// streaming), `?files=0` replaces data payloads with "[file N KB]".
+    #[tokio::test]
+    async fn message_since_and_files_params() {
+        let (st, dir) = ctx_app().await;
+        let sid = new_session(&st, "b8 probe", None, None, None, None)["id"].as_str().unwrap().to_string();
+        let mk = |id: &str, text: &str| {
+            let mut m = make_message(&sid, "user", vec![text_part(text)]);
+            m["info"]["id"] = json!(id);
+            m["info"]["time"]["created"] = json!(1_000);
+            m
+        };
+        with_session(&st, &sid, |s| {
+            s.messages = vec![mk("m1", "first"), mk("m2", "second"), mk("m3", "data:image/png;base64,AAAA")];
+        });
+        async fn msgs_of(st: &AppState, sid: &str, query: &str) -> Value {
+            let q: HashMap<String, String> = query
+                .split('&')
+                .filter_map(|kv| kv.split_once('=').map(|(k, v)| (k.to_string(), v.to_string())))
+                .collect();
+            body_of(list_messages(State(st.clone()), Path(sid.to_string()), Query(q)).await).await
+        }
+        assert_eq!(msgs_of(&st, &sid, "").await.as_array().unwrap().len(), 3);
+        let tail = msgs_of(&st, &sid, "since=m2").await.as_array().unwrap().clone();
+        let ids: Vec<&str> = tail.iter().map(|m| m["info"]["id"].as_str().unwrap()).collect();
+        assert_eq!(ids, vec!["m2", "m3"], "since answers the named message and everything after");
+        assert_eq!(msgs_of(&st, &sid, "since=zzz").await.as_array().unwrap().len(), 3, "an unknown since loses nothing");
+        let slim = msgs_of(&st, &sid, "files=0").await.to_string();
+        assert!(slim.contains("[file 1 KB]"), "{slim}");
+        assert!(!slim.contains("AAAA"), "the bytes stay home");
+        let fat = msgs_of(&st, &sid, "since=m3").await.to_string();
+        assert!(fat.contains("data:image/png;base64,AAAA"), "without files=0 the payload travels");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// DELETE /memory/fact/{id} (phase 2): reaches the librarian's internal `forget` through
+    /// call_internal — with no librarian configured the route answers 502 with the reason,
+    /// and a non-numeric id is a 400 before any call. (The happy path is the twin.)
+    #[tokio::test]
+    async fn memory_fact_delete_wiring() {
+        let (st, dir) = ctx_app().await;
+        let res = delete_memory_fact(State(st.clone()), Path("12".into())).await;
+        assert_eq!(res.status(), axum::http::StatusCode::BAD_GATEWAY, "no librarian configured in the test app");
+        let res = delete_memory_fact(State(st.clone()), Path("nope".into())).await;
+        assert_eq!(res.status(), axum::http::StatusCode::BAD_REQUEST);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
