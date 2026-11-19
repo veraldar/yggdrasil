@@ -60,6 +60,8 @@ pub struct Peers {
     pub removed: Mutex<HashSet<String>>,
     /// name → when a call to it last failed to reach it: off at once, not 3 minutes later
     pub failed: Mutex<HashMap<String, u64>>,
+    /// name → lists in a row the learned root was missing from (`forget_unlisted`)
+    pub absent: Mutex<HashMap<String, u32>>,
 }
 
 /// Work passed from root to root more often than this is refused (L6): two MAINs can never hand
@@ -106,13 +108,28 @@ pub fn merge(statics: &[(String, String)], learned: &mut Vec<(String, String)>, 
     added
 }
 
-/// Drops the learned roots the list no longer names (revoked or removed on the hub) and the ones
-/// removed here; returns their names. Their proxies are kept: a root that comes back works again.
-pub fn forget_unlisted(learned: &mut Vec<(String, String)>, ids: &[String], removed: &HashSet<String>) -> Vec<String> {
+/// Lists in a row a learned root may be missing from before it is forgotten (a link that blips,
+/// a trunk restarting, is not a removal).
+pub const FORGET_AFTER: u32 = 3;
+
+/// Drops the learned roots the list has stopped naming (revoked or removed on the hub: missing
+/// from FORGET_AFTER lists in a row; `absent` counts) and the ones removed here; returns their
+/// names. An empty list forgets nothing. Their proxies are kept: a root that comes back works again.
+pub fn forget_unlisted(learned: &mut Vec<(String, String)>, ids: &[String], removed: &HashSet<String>, absent: &mut HashMap<String, u32>) -> Vec<String> {
     let mut gone = vec![];
     learned.retain(|(n, _)| {
-        let keep = ids.contains(n) && !removed.contains(n);
+        let keep = if removed.contains(n) {
+            false
+        } else if ids.is_empty() || ids.contains(n) {
+            absent.remove(n);
+            true
+        } else {
+            let k = absent.entry(n.clone()).or_insert(0);
+            *k += 1;
+            *k < FORGET_AFTER
+        };
         if !keep {
+            absent.remove(n);
             gone.push(n.clone());
         }
         keep
@@ -161,6 +178,7 @@ impl Peers {
             own_main: false,
             removed: Mutex::new(HashSet::new()),
             failed: Mutex::new(HashMap::new()),
+            absent: Mutex::new(HashMap::new()),
         }
     }
 
@@ -235,11 +253,10 @@ pub async fn learn(st: &AppState) -> Result<Vec<String>, String> {
     let ids: Vec<String> = linked_ids(&v).into_iter().filter(|id| !removed.contains(id)).collect();
     let (added, gone) = {
         let mut learned = p.learned.lock().unwrap();
-        let gone = forget_unlisted(&mut learned, &ids, &removed);
+        let gone = forget_unlisted(&mut learned, &ids, &removed, &mut p.absent.lock().unwrap());
         (merge(&p.list, &mut learned, &p.me, &p.via, &ids), gone)
     };
     for n in &gone {
-        p.seen.lock().unwrap().remove(n);
         eprintln!("peers: {n} is no longer listed at {from} — forgotten (its sessions here stay)");
     }
     for n in &added {
@@ -478,9 +495,10 @@ pub async fn start(st: &AppState, caller: &str, root: &str, title: &str, profile
         s.info["card"] = json!({ "topic": title, "brief": brief.chars().take(600).collect::<String>(), "status": "working",
             "by": caller, "root": root, "created": now_ms(), "updated": now_ms() });
     });
+    // placed between two roots that are not home: home is told first, so the phone lists it and
+    // no report outruns it (L6)
+    crate::roots::tell_home(st, &pid, root, &rid, title, profile, caller, hops).await;
     send(st, root, &rid, brief, caller, &pid, hops).await?;
-    // placed between two roots that are not home: home is told, so the phone lists it (L6)
-    crate::roots::tell_home(st, &pid, root, &rid, title, profile, caller, hops);
     Ok(pid)
 }
 
