@@ -385,6 +385,18 @@ def main():
         req(HOME_PORT, "DELETE", "/agent/reader")
         check("a made agent can be deleted", "reader" not in [x["name"] for x in req(HOME_PORT, "GET", "/agent")])
 
+        # 6d. steps (owner 11-19): no cap by default; a session's own cap stops a turn that runs on
+        cap = req(HOME_PORT, "POST", "/session", {"title": "capped"})["id"]
+        check("a new session has no step cap", "steps" not in req(HOME_PORT, "GET", f"/session/{cap}"), req(HOME_PORT, "GET", f"/session/{cap}"))
+        check("…its settings set one", req(HOME_PORT, "PATCH", f"/session/{cap}", {"steps": 3}).get("steps") == 3)
+        try:
+            req(HOME_PORT, "POST", f"/session/{cap}/message", {"parts": [{"type": "text", "text": "tool:forever"}]}, 60)
+        except Exception:
+            pass
+        last = [m for m in req(HOME_PORT, "GET", f"/session/{cap}/message?errors=1") if m["info"]["role"] == "assistant"][-1:]
+        check("…and a turn that runs on stops at it", last and "step cap (3 upstream calls" in json.dumps(last[0]["info"].get("error")), last and last[0]["info"].get("error"))
+        check("…null takes it off again", "steps" not in req(HOME_PORT, "PATCH", f"/session/{cap}", {"steps": None}))
+
         # 7. another root
         r = say(tool([["session_start", {"title": "gamma", "agent": "build", "root": "lab", "brief": "Reply with exactly: GAMMA-ON-LAB"}]]))
         out = [p for p in r["parts"] if p["type"] == "tool"][0]["state"]["output"]

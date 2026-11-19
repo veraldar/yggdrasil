@@ -68,6 +68,9 @@ test('blocked/step-cap: a run that never ends its tool loop is said as blocked, 
 }) => {
   const sid = await mk(request, `${TAG}-cap`);
   expect(await row(request, sid)).toBe('idle (brain)');
+  // no cap by default (owner 11-19): this session sets one in its settings
+  const capped = await request.patch(`/api/session/${sid}`, { data: { steps: 5 } });
+  expect(((await capped.json()) as { steps: number | null }).steps).toBe(5);
   await turn(request, sid, 'tool:forever'); // the mock calls bash on every step
   await expect
     .poll(() => row(request, sid), { timeout: 60_000, message: 'step cap never surfaced' })

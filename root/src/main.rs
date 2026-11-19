@@ -1191,6 +1191,17 @@ async fn patch_session(State(st): State<AppState>, Path(id): Path<String>, Json(
         if let Some(t) = body["title"].as_str() {
             s.info["title"] = json!(t);
         }
+        // the step cap of this session's turns: a number, or null / 0 = no cap
+        if let Some(v) = body.get("steps") {
+            match v.as_u64().filter(|n| *n > 0) {
+                Some(n) => s.info["steps"] = json!(n.min(100_000)),
+                None => {
+                    if let Some(o) = s.info.as_object_mut() {
+                        o.remove("steps");
+                    }
+                }
+            }
+        }
         s.info.clone()
     });
     match info {
@@ -2574,9 +2585,14 @@ async fn agent_loop(
     if let Some(last) = convo.iter_mut().rev().find(|m| m["role"] == "user") {
         prefix_text(last, &context_line(tokens, st.config.rollup_tokens));
     }
-    let max = prof.steps.unwrap_or(st.config.max_steps).min(st.config.max_steps).max(1);
+    let max = step_cap(st, id, &prof);
     let mut quiet_nudged = false;
-    for _ in 0..max {
+    let mut step = 0usize;
+    loop {
+        if max.is_some_and(|m| step >= m) {
+            break;
+        }
+        step += 1;
         if st.config.rollup_tokens > 0 {
             let n = rollup::prune(&mut convo, st.config.rollup_tokens);
             if n > 0 {
@@ -2651,7 +2667,15 @@ async fn agent_loop(
             return Ok(());
         }
     }
-    Err(format!("agent loop hit the step cap ({max} upstream calls) without a final reply"))
+    Err(format!("agent loop hit the step cap ({} upstream calls, set in this session's settings) without a final reply", max.unwrap_or(0)))
+}
+
+/// How many upstream calls one turn may make: the session's own setting (its settings page), else
+/// an agent's explicit one (the agent editor), else the box's YGG_MAX_STEPS — none by default
+/// (owner 11-19: "by default infinite steps and configurable in session settings").
+fn step_cap(st: &AppState, id: &str, prof: &profiles::Profile) -> Option<usize> {
+    let own = st.sessions.lock().unwrap().get(id).and_then(|s| s.info["steps"].as_u64()).filter(|n| *n > 0);
+    own.map(|n| n as usize).or(prof.steps).or((st.config.max_steps > 0).then_some(st.config.max_steps))
 }
 
 /// A tree tool call that handed work off and went through (its output says so first).
@@ -3380,7 +3404,8 @@ async fn main() {
         ext: ext::Extensions::load(),
         tiers,
         vision: std::env::var("YGG_VISION_MODELS").unwrap_or_default().split(',').map(str::trim).filter(|m| !m.is_empty()).map(String::from).collect(),
-        max_steps: env_num("YGG_MAX_STEPS", 100).max(1) as usize,
+        // 0 = no cap (owner 11-19: no step cap by default; a session may set one in its settings)
+        max_steps: env_num("YGG_MAX_STEPS", 0) as usize,
         tools_enabled: std::env::var("YGG_TOOLS").map_or(true, |v| v != "0"),
         voice: std::env::var("YGG_VOICE").map_or(false, |v| v == "1"),
         // a safety limit, not a style: the note keeps replies short, the voice commands control

@@ -76,6 +76,8 @@ async function summary(s: any) {
     id: s.id,
     title: s.title || s.id,
     agent: s.agent || null,
+    // the step cap of this session's turns; null = none (the default)
+    steps: typeof s.steps === 'number' && s.steps > 0 ? s.steps : null,
     model,
     defaultModel: d ? await modelRef(d.providerID, d.modelID) : null,
     harness: s.harness
@@ -168,6 +170,17 @@ export async function PATCH(req: Request, ctx: { params: Promise<{ id: string }>
         });
         if (no) return no;
       }
+    }
+
+    if (body.steps !== undefined) {
+      const n = body.steps === null ? null : Number(body.steps);
+      if (n !== null && !(Number.isInteger(n) && n > 0 && n <= 100_000))
+        return NextResponse.json(
+          { error: 'steps: a whole number, or null for no cap' },
+          { status: 400 }
+        );
+      const no = await ocWrite(`/session/${sid}`, 'PATCH', { steps: n });
+      if (no) return no;
     }
 
     if (body.agent !== undefined) {

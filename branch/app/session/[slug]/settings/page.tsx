@@ -31,6 +31,8 @@ type SessionInfo = {
   id: string;
   title: string;
   agent: string | null;
+  /** the step cap of this session's turns; null = none (the default) */
+  steps?: number | null;
   model: ModelRef | null;
   /** what a model-less session runs on — the brain's default (null: the
    * brain didn't say) */
@@ -46,7 +48,7 @@ type ProviderRow = {
 };
 /** one of the brain's agents (/api/agents) — what it is for, in its words */
 type Agent = { name: string; description: string };
-type Block = 'name' | 'model' | 'think' | 'agent';
+type Block = 'name' | 'model' | 'think' | 'agent' | 'steps';
 type Res = 'session' | 'models' | 'agents';
 /** root-coord: MAIN's own agent — never offered to another session */
 const COORD = 'coordinator';
@@ -214,6 +216,14 @@ export default function SessionSettingsView() {
   // the coordinator is MAIN's alone: offered on MAIN (and shown where it
   // already runs), never to another session
   const agentList = (agents || []).filter((a) => a.name !== COORD || isMain || agent === COORD);
+
+  // ∞ (no cap, the default), a few caps, and the session's own when it is another number
+  const STEPS = [50, 100, 200, 500];
+  const stepChoices: (number | null)[] = [
+    null,
+    ...STEPS,
+    ...(info?.steps && !STEPS.includes(info.steps) ? [info.steps] : []),
+  ];
 
   const agentNote = !agents
     ? loadErr.agents
@@ -575,6 +585,26 @@ export default function SessionSettingsView() {
           )}
         </p>
         {refused?.block === 'agent' && <Refusal msg={refused.msg} />}
+      </section>
+
+      {/* STEPS — how many model calls one turn may make: none by default (∞, owner 11-19); a
+          cap stops a turn that would run on (it ends failed, said so in the list) */}
+      <section className="oz-blk" data-testid="steps-block">
+        <h2>steps</h2>
+        <div className="oz-chips">
+          {stepChoices.map((n) => (
+            <button
+              key={String(n)}
+              aria-pressed={!!info && (info.steps ?? null) === n}
+              disabled={!info}
+              data-steps={n ?? 'none'}
+              onClick={() => void patch({ steps: n }, 'steps')}
+            >
+              {n ?? '∞'}
+            </button>
+          ))}
+        </div>
+        {refused?.block === 'steps' && <Refusal msg={refused.msg} />}
       </section>
 
       {/* NOTIFICATIONS — may this session wake the phone when a reply is ready? Off by default,

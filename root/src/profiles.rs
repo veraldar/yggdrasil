@@ -218,14 +218,15 @@ fn allow_only(tools: &[&str]) -> Vec<Rule> {
 }
 
 pub fn builtins() -> Vec<Profile> {
-    let p = |name: &str, description: &str, prompt: &str, steps: usize, fold: bool, sessions: bool, rules: Vec<Rule>| Profile {
+    let p = |name: &str, description: &str, prompt: &str, fold: bool, sessions: bool, rules: Vec<Rule>| Profile {
         name: name.into(),
         description: description.into(),
         mode: "primary".into(),
         prompt: prompt.into(),
         model: None,
         variant: None,
-        steps: Some(steps),
+        // no cap of their own (owner 11-19): a session sets one in its settings, if it wants one
+        steps: None,
         fold,
         sessions,
         rules,
@@ -236,25 +237,24 @@ pub fn builtins() -> Vec<Profile> {
         "coordinator",
         "the user's door: talks with you, routes work to sessions it manages, reports back what matters",
         COORDINATOR_PROMPT,
-        12,
         true,
         true,
         allow_only(&["read", "glob", "grep", "webfetch", "todowrite"]),
     );
     coordinator.variant = Some("off".into());
     coordinator.prompt_lite = Some(COORDINATOR_LITE.into());
-    let mut lead = p("lead", "owns a project end to end: plans, splits into sub-sessions, iterates until done", LEAD_PROMPT, 80, false, true, allow_all());
+    let mut lead = p("lead", "owns a project end to end: plans, splits into sub-sessions, iterates until done", LEAD_PROMPT, false, true, allow_all());
     lead.prompt_lite = Some(LEAD_LITE.into());
-    let mut build = p("build", "does one concrete task fully: code, run, test, fix", BUILD_PROMPT, 100, false, false, allow_all());
+    let mut build = p("build", "does one concrete task fully: code, run, test, fix", BUILD_PROMPT, false, false, allow_all());
     build.prompt_lite = Some(BUILD_LITE.into());
-    let mut fix = p("fix", "repairs something broken: reproduces it, finds the root cause, fixes it and proves it with a test", FIX_PROMPT, 100, false, false, allow_all());
+    let mut fix = p("fix", "repairs something broken: reproduces it, finds the root cause, fixes it and proves it with a test", FIX_PROMPT, false, false, allow_all());
     fix.prompt_lite = Some(FIX_LITE.into());
     vec![
         coordinator,
         lead,
         build,
         fix,
-        p("research", "reads, fetches and compares; answers with evidence", RESEARCH_PROMPT, 60, false, false, allow_all()),
+        p("research", "reads, fetches and compares; answers with evidence", RESEARCH_PROMPT, false, false, allow_all()),
         // few agents (user 11-13: "too many agent types"; fix asked for 11-13); opencode / codex stay a harness choice
         // for agents you make in the editor
         review_profile(),
@@ -297,7 +297,7 @@ fn review_profile() -> Profile {
         },
         model: None,
         variant: None,
-        steps: Some(60),
+        steps: None,
         fold: false,
         sessions: false,
         rules,
