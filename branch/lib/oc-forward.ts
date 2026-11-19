@@ -2,6 +2,7 @@
  *  forget one message at opencode, track it in the live registry, pick up the
  *  next queued message when the run ends (abort included — the proxy owns
  *  queue pickup because opencode's own queue stalls forever after an abort). */
+import { type FileRef, cleanRefs, refPart } from './file-ref';
 import { ocFetch } from './oc';
 import { bustCache } from './oc-cache';
 import { abortedAt, markRunEnd, markRunStart } from './oc-live';
@@ -13,6 +14,8 @@ export type SendBody = {
   text?: string;
   images?: string[];
   files?: { name: string; content: string }[];
+  /** files the brain keeps (uploaded through /api/file/upload): REF each */
+  refs?: FileRef[];
   modality?: string;
 };
 
@@ -26,6 +29,8 @@ export function buildParts(body: SendBody): any[] {
     const mime = /^data:([^;,]+)/.exec(String(dataUrl))?.[1] || 'image/png';
     parts.push({ type: 'file', mime, url: dataUrl });
   }
+  // a file the brain keeps travels as its REF: the stored part names it by hash (contract B)
+  for (const r of cleanRefs(body.refs) || []) parts.push(refPart(r));
   for (const f of body.files || []) {
     // md/txt/html arrive as fenced content so the model sees them verbatim
     parts.push({

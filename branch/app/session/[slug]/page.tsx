@@ -37,6 +37,15 @@ import { shouldAutoSpeak } from '@/lib/auto-speak';
 import { CARD_ST, type TreeRow } from '@/lib/card';
 import { slugify } from '@/lib/slug';
 import { diagEvent } from '@/lib/diag';
+import {
+  type FileChip,
+  type FileRef,
+  FILES_PER_MESSAGE,
+  isImageMime,
+  refViews,
+  urlHash,
+} from '@/lib/file-ref';
+import { uploadFile } from '@/lib/file-upload';
 import '@/lib/labmic';
 import { clearAsked, ensureNotifyPermission, markAsked, notifyReply } from '@/lib/notify';
 import { PENDING_TTL_MS } from '@/lib/pending-ttl';
@@ -155,9 +164,16 @@ const FT = {
     ok: 'ok',
   },
 } as const;
-type Attach =
-  | { kind: 'image'; name: string; dataUrl: string }
-  | { kind: 'file'; name: string; content: string };
+/** a picked file: uploading until the brain gives its REF */
+type Attach = {
+  key: number;
+  name: string;
+  mime: string;
+  preview?: string; // an image's thumbnail (object URL)
+  ref?: FileRef;
+};
+
+const ATTACH_ONLY = '(📎 attachment)';
 
 const PTT_BARS = 9;
 
@@ -165,14 +181,6 @@ const PTT_BARS = 9;
 // its name may already belong to a new session, which the pin never reaches
 const GONE = 'this session is gone — it was deleted. Open it again from the list.';
 
-function fileToDataUrl(f: File): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const r = new FileReader();
-    r.onload = () => resolve(String(r.result));
-    r.onerror = () => reject(r.error);
-    r.readAsDataURL(f);
-  });
-}
 
 /** An agent-less room that still looks connected: the dispatch dies with
  *  the first agent job, and a network flap makes the SDK self-reconnect
@@ -252,15 +260,16 @@ function useMicLevels(active: boolean, roomRef: RefObject<Room | null>) {
   return levels;
 }
 
-/** Downscale to max 1568px and re-encode JPEG unless it's already small. */
-async function downscaleImage(f: File): Promise<string> {
+/** Downscale to max 1568px and re-encode JPEG unless it's already small (what the model is
+ *  shown); null = keep the file as it is. */
+async function downscaleImage(f: File): Promise<Blob | null> {
   const MAX = 1568;
   try {
     const bmp = await createImageBitmap(f, { imageOrientation: 'from-image' });
     const scale = Math.min(1, MAX / Math.max(bmp.width, bmp.height));
     if (scale === 1 && f.size < 300_000) {
       bmp.close?.();
-      return await fileToDataUrl(f);
+      return null;
     }
     const w = Math.max(1, Math.round(bmp.width * scale));
     const h = Math.max(1, Math.round(bmp.height * scale));
@@ -269,10 +278,23 @@ async function downscaleImage(f: File): Promise<string> {
     c.height = h;
     c.getContext('2d')!.drawImage(bmp, 0, 0, w, h);
     bmp.close?.();
-    return c.toDataURL('image/jpeg', 0.85);
+    return await new Promise<Blob | null>((ok) => c.toBlob(ok, 'image/jpeg', 0.85));
   } catch {
-    return await fileToDataUrl(f);
+    return null;
   }
+}
+
+/** A user message in the transcript is the one an echo stands for: same words — or, for a
+ *  message of files only, one carrying the same file (by its hash). */
+function echoLanded(e: Msg, m: Msg): boolean {
+  if (m.role !== 'user') return false;
+  if (e.text !== ATTACH_ONLY) return m.text === e.text || userProse(m.text) === e.text;
+  const key = urlHash(e.images[0] || e.files?.[0]?.url || '');
+  return (
+    !!key &&
+    !userProse(m.text) &&
+    [...m.images, ...(m.files || []).map((f) => f.url)].some((u) => !!u && urlHash(u) === key)
+  );
 }
 
 export default function SessionView({
@@ -363,6 +385,9 @@ export default function SessionView({
   const [voiceNaNote, setVoiceNaNote] = useState(false);
   const [error, setError] = useState('');
   const [attachments, setAttachments] = useState<Attach[]>([]);
+  // the same list, current between renders (picks and uploads finish out of step)
+  const attachmentsRef = useRef<Attach[]>([]);
+  const attachKeyRef = useRef(0);
   const [total, setTotal] = useState(0);
   const [limit, setLimit] = useState(60);
   // root-coord: the brain's tree (GET /api/tree) — this session's card (the
@@ -532,14 +557,12 @@ export default function SessionView({
   const busyStartRef = useRef(Date.now());
 
   /** Show the user's own message instantly; the poll reconciles later. */
-  function addEcho(text: string, images: string[] = [], before = 0) {
-    const m: Msg = { role: 'user', text: text || '(📎 attachment)', images, time: Date.now() };
+  function addEcho(text: string, images: string[] = [], before = 0, files: FileChip[] = []) {
+    const m: Msg = { role: 'user', text: text || ATTACH_ONLY, images, files, time: Date.now() };
     stickRef.current = true;
     // a poll that raced the POST may already hold the server's copy — an echo
     // on top of it is the doubled bubble (the echo filter only runs per poll)
-    const has = (list: Msg[]) =>
-      list.filter((x) => x.role === 'user' && (x.text === m.text || userProse(x.text) === m.text))
-        .length;
+    const has = (list: Msg[]) => list.filter((x) => echoLanded(m, x)).length;
     if (has(msgsRef.current) > before) return;
     echoesRef.current = [...echoesRef.current, m];
     setMsgs((prev) => (has(prev) > before ? prev : [...prev, m]));
@@ -562,7 +585,7 @@ export default function SessionView({
       msgs
         .filter((m) => m.role === 'user')
         .map((m) => userProse(m.text))
-        .filter((t) => t.trim() && t !== '(📎 attachment)'),
+        .filter((t) => t.trim() && t !== ATTACH_ONLY),
     [msgs]
   );
   // null = live draft; 0..n-1 = index into sentHistory (0 = oldest)
@@ -889,9 +912,7 @@ export default function SessionView({
             void notifyReply(slug);
           }
           // keep optimistic echoes until the server transcript catches up
-          const echoes = echoesRef.current.filter(
-            (e) => !fresh.some((m) => m.role === 'user' && (m.text === e.text || userProse(m.text) === e.text))
-          );
+          const echoes = echoesRef.current.filter((e) => !fresh.some((m) => echoLanded(e, m)));
           setMsgs([...fresh, ...echoes]);
           try {
             if (JSON.stringify(fresh).length < 300_000) {
@@ -2559,30 +2580,59 @@ export default function SessionView({
     if (busyRef.current) void abortGeneration();
   }
 
-  async function addAttachments(files: FileList | null) {
+  /** Picked (or pasted) files: each goes to the brain at once, in pieces; the chip breathes
+   *  until the brain has all of it. A file the brain refuses (over the limit) is dropped with
+   *  the brain's own words. */
+  async function addAttachments(files: FileList | File[] | null) {
     if (!files?.length) return;
-    const picked = Array.from(files).slice(0, 4);
-    const next: Attach[] = [];
-    for (const f of picked) {
-      try {
-        if (f.type.startsWith('image/')) {
-          next.push({ kind: 'image', name: f.name, dataUrl: await downscaleImage(f) });
-        } else {
-          next.push({ kind: 'file', name: f.name, content: (await f.text()).slice(0, 200_000) });
+    const all = Array.from(files);
+    const room = FILES_PER_MESSAGE - attachmentsRef.current.length;
+    if (all.length > room) setError(`at most ${FILES_PER_MESSAGE} files in one message`);
+    for (const f of all.slice(0, Math.max(0, room))) {
+      let blob: Blob = f;
+      let name = f.name || 'file';
+      let mime = f.type || 'application/octet-stream';
+      if (isImageMime(mime) && mime !== 'image/gif' && mime !== 'image/svg+xml') {
+        const small = await downscaleImage(f);
+        if (small) {
+          blob = small;
+          mime = 'image/jpeg';
+          name = name.replace(/\.[^.]*$/, '') + '.jpg';
         }
-      } catch (e) {
-        setError(`could not read ${f.name}: ${e}`);
       }
+      const key = ++attachKeyRef.current;
+      const preview = isImageMime(mime) ? URL.createObjectURL(blob) : undefined;
+      attachmentsRef.current = [...attachmentsRef.current, { key, name, mime, preview }];
+      setAttachments(attachmentsRef.current);
+      void uploadFile(blob, name, mime).then((res) => {
+        if ('error' in res) {
+          setError(res.error);
+          dropAttachment(key);
+          return;
+        }
+        attachmentsRef.current = attachmentsRef.current.map((a) =>
+          a.key === key ? { ...a, ref: res.ref } : a
+        );
+        setAttachments(attachmentsRef.current);
+      });
     }
-    if (next.length) setAttachments((a) => [...a, ...next].slice(0, 8));
+  }
+
+  function dropAttachment(key: number) {
+    const gone = attachmentsRef.current.find((a) => a.key === key);
+    if (gone?.preview) URL.revokeObjectURL(gone.preview);
+    attachmentsRef.current = attachmentsRef.current.filter((a) => a.key !== key);
+    setAttachments(attachmentsRef.current);
   }
 
   function sendText() {
     const text = input.trim();
     if (!text && attachments.length === 0) return;
+    // every file must be with the brain before the message goes (its REF rides the message)
+    if (attachmentsRef.current.some((a) => !a.ref)) return;
     // idempotency (owner 11-11 "turn committed twice"): Enter + button tap or a
     // double tap fire in one tick, before setInput('') re-renders the closure
-    const sig = text + '|' + attachments.length;
+    const sig = text + '|' + attachments.map((a) => a.ref?.hash).join(',');
     if (lastSendRef.current.sig === sig && Date.now() - lastSendRef.current.at < 1500) return;
     lastSendRef.current = { sig, at: Date.now() };
     setInput('');
@@ -2596,23 +2646,17 @@ export default function SessionView({
       /* private mode */
     }
     if (inputRef.current) inputRef.current.style.height = 'auto';
-    const images = attachments
-      .filter((a): a is Extract<Attach, { kind: 'image' }> => a.kind === 'image')
-      .map((a) => a.dataUrl);
-    const files = attachments
-      .filter((a): a is Extract<Attach, { kind: 'file' }> => a.kind === 'file')
-      .map((a) => ({ name: a.name, content: a.content }));
+    const sent = attachmentsRef.current;
+    attachmentsRef.current = [];
     setAttachments([]);
     stickRef.current = true;
     if (first !== 'off') firstSent('type'); // the walk-through's typed turn
-    void sendTextAsync(text, images, files);
+    void sendTextAsync(text, sent);
   }
 
-  async function sendTextAsync(
-    text: string,
-    images: string[],
-    files: { name: string; content: string }[]
-  ) {
+  async function sendTextAsync(text: string, sent: Attach[]) {
+    const refs = sent.map((a) => a.ref!);
+    const { images, files } = refViews(refs);
     markAsked(slug);
     void ensureNotifyPermission();
     // sending while busy = queue behind the current run (opencode serializes
@@ -2627,17 +2671,15 @@ export default function SessionView({
     // reply in the transcript AND arms the proxy run tracker (list dot,
     // live flag, wedge guard, busy clear).
     const willQueue = busyRef.current; // server will hold it in the proxy queue
-    const echoKey = text || '(📎 attachment)';
-    const before = msgsRef.current.filter(
-      (x) => x.role === 'user' && (x.text === echoKey || userProse(x.text) === echoKey)
-    ).length;
+    const echo: Msg = { role: 'user', text: text || ATTACH_ONLY, images, files, time: 0 };
+    const before = msgsRef.current.filter((x) => echoLanded(echo, x)).length;
     setBusy(true);
     armRunWatch();
     try {
       const r = await fetch(`/api/session/${slug}/messages`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', ...pinHeaders() },
-        body: JSON.stringify({ text, images, files, async: true }),
+        body: JSON.stringify({ text, refs, async: true }),
         // a hung radio/socket must surface as an error, not a silent stuck send
         signal: AbortSignal.timeout(30_000),
       });
@@ -2645,16 +2687,26 @@ export default function SessionView({
         const d = await r.json().catch(() => ({}));
         setError(d.code === 'session_gone' ? GONE : d.error || `send failed (${r.status})`);
         setInput((prev) => (prev.trim() ? prev : text)); // draft back, no clobber
+        restoreAttachments(sent);
         setBusy(false);
-      } else if (!willQueue) {
-        addEcho(text, images, before); // queued sends come back via the poll instead
+      } else {
+        for (const a of sent) if (a.preview) URL.revokeObjectURL(a.preview);
+        if (!willQueue) addEcho(text, images, before, files); // queued sends come back via the poll
       }
       await loadMsgs();
     } catch {
       setError('send failed');
       setInput((prev) => (prev.trim() ? prev : text)); // draft back, no clobber
+      restoreAttachments(sent);
       setBusy(false);
     }
+  }
+
+  /** a send that failed: its files back in the composer (they are with the brain already) */
+  function restoreAttachments(sent: Attach[]) {
+    if (!sent.length || attachmentsRef.current.length) return;
+    attachmentsRef.current = sent;
+    setAttachments(sent);
   }
 
   /** The voice toggle (req 09-30): a TAP on the composer mic. Enters
@@ -3149,16 +3201,21 @@ export default function SessionView({
 
       {attachments.length > 0 && (
         <div className="flex flex-wrap gap-1 pb-1">
-          {attachments.map((a, i) => (
-            <span key={i} className="oz-box flex items-center gap-1.5 px-2 py-1 text-xs">
-              {a.kind === 'image' && (
+          {attachments.map((a) => (
+            <span
+              key={a.key}
+              data-testid="attachment"
+              data-state={a.ref ? 'ready' : 'sending'}
+              className={`oz-box flex items-center gap-1.5 px-2 py-1 text-xs ${a.ref ? '' : 'oz-breathe'}`}
+            >
+              {a.preview && (
                 // eslint-disable-next-line @next/next/no-img-element
-                <img src={a.dataUrl} alt="" className="h-6 w-6 object-cover" />
+                <img src={a.preview} alt="" className="h-6 w-6 object-cover" />
               )}
               <span className="max-w-28 truncate text-[var(--oz-dim)]">{a.name}</span>
               <button
                 aria-label={`remove ${a.name}`}
-                onClick={() => setAttachments((arr) => arr.filter((_, j) => j !== i))}
+                onClick={() => dropAttachment(a.key)}
                 className="text-[var(--oz-dim)] hover:text-[var(--oz-text)]"
               >
                 <LineIcon name="close" size={10} />
@@ -3458,8 +3515,8 @@ export default function SessionView({
             </div>
           )}
           <div className="oz-dock -mx-3 px-3">
-            {/* single paper-clip key — opens the phone's photo/camera picker
-                (accept=image/*); files ride along when picked from there */}
+            {/* single paper-clip key — opens the phone's picker: any file, a photo,
+                the camera (package 2: files are files) */}
             <button
               aria-label="attach"
               onClick={() => photoInputRef.current?.click()}
@@ -3470,7 +3527,6 @@ export default function SessionView({
             <input
               ref={photoInputRef}
               type="file"
-              accept="image/*"
               multiple
               hidden
               onChange={(e) => {
@@ -3548,6 +3604,13 @@ export default function SessionView({
                     }
                   }
                 }}
+                onPaste={(e) => {
+                  // a pasted picture (or file) goes the picked files' way
+                  const pasted = Array.from(e.clipboardData?.files || []);
+                  if (!pasted.length) return;
+                  e.preventDefault();
+                  void addAttachments(pasted);
+                }}
                 placeholder="message…"
                 aria-label="message"
                 className="oz-ta"
@@ -3557,7 +3620,12 @@ export default function SessionView({
             {/* discord-style rightmost key: mic (hold to talk) when empty,
                 send as soon as there's something to send */}
             {input.trim() || attachments.length > 0 ? (
-              <button onClick={sendText} aria-label="send" className="oz-k ok">
+              <button
+                onClick={sendText}
+                aria-label="send"
+                disabled={attachments.some((a) => !a.ref)}
+                className={`oz-k ok ${attachments.some((a) => !a.ref) ? 'opacity-50' : ''}`}
+              >
                 <LineIcon name="send" size={16} />
               </button>
             ) : (
