@@ -126,14 +126,15 @@ try {
       '--wg-pipe', env('PW_LAB_PIPE'), ...brainEnv.flatMap((e) => ['--brain-env', e]),
     ], { stdio: ['ignore', out, out] });
     await poll(() => existsSync(join(LABST, 'join.json')) || existsSync(join(LABST, 'error')), 30_000, 'no join.json');
-    must(!existsSync(join(LABST, 'error')), readFileSync(join(LABST, 'error'), 'utf8').slice(0, 200));
+    if (existsSync(join(LABST, 'error'))) throw new Error(`the joiner: ${readFileSync(join(LABST, 'error'), 'utf8').slice(0, 200)}`);
     const J = JSON.parse(readFileSync(join(LABST, 'join.json'), 'utf8'));
     await phone.goto(String(J.approve_url));
     await phone.getByTestId('join-code').filter({ hasText: String(J.code) }).waitFor({ timeout: 20_000 });
     await phone.getByTestId('join-wg-fp').filter({ hasText: String(J.wg_fp) }).waitFor({ timeout: 20_000 });
     await phone.getByTestId('join-approve').tap();
     await phone.getByTestId('join-status').filter({ hasText: 'lab' }).waitFor({ timeout: 20_000 });
-    await poll(() => existsSync(join(LABST, 'linked')), 40_000, 'lab never linked');
+    await poll(() => existsSync(join(LABST, 'linked')) || existsSync(join(LABST, 'error')), 40_000, 'lab never linked');
+    if (existsSync(join(LABST, 'error'))) throw new Error(`the joiner: ${readFileSync(join(LABST, 'error'), 'utf8').slice(0, 200)}`);
     await poll(async () => ((await brain(HOME, '/root')).body.peers || []).includes('lab'), 30_000, 'home never learned lab');
     return `code ${J.code}, tunnel key ${J.wg_fp}`;
   });
@@ -187,6 +188,27 @@ try {
     const blob = join(LABDATA, 'data', 'files', 'blobs', pdf.sha256);
     must(existsSync(blob) && sha(readFileSync(blob)) === pdf.sha256, `lab has no files/blobs/${pdf.sha256.slice(0, 12)}…`);
     return `one message on lab: ${f.filename} ${f.mime} ${f.size} bytes, sha256 equal, ref ${f.url} (root ${f.root})`;
+  });
+
+  await step('S17.4w', 'it crossed the WireGuard link in pieces: one whole-file call is refused there (4 MB cap), a 1 MiB piece passes; the hub node carried it', async () => {
+    must(turn, 'needs S17.4');
+    const log = existsSync(join(LABST, 'brain.log')) ? readFileSync(join(LABST, 'brain.log'), 'utf8') : '';
+    const pulled = log.split('\n').find((l) => l.includes(`files: pulled ${pdf.sha256}`));
+    must(pulled && /from home/.test(pulled), `lab's brain never logged pulling it from home (${log.split('\n').filter((l) => l.startsWith('files:')).slice(-2).join(' | ')})`);
+    // lab's way to home is its own tunnel door: /_wg/local = the hub, inside WireGuard
+    const door = `http://127.0.0.1:${env('PW_LAB_WG')}/_wg/local`;
+    const whole = await brain(door, `/file/${pdf.sha256}`, { timeout: 90_000 });
+    must(whole.status >= 400, `the tunnel passed the whole ${pdf.size}-byte file in one call (${whole.status}, ${whole.raw.length} bytes)`);
+    const piece = await brain(door, `/file/${pdf.sha256}?offset=1048576&len=1048576`, { timeout: 60_000 });
+    must(piece.status === 200 && piece.raw.equals(pdfBytes.subarray(1048576, 2 * 1048576)), `a 1 MiB piece through the tunnel: ${piece.status}, ${piece.raw.length} bytes`);
+    const hubwg = (readFileSync(join(STATE, 'wg-hub.toml'), 'utf8').match(/^http = "([^"]+)"/m) || [])[1];
+    const peers = (await brain(`http://${hubwg}`, '/_wg')).body || [];
+    const lab = peers.find((p) => p.id === 'lab') || {};
+    const node = (await brain(`http://${hubwg}`, '/_wg/_node')).body || {};
+    must(lab.up && Number(lab.tx) + Number(lab.rx) >= pdf.size, `the hub node's lab peer: ${JSON.stringify(lab)}`);
+    const dropped = Object.entries(node.dropped || {}).filter(([k, v]) => v && ['unknown_key', 'wrong_link', 'replay', 'auth_fail', 'spoofed_ip'].includes(k));
+    must(dropped.length === 0, `the hub node dropped ${JSON.stringify(node.dropped)}`);
+    return `${pulled.trim()} · whole file through the tunnel → ${whole.status} ${String(whole.body?.error || whole.body || '').slice(0, 60)} · 1 MiB piece → 200, equal · hub node ↔ lab tx ${lab.tx} rx ${lab.rx} bytes`;
   });
 
   await step('S17.5', 'Claude Code was handed it: the prompt names the file at a path on lab with those bytes; its Read sent the model that PDF', async () => {
