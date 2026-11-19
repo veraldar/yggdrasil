@@ -160,7 +160,7 @@ def main():
            "YGG_PROVIDERS": os.path.join(data, "no-providers.json"), "YGG_ARTIFACTS_DIR": os.path.join(data, "artifacts"),
            "YGG_LISTEN": f"127.0.0.1:{o.brain_port}", "YGG_DATA_DIR": os.path.join(data, "data"),
            "YGG_PROFILES": os.path.join(data, "agents.json"), "YGG_PROJECT_DIR": os.path.join(data, "work"),
-           "YGG_ROOT_NAME": root["root_id"],
+           "YGG_ROOT_NAME": root["root_id"], "YGG_ROOT_MAIN": "1", "YGG_HOME_ROOT": root["hub"] or "hub",
            # the hub brain by the name the join answered (reports go to that name), via `local`
            "YGG_PEERS": f"{root['hub'] or 'hub'}={hub_peer}",
            # the other roots of the tree, from this root's node (the hub's directory)
