@@ -238,6 +238,12 @@
   }
   .oz-film .wait .oz-rail { width: 140px; }
   .oz-film[data-up] .wait { display: none; }
+  /* the context sheet (G1): the film as a column — header, tabs, one
+     scrolling pane, two actions; 412px-wide phone, no horizontal scroll */
+  .ctx-sheet { display: flex; flex-direction: column; overflow: hidden; }
+  .ctx-sheet .ctx-block, .ctx-sheet .ctx-pre {
+    font-family: var(--oz-mono, ui-monospace, monospace); font-size: 10.5px; line-height: 1.5; min-width: 0;
+  }
   .oz-film .skip {
     position: absolute; top: calc(10px + env(safe-area-inset-top)); right: 10px; min-height: 36px; padding: 0 12px;
     font-size: 11px; letter-spacing: .12em; color: var(--oz-dim); border: 1px solid var(--oz-border); background: var(--oz-bg);
