@@ -3077,16 +3077,60 @@ async fn harness_loop(st: &AppState, id: &str, prompt: String, tx: &mpsc::Sender
     // G1: a harness turn's context is the prompt + the system we hand it + its argv (secrets masked)
     let (argv, _) = kind.argv(model.as_deref(), resume.as_deref(), &cwd, &prompt, system.as_deref(), attach);
     context::capture_harness(st, id, run.upstream_calls as usize + 1, &prompt, system.as_deref().unwrap_or_default(), &argv);
-    let _slot = st.harness_slots.acquire().await.map_err(|e| e.to_string())?;
+    // a harness turn says it is alive once a minute — while it waits for a slot, and inside one
+    // long quiet command — so whoever watches the event stream never takes it for a hung run
+    // (the app stops a run that is silent for ten minutes). After an hour without a word from
+    // the harness it stops saying so.
+    let alive = || publish(st, "session.status", json!({ "sessionID": id, "status": { "type": "busy" } }));
+    let mut beat = tokio::time::interval(Duration::from_secs(60));
+    beat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let _slot = {
+        let slot = st.harness_slots.acquire();
+        tokio::pin!(slot);
+        loop {
+            tokio::select! {
+                s = &mut slot => break s.map_err(|e| e.to_string())?,
+                _ = beat.tick() => alive(),
+            }
+        }
+    };
     let (etx, mut erx) = mpsc::unbounded_channel::<harness::Ev>();
     let fut = harness::run(kind, model.as_deref(), resume.as_deref(), &cwd, &prompt, system.as_deref(), attach, move |ev| {
         let _ = etx.send(ev.clone());
     });
     tokio::pin!(fut);
+    let mut heard = std::time::Instant::now();
+    // the conversation's id is kept as soon as the conversation has said or done something: a
+    // turn that then fails or is cut (a usage limit, a restart) goes on in the same conversation
+    // on the next message, never in a new one. (A copy's first turn keeps the old rule.)
+    let mut said: Option<String> = None;
     let result = loop {
         tokio::select! {
             r = &mut fut => break r,
-            Some(ev) = erx.recv() => harness_event(st, id, tx, run, ev).await,
+            Some(ev) = erx.recv() => {
+                heard = std::time::Instant::now();
+                match &ev {
+                    harness::Ev::Session(sid) if !sid.is_empty() && !fork_now => said = Some(sid.clone()),
+                    harness::Ev::Text(_) | harness::Ev::Delta(_) | harness::Ev::Tool { .. } => {
+                        if let Some(sid) = said.take() {
+                            with_session(st, id, |s| {
+                                if !s.info["harness"].is_object() {
+                                    s.info["harness"] = json!({});
+                                }
+                                s.info["harness"]["kind"] = json!(kind.name());
+                                s.info["harness"]["id"] = json!(sid);
+                            });
+                        }
+                    }
+                    _ => {}
+                }
+                harness_event(st, id, tx, run, ev).await
+            }
+            _ = beat.tick() => {
+                if heard.elapsed() < Duration::from_secs(3600) {
+                    alive();
+                }
+            }
         }
     };
     while let Ok(ev) = erx.try_recv() {
@@ -4146,7 +4190,7 @@ async fn main() {
         tools: Arc::new(tool_env),
         upstream: Arc::new(tokio::sync::Semaphore::new(max_inflight)),
         wakes: Arc::default(),
-        harness_slots: Arc::new(tokio::sync::Semaphore::new(env_num("YGG_MAX_HARNESS", 3).max(1) as usize)),
+        harness_slots: Arc::new(tokio::sync::Semaphore::new(env_num("YGG_MAX_HARNESS", 8).max(1) as usize)),
         harness_models: Arc::new(Mutex::new(HashMap::from([
             ("claude".to_string(), vec!["opus".to_string(), "sonnet".to_string(), "haiku".to_string()]),
             ("opencode".to_string(), vec!["default".to_string()]),
