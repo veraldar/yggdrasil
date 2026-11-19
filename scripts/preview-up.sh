@@ -126,10 +126,10 @@ for k, v in staged.get("agent", {}).items():
 json.dump(ui, open(sys.argv[1], "w"), indent=1)
 PY
 
-# before the swap: the data backed up, then short turns get up to DRAIN_S (default 20) to finish;
+# before the swap: the data backed up, then short turns get up to DRAIN_S (default 60) to finish;
 # a turn still running is cut and the new brain sends it again once by itself
 [ "$NAME" = preview ] && { "$TREE/scripts/preview-backup.sh" || echo "backup failed — going on"; }
-curl -s -m $(( ${DRAIN_S:-20} + 5 )) -X POST "$B/admin/drain" -H 'Content-Type: application/json' -d "{\"max_s\": ${DRAIN_S:-20}}" 2>/dev/null | head -c 300 || true; echo
+curl -s -m $(( ${DRAIN_S:-60} + 5 )) -X POST "$B/admin/drain" -H 'Content-Type: application/json' -d "{\"max_s\": ${DRAIN_S:-60}}" 2>/dev/null | head -c 300 || true; echo
 systemctl --user stop "$UNIT" 2>/dev/null || true
 [ "$(readlink -f "$BIN")" = "$(readlink -f "$UI/bin/yggdrasil")" ] || { cp -f "$UI/bin/yggdrasil" "$UI/bin/yggdrasil.prev" 2>/dev/null || true; install -m755 "$BIN" "$UI/bin/yggdrasil"; }
 mkdir -p "$ART"
