@@ -223,7 +223,10 @@ if [ -n "$MAC_HOST" ] && { [ $BUILD = 1 ] || [ "$(cat "$MAC/commit" 2>/dev/null)
     scp -q -o BatchMode=yes "$MAC_HOST:$MREM/target/trunk-root/release/bifrost-net" "$MAC/bifrost-net-root" &&
     scp -q -o BatchMode=yes "$MAC_HOST:$MREM/macos-version" "$MAC_HOST:$MREM/rustc-version" "$MAC/" || die "could not pull the macOS binaries back"
   for b in yggdrasil bifrost-net-root; do
-    file -b "$MAC/$b" | grep -q '^Mach-O 64-bit executable arm64' || die "macOS $b is not a Mach-O arm64 executable: $(file -b "$MAC/$b")"
+    case $(file -b "$MAC/$b") in   # "Mach-O 64-bit executable arm64" (macOS) · "Mach-O 64-bit arm64 executable, …" (Linux)
+      Mach-O\ 64-bit*arm64*) case $(file -b "$MAC/$b") in *executable*) ;; *) die "macOS $b is not an executable: $(file -b "$MAC/$b")" ;; esac ;;
+      *) die "macOS $b is not a Mach-O arm64 executable: $(file -b "$MAC/$b")" ;;
+    esac
   done
   cat "$CACHE/commit" >"$MAC/commit"
 fi
