@@ -263,6 +263,22 @@ async function send(page: Page, text: string) {
   await box.fill(text, { timeout: 30_000 });
   await page.getByRole('button', { name: 'send', exact: true }).tap({ timeout: 30_000 });
 }
+/** the roots key → the sheet (a tap before the page is live is tried again) */
+async function openSheet(page: Page) {
+  await expect(async () => {
+    await page.getByRole('button', { name: 'roots', exact: true }).tap();
+    await expect(page.getByTestId('roots-sheet')).toBeVisible({ timeout: 1500 });
+  }).toPass({ timeout: 20_000 });
+}
+/** a press held past the sheet's 0.5 s, by a finger that does not move */
+async function hold(page: Page, el: ReturnType<Page['locator']>) {
+  const b = await el.boundingBox();
+  if (!b) throw new Error('nothing to hold');
+  await page.mouse.move(b.x + b.width / 2, b.y + b.height / 2);
+  await page.mouse.down();
+  await page.waitForTimeout(800);
+  await page.mouse.up();
+}
 /** an agent message holding `text` shows on the phone's screen (polls, never a reload) */
 const agentSays = (page: Page, text: string | RegExp) =>
   page.locator('[data-mi]', { hasText: '(agent' }).filter({ hasText: text });
@@ -1233,6 +1249,69 @@ test('trunk full: phone ↔ ap ↔ hub ↔ joined root — pair, talk, join, del
           )
           .toBe(true);
         expect((await sessionsOf(MAC)).some((s) => s.title === 'hop three')).toBe(false);
+      }
+    );
+
+    await step(
+      '7s',
+      'S10 · the roots sheet on the phone: every computer with its state; tap lab → its MAIN first, then its sessions; ＋ starts one there',
+      async () => {
+        await phone.goto(`${AP}/`);
+        await openSheet(phone);
+        const rows = phone.getByTestId('root-row');
+        await expect(rows).toHaveCount(3, { timeout: 30_000 });
+        await expect(rows.nth(0)).toHaveAttribute('data-root', 'home');
+        for (const r of [rootId, 'lab']) {
+          await expect(
+            phone.locator(`[data-testid="root-row"][data-root="${r}"]`).getByTestId('root-state')
+          ).toHaveText('on', { timeout: 60_000 });
+        }
+        await phone.screenshot({ path: join(STATE, 'p3-s10-sheet.png') });
+        await phone.locator('[data-testid="root-row"][data-root="lab"]').tap();
+        const view = phone.getByTestId('root-view');
+        await expect(view.getByTestId('root-main')).toBeVisible({ timeout: 30_000 });
+        await expect(view.getByTestId('root-sess').filter({ hasText: 'lab ledger' })).toBeVisible();
+        const first = view.locator('[data-testid="root-main"], [data-testid="root-sess"]').first();
+        await expect(first).toHaveAttribute('data-testid', 'root-main');
+        await phone.screenshot({ path: join(STATE, 'p3-s10-lab.png') });
+        await phone.getByTestId('roots-new').tap();
+        await phone.getByTestId('roots-new-name').fill('hi from the sheet');
+        await phone.getByTestId('roots-create').tap();
+        await phone.waitForURL(/\/session\/hi-from-the-sheet/, { timeout: 30_000 });
+        await send(phone, 'hi');
+        await expect
+          .poll(async () => (await sessionsOf(LAB)).some((s) => s.title === 'hi from the sheet'), { timeout: 30_000 })
+          .toBe(true);
+        await phone.goto(`${AP}/`);
+        const row = phone.locator('.oz-row', { hasText: 'hi from the sheet' });
+        await expect(row.getByTestId('root-tag')).toHaveText('[lab]', { timeout: 30_000 });
+        await expect(phone.locator('.oz-row', { hasText: '[MAIN] lab' })).toHaveCount(0);
+        await phone.screenshot({ path: join(STATE, 'p3-s10-home-tag.png') });
+      }
+    );
+
+    await step(
+      '7z',
+      'S10 · hold lab → Remove: gone from the sheet within 5 s, its sessions at home say "root removed", the bridge cuts its link',
+      async () => {
+        await phone.goto(`${AP}/`);
+        await openSheet(phone);
+        const lab = phone.locator('[data-testid="root-row"][data-root="lab"]');
+        await expect(lab).toBeVisible({ timeout: 30_000 });
+        await hold(phone, lab);
+        await expect(phone.getByTestId('root-confirm')).toBeVisible();
+        await phone.screenshot({ path: join(STATE, 'p3-s10-remove.png') });
+        await phone.getByTestId('root-remove').tap();
+        await expect(lab).toHaveCount(0, { timeout: 5_000 });
+        const t = Object.values(await treeOf(HOME)).filter((r) => r.card?.root === 'lab');
+        expect(t.length).toBeGreaterThan(0);
+        for (const r of t) expect(String(r.card?.headline), r.title as string).toBe('root removed');
+        expect(((await brain(HOME, '/root')).body.peers as unknown as string[]).includes('lab')).toBe(false);
+        await expect
+          .poll(() => readFileSync(join(STATE, 'bridge.log'), 'utf8').match(/root-link: (root 'lab' unlinked|refused dial for root 'lab' — it was removed)/) !== null, {
+            timeout: 30_000,
+          })
+          .toBe(true);
       }
     );
 
