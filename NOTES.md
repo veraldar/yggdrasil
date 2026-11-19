@@ -20,10 +20,18 @@ never from this one — bash reads scripts as it goes, an edit here breaks a run
   brain.env with a model upstream, bin/yggdrasil, never joined: no root.json, no bifrost-net, no agents).
   join.sh's default --dir. Not touched. Reported; M4 waits for a decision.
 
+## Proven 11-20 ~00:30 (artifact p4-proofs-1120.md)
+- S11 Linux in the rig: deb443 joiner, rc release, OWN-TRUNK GREEN 32/0 (state ~/.cache/p4-rig/s11-linux)
+- adopt-test.sh 10/10 (found + fixed trunk.sh behind-proxy probe bug: -w took --haproxy-protocol)
+- Mac pre-test: join.sh bootstrap on the real Mac with a test release incl. macos archive — up to the hub ask
+- tree-next 4060a9fb merged
+
 ## Half done
 - Windows installer: sub-agent in ~/Work/p4-win (branch p4-win)
-- S11 Linux proof (rig stage a, deb443) — restarted from p4-run
-- adopt-test.sh first run
+
+## Asked the owner (00:30)
+- model for new computers: same as omarchy (z.ai glm-5.3-flash, handed over on approval) or paste a key per installer
+- Mac: may the stale ~/.local/share/yggdrasil-root (Nov 14, never joined) be removed before M4
 
 ## Next
 - Mac pre-test: test release with --mac-host, join.sh bootstrap on the Mac in an isolated XDG_DATA_HOME/--dir, --no-start
