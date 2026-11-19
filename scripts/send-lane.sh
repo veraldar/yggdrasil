@@ -12,8 +12,9 @@
 # the first POST landed (client died) → ack as dup, NEVER re-POST. Ack = a response with a msg_ id.
 # Ack file /tmp/acks/<ts>.txt: ts, session, msg id, try#, req-id, mode (post|dup).
 # Exit: 0 acked · 3 worker still running (detached; ack will appear) · 1 gave up / bad args.
-# Env: BRAIN_URL (default :4100) SEND_WILL_DIR SEND_ACK_DIR SEND_TRIES SEND_BACKOFF SEND_POST_MAX SEND_WAIT
+# Env: BRAIN_URL (default :4100; dispatch-runner-* sessions default :4110, RUNNER_BRAIN_URL) SEND_WILL_DIR SEND_ACK_DIR SEND_TRIES SEND_BACKOFF SEND_POST_MAX SEND_WAIT
 set -u
+_BU_SET="${BRAIN_URL:-}"   # explicit env/-u wins over the per-session default (runner-brain-r1)
 BRAIN_URL="${BRAIN_URL:-http://127.0.0.1:4100}"
 WILL_DIR="${SEND_WILL_DIR:-/tmp/send-will}"
 ACK_DIR="${SEND_ACK_DIR:-/tmp/acks}"
@@ -80,8 +81,10 @@ esac
 
 SESS= TAG= TEXT= FILE= NOWILL=0
 while getopts s:t:m:f:u:w:N o; do case $o in
-  s) SESS=$OPTARG;; t) TAG=$OPTARG;; m) TEXT=$OPTARG;; f) FILE=$OPTARG;; u) BRAIN_URL=$OPTARG;; w) WAIT=$OPTARG;; N) NOWILL=1;; *) exit 1;; esac; done
+  s) SESS=$OPTARG;; t) TAG=$OPTARG;; m) TEXT=$OPTARG;; f) FILE=$OPTARG;; u) BRAIN_URL=$OPTARG; _BU_SET=1;; w) WAIT=$OPTARG;; N) NOWILL=1;; *) exit 1;; esac; done
 [ -n "$SESS" ] && [ -n "$TAG" ] && { [ -n "$TEXT" ] || [ -f "$FILE" ]; } || { sed -n 2,6p "$0" >&2; exit 1; }
+# runner-brain-r1: dispatch-runner-* sessions live on the runner brain (:4110); MAIN :4100 = owner+verdicts only.
+[ -z "$_BU_SET" ] && case "$SESS" in dispatch-runner-*) BRAIN_URL="${RUNNER_BRAIN_URL:-http://127.0.0.1:4110}";; esac
 
 TS="$(date -u +%Y%m%dT%H%M%SZ)-$$"; RID="${SEND_REQ_ID:-$(python3 -c 'import uuid;print(uuid.uuid4().hex[:16])')}"
 PAYLOAD="$WILL_DIR/$TS.payload.json"; WILLF="$WILL_DIR/$TS.json"

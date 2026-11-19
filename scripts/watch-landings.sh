@@ -20,6 +20,8 @@ set -u
 STATUS_FILE="${STATUS_FILE:-/tmp/sub-status.tsv}"
 BRAIN_URL="${BRAIN_URL:-http://127.0.0.1:4100}"
 POLL_SECS="${POLL_SECS:-60}"
+# dispatch-runner-* sessions live on the runner brain; everything else stays on $BRAIN_URL
+brain_for() { case "$1" in dispatch-runner-*) [ -z "$_BU_SET" ] && { echo "${RUNNER_BRAIN_URL:-http://127.0.0.1:4110}"; return; };; esac; echo "$BRAIN_URL"; }
 WILL_DIR="${WILL_DIR:-${AGI_WILL_DIR:-$HOME/Work/bifrost/.agi-log/wills}}"
 WAKE_JSON="${WAKE_JSON:-/tmp/.lane-wake.json}"   # station-sim points this at scratch
 
@@ -40,7 +42,7 @@ print(mains[-1]["id"] if mains else "")' 2>/dev/null
 # GET /session/status. Unreachable/garbled status counts as NOT busy (the POST then fails or lands
 # on its own). A busy skip returns 1, so the caller keeps the line pending and retries next poll.
 session_busy() { # $1 = session id
-  curl -s --max-time 5 "$BRAIN_URL/session/status" | python3 -c '
+  curl -s --max-time 5 "$(brain_for "$1")/session/status" | python3 -c '
 import json, sys
 try:
     sys.exit(0 if sys.argv[1] in json.load(sys.stdin) else 1)
@@ -54,7 +56,7 @@ wake() { # $1 = session id, $2 = landing line
 import json, sys
 print(json.dumps({"parts": [{"type": "text", "text": "LANE LANDED (auto-watch): " + sys.argv[1]}], "meta": {"auto": True}}))
 PY
-  curl -s -X POST "$BRAIN_URL/session/$1/message" -H 'content-type: application/json' \
+  curl -s -X POST "$(brain_for "$1")/session/$1/message" -H 'content-type: application/json' \
     -d @"$WAKE_JSON" --max-time 30 -o /dev/null
 }
 
@@ -110,7 +112,7 @@ import json, sys
 print(json.dumps({"parts": [{"type": "text", "text": sys.argv[2] + sys.argv[1]}], "meta": {"auto": True, "internal": True}, "internal": True}))
 PY
   [ "$(grep -o 'AUTO-VERDICT REQUEST:' "$WAKE_JSON" | wc -l)" = 1 ] || return 1
-  code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BRAIN_URL/session/$sid/message" \
+  code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$(brain_for "$sid")/session/$sid/message" \
     -H 'content-type: application/json' -d @"$WAKE_JSON" --max-time "${POST_MAX_TIME:-90}"); rc=$?
   case "$code" in 2*) delivered_add "$key" "2xx"; return 0 ;; esac
   # curl timeout (28) = delivered-unknown: a MAIN mid-turn holds the run lock, the brain keeps
