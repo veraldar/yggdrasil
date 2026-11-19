@@ -2,7 +2,8 @@
 # fake-join.sh — stands in for root/install/join.sh in the installer tests (bootstrap-test.sh, launcher-test.sh):
 # prints what the real one prints in each case (its die() lines verbatim) and exits with its code.
 #   FAKE_JOIN_MODE (else the file FAKE_JOIN_FILE, default /tmp/fake-join-mode): ok | run | refused | expired | sig |
-#     net | hubnet | model | other | secret | wait        FAKE_WAIT: seconds the code stays up (default 1)
+#     net | hubnet | model | other | secret | wait        FAKE_WAIT: seconds the code stays up (default 1), FAKE_PREP:
+#     seconds before it shows (default 0)
 #   FAKE_ROOTJOIN: rootjoin.py (draws the real QR PNG)   FAKE_BRAIN_PORT: what root.conf names for "ok"
 # Its arguments go to $HOME/fake-join-args (one per line); an --upstream-env file's content to $HOME/fake-upstream.
 set -u
@@ -22,6 +23,7 @@ say() { printf '\033[1m==>\033[0m %s\n' "$*"; }
 die() { printf '\033[1;31mxx\033[0m  %s\n' "$1" >&2; exit "${2:-1}"; }
 REL=https://github.com/veraldar/yggdrasil/releases/download/v0.9.1
 code() {
+  sleep "${FAKE_PREP:-0}"
   say "release: $REL/SHA256SUMS (+ its signature)"
   say "release: signature OK (the yggdrasil release key)"
   say 'asking https://ap.veraldar.org to let "PC" join as a root (wsl, host pc)'

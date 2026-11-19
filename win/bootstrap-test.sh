@@ -66,11 +66,15 @@ echo "[mask]"
 M=$(printf '%s\n' 'YGG_UPSTREAM_API_KEY=sk-live-abcdefghijklmnop1234567890' 'Authorization: Bearer x' \
   'link token: 9f8e7d6c5b4a39281706f5e4d3c2b1a0ffeeddcc' 'export GH_TOKEN=ghp_A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6' \
   'b64 Q2xhdWRlIGlzIG5vdCBhIHNlY3JldCBidXQgdGhpcyBpcz0+/abc=' 'ok /home/me/.local/share/yggdrasil-root/bin/start' \
-  'url https://github.com/veraldar/yggdrasil/releases/download/v0.9.1/SHA256SUMS' 'code K7QM2XWP' $'\e[1;31mxx\e[0m  red' | bash $B --mask)
+  'url https://github.com/veraldar/yggdrasil/releases/download/v0.9.1/SHA256SUMS' 'code K7QM2XWP' $'\e[1;31mxx\e[0m  red' \
+  'stop — re-run · “quoted” ‘one’ …' $'\e[30;107m\u2580\e[97;40m\u2580\e[0m' $'\e[40m    \e[0m' 'last' | bash $B --mask)
 ! grep -qE 'abcdefghijklmnop|9f8e7d6c5b4a|A1b2C3d4|Q2xhdWRl' <<<"$M" && grep -q 'YGG_UPSTREAM_API_KEY=\*\*\*' <<<"$M" \
   && grep -qF '/home/me/.local/share/yggdrasil-root/bin/start' <<<"$M" && grep -qF 'releases/download/v0.9.1/SHA256SUMS' <<<"$M" \
-  && grep -q 'code K7QM2XWP' <<<"$M" && grep -q '^xx  red$' <<<"$M"
-check 'mask: keys, tokens, long random runs -> ***; paths, URLs, the 8-char code, plain words stay; colours gone' $? "$M"
+  && grep -q 'code K7QM2XWP' <<<"$M" && grep -q '^xx  red$' <<<"$M" && grep -qx "stop - re-run - \"quoted\" 'one' ..." <<<"$M" \
+  && [ "$(tail -n 2 <<<"$M" | head -n 1)" = "stop - re-run - \"quoted\" 'one' ..." ]
+check 'mask: keys, tokens, long random runs -> ***; paths, URLs, the code stay; ASCII only; colours and terminal QR gone' $? "$M"
+[ -z "$(LC_ALL=C grep -n '[^[:print:][:space:]]' <<<"$M")" ]
+check 'mask: the output is plain ASCII' $? "$M"
 
 echo "[join, as the user]"
 OUT=/tmp/out; mkdir -p $OUT; chown johnsmith $OUT

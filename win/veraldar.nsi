@@ -287,7 +287,16 @@ Function DescribeWindows ; -> $WinDesc, e.g. "Windows 11 Professional 23H2 (buil
   ${Else}
     StrCpy $5 "x86"
   ${EndIf}
-  StrCpy $WinDesc "$4 $2 $0 (build $3.$1), $5"
+  ${If} $2 != ""
+    StrCpy $4 "$4 $2"
+  ${EndIf}
+  ${If} $0 != ""
+    StrCpy $4 "$4 $0"
+  ${EndIf}
+  ${If} $1 != ""
+    StrCpy $3 "$3.$1"
+  ${EndIf}
+  StrCpy $WinDesc "$4 (build $3), $5"
 FunctionEnd
 
 Function ReportLine ; LineFind callback: a line of setup.log into the report
@@ -295,7 +304,7 @@ Function ReportLine ; LineFind callback: a line of setup.log into the report
   Push 0
 FunctionEnd
 
-Function WriteReport ; step 7: install-report.txt — no secrets (setup.log is masked by wsl-bootstrap.sh)
+Function WriteReport ; step 7: install-report.txt - no secrets (setup.log is masked by wsl-bootstrap.sh)
   ClearErrors
   FileOpen $RptH "$INSTDIR\install-report.txt" w
   ${If} ${Errors}
@@ -992,7 +1001,7 @@ Function .onInit
   ${EndIf}
   StrCpy $JoinProc 0
   CreateFont $FontBig "Segoe UI" 12 600
-  CreateFont $FontCode "Segoe UI" 28 700
+  CreateFont $FontCode "Segoe UI" 26 700
   Call DescribeWindows
   ${Log} "Veraldar-Setup ${APPVERSION}$\r$\n[setup] $WinDesc$\r$\n[setup] continue after restart: $Continue"
 

@@ -42,13 +42,17 @@ while [ $# -gt 0 ]; do
 done
 
 # ------------------------------------------------------------------------------------------- masking
-# Before anything reaches the Windows side: ANSI colours out; sk-… keys, *KEY/*TOKEN/*SECRET/*PASSWORD values,
-# and long runs that look random (24+ base64url/hex characters with letters and digits; 40+ of standard base64)
-# become ***. Path and URL segments that are plain words stay readable.
+# Before anything reaches the Windows side: the terminal QR (coloured blocks) and ANSI colours out, plain ASCII
+# (the report is read with the Windows code page); sk-… keys, *KEY/*TOKEN/*SECRET/*PASSWORD values, and long
+# runs that look random (24+ base64url/hex characters with letters and digits; 40+ of standard base64) become
+# ***. Path and URL segments that are plain words stay readable.
 mask() {
-  perl -pe 'BEGIN { $| = 1 }
+  perl -CSD -pe 'BEGIN { $| = 1; $SIG{__WARN__} = sub {} }
     sub rnd { my $s = shift; length($s) >= 24 && $s =~ /[0-9]/ && $s =~ /[A-Za-z]/ }
+    if (/\e\[[0-9;]*(?:4[0-7]|10[0-7])[;m]/ || /[\x{2580}-\x{259F}]/) { $_ = ""; next }
     s/\r//g; s/\e\[[0-9;?]*[A-Za-z]//g;
+    s/[\x{2010}-\x{2015}\x{2212}]/-/g; s/[\x{2018}\x{2019}]/\x27/g; s/[\x{201C}\x{201D}]/"/g;
+    s/\x{2026}/.../g; s/\x{00B7}/-/g; s/\x{2192}/->/g; s/[^\x09\x0a\x20-\x7e]/?/g;
     s/\b(sk-)[A-Za-z0-9_-]{4,}/$1***/g;
     s/\b([A-Za-z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD)[A-Za-z0-9_]*)(\s*[=:]\s*)(?!\*\*\*)\S+/$1$2***/gi;
     s{[A-Za-z0-9_+/=-]{24,}}{
@@ -233,7 +237,7 @@ if [ "$MODE" = setup ]; then
     rc=0
     { apt-get -o DPkg::Lock::Timeout=300 update -q && \
       apt-get -o DPkg::Lock::Timeout=300 install -y -q --no-install-recommends "${missing[@]}"; } 2>&1 \
-      | tee -a "$LOG" | mask | tail -n 20 | sed 's/$/\r/' >>"$OUT/setup.log" || rc=$?   # pipefail: apt-get's
+      | tee -a "$LOG" | mask | grep -v 'Reading database' | tail -n 20 | sed 's/$/\r/' >>"$OUT/setup.log" || rc=$?
     if [ $rc != 0 ]; then
       note "[setup] apt-get could not install ${missing[*]}"
       ini "$OUT/setup.ini" setup "user=$user" "made=$made" "result=fail" "why=apt-get could not install ${missing[*]}"
