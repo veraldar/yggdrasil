@@ -14,7 +14,7 @@
  *  next turn, "over and out" ends it, the stop key ends it. A drop (slid
  *  off) sends nothing and undoes the hold.
  *
- *  Loaded lazily by components/roots.tsx: livekit-client never rides the
+ *  Loaded lazily by components/main-bar.tsx: livekit-client never rides the
  *  front page's first load. One instance per page, disposed on leave. */
 import { Room, RoomEvent, Track, createAudioAnalyser } from 'livekit-client';
 import type { Msg } from '@/components/session-message';

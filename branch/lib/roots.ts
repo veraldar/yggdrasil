@@ -26,8 +26,15 @@
  *
  * At rest: hashes only (join secret, root secret). Raw link tokens and the
  * raw root secret exist only in memory between approval and the one
- * collection, then are dropped. Pending joins are memory-only too: a hub
- * restart forgets them and the machine runs join again.
+ * collection, then are dropped. Pending joins are also written to
+ * joins-pending.json beside roots.json (mode 600, atomic, without the raw
+ * result): an app restart keeps a pending join approvable for 10 minutes; an
+ * approval made before the restart and not yet collected is over (its raw
+ * result never touched the disk) and the machine runs join again.
+ *
+ * Removing a root (the roots sheet's hold): roots.json marks it `revoked`
+ * (the trunk's WireGuard node drops it, refill refuses it, its id is never
+ * handed out again) and the hub brain forgets it (DELETE /root/peers/<id>).
  *
  * Env: BIFROST_ROOTS_FILE (default: roots.json beside BIFROST_DEVICES_FILE),
  * BIFROST_NET_BIN (default `bifrost-net` on PATH), BIFROST_ROOTLINK_SECRET_FILE
@@ -39,6 +46,7 @@
  */
 import { execFile } from 'child_process';
 import { createHash, randomBytes, randomInt, timingSafeEqual } from 'crypto';
+import { readFileSync } from 'fs';
 import { chmod, readFile, rename, writeFile } from 'fs/promises';
 import { dirname, join } from 'path';
 import { fetch as undiciFetch } from 'undici';
@@ -122,6 +130,8 @@ type State = {
   joins: Map<string, JoinReq>;
   windows: Map<string, number[]>;
   chain: Promise<unknown>;
+  /** joins-pending.json was read (once, at first use) */
+  loaded?: boolean;
 };
 
 // globalThis: every route bundle in this one server process sees ONE store
@@ -161,7 +171,88 @@ function serialize<T>(fn: () => Promise<T>): Promise<T> {
   return out;
 }
 
+/* ---------------- pending joins on disk (joins-pending.json, mode 600) ---------------- */
+
+export const JOINS_FILE = join(dirname(ROOTS_FILE), 'joins-pending.json');
+/** a join outlives an app restart this long from its creation (10 min, or the TTL if longer) */
+const JOIN_KEEP_MS = Math.max(600, JOIN_TTL_S) * 1000;
+const JOIN_STATES = new Set(['pending', 'approved', 'refused', 'delivered']);
+
+const str = (v: unknown) => (typeof v === 'string' ? v : '');
+
+/** one record off the disk, or null when it is not one this module wrote */
+function joinOf(v: unknown): JoinReq | null {
+  const o = (v && typeof v === 'object' ? v : {}) as Record<string, unknown>;
+  const req = str(o.req);
+  const secretHash = str(o.secretHash);
+  const created = Number(o.created);
+  const exp = Number(o.exp);
+  if (
+    !/^[A-Za-z0-9_-]{16,64}$/.test(req) ||
+    !/^[0-9a-f]{64}$/.test(secretHash) ||
+    !JOIN_STATES.has(str(o.status)) ||
+    !(created > 0) ||
+    !(exp > 0)
+  ) {
+    return null;
+  }
+  const holdUntil = Number(o.holdUntil);
+  return {
+    req,
+    secretHash,
+    code: str(o.code),
+    name: str(o.name),
+    os: str(o.os),
+    host: str(o.host),
+    peer: str(o.peer),
+    ...(wgKey(o.wgPub) ? { wgPub: wgKey(o.wgPub) } : {}),
+    created,
+    exp,
+    status: o.status as JoinReq['status'],
+    ...(str(o.by) ? { by: str(o.by) } : {}),
+    ...(str(o.root_id) ? { root_id: str(o.root_id) } : {}),
+    ...(holdUntil > 0 ? { holdUntil } : {}),
+    ...(str(o.why) ? { why: str(o.why) } : {}),
+  };
+}
+
+/** Once per process, at first use: the joins an earlier run left (older than JOIN_KEEP_MS dropped). */
+function loadJoins() {
+  if (S.loaded) return;
+  S.loaded = true;
+  let list: unknown;
+  try {
+    list = (JSON.parse(readFileSync(JOINS_FILE, 'utf8')) as { joins?: unknown })?.joins;
+  } catch {
+    return; // none yet, or unreadable: memory starts empty as before
+  }
+  if (!Array.isArray(list)) return;
+  const now = Date.now();
+  for (const v of list) {
+    const j = joinOf(v);
+    if (!j || j.created < now - JOIN_KEEP_MS || S.joins.has(j.req)) continue;
+    // approved before the restart, not collected: the raw result was memory only
+    if (j.status === 'approved') j.why = 'undelivered';
+    S.joins.set(j.req, j);
+  }
+}
+
+/** Write the joins (never `result`) — queued on the registry chain, atomic, mode 600. */
+function saveJoins() {
+  void serialize(async () => {
+    const now = Date.now();
+    const joins = [...S.joins.values()]
+      .filter((j) => j.created >= now - JOIN_KEEP_MS)
+      .map((j) => ({ ...j, result: undefined })); // the raw secrets: memory only
+    const tmp = `${JOINS_FILE}.${process.pid}.tmp`;
+    await writeFile(tmp, JSON.stringify({ version: 1, joins }, null, 2) + '\n', { mode: 0o600 });
+    await chmod(tmp, 0o600).catch(() => {});
+    await rename(tmp, JOINS_FILE);
+  }).catch((e) => console.warn(`join: ${JOINS_FILE} not written: ${(e as Error).message}`));
+}
+
 function prune() {
+  loadJoins();
   const now = Date.now();
   for (const [k, j] of S.joins) {
     // an undelivered approval is dropped after its hold window (raw secrets
@@ -191,6 +282,9 @@ export type RootRecord = {
   /** its pinned WireGuard public key and tunnel address (roots that joined with one) */
   wg_pub?: string;
   wg_ip?: string;
+  /** removed from the tree (the roots sheet): the trunk drops it, refill refuses it, its id stays taken */
+  revoked?: boolean;
+  revoked_at?: string;
 };
 
 /** `wg.net`: this tree's tunnel range, chosen once (the hub's node takes .1) */
@@ -259,17 +353,20 @@ async function writeRoots(f: RootsFile): Promise<void> {
   await rename(tmp, ROOTS_FILE);
 }
 
+/** The joined roots, removed ones left out. */
 export async function listRoots() {
   const f = await readRoots();
-  return f.roots.map(({ id, name, os, host, joined_at, delivered_at, wg_pub }) => ({
-    id,
-    name,
-    os,
-    host,
-    joined_at,
-    delivered_at: delivered_at ?? null,
-    wg_fp: wg_pub ? wgFingerprint(wg_pub) : null,
-  }));
+  return f.roots
+    .filter((r) => !r.revoked)
+    .map(({ id, name, os, host, joined_at, delivered_at, wg_pub }) => ({
+      id,
+      name,
+      os,
+      host,
+      joined_at,
+      delivered_at: delivered_at ?? null,
+      wg_fp: wg_pub ? wgFingerprint(wg_pub) : null,
+    }));
 }
 
 export function rootIdFor(name: string, taken: Set<string>): string {
@@ -287,7 +384,7 @@ export function rootIdFor(name: string, taken: Set<string>): string {
 }
 
 /** a root name a joined root can put in its YGG_PEERS (the joiner checks the same shape) */
-const ROOT_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+export const ROOT_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 
 /**
  * The hub brain's root NAME, handed to the joiner as `hub`. The joined root
@@ -419,6 +516,7 @@ export function createJoin(
     status: 'pending',
   };
   S.joins.set(req, j);
+  saveJoins();
   return { req, secret, code: j.code, expires_in: JOIN_TTL_S };
 }
 
@@ -472,6 +570,7 @@ export function pollJoin(req: string, secret: string): Promise<PollOut> {
     const result = j.result;
     j.result = undefined; // ONCE: the raw secrets leave memory with this response
     j.status = 'delivered';
+    saveJoins();
     const f = await readRoots();
     const rec = f.roots.find((r) => r.id === result.root_id);
     if (rec) {
@@ -496,6 +595,7 @@ export function refuseJoin(req: string, device: string): Promise<Decision> {
     if (st !== 'pending') return { http: 409, body: { error: `already ${st}`, status: st } };
     j.status = 'refused';
     j.by = device;
+    saveJoins();
     return { http: 200, body: { status: 'refused' } };
   });
 }
@@ -581,6 +681,7 @@ export async function approveJoin(req: string, device: string): Promise<Decision
         ? { wg: { public_key: hubKey, hub_ip: `${addr.base}.1`, ip: addr.ip, net: addr.net } }
         : {}),
     };
+    saveJoins();
     return {
       http: 200,
       body: { status: 'approved', root_id, name: j.name, os: j.os, host: j.host },
@@ -600,6 +701,9 @@ export async function refillTokens(
   const rec = f.roots.find((r) => r.id === root);
   if (!rec || !/^[0-9a-f]{32}$/.test(secret) || !sameHash(sha256(secret), rec.secretHash)) {
     return { http: 401, body: { error: 'unknown root or bad root secret' } };
+  }
+  if (rec.revoked) {
+    return { http: 401, body: { error: 'this root was removed from the tree', why: 'revoked' } };
   }
   // the bridge refuses a link token whose dev claim is revoked: say so here
   // instead of handing out 20 tokens that can never open
@@ -627,4 +731,177 @@ export async function refillTokens(
     console.error(`refill ${root}: ${msg}`);
     return { http: 503, body: { error: msg } };
   }
+}
+
+/* ---------------- the whole tree: what the hub brain knows of every root ---------------- */
+
+/** this root (the hub brain itself), as GET <brain>/root describes it */
+export type HomeRoot = {
+  name: string;
+  os: string | null;
+  cpus: number | null;
+  mem_gb: number | null;
+  running: number;
+  /** its own [MAIN] id (null: none yet) */
+  main: string | null;
+};
+
+/** the brain's word on one other root (GET /root → roots[]) */
+export type RootLive = {
+  reachable: boolean;
+  /** when it last answered (ms since epoch; null: never) */
+  seen: number | null;
+  running: number;
+  models: string[];
+  /** its MAIN's id there, and the local proxy of it */
+  main: string | null;
+  main_proxy: string | null;
+  arch?: string | null;
+  cpus?: number | null;
+  mem_gb?: number | null;
+};
+
+type BrainRoot = RootLive & { name: string; os: string | null };
+
+const num0 = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
+const strN = (v: unknown) => (typeof v === 'string' && v ? v : null);
+/** seconds or milliseconds → milliseconds */
+const ms = (v: unknown) => {
+  const n = num0(v);
+  return n && n > 0 ? (n < 1e12 ? n * 1000 : n) : null;
+};
+
+function brainRoot(v: unknown): BrainRoot | null {
+  const o = (v && typeof v === 'object' ? v : {}) as Record<string, unknown>;
+  const name = str(o.name);
+  if (!ROOT_NAME.test(name)) return null;
+  return {
+    name,
+    os: strN(o.os),
+    arch: strN(o.arch),
+    cpus: num0(o.cpus),
+    mem_gb: num0(o.mem_gb),
+    reachable: o.reachable === true,
+    seen: ms(o.seen),
+    running: num0(o.running) ?? 0,
+    models: (Array.isArray(o.models) ? o.models : [])
+      .map((m) => (typeof m === 'string' ? m : str((m as { id?: unknown } | null)?.id)))
+      .filter(Boolean),
+    main: strN(o.main),
+    main_proxy: strN(o.main_proxy),
+  };
+}
+
+/** GET <brain>/root: this root and the brain's word on the others (empty when it does not answer) */
+export async function brainTree(): Promise<{ home: HomeRoot | null; roots: BrainRoot[] }> {
+  try {
+    const r = await undiciFetch(`${OC}/root`, { signal: AbortSignal.timeout(4000) });
+    if (!r.ok) return { home: null, roots: [] };
+    const d = ((await r.json()) ?? {}) as Record<string, unknown>;
+    const hw = (d.hardware ?? {}) as Record<string, unknown>;
+    const load = (d.load ?? {}) as Record<string, unknown>;
+    return {
+      home: {
+        name: str(d.name),
+        os: strN(hw.os),
+        cpus: num0(hw.cpus),
+        mem_gb: num0(hw.mem_gb),
+        running: num0(load.running) ?? 0,
+        main: strN(d.main),
+      },
+      roots: (Array.isArray(d.roots) ? d.roots : [])
+        .map(brainRoot)
+        .filter((x): x is BrainRoot => !!x),
+    };
+  } catch {
+    return { home: null, roots: [] };
+  }
+}
+
+const OFF_LINE: RootLive = {
+  reachable: false,
+  seen: null,
+  running: 0,
+  models: [],
+  main: null,
+  main_proxy: null,
+};
+
+/**
+ * GET /api/roots: every root of this tree. The joined ones (roots.json, removed ones left out)
+ * with the brain's word on each merged in by id (= the root's name on the brain), then the roots
+ * the brain knows that roots.json does not (static peers), as the brain describes them.
+ */
+export async function rootsOverview() {
+  const [f, tree] = await Promise.all([readRoots(), brainTree()]);
+  const gone = new Set(f.roots.filter((r) => r.revoked).map((r) => r.id));
+  const byName = new Map(tree.roots.map((b) => [b.name, b]));
+  const used = new Set<string>();
+  const live = (b: BrainRoot): RootLive => ({
+    reachable: b.reachable,
+    seen: b.seen,
+    running: b.running,
+    models: b.models,
+    main: b.main,
+    main_proxy: b.main_proxy,
+    arch: b.arch,
+    cpus: b.cpus,
+    mem_gb: b.mem_gb,
+  });
+  const roots: Array<Record<string, unknown> & { id: string; name: string }> = (
+    await listRoots()
+  ).map((r) => {
+    const b = byName.get(r.id) ?? byName.get(r.name);
+    if (b) used.add(b.name);
+    return { ...r, ...(b ? live(b) : OFF_LINE), os: b?.os || r.os };
+  });
+  for (const b of tree.roots) {
+    if (used.has(b.name) || gone.has(b.name) || b.name === tree.home?.name) continue;
+    roots.push({
+      id: b.name,
+      name: b.name,
+      os: b.os || '',
+      host: '',
+      joined_at: null,
+      delivered_at: null,
+      wg_fp: null,
+      ...live(b),
+    });
+  }
+  return { home: tree.home, roots };
+}
+
+/**
+ * Remove a root from the tree (the roots sheet's hold → Remove): roots.json marks it `revoked`
+ * (the existing atomic write, on the registry chain), then the hub brain forgets it
+ * (DELETE /root/peers/<id>: loopback, its proxies say "root removed"). A static peer (not in
+ * roots.json) is only forgotten by the brain.
+ */
+export async function removeRoot(
+  id: string
+): Promise<{ http: 200 | 404 | 502; body: Record<string, unknown> }> {
+  const known = await serialize(async () => {
+    const f = await readRoots();
+    const rec = f.roots.find((r) => r.id === id);
+    if (!rec) return false;
+    if (!rec.revoked) {
+      rec.revoked = true;
+      rec.revoked_at = new Date().toISOString();
+      await writeRoots(f);
+    }
+    return true;
+  });
+  let brain = 0;
+  try {
+    const r = await undiciFetch(`${OC}/root/peers/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+      signal: AbortSignal.timeout(8000),
+    });
+    brain = r.status;
+  } catch (e) {
+    console.warn(`roots: the brain did not forget ${id}: ${(e as Error).message}`);
+  }
+  if (known || (brain >= 200 && brain < 300)) return { http: 200, body: { ok: true } };
+  if (brain === 404) return { http: 404, body: { error: `no root ${id}` } };
+  return { http: 502, body: { error: 'the brain did not answer' } };
 }
