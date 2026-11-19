@@ -40,7 +40,7 @@ use crate::{AppState, now_ms};
 /// The piece size, both ways: the phone's upload and a pull between roots.
 pub const PIECE: u64 = 1 << 20;
 /// A text file up to this size reaches a brain-native model inline, as text.
-const INLINE_MAX: u64 = 100 * 1024;
+const INLINE_MAX: u64 = 200 * 1024;
 const UPLOAD_TTL_MS: u64 = 3_600_000;
 
 #[derive(Default)]
@@ -56,6 +56,8 @@ struct Upload {
     size: u64,
     have: u64,
     created: u64,
+    /// done: its REF, still given to a last piece sent again (its answer was lost)
+    file: Option<Value>,
 }
 
 pub fn max_bytes() -> u64 {
@@ -219,17 +221,18 @@ pub fn size_of(st: &AppState, hash: &str) -> Option<u64> {
     std::fs::metadata(blob(st, hash)).ok().filter(|m| m.is_file()).map(|m| m.len())
 }
 
-/// The file under its own name, for a tool or a harness to open (a hard link to the blob).
+/// The file under its own name, for a tool or a harness to open: a copy, so a session that
+/// edits it never changes the stored file (whose name is its hash). Made beside, then renamed
+/// into place: two at once never cut each other's copy short.
 pub fn named(st: &AppState, hash: &str, name: &str) -> std::io::Result<PathBuf> {
     let d = root_dir(st).join("named").join(hash);
     std::fs::create_dir_all(&d)?;
     let p = d.join(safe_name(name));
     if !p.exists() {
-        let b = blob(st, hash);
-        if std::fs::hard_link(&b, &p).is_err() {
-            std::fs::copy(&b, &p)?;
-            private(&p);
-        }
+        let tmp = tmp_path(st, "named");
+        std::fs::copy(blob(st, hash), &tmp)?;
+        private(&tmp);
+        std::fs::rename(&tmp, &p)?;
     }
     Ok(p)
 }
@@ -260,7 +263,7 @@ pub async fn upload_start(State(st): State<AppState>, Json(b): Json<Value>) -> R
             ups.remove(&k);
             let _ = std::fs::remove_file(root_dir(&st).join("up").join(&k));
         }
-        ups.insert(id.clone(), Upload { name: name.clone(), mime: mime.clone(), size, have: 0, created: now });
+        ups.insert(id.clone(), Upload { name: name.clone(), mime: mime.clone(), size, have: 0, created: now, file: None });
     }
     if size == 0 {
         return match put_bytes(&st, &[]) {
@@ -286,6 +289,9 @@ pub async fn upload_piece(State(st): State<AppState>, UrlPath(id): UrlPath<Strin
     let done = {
         let mut ups = st.files.uploads.lock().unwrap();
         let Some(u) = ups.get_mut(&id) else { return err(StatusCode::NOT_FOUND, "no such upload (it may have expired: start it again)") };
+        if let Some(f) = &u.file {
+            return Json(json!({ "have": u.size, "file": f })).into_response();
+        }
         if offset != u.have {
             // a piece sent again (its answer was lost) or one that skips ahead: go on from `have`
             return (StatusCode::CONFLICT, Json(json!({ "error": "go on from have", "have": u.have }))).into_response();
@@ -303,8 +309,7 @@ pub async fn upload_piece(State(st): State<AppState>, UrlPath(id): UrlPath<Strin
         if u.have < u.size {
             return Json(json!({ "have": u.have })).into_response();
         }
-        let u = ups.remove(&id).unwrap();
-        (u.name, u.mime, u.size)
+        (u.name.clone(), u.mime.clone(), u.size)
     };
     let (name, mime, size) = done;
     let st2 = st.clone();
@@ -320,7 +325,11 @@ pub async fn upload_piece(State(st): State<AppState>, UrlPath(id): UrlPath<Strin
     match settled {
         Ok(Ok(hash)) => {
             let _ = named(&st, &hash, &name);
-            Json(json!({ "have": size, "file": reference(&hash, &name, &mime, size, &st.config.peers.me) })).into_response()
+            let file = reference(&hash, &name, &mime, size, &st.config.peers.me);
+            if let Some(u) = st.files.uploads.lock().unwrap().get_mut(&id) {
+                u.file = Some(file.clone());
+            }
+            Json(json!({ "have": size, "file": file })).into_response()
         }
         Ok(Err(e)) => err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
         Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
@@ -591,6 +600,26 @@ pub fn point_artifact_links(text: &str, root: &str, rid: &str) -> String {
 
 fn is_ref(p: &Value) -> bool {
     p["type"] == "file" && p["hash"].as_str().is_some_and(valid_hash)
+}
+
+/// What a client says about a file's place on this root is not taken: `path`, `inline` and
+/// `missing` are this root's own (set by `prepare`).
+pub fn strip_local(parts: &mut [Value]) {
+    for p in parts.iter_mut().filter(|p| p["type"] == "file") {
+        if let Some(o) = p.as_object_mut() {
+            for k in ["path", "inline", "missing"] {
+                o.remove(k);
+            }
+        }
+    }
+}
+
+/// An image a model takes as an image: png, jpeg, gif or webp, at most 5 MB (an upstream refuses
+/// the rest, and the turn with it would fail). Any other image reaches it as a file line.
+pub fn model_image(p: &Value) -> bool {
+    p["type"] == "file"
+        && matches!(p["mime"].as_str(), Some("image/png" | "image/jpeg" | "image/gif" | "image/webp"))
+        && p["size"].as_u64().is_none_or(|n| n <= 5 << 20)
 }
 
 /// A new message's `data:` file parts become files in the store (the part keeps its name and mime,

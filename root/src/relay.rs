@@ -106,7 +106,9 @@ struct Watch {
 
 struct PendingTurn {
     turn_id: Option<String>,
-    sink: Option<mpsc::Sender<Event>>,
+    /// this client's own tag (two turns posted at once never take each other's place)
+    tag: u64,
+    sink: Option<mpsc::UnboundedSender<Event>>,
     done: Option<oneshot::Sender<Result<Value, String>>>,
 }
 
@@ -211,6 +213,9 @@ fn sse(kind: &str, props: &Value) -> Event {
 
 /// Starts following `proxy` (on `root`, there `rid`) if it is not yet; `view`: the phone reads it.
 fn watch_locked(st: &AppState, w: &mut HashMap<String, Watch>, proxy: &str, root: &str, rid: &str, view: bool) {
+    // only a new proxy changes what the follower asks for (the phone reads every 2.5 s: a restart
+    // of the long poll on each read would never let it answer)
+    let new = !w.contains_key(proxy);
     let e = w.entry(proxy.to_string()).or_insert_with(|| Watch {
         root: root.to_string(),
         rid: rid.to_string(),
@@ -226,7 +231,11 @@ fn watch_locked(st: &AppState, w: &mut HashMap<String, Watch>, proxy: &str, root
     }
     let mut f = st.relay.followers.lock().unwrap();
     match f.get(root) {
-        Some(fo) => fo.changed.notify_one(),
+        Some(fo) => {
+            if new {
+                fo.changed.notify_one();
+            }
+        }
         None => {
             let fo = Arc::new(Follower::default());
             f.insert(root.to_string(), fo.clone());
@@ -281,19 +290,15 @@ fn release(st: &AppState, w: &mut Watch, proxy: &str) -> bool {
 /// What to do once the watches lock is let go (sends can wait on a slow client).
 #[derive(Default)]
 struct After {
-    sends: Vec<(mpsc::Sender<Event>, Event)>,
     ends: Vec<(PendingTurn, Result<Value, String>)>,
     resolve: Option<String>,
 }
 
 impl After {
     async fn run(self, st: &AppState) {
-        for (tx, ev) in self.sends {
-            let _ = tx.send(ev).await;
-        }
         for (mut t, r) in self.ends {
             if let (Some(tx), Err(e)) = (&t.sink, &r) {
-                let _ = tx.send(Event::default().event("error").json_data(json!({ "error": e })).unwrap_or_default()).await;
+                let _ = tx.send(Event::default().event("error").json_data(json!({ "error": e })).unwrap_or_default());
             }
             t.sink = None;
             if let Some(d) = t.done.take() {
@@ -301,7 +306,7 @@ impl After {
             }
         }
         if let Some(p) = self.resolve {
-            tokio::spawn(resolve_later(st.clone(), p));
+            tokio::spawn(resolve_later(st.clone(), p, false));
         }
     }
 }
@@ -320,7 +325,7 @@ fn on_event(st: &AppState, proxy: &str, w: &mut Watch, mut ev: Value, after: &mu
     let kind = ev["type"].as_str().unwrap_or_default().to_string();
     rewrite(&mut ev["properties"], &w.rid, proxy);
     let props = ev["properties"].take();
-    let sinks_for = |w: &Watch, turn: Option<&str>| -> Vec<mpsc::Sender<Event>> {
+    let sinks_for = |w: &Watch, turn: Option<&str>| -> Vec<mpsc::UnboundedSender<Event>> {
         w.turns.iter().filter(|t| turn.is_some() && t.turn_id.as_deref() == turn).filter_map(|t| t.sink.clone()).collect()
     };
     let unknown_turn = |w: &Watch, turn: &str| w.turns.iter().any(|t| t.turn_id.is_none()) && !w.turns.iter().any(|t| t.turn_id.as_deref() == Some(turn));
@@ -354,7 +359,7 @@ fn on_event(st: &AppState, proxy: &str, w: &mut Watch, mut ev: Value, after: &mu
                     w.early.push((cur, kind.clone(), props.clone()));
                 } else {
                     for tx in sinks_for(w, Some(&cur)) {
-                        after.sends.push((tx, sse(&kind, &props)));
+                        let _ = tx.send(sse(&kind, &props));
                     }
                 }
             }
@@ -364,7 +369,7 @@ fn on_event(st: &AppState, proxy: &str, w: &mut Watch, mut ev: Value, after: &mu
             let turn = props["info"]["parentID"].as_str().map(String::from);
             if let Some(t) = &turn {
                 for tx in sinks_for(w, Some(t)) {
-                    after.sends.push((tx, sse(&kind, &props)));
+                    let _ = tx.send(sse(&kind, &props));
                 }
                 if unknown_turn(w, t) {
                     w.early.push((t.clone(), kind.clone(), props.clone()));
@@ -404,7 +409,7 @@ fn flush_early(w: &mut Watch, turn_id: &str, after: &mut After) {
         }
         let sinks: Vec<_> = w.turns.iter().filter(|x| x.turn_id.as_deref() == Some(turn_id)).filter_map(|x| x.sink.clone()).collect();
         for tx in sinks {
-            after.sends.push((tx, sse(&kind, &props)));
+            let _ = tx.send(sse(&kind, &props));
         }
         match kind.as_str() {
             "message.completed" | "message.aborted" => end_turn(w, turn_id, Ok(props), after),
@@ -415,12 +420,14 @@ fn flush_early(w: &mut Watch, turn_id: &str, after: &mut After) {
 }
 
 /// `resolve`, boxed: it and `After::run` call each other, so one of them names its future's type.
-fn resolve_later(st: AppState, proxy: String) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
-    Box::pin(async move { resolve(&st, &proxy).await })
+fn resolve_later(st: AppState, proxy: String, restarted: bool) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
+    Box::pin(async move { resolve(&st, &proxy, restarted).await })
 }
 
 /// After an idle (or a gap): the turns still open here are looked up there; a finished one ends.
-async fn resolve(st: &AppState, proxy: &str) {
+/// `restarted`: the other root started again since; a turn with no reply there never runs (a
+/// restart keeps no queue), so it ends here, said plainly.
+async fn resolve(st: &AppState, proxy: &str, restarted: bool) {
     let Some((root, rid, ids)) = ({
         let w = st.relay.watches.lock().unwrap();
         w.get(proxy).map(|x| (x.root.clone(), x.rid.clone(), x.turns.iter().filter_map(|t| t.turn_id.clone()).collect::<Vec<_>>()))
@@ -438,8 +445,21 @@ async fn resolve(st: &AppState, proxy: &str) {
             if let Some(m) = reply {
                 let mut m = m.clone();
                 rewrite(&mut m, &rid, proxy);
-                let r = if m["info"]["error"]["name"] == "UnknownError" { Err(m["info"]["error"]["data"]["message"].as_str().unwrap_or("the reply failed").to_string()) } else { Ok(m) };
+                let r = if m["info"]["error"]["name"] == "UnknownError" {
+                    Err(m["info"]["error"]["data"]["message"].as_str().unwrap_or("the reply failed").to_string())
+                } else {
+                    // its client hears the end the way a live turn ends
+                    let kind = if m["info"]["error"]["name"] == "MessageAbortedError" { "message.aborted" } else { "message.completed" };
+                    for t in w.turns.iter().filter(|t| t.turn_id.as_deref() == Some(id.as_str())) {
+                        if let Some(tx) = &t.sink {
+                            let _ = tx.send(sse(kind, &m));
+                        }
+                    }
+                    Ok(m)
+                };
                 end_turn(w, id, r, &mut after);
+            } else if restarted {
+                end_turn(w, id, Err(format!("{root} restarted; this message did not run there — send it again")), &mut after);
             }
         }
         if w.turns.is_empty() && w.current.is_none() {
@@ -462,7 +482,7 @@ fn link_lost(st: &AppState, root: &str) {
             let why = format!("no answer from {root}");
             for mut t in w.turns.drain(..) {
                 if let Some(tx) = t.sink.take() {
-                    after.sends.push((tx, Event::default().event("error").json_data(json!({ "sessionID": proxy, "error": why })).unwrap_or_default()));
+                    let _ = tx.send(Event::default().event("error").json_data(json!({ "sessionID": proxy, "error": why })).unwrap_or_default());
                 }
                 if let Some(d) = t.done.take() {
                     let _ = d.send(Err(why.clone()));
@@ -559,7 +579,8 @@ async fn follow(st: AppState, root: String, fo: Arc<Follower>) {
                         let proxy = proxy.clone();
                         on_event(&st, &proxy, w, ev, &mut post);
                     }
-                    let gap = v["gap"] == true || (fresh && !first);
+                    let restarted = fresh && !first;
+                    let gap = v["gap"] == true || restarted;
                     let mut look = vec![];
                     for (proxy, w) in ws.iter_mut().filter(|(_, w)| w.root == root) {
                         if w.lost {
@@ -580,10 +601,21 @@ async fn follow(st: AppState, root: String, fo: Arc<Follower>) {
                     }
                     drop(ws);
                     for p in look {
-                        tokio::spawn(resolve_later(st.clone(), p));
+                        tokio::spawn(resolve_later(st.clone(), p, restarted));
                     }
                 }
                 post.run(&st).await;
+            }
+            Err(e) if e.contains(": 404 ") => {
+                // a root from before the feed: no live events from it, but no false "no answer"
+                // either — its turns are looked up every few seconds instead
+                last_ok = now_ms();
+                lost_said = false;
+                let open: Vec<String> = st.relay.watches.lock().unwrap().iter().filter(|(_, w)| w.root == root && !w.turns.is_empty()).map(|(p, _)| p.clone()).collect();
+                for p in open {
+                    resolve(&st, &p, false).await;
+                }
+                tokio::time::sleep(Duration::from_secs(5)).await;
             }
             Err(e) => {
                 fails += 1;
@@ -609,7 +641,7 @@ pub enum Wants {
 
 pub struct Forwarded {
     pub turn_id: String,
-    pub stream: Option<mpsc::Receiver<Event>>,
+    pub stream: Option<mpsc::UnboundedReceiver<Event>>,
     pub done: Option<oneshot::Receiver<Result<Value, String>>>,
 }
 
@@ -626,9 +658,11 @@ pub fn no_answer(root: &str, e: &str) -> String {
 /// `meta`: what rides along (`from`, `auto`, `internal`); a key is added, so a post sent twice
 /// runs once.
 pub async fn forward(st: &AppState, proxy: &str, root: &str, rid: &str, parts: Vec<Value>, modality: Option<String>, meta: Value, wants: Wants) -> Result<Forwarded, String> {
+    static TAGS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    let tag = TAGS.fetch_add(1, Ordering::SeqCst);
     let (sink, stream) = match wants {
         Wants::Sse => {
-            let (tx, rx) = mpsc::channel::<Event>(256);
+            let (tx, rx) = mpsc::unbounded_channel::<Event>();
             (Some(tx), Some(rx))
         }
         _ => (None, None),
@@ -644,7 +678,7 @@ pub async fn forward(st: &AppState, proxy: &str, root: &str, rid: &str, parts: V
         let mut ws = st.relay.watches.lock().unwrap();
         watch_locked(st, &mut ws, proxy, root, rid, false);
         let w = ws.get_mut(proxy).unwrap();
-        w.turns.push(PendingTurn { turn_id: None, sink, done: done_tx });
+        w.turns.push(PendingTurn { tag, turn_id: None, sink, done: done_tx });
         w.lost = false;
         mark_busy(st, w, proxy);
         st.relay.followers.lock().unwrap().get(root).cloned()
@@ -675,8 +709,8 @@ pub async fn forward(st: &AppState, proxy: &str, root: &str, rid: &str, parts: V
     let out = {
         let mut ws = st.relay.watches.lock().unwrap();
         let Some(w) = ws.get_mut(proxy) else { return Err("the session was removed".into()) };
-        // our turn is the newest one without an id
-        let i = w.turns.iter().rposition(|t| t.turn_id.is_none());
+        // our own turn, by its tag (two posted at once must never swap)
+        let i = w.turns.iter().position(|t| t.tag == tag);
         match (&r, i) {
             (Ok(v), Some(i)) if v["turn_id"].is_string() => {
                 let tid = v["turn_id"].as_str().unwrap().to_string();
@@ -728,7 +762,7 @@ async fn forward_abort(st: &AppState, proxy: &str, root: &str, rid: &str) {
                             "error": { "name": "MessageAbortedError", "data": { "message": format!("stopped here — {why}") } } },
                             "parts": [{ "type": "text", "text": "" }] });
                         if let Some(tx) = &t.sink {
-                            after.sends.push((tx.clone(), sse("message.aborted", &msg)));
+                            let _ = tx.send(sse("message.aborted", &msg));
                         }
                         after.ends.push((t, Ok(msg)));
                     }

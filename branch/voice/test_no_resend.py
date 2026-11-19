@@ -20,6 +20,8 @@ class H(BaseHTTPRequestHandler):
         n = int(self.headers.get("content-length") or 0); body = self.rfile.read(n)
         if "/message" in self.path:
             POSTS.append(self.path)
+            if MODE["m"] == "hang":
+                import time as _t; _t.sleep(4); return
             if MODE["m"] == "refuse":
                 self.send_response(502); self.send_header("content-type", "application/json"); self.end_headers()
                 self.wfile.write(b'{"error":"no answer from lab"}'); return
@@ -45,7 +47,14 @@ async def turn():
     return out
 
 fails = 0
-for mode in ("refuse", "drop"):
+import agent as _agent, httpx as _httpx
+_orig = _httpx.AsyncClient
+class _Short(_orig):
+    def __init__(self, *a, **k):
+        k["timeout"] = 2
+        super().__init__(*a, **k)
+for mode in ("refuse", "drop", "hang"):
+    _agent.httpx.AsyncClient = _Short if mode == "hang" else _orig
     MODE["m"] = mode; POSTS.clear()
     said = asyncio.run(turn())
     ok = len(POSTS) == 1

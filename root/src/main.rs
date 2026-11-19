@@ -70,7 +70,7 @@ use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::sync::{Notify, broadcast, mpsc, oneshot};
-use tokio_stream::wrappers::{BroadcastStream, ReceiverStream};
+use tokio_stream::wrappers::{BroadcastStream, ReceiverStream, UnboundedReceiverStream};
 
 mod anthropic;
 mod context;
@@ -1170,10 +1170,15 @@ async fn admin_drain(
     let max_s = body["max_s"].as_u64().unwrap_or(120).clamp(1, 600);
     st.draining.store(true, std::sync::atomic::Ordering::Relaxed);
     let deadline = std::time::Instant::now() + Duration::from_secs(max_s);
+    // a proxy's turn runs on its own root: a restart here does not cut it (relay.rs)
+    let local = |st: &AppState| -> Vec<String> {
+        let running: Vec<String> = st.running.lock().unwrap().keys().cloned().collect();
+        running.into_iter().filter(|id| peers::remote_of(st, id).is_none()).collect()
+    };
     loop {
-        let running = st.running.lock().unwrap().len();
+        let running = local(&st).len();
         if running == 0 || std::time::Instant::now() >= deadline {
-            let still = st.running.lock().unwrap().keys().cloned().collect::<Vec<_>>();
+            let still = local(&st);
             if still.is_empty() {
                 eprintln!("DRAIN: drained in {}s", max_s - deadline.saturating_duration_since(std::time::Instant::now()).as_secs());
             } else {
@@ -2086,6 +2091,7 @@ async fn post_message(
         .is_some_and(|a| a.contains("text/event-stream"));
     // a file sent as a data: URL is stored as a file here; the message keeps a reference
     let mut parts = body.parts;
+    files::strip_local(&mut parts);
     files::ingest_data_urls(&st, &mut parts);
     // a proxy: the turn goes to its root without waiting there for its end; that root's events
     // come back under this id, and its client here is answered like a local one (relay.rs)
@@ -2103,7 +2109,7 @@ async fn post_message(
         let wants = if is_async { relay::Wants::Async } else if want_sse { relay::Wants::Sse } else { relay::Wants::Plain };
         return match relay::forward(&st, &id, &root, &rid, parts, body.modality, meta, wants).await {
             Ok(f) if is_async => Json(json!({ "turn_id": f.turn_id, "origin": Value::Null, "sessionID": id, "status": "queued" })).into_response(),
-            Ok(relay::Forwarded { stream: Some(rx), .. }) => Sse::new(ReceiverStream::new(rx).map(Ok::<_, Infallible>)).keep_alive(KeepAlive::default()).into_response(),
+            Ok(relay::Forwarded { stream: Some(rx), .. }) => Sse::new(UnboundedReceiverStream::new(rx).map(Ok::<_, Infallible>)).keep_alive(KeepAlive::default()).into_response(),
             Ok(relay::Forwarded { done: Some(done), .. }) => match done.await {
                 Ok(Ok(msg)) => Json(msg).into_response(),
                 Ok(Err(e)) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e }))).into_response(),
@@ -2352,9 +2358,6 @@ fn submit(st: &AppState, id: &str, turn: Turn) -> Result<Submitted, Response> {
     let (done_tx, done_rx) = oneshot::channel::<Result<Value, String>>();
     let (st, id, turn_id) = (st.clone(), id.to_string(), user_msg["info"]["id"].as_str().unwrap_or_default().to_string());
     tokio::spawn(async move {
-        // the files this message names are here before it runs (pulled from the root that has
-        // them), each with a path a tool can open (files.rs)
-        files::prepare(&st, &id, &turn_id).await;
         let result = match gate.admit(&ticket).await {
             gate::Admit::Go(mut permit) => {
                 let queue_ms = enqueued.elapsed().as_millis() as u64;
@@ -2478,6 +2481,14 @@ fn upstream_history(messages: &[Value]) -> Vec<Value> {
         text.clear();
     }
     let mut out = Vec::new();
+    // what the model gets as an image: a data: URL image (as always), or a stored image it takes
+    let as_image = |p: &Value| {
+        p["type"] == "file"
+            && match p["url"].as_str() {
+                Some(u) if u.starts_with("data:") => p["mime"].as_str().is_some_and(|t| t.starts_with("image/")),
+                _ => files::model_image(p),
+            }
+    };
     let start = last_compaction(messages);
     // images ride the newest two user turns as image parts (older ones as a one-line note):
     // what the model is asked about now, without re-sending every photo of the session
@@ -2529,7 +2540,7 @@ fn upstream_history(messages: &[Value]) -> Vec<Value> {
             // every other file: a line with its path (a small text file inline), frozen on the part
             // before the turn ran (files::prepare), so these bytes never change (cache law)
             if role == "user" && !compaction {
-                for t in m["parts"].as_array().into_iter().flatten().filter(|p| !p["mime"].as_str().is_some_and(|t| t.starts_with("image/"))).filter_map(files::model_text) {
+                for t in m["parts"].as_array().into_iter().flatten().filter(|p| !as_image(p)).filter_map(files::model_text) {
                     if !text.is_empty() {
                         text.push_str("\n\n");
                     }
@@ -2547,7 +2558,7 @@ fn upstream_history(messages: &[Value]) -> Vec<Value> {
                     .as_array()
                     .into_iter()
                     .flatten()
-                    .filter(|p| p["type"] == "file" && p["mime"].as_str().is_some_and(|t| t.starts_with("image/")))
+                    .filter(|p| as_image(p))
                     .filter_map(|p| match p["url"].as_str() {
                         Some(u) if u.starts_with("data:") => Some(u.to_string()),
                         // a stored file: read when the request is made (files::resolve_images)
@@ -2907,12 +2918,20 @@ impl Run {
 /// un-completed assistant placeholder, run the agent loop (abortable), store the
 /// outcome, then `session.idle`. Returns the final assistant message (aborted ones included).
 async fn run_turn(st: &AppState, id: &str, tx: &mpsc::Sender<Event>, queue_ms: u64, auto_class: bool, turn_id: &str) -> Result<Value, String> {
-    let history = st.sessions.lock().unwrap().get(id).map(|s| s.messages.clone());
-    let Some(history) = history else { return Err(format!("session {id} not found")) };
-
     let cancel = Arc::new(Notify::new());
     st.running.lock().unwrap().insert(id.to_string(), cancel.clone());
     publish(st, "session.status", json!({ "sessionID": id, "status": { "type": "busy" } }));
+    // the files this turn's message names are here before it runs (pulled from the root that has
+    // them), each with a path a tool can open — in turn order, inside the run slot (files.rs)
+    files::prepare(st, id, turn_id).await;
+    let history = st.sessions.lock().unwrap().get(id).map(|s| s.messages.clone());
+    let Some(history) = history else {
+        let mut running = st.running.lock().unwrap();
+        if running.get(id).is_some_and(|n| Arc::ptr_eq(n, &cancel)) {
+            running.remove(id);
+        }
+        return Err(format!("session {id} not found"));
+    };
     let mut placeholder = make_message(id, "assistant", vec![text_part("")]);
     // the message it answers (opencode's parentID): with messages waiting their turn, the reply
     // to one is not the first reply after it

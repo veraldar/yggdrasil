@@ -295,6 +295,20 @@ class OpenCodeLLM(llm.LLM):
         first sentence seconds before the run completes. Raises on upstream
         failure only if nothing was yielded yet."""
         sid = await self._ensure_session()
+        try:
+            async for sentence in self._stream(sid, text, voice):
+                yield sentence
+        except (httpx.ConnectError, httpx.ConnectTimeout):
+            raise  # the brain was never reached: sending it again is the first time
+        except OpenCodeLLM.Delivered:
+            raise
+        except Exception as e:  # noqa: BLE001
+            # it may have reached the brain (a timeout waiting for the answer, a cut line):
+            # never send it a second time
+            why = "no answer in time; it may still be working" if isinstance(e, httpx.TimeoutException) else (str(e)[:200] or "the line was cut")
+            raise OpenCodeLLM.Delivered(why) from e
+
+    async def _stream(self, sid: str, text: str, voice: bool) -> AsyncIterable[str]:
         async with httpx.AsyncClient(timeout=300) as c:
             async with c.stream(
                 "POST",
