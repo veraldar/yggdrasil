@@ -58,9 +58,11 @@ pub fn schemas(profiles: &crate::profiles::Profiles) -> Vec<Value> {
                   "brief": s("self-contained instructions: goal, constraints, paths, what done means, needed facts"),
                   "root": s("optional: another root (machine) to run it on — see the roots line of the [tree] view"),
                   "model": s("optional model id"), "variant": s("optional thinking: high | low | off"),
+                  "attach": { "type": "boolean", "description": "true = the files in the user's current message (screenshots, documents) go to this session, unedited" },
                   "from": s("optional: start as a COPY of this conversation — a terminal session (term:…) or a session here on Claude Code/opencode/Antigravity — with its whole context; the original is never written (use it when the owner has it open in their terminal)") }), &["title", "agent", "brief"]),
         f("session_send", "Send a message or follow-up instruction to an existing session (its context is kept). It reports back when done. A terminal session (term:…) gets it typed into the owner's terminal when that is possible, else it continues here under you.",
-          json!({ "id": s("session id (or exact title)"), "message": s("the message") }), &["id", "message"]),
+          json!({ "id": s("session id (or exact title)"), "message": s("the message"),
+                  "attach": { "type": "boolean", "description": "true = the files in the user's current message go with it, unedited" } }), &["id", "message"]),
         f("session_read", "Read a session's card, status, last request, last reply and sub-sessions.",
           json!({ "id": s("session id (or exact title)") }), &["id"]),
         f("session_close", "Cancel and archive a session and its sub-sessions — only when the user cancels or drops that work. Never to tidy up: finished sessions stay in the tree.",
@@ -291,8 +293,12 @@ async fn run_remote(st: &AppState, caller: &str, name: &str, input: &Value) -> O
         if brief.trim().is_empty() {
             return Some(err("brief required".into()));
         }
+        let parts = match with_files(st, caller, input, brief) {
+            Ok(p) => p,
+            Err(o) => return Some(o),
+        };
         let title = unique_title(&st.sessions.lock().unwrap(), title);
-        return Some(match crate::peers::start(st, caller, root, &title, profile, brief, input["model"].as_str(), input["variant"].as_str()).await {
+        return Some(match crate::peers::start(st, caller, root, &title, profile, brief, parts, input["model"].as_str(), input["variant"].as_str()).await {
             Ok(pid) => {
                 publish(st, "tree.updated", json!({ "sessionID": pid, "parentID": caller }));
                 ok(format!("STARTED, NOT DONE YET: id={pid} \"{title}\" ({profile}) on root {root} reports back when finished. Tell the user it is on its way (→ {title}); never say it is done."))
@@ -308,8 +314,12 @@ async fn run_remote(st: &AppState, caller: &str, name: &str, input: &Value) -> O
     Some(match name {
         "session_send" => {
             let msg = input["message"].as_str().unwrap_or_default();
+            let parts = match with_files(st, caller, input, msg) {
+                Ok(p) => p,
+                Err(o) => return Some(o),
+            };
             with_session(st, &target, |s| s.info["card"]["status"] = json!("working"));
-            match crate::peers::send(st, &root, &rid, msg, caller).await {
+            match crate::peers::send(st, &target, &root, &rid, parts, caller).await {
                 Ok(()) => ok(format!("SENT, NOT DONE YET: id={target} on root {root} reports back when finished. Tell the user it is on its way; never say it is done.")),
                 Err(e) => err(e),
             }
@@ -319,6 +329,8 @@ async fn run_remote(st: &AppState, caller: &str, name: &str, input: &Value) -> O
             match crate::peers::call(st, &root, "GET", &format!("/session/{rid}/message"), None, 20).await {
                 Ok(v) => {
                     let last = v.as_array().into_iter().flatten().rev().find(|m| m["info"]["role"] == "assistant").map(message_text).unwrap_or_default();
+                    // its artifact links open on that root (the owner taps the link MAIN passes on)
+                    let last = crate::files::point_artifact_links(&last, &root, &rid);
                     ok(format!("{local}(runs on root {root})\nlast reply there:\n{}", clip(&last, 3000)))
                 }
                 Err(e) => ok(format!("{local}(runs on root {root}, unreachable now: {e})")),
@@ -398,6 +410,22 @@ fn unique_title(sessions: &HashMap<String, Session>, want: &str) -> String {
     (2..).map(|n| format!("{base} {n}")).find(|t| !taken.contains(&crate::slug(t))).unwrap()
 }
 
+/// The parts of a brief or message: its text, and with `attach: true` the files of the turn the
+/// caller is answering (package 2: the owner's screenshot or PDF reaches the worker unedited).
+fn with_files(st: &AppState, caller: &str, input: &Value, text: &str) -> Result<Vec<Value>, Out> {
+    if input["attach"] != true {
+        return Ok(vec![text_part(text)]);
+    }
+    let files = crate::files::turn_files(st, caller);
+    if files.is_empty() {
+        return Err(err("nothing to attach: the user's current message has no file".into()));
+    }
+    let note = format!("{text}\n\n[attached by the brain: the user's file(s), unedited — {} file(s)]", files.len());
+    let mut parts = vec![text_part(&note)];
+    parts.extend(files);
+    Ok(parts)
+}
+
 fn start(st: &AppState, caller: &str, input: &Value) -> Out {
     let Some(brief) = input["brief"].as_str().filter(|b| !b.trim().is_empty()) else { return err("brief required".into()) };
     if relays_approval(brief) {
@@ -436,7 +464,14 @@ fn start(st: &AppState, caller: &str, input: &Value) -> Out {
         s.info["card"] = json!({ "topic": title, "brief": clip(brief, 600), "status": "working", "by": caller,
             "created": now_ms(), "updated": now_ms() });
     });
-    let turn = Turn { parts: vec![text_part(brief)], modality: None, auto_turn: false, internal: false, origin: Some(caller.to_string()), completes: None, from: Some(crate::sender_here(st, caller)), digest_hint: None };
+    let parts = match with_files(st, caller, input, brief) {
+        Ok(p) => p,
+        Err(o) => {
+            crate::drop_session(st, &sid);
+            return o;
+        }
+    };
+    let turn = Turn { parts, modality: None, auto_turn: false, internal: false, origin: Some(caller.to_string()), completes: None, from: Some(crate::sender_here(st, caller)), digest_hint: None };
     if let Err(e) = crate::submit(st, &sid, turn) {
         return err(format!("created {sid} but could not post the brief ({:?})", e.status()));
     }
@@ -506,6 +541,10 @@ fn send(st: &AppState, caller: &str, input: &Value) -> Out {
     if let Some(o) = owner_only(st, &target, &title, message) {
         return o;
     }
+    let parts = match with_files(st, caller, input, message) {
+        Ok(p) => p,
+        Err(o) => return o,
+    };
     let busy = st.running.lock().unwrap().contains_key(&target);
     with_session(st, &target, |s| {
         if is_archived(s) {
@@ -514,7 +553,7 @@ fn send(st: &AppState, caller: &str, input: &Value) -> Out {
         s.info["card"]["status"] = json!("working");
         s.info["card"]["updated"] = json!(now_ms());
     });
-    let turn = Turn { parts: vec![text_part(message)], modality: None, auto_turn: false, internal: false, origin: Some(caller.to_string()), completes: None, from: Some(crate::sender_here(st, caller)), digest_hint: None };
+    let turn = Turn { parts, modality: None, auto_turn: false, internal: false, origin: Some(caller.to_string()), completes: None, from: Some(crate::sender_here(st, caller)), digest_hint: None };
     match crate::submit(st, &target, turn) {
         Ok(_) => ok(format!(
             "SENT, NOT DONE YET: \"{title}\" (id={target}){} has your instruction and reports back when finished. Tell the user it is on its way (→ {title}); never say it is done.",
