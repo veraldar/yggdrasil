@@ -4,7 +4,8 @@
  *
  * Routes:
  *   GET    /api/session                 → enriched session list (title + preview, cached 60s)
- *   POST   /api/session                 → {name} create session (title = name)
+ *   POST   /api/session                 → {name, root?} create session (title = name; `root`:
+ *                                          on that computer — a proxy of it here, card.root)
  *                                          {attach: {id, cwd}} continue a Claude Code session
  *   GET    /api/session/[id]/messages   → transcript
  *   POST   /api/session/[id]/prompt     → {text, images?: string[](dataURL), files?: {name, content}[]}
@@ -18,6 +19,7 @@ import { PENDING_TTL_MS } from '@/lib/pending-ttl';
 import { ensureWatchdog, lastEventAt, STALL_MS } from '@/lib/oc-watchdog';
 import { slugify } from '@/lib/slug';
 import { MAIN_SLUG } from '@/lib/tree-first';
+import { ROOT_NAME } from '@/lib/roots';
 
 export const dynamic = 'force-dynamic';
 
@@ -211,9 +213,14 @@ export async function POST(req: Request) {
     if (slugify(title) === MAIN_SLUG) {
       return NextResponse.json({ error: 'the name "main" is reserved' }, { status: 409 });
     }
+    // the roots sheet's ＋ on another computer: the brain makes it there, a proxy here
+    const root = typeof body?.root === 'string' ? body.root.trim() : '';
+    if (root && !ROOT_NAME.test(root)) {
+      return NextResponse.json({ error: 'not a root name' }, { status: 400 });
+    }
     const s = await ocFetch('/session', {
       method: 'POST',
-      body: JSON.stringify({ title }),
+      body: JSON.stringify({ title, ...(root ? { root } : {}) }),
     });
     bustCache();
     return NextResponse.json({ id: s.id, title: s.title });
