@@ -4,8 +4,10 @@
  * Run by `sim/trunk-rtc-e2e.sh --scenario s16`, AT HOME (the box's namespace), like the rtc spec:
  * the phone is its own Chromium inside the phone's namespace (PW_PHONE_CHROME wraps nsenter); its
  * microphone is a WAV of Ása's sentence rendered by the rig's own TTS (piper): lead silence, the
- * sentence ending in "over" (the hands-free commit word; the agent strips it from every turn), a long
- * silent tail (Chromium loops the file: the tail keeps the sentence from coming round again).
+ * sentence, a long silent tail (Chromium loops the file: the tail keeps it from coming round again).
+ * Hands-free ends the sentence with "over" (its commit word); a hold never says it (the agent would
+ * commit it as a keyword turn while the finger is still down). Chromium takes its fake mic at launch,
+ * so each way gets its own browser — the same paired phone (its cookies and pin carried over).
  * Everything the phone does goes through the VPS's :443 (the ap) to the box. The box runs two
  * brains: home (the app's OPENCODE_URL — the voice agent only ever talks to home) and lab.
  *
@@ -42,7 +44,7 @@ const PHONE_CHROME = env('PW_PHONE_CHROME');
 const APP = env('APP_DIR');
 const ROOT = env('S16_ROOT', 'lab');
 const WAYS = env('S16_WAYS', 'hold,free').split(',').filter(Boolean);
-const SAY = env('S16_SAY', 'please add oat milk and eggs to the shopping list. over');
+const SAY = env('S16_SAY', 'please add oat milk and eggs to the shopping list');
 const KEY = words(env('S16_KEYWORDS', 'oat milk eggs shopping list'));
 must(AP && STATE && BASE && HOME && VOICE && PHONE_CHROME && APP, 'run by sim/trunk-rtc-e2e.sh --scenario s16');
 must(ROOT === 'home' || LAB, 'S16_ROOT=lab needs PW_LAB');
@@ -55,70 +57,80 @@ const userTurns = async (sid) =>
 
 const t00 = Date.now();
 const LEAD = 3.0;
-const wav = await renderSay(VOICE, SAY, join(STATE, 's16-say.wav'), { lead: LEAD, tail: 45 });
-process.stderr.write(`s16: root ${ROOT}, ways ${WAYS}; Ása's WAV ${wav.speech.toFixed(1)} s of speech (${wav.total.toFixed(1)} s with silence) → ${wav.path}\n`);
+const WAV = {
+  hold: await renderSay(VOICE, SAY, join(STATE, 's16-hold.wav'), { lead: LEAD, tail: 45 }),
+  free: await renderSay(VOICE, `${SAY}. over`, join(STATE, 's16-free.wav'), { lead: LEAD, tail: 45 }),
+};
+process.stderr.write(`s16: root ${ROOT}, ways ${WAYS}; Ása's WAVs: hold ${WAV.hold.speech.toFixed(1)} s, free ${WAV.free.speech.toFixed(1)} s of speech (+ ${LEAD} s lead, 45 s tail)\n`);
 
 const box = await chromium.launch();
 const desk = await box.newContext({ viewport: { width: 1280, height: 900 } });
 const consolePage = await desk.newPage();
-const phoneBrowser = await chromium.launch({
-  executablePath: PHONE_CHROME,
-  args: [
-    '--use-fake-ui-for-media-stream',
-    '--use-fake-device-for-media-stream',
-    `--use-file-for-fake-audio-capture=${wav.path}`,
-    '--autoplay-policy=no-user-gesture-required',
-    `--host-resolver-rules=MAP ${new URL(AP).hostname} ${AP_IP}`,
-    '--ignore-certificate-errors',
-  ],
-});
-const ctx = await phoneBrowser.newContext({
-  ...devices['Pixel 7'],
-  ignoreHTTPSErrors: true,
-  permissions: ['microphone'],
-  storageState: {
-    cookies: [],
-    origins: [{ origin: AP, localStorage: [
-      { name: 'bifrost-door', value: 'v2' },
-      { name: 'bifrost-first-turn', value: '1' },
-      { name: 'oz-mode', value: 'text' },
-    ] }],
-  },
-});
-// the reply's sound as it arrives over the room (lib/voice-tts.ts' test hook) — the rtc spec's R3 tap
-const roomTts = { chunks: [], rate: 0, first: 0, last: 0 };
-await ctx.exposeBinding('__ttsTapB64', (_s, b64, rate) => {
-  roomTts.chunks.push(Buffer.from(b64, 'base64'));
-  roomTts.rate = rate;
-  roomTts.first ||= Date.now();
-  roomTts.last = Date.now();
-});
-await ctx.addInitScript(() => {
-  globalThis.__bifrostTtsTap = (c, r) => {
-    let bin = '';
-    for (let i = 0; i < c.length; i++) bin += String.fromCharCode(c[i]);
-    window.__ttsTapB64(btoa(bin), r);
-  };
-});
-const httpsTts = [];
-const tokens = [];
 const offAp = [];
-ctx.on('request', (r) => {
-  const u = r.url();
-  if (/^(https?|wss?):/.test(u) && !u.startsWith(`${AP}/`) && !u.startsWith(`${AP.replace(/^https/, 'wss')}/`)) offAp.push(u);
-});
-ctx.on('response', (r) => {
-  if (r.url().includes('/api/tts/stream')) httpsTts.push(r.status());
-  if (r.url().endsWith('/api/token') && r.request().method() === 'POST') tokens.push(r.status());
-});
-ctx.on('page', (p) => p.on('console', (m) => appendFileSync(join(STATE, 's16-phone-console.log'), `${m.type()} ${m.text().slice(0, 400)}\n`)));
-const phone = await ctx.newPage();
-screens.push(['phone', phone], ['box', consolePage]);
+/** one launch of Ása's phone: its fake mic = `wavPath`; `storage` = the paired phone's state */
+async function phoneFor(wavPath, storage) {
+  const browser = await chromium.launch({
+    executablePath: PHONE_CHROME,
+    args: [
+      '--use-fake-ui-for-media-stream',
+      '--use-fake-device-for-media-stream',
+      `--use-file-for-fake-audio-capture=${wavPath}`,
+      '--autoplay-policy=no-user-gesture-required',
+      `--host-resolver-rules=MAP ${new URL(AP).hostname} ${AP_IP}`,
+      '--ignore-certificate-errors',
+    ],
+  });
+  const ctx = await browser.newContext({
+    ...devices['Pixel 7'],
+    ignoreHTTPSErrors: true,
+    permissions: ['microphone'],
+    storageState: storage || {
+      cookies: [],
+      origins: [{ origin: AP, localStorage: [
+        { name: 'bifrost-door', value: 'v2' },
+        { name: 'bifrost-first-turn', value: '1' },
+        { name: 'oz-mode', value: 'text' },
+      ] }],
+    },
+  });
+  // the reply's sound as it arrives over the room (lib/voice-tts.ts' test hook) — the rtc spec's R3 tap
+  const roomTts = { chunks: [], rate: 0, first: 0, last: 0 };
+  await ctx.exposeBinding('__ttsTapB64', (_s, b64, rate) => {
+    roomTts.chunks.push(Buffer.from(b64, 'base64'));
+    roomTts.rate = rate;
+    roomTts.first ||= Date.now();
+    roomTts.last = Date.now();
+  });
+  await ctx.addInitScript(() => {
+    globalThis.__bifrostTtsTap = (c, r) => {
+      let bin = '';
+      for (let i = 0; i < c.length; i++) bin += String.fromCharCode(c[i]);
+      window.__ttsTapB64(btoa(bin), r);
+    };
+  });
+  const P = { browser, ctx, roomTts, httpsTts: [], tokens: [] };
+  ctx.on('request', (r) => {
+    const u = r.url();
+    if (/^(https?|wss?):/.test(u) && !u.startsWith(`${AP}/`) && !u.startsWith(`${AP.replace(/^https/, 'wss')}/`)) offAp.push(u);
+  });
+  ctx.on('response', (r) => {
+    if (r.url().includes('/api/tts/stream')) P.httpsTts.push(r.status());
+    if (r.url().endsWith('/api/token') && r.request().method() === 'POST') P.tokens.push(r.status());
+  });
+  ctx.on('page', (p) => p.on('console', (m) => appendFileSync(join(STATE, 's16-phone-console.log'), `${m.type()} ${m.text().slice(0, 400)}\n`)));
+  P.page = await ctx.newPage();
+  screens.length = 0;
+  screens.push(['phone', P.page], ['box', consolePage]);
+  return P;
+}
 
 let mainId = '';
+let paired = null; // the paired phone's cookies + storage, carried into each launch
 const S = {}; // way → {proxy, real}
 
-async function walk(way) {
+async function walk(way, P) {
+  const { page: phone, roomTts, httpsTts, tokens } = P;
+  const wav = WAV[way];
   const x = way === 'hold' ? 'h' : 'f';
   const title = TITLES[way];
   const s = S[way];
@@ -227,8 +239,11 @@ async function walk(way) {
 
 try {
   await step('S16.1', 'box console QR → the phone pairs through vps:443 (the ap) → its list', async () => {
-    await pair(consolePage, phone, { base: BASE, ap: AP, png: join(STATE, 's16-pair-qr.png') });
-    mainId = String((await phoneFetch(phone, '/api/session/main')).body.id || '');
+    const P = await phoneFor(WAV.hold.path, null);
+    await pair(consolePage, P.page, { base: BASE, ap: AP, png: join(STATE, 's16-pair-qr.png') });
+    mainId = String((await phoneFetch(P.page, '/api/session/main')).body.id || '');
+    paired = await P.ctx.storageState();
+    await P.browser.close();
     must(/^ses_/.test(mainId), `MAIN ${mainId}`);
     return `MAIN ${mainId}`;
   });
@@ -255,14 +270,20 @@ try {
     return out.join(' · ');
   });
 
-  for (const way of WAYS) await walk(way);
+  for (const way of WAYS) {
+    const P = await phoneFor(WAV[way].path, paired);
+    try {
+      await walk(way, P);
+    } finally {
+      await P.browser.close().catch(() => {});
+    }
+  }
 
   await step('∀', `the phone only ever reached ${AP}`, async () => {
     must(offAp.length === 0, offAp.slice(0, 3).join(' '));
   });
 } finally {
   process.stderr.write(`s16 (root ${ROOT}): ${failed.length ? 'RED ' + failed.join(' ') : 'GREEN'} in ${Math.round((Date.now() - t00) / 1000)} s\n`);
-  await phoneBrowser.close().catch(() => {});
   await box.close().catch(() => {});
 }
 process.exit(failed.length ? 1 : 0);
