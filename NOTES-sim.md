@@ -43,5 +43,30 @@ Brain: `CARGO_TARGET_DIR=/home/dweeb_xyz/.cache/p2-reach/target cargo build --re
   taps the link → 200 text/html with the marker. Substitution: the MODEL is scripted (offline);
   Claude Code itself (Read, Write, its prompt line) is real.
 
+## Baselines (current code, p2 brain merged)
+- trunk-full-e2e.sh: GREEN 19/19 steps, 89 s. trunk-rtc-e2e.sh: GREEN 10/10, 90 s (61 s rerun on
+  the edited script, default scenario `rtc`).
+
+## Built (how to run; all state under sim-tmp)
+    export TMPDIR=/home/dweeb_xyz/.cache/p2-reach/sim-tmp
+    YGG_BIN=/home/dweeb_xyz/.cache/p2-reach/target/release/yggdrasil TRUNK_RTC_STATE=$TMPDIR/s16 \
+      sim/trunk-rtc-e2e.sh --scenario s16          # S16; S16_ROOT=home = the control; S16_WAYS=hold|free
+    YGG_BIN=… TRUNK_FULL_STATE=$TMPDIR/s17 sim/trunk-full-e2e.sh --scenario s17     # S17
+  Both rigs take APP_DIR=<built app> (default branch/). Drivers: sim/reach/{s16,s17}.mjs + rig-lib.mjs.
+  sim/reach/cc_model.py = the scripted model for lab's real Claude Code; joiner --brain-env.
+
+## Findings
+- S16 hold (push to talk, text mode) on a SESSION page: the words reach lab once (PASS), but
+  (a) the agent marks the turn `modality: voice` only in hands-free (agent.py `voice = mode == "free"`)
+      — run 1 without "over": modality absent; and a hold whose speech ends in "over" is committed as a
+      keyword turn mid-hold (then it IS voice): the hold WAV must not say "over";
+  (b) the session page never speaks a text-mode hold's reply (it speaks only in hands-free or the
+      first-turn walk). The CONTROL (S16_ROOT=home, a local session, no package 2) fails the same
+      step → an app behaviour, not package 2. The rtc spec's R3 covers the home-screen roots hold only.
+- S16 hands-free on a local session: all PASS (control). On lab: see the latest run.
+- Claude Code on a resumed session with the 6 MB PDF in its history auto-compacts (8.5 MB context):
+  the scripted model answers the compaction calls "OK."; harmless here, worth knowing for real runs.
+
 ## Half done / next
-- (see git log)
+- S17 runs (run 1 died on a driver bug, fixed); S16 rerun with one phone launch per way.
+- Then: rerun trunk-full + trunk-rtc default scenarios on the merged app (stay green?).
