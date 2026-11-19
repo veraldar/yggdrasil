@@ -35,6 +35,10 @@
 #   OT_KEEP=1 leaves the containers up · OT_STATE=DIR keeps state + logs there
 #   OT_JOINER=deb443: the third machine is a clean Debian 12 whose firewall lets ONLY tcp 443 out (iptables,
 #   loopback aside); it fetches the release from the fake GitHub over https on 443 (a CA made for this run)
+#   OT_DIST=DIR: a release made elsewhere (release.sh's dist/VERSION — a draft, a rehearsal), used exactly as it is:
+#   nothing is built, its installers' own embedded key decides (a real-stamped one gets no YGG_RELEASE_TEST_SIGNERS).
+#   OT_DIST_KEY=FILE: the key that signed it, for the forged/newer releases the tamper and update steps need — never
+#   the real release key (refused); without it those steps are SKIP (listed, not counted as passes)
 #   OT_VERSION (0.9.0) · OT_REUSE_BUILD=1: re-stage the last release build (release.sh --no-build) instead of
 #   building the working tree again (--dirty)
 #
@@ -56,19 +60,26 @@ ALL=(ot-files ot-pebble ot-vps-a ot-vps-b ot-vps-c ot-vps-r ot-vps-v ot-home ot-
 VER=${OT_VERSION:-0.9.0}
 DIST=$STATE/dist/$VER                     # this run's TEST release (scripts/release.sh, a throwaway key)
 KEY=$STATE/test-key/release_ed25519       # made for this run; never the real release key
+GIVEN=${OT_DIST:-} REALSTAMP=0            # OT_DIST: a release made elsewhere, used as it is
+if [ -n "$GIVEN" ]; then
+  GIVEN=$(cd "$GIVEN" && pwd) || exit 2; VER=${OT_VERSION:-$(basename "$GIVEN")}; DIST=$GIVEN; KEY=${OT_DIST_KEY:-}
+  grep -q "^YGG_RELEASE_TEST=''" "$DIST/install.sh" && REALSTAMP=1
+fi
 TS=/opt/test-signers                      # its allowed_signers line, in every container that runs a script
 HU=ana HH=/home/ana                       # the home computer's user
 FILES_URL=http://files.tree.test:8000
 # trunk.sh / install.sh / join.sh: the fake GitHub's releases, signed by this run's key
-REL="TRUNK_RELEASES=$FILES_URL/releases YGG_RELEASE_TEST_SIGNERS=$TS"
-HREL="YGG_RELEASES=$FILES_URL/releases YGG_RELEASE_TEST_SIGNERS=$TS"
+TSENV="YGG_RELEASE_TEST_SIGNERS=$TS"; [ $REALSTAMP = 1 ] && TSENV=''   # a real-stamped release trusts its own key only
+REL="TRUNK_RELEASES=$FILES_URL/releases $TSENV"
+HREL="YGG_RELEASES=$FILES_URL/releases $TSENV"
 JOINER=${OT_JOINER:-ubuntu}; JREL=$HREL   # what the third machine runs join.sh with
-[ "$JOINER" = deb443 ] && JREL="YGG_RELEASES=https://files.tree.test/releases YGG_RELEASE_TEST_SIGNERS=$TS"
+[ "$JOINER" = deb443 ] && JREL="YGG_RELEASES=https://files.tree.test/releases $TSENV"
 
 say()  { printf '\033[1m==>\033[0m %s\n' "$*"; }
 note() { printf '    %s\n' "$*"; }
 pass() { printf 'PASS\t%s\t%s\n' "$1" "$2" >>"$RESULTS"; printf '\033[32mPASS\033[0m %-5s %s\n' "$1" "$2"; }
 fail() { printf 'FAIL\t%s\t%s\t%s\n' "$1" "$2" "${3:-}" >>"$RESULTS"; printf '\033[31mFAIL\033[0m %-5s %s  %s\n' "$1" "$2" "${3:-}"; }
+skip() { printf 'SKIP\t%s\t%s\t%s\n' "$1" "$2" "${3:-}" >>"$RESULTS"; printf '\033[33mSKIP\033[0m %-5s %s  %s\n' "$1" "$2" "${3:-}"; }
 check() { # ID WHAT CMD… — PASS when CMD exits 0
   local id=$1 what=$2; shift 2
   if "$@" >>"$STATE/log/checks.log" 2>&1; then pass "$id" "$what"; else fail "$id" "$what" "(see log/checks.log)"; fi
@@ -94,20 +105,36 @@ command -v docker >/dev/null || { echo "docker is needed"; exit 2; }
 command -v zbarimg >/dev/null || { echo "zbarimg is needed (zbar)"; exit 2; }
 command -v ssh-keygen >/dev/null || { echo "ssh-keygen is needed (openssh)"; exit 2; }
 [ -d "$ROOT/branch/node_modules/@playwright/test" ] || { echo "the phone needs Playwright: (cd branch && npm ci && npx playwright install chromium)"; exit 2; }
-# this run's release key: a throwaway, and its allowed_signers line (what YGG_RELEASE_TEST_SIGNERS points at)
-mkdir -p "$STATE/test-key" && rm -f "$KEY" "$KEY.pub"
-ssh-keygen -q -t ed25519 -N '' -C release@yggdrasil -f "$KEY" </dev/null
-printf 'release@yggdrasil namespaces="yggdrasil-release" %s\n' "$(cut -d' ' -f1-2 "$KEY.pub")" >"$STATE/test-signers"
-chmod 644 "$STATE/test-signers"
-say "a TEST release of the working tree, signed by this run's throwaway key: scripts/release.sh $VER"
-BUILD_FLAG=--dirty; [ "${OT_REUSE_BUILD:-0}" = 1 ] && BUILD_FLAG=--no-build
-YGG_RELEASE_KEY=$KEY DIST=$STATE/dist "$ROOT/scripts/release.sh" "$VER" "$BUILD_FLAG" >"$STATE/log/release.log" 2>&1 ||
-  { tail -20 "$STATE/log/release.log"; exit 2; }
-ssh-keygen -Y verify -f "$STATE/test-signers" -I release@yggdrasil -n yggdrasil-release -s "$DIST/SHA256SUMS.sig" \
-  <"$DIST/SHA256SUMS" >/dev/null 2>&1 || { echo "$DIST/SHA256SUMS is not signed by this run's key"; exit 2; }
-! ssh-keygen -Y verify -f "$ROOT/allowed_signers" -I release@yggdrasil -n yggdrasil-release -s "$DIST/SHA256SUMS.sig" \
-  <"$DIST/SHA256SUMS" >/dev/null 2>&1 || { echo "the test release verifies against the REAL key — refusing to go on"; exit 2; }
-grep -q "^YGG_RELEASE_TEST='1'" "$DIST/install.sh" || { echo "the test release's scripts are not marked YGG_RELEASE_TEST=1"; exit 2; }
+if [ -z "$GIVEN" ]; then
+  # this run's release key: a throwaway, and its allowed_signers line (what YGG_RELEASE_TEST_SIGNERS points at)
+  mkdir -p "$STATE/test-key" && rm -f "$KEY" "$KEY.pub"
+  ssh-keygen -q -t ed25519 -N '' -C release@yggdrasil -f "$KEY" </dev/null
+  printf 'release@yggdrasil namespaces="yggdrasil-release" %s\n' "$(cut -d' ' -f1-2 "$KEY.pub")" >"$STATE/test-signers"
+  chmod 644 "$STATE/test-signers"
+  say "a TEST release of the working tree, signed by this run's throwaway key: scripts/release.sh $VER"
+  BUILD_FLAG=--dirty; [ "${OT_REUSE_BUILD:-0}" = 1 ] && BUILD_FLAG=--no-build
+  YGG_RELEASE_KEY=$KEY DIST=$STATE/dist "$ROOT/scripts/release.sh" "$VER" "$BUILD_FLAG" >"$STATE/log/release.log" 2>&1 ||
+    { tail -20 "$STATE/log/release.log"; exit 2; }
+  ssh-keygen -Y verify -f "$STATE/test-signers" -I release@yggdrasil -n yggdrasil-release -s "$DIST/SHA256SUMS.sig" \
+    <"$DIST/SHA256SUMS" >/dev/null 2>&1 || { echo "$DIST/SHA256SUMS is not signed by this run's key"; exit 2; }
+  ! ssh-keygen -Y verify -f "$ROOT/allowed_signers" -I release@yggdrasil -n yggdrasil-release -s "$DIST/SHA256SUMS.sig" \
+    <"$DIST/SHA256SUMS" >/dev/null 2>&1 || { echo "the test release verifies against the REAL key — refusing to go on"; exit 2; }
+  grep -q "^YGG_RELEASE_TEST='1'" "$DIST/install.sh" || { echo "the test release's scripts are not marked YGG_RELEASE_TEST=1"; exit 2; }
+else
+  say "the release in $DIST (v$VER), used as it is$( [ $REALSTAMP = 1 ] && echo ': real-stamped, its own embedded key decides')"
+  # whom it trusts: the allowed_signers line its installers embed (a test release: the key given)
+  if [ $REALSTAMP = 1 ]; then sed -n "s/^YGG_SIGNER='\(.*\)'\$/\1/p" "$DIST/install.sh" | head -1 >"$STATE/test-signers"
+  else printf 'release@yggdrasil namespaces="yggdrasil-release" %s\n' "$(ssh-keygen -y -f "$KEY" | cut -d' ' -f1-2)" >"$STATE/test-signers"; fi
+  chmod 644 "$STATE/test-signers"
+  ssh-keygen -Y verify -f "$STATE/test-signers" -I release@yggdrasil -n yggdrasil-release -s "$DIST/SHA256SUMS.sig" \
+    <"$DIST/SHA256SUMS" >/dev/null 2>&1 || { echo "$DIST/SHA256SUMS is not signed by the key its installers trust"; exit 2; }
+  (cd "$DIST" && sha256sum -c --quiet SHA256SUMS) || { echo "$DIST does not match its SHA256SUMS"; exit 2; }
+  if [ -n "$KEY" ]; then
+    kp=$(ssh-keygen -y -f "$KEY" | cut -d' ' -f1-2)
+    [ "$kp" != "$(cut -d' ' -f1-2 "$ROOT/RELEASE-KEY.pub")" ] || { echo "OT_DIST_KEY is the REAL release key: it never signs a test release — refusing"; exit 2; }
+    grep -qF "$kp" "$STATE/test-signers" || { echo "OT_DIST_KEY did not sign $DIST"; exit 2; }
+  fi
+fi
 to_box() { # CONTAINER — this run's signers file at $TS (readable by everyone there)
   docker cp "$STATE/test-signers" "$1:$TS" >/dev/null && docker exec "$1" chmod 644 "$TS"
 }
@@ -154,8 +181,10 @@ mkrel() { # VERSION MODE — releases/download/vVERSION from dist (assets rename
 }
 latest() { rm -rf "$R/latest"; mkdir -p "$R/latest"; cp -r "$R/download/v$1" "$R/latest/download"; chmod -R a+rX "$STATE/files"; }
 mkdir -p "$R/download/v$VER" && cp "$DIST"/* "$R/download/v$VER/"   # the release exactly as release.sh made it
-mkrel 9.9.1 sums; mkrel 9.9.2 asset; mkrel 9.9.3 nosig; mkrel 9.9.4 otherkey
-mkrel 0.9.1-test good; mkrel 0.9.2-test sums; mkrel 0.9.3-test broken   # the weekly update: newer, forged, broken
+if [ -n "$KEY" ]; then   # (OT_DIST without OT_DIST_KEY: no forged/newer releases — their steps are SKIP)
+  mkrel 9.9.1 sums; mkrel 9.9.2 asset; mkrel 9.9.3 nosig; mkrel 9.9.4 otherkey
+  mkrel 0.9.1-test good; mkrel 0.9.2-test sums; mkrel 0.9.3-test broken   # the weekly update: newer, forged, broken
+fi
 latest "$VER"
 
 # ---- Pebble: HTTP-01 on port 80 like Let's Encrypt; no random nonce rejects, no sleeps (deterministic)
@@ -251,13 +280,14 @@ if stage a; then
   # a real release's trunk.sh (YGG_RELEASE_TEST unset) never trusts other signers; a changed trunk.sh stops itself
   vps ot-vps-a "sed \"s/^YGG_RELEASE_TEST='1'/YGG_RELEASE_TEST=''/\" /root/trunk.sh >/root/trunk-real.sh &&
     cp /root/trunk.sh /root/trunk-changed.sh && echo '# one line more' >>/root/trunk-changed.sh"
-  vps ot-vps-a "cd /root && $REL bash trunk-real.sh --name $A --self-signed -y" >"$STATE/log/a0p-real.log" 2>&1; rc=$?
+  vps ot-vps-a "cd /root && $REL YGG_RELEASE_TEST_SIGNERS=$TS bash trunk-real.sh --name $A --self-signed -y" >"$STATE/log/a0p-real.log" 2>&1; rc=$?
   check a0p "a real release's trunk.sh with YGG_RELEASE_TEST_SIGNERS set refuses (64) before anything — it trusts only the release key" \
     bash -c "[ $rc = 64 ] && grep -q 'it trusts only the yggdrasil release key' '$STATE/log/a0p-real.log' && ! grep -q 'release:' '$STATE/log/a0p-real.log'"
   vps ot-vps-a "cd /root && $REL bash trunk-changed.sh --name $A --self-signed -y" >"$STATE/log/a0s-changed.log" 2>&1; rc=$?
   check a0s "a trunk.sh that is not the one the release signed (one line more) stops before it installs anything" \
     bash -c "[ $rc = 1 ] && grep -q 'is not the one release v$VER signed' '$STATE/log/a0s-changed.log' && \
       ! docker exec ot-vps-a test -e /usr/local/lib/yggdrasil-trunk/bifrost-net"
+  if [ -n "$KEY" ]; then
   for v in 9.9.1 9.9.3 9.9.4; do
     vps ot-vps-a "cd /root && $REL bash trunk.sh --name $A --self-signed --version v$v -y" >"$STATE/log/a0-$v.log" 2>&1; echo "rc=$?" >>"$STATE/log/a0-$v.log"
   done
@@ -270,6 +300,10 @@ if stage a; then
   check a0b "a release whose binary was changed after signing: signature OK, sha256 refused, nothing installed" \
     bash -c "[ $rc != 0 ] && grep -q 'signature OK' '$STATE/log/a0-9.9.2.log' && grep -q 'does not match SHA256SUMS' '$STATE/log/a0-9.9.2.log' && \
       ! docker exec ot-vps-a test -e /usr/local/lib/yggdrasil-trunk/bifrost-net"
+  else
+    skip a0 "a forged release is refused before anything runs" "needs a re-signed release (OT_DIST_KEY)"
+    skip a0b "a release changed after signing: sha256 refused" "needs a re-signed release (OT_DIST_KEY)"
+  fi
   vps ot-vps-a "cd /root && $REL bash trunk.sh --name $A --self-signed" >"$STATE/log/a1-trunk.log" 2>&1; rc=$?
   LINE_A=$(line_of "$STATE/log/a1-trunk.log"); PIN_A=$(pin_of "$STATE/log/a1-trunk.log")
   check a1 "trunk.sh --name $A --self-signed (pinned to v$VER) → exit 0, ONE connect line, no command holding it" \
@@ -317,6 +351,7 @@ if stage a; then
     printf "YGG_UPSTREAM_BASE_URL=http://127.0.0.1:18397\nYGG_UPSTREAM_STYLE=anthropic\nYGG_UPSTREAM_API_KEY=mock\nYGG_UPSTREAM_MODEL=mock\n" >~/model.env'
   check h0 "the home computer has no node, npm, cargo, rustc or git (the release brings what it needs)" \
     homesh '! command -v node && ! command -v npm && ! command -v cargo && ! command -v rustc && ! command -v git'
+  if [ -n "$KEY" ]; then
   for v in 9.9.1 9.9.2; do
     printf '%s\n' "$LINE_A" | docker exec -i -u "$HU" ot-home bash -c "cd ~ && $HREL bash install.sh --version $v $INSTALL_ARGS --trunk" >"$STATE/log/h0-$v.log" 2>&1
     echo "rc=$?" >>"$STATE/log/h0-$v.log"
@@ -325,8 +360,11 @@ if stage a; then
     bash -c "grep -q 'NOT signed by the yggdrasil release key' '$STATE/log/h0-9.9.1.log' && grep -q 'rc=1' '$STATE/log/h0-9.9.1.log' && \
       grep -q 'does not match SHA256SUMS' '$STATE/log/h0-9.9.2.log' && grep -q 'rc=1' '$STATE/log/h0-9.9.2.log' && \
       ! docker exec ot-home test -e $HH/.local/share/yggdrasil/release/9.9.2 && ! docker exec ot-home test -e $HH/.config/bifrost"
+  else
+    skip h0t "install.sh refuses a forged release" "needs a re-signed release (OT_DIST_KEY)"
+  fi
   homesh "sed \"s/^YGG_RELEASE_TEST='1'/YGG_RELEASE_TEST=''/\" ~/install.sh >~/install-real.sh && cp ~/install.sh ~/install-changed.sh && echo '# one line more' >>~/install-changed.sh"
-  homesh "cd ~ && $HREL bash install-real.sh $INSTALL_ARGS" >"$STATE/log/h0p-real.log" 2>&1 </dev/null; rc=$?
+  homesh "cd ~ && $HREL YGG_RELEASE_TEST_SIGNERS=$TS bash install-real.sh $INSTALL_ARGS" >"$STATE/log/h0p-real.log" 2>&1 </dev/null; rc=$?
   homesh "cd ~ && $HREL bash install-changed.sh $INSTALL_ARGS" >"$STATE/log/h0s-changed.log" 2>&1 </dev/null; rc2=$?
   check h0p "a real release's install.sh with YGG_RELEASE_TEST_SIGNERS set refuses (64) before downloading anything" \
     bash -c "[ $rc = 64 ] && grep -q 'it trusts only the yggdrasil release key' '$STATE/log/h0p-real.log' && ! grep -q 'release:' '$STATE/log/h0p-real.log'"
@@ -417,6 +455,7 @@ if stage a; then
   vps ot-vps-a 'systemctl start yggdrasil-trunk-update.service; journalctl -u yggdrasil-trunk-update -o cat --no-pager' >"$STATE/log/a7-update-none.log" 2>&1
   check a7 "the update timer's unit, nothing newer: 'the newest release — nothing to do'" \
     bash -c "grep -q 'signature OK' '$STATE/log/a7-update-none.log' && grep -q '$VER is the newest release' '$STATE/log/a7-update-none.log'"
+  if [ -n "$KEY" ]; then
   latest 0.9.1-test
   vps ot-vps-a 'systemctl start yggdrasil-trunk-update.service; journalctl -u yggdrasil-trunk-update -o cat --no-pager' >"$STATE/log/a8-update.log" 2>&1
   sleep 2
@@ -445,6 +484,11 @@ if stage a; then
       docker exec ot-vps-a systemctl is-active -q yggdrasil-trunk && \
       [ \"\$(outside \"curl -sk -o /dev/null -w '%{http_code}' https://$A/pair\")\" = 200 ]"
   latest "$VER"
+  else
+    skip a8 "a newer signed release: updated by itself" "needs a re-signed release (OT_DIST_KEY)"
+    skip a9 "a forged newer release refused" "needs a re-signed release (OT_DIST_KEY)"
+    skip a10 "a broken newer release: rolled back" "needs a re-signed release (OT_DIST_KEY)"
+  fi
 fi
 
 # =========================================================================================== stage b
@@ -697,10 +741,10 @@ fi
 # ====================================================================================== the table
 echo
 printf '%-5s %-4s %s\n' STEP "" WHAT
-fails=0
+fails=0 skips=0
 while IFS=$'\t' read -r res id what detail; do
   printf '%-5s %-4s %s\n' "$id" "$res" "$what"
-  [ "$res" = PASS ] || fails=$((fails + 1))
+  case $res in PASS) ;; SKIP) skips=$((skips + 1)) ;; *) fails=$((fails + 1)) ;; esac
 done <"$RESULTS"
 for f in "$STATE/sim/steps.tsv" "$STATE/sim/steps-c.tsv"; do
   [ -s "$f" ] || continue
@@ -712,4 +756,4 @@ for f in "$STATE/sim/steps.tsv" "$STATE/sim/steps-c.tsv"; do
 done
 echo "state + logs: $STATE"
 if [ "$fails" != 0 ]; then echo "OWN-TRUNK: RED ($fails failed)"; exit 1; fi
-echo "OWN-TRUNK: GREEN"
+echo "OWN-TRUNK: GREEN$( [ "$skips" = 0 ] || echo " ($skips skipped — see SKIP above)")"
