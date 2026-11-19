@@ -434,7 +434,15 @@ async fn resolve(st: &AppState, proxy: &str, restarted: bool) {
     }) else {
         return;
     };
-    let Some(first) = ids.first() else { return };
+    let Some(first) = ids.first() else {
+        // nothing left to look up (a turn whose id was not known yet ended meanwhile)
+        if let Some(w) = st.relay.watches.lock().unwrap().get_mut(proxy) {
+            if w.turns.is_empty() && w.current.is_none() {
+                release(st, w, proxy);
+            }
+        }
+        return;
+    };
     let Ok(msgs) = crate::peers::call(st, &root, "GET", &format!("/session/{rid}/message?from={first}&internal=1"), None, 30).await else { return };
     let mut after = After::default();
     {
@@ -716,6 +724,10 @@ pub async fn forward(st: &AppState, proxy: &str, root: &str, rid: &str, parts: V
                 let tid = v["turn_id"].as_str().unwrap().to_string();
                 w.turns[i].turn_id = Some(tid.clone());
                 flush_early(w, &tid, &mut after);
+                // the whole turn may have come and gone (idle included) before its id was known
+                if w.turns.is_empty() && w.current.is_none() {
+                    release(st, w, proxy);
+                }
                 Ok(tid)
             }
             (_, i) => {
