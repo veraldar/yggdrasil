@@ -22,7 +22,9 @@ export async function uploadFile(blob: Blob, name: string, mime: string): Promis
   }
   const s = await answer(start);
   if (!start.ok || typeof s.upload !== 'string') {
-    return { error: typeof s.error === 'string' ? s.error : `could not send ${name} (${start.status})` };
+    return {
+      error: typeof s.error === 'string' ? s.error : `could not send ${name} (${start.status})`,
+    };
   }
   // an empty file is done at the start (the brain answers its REF there)
   const done = s.file as FileRef | undefined;
@@ -52,7 +54,9 @@ export async function uploadFile(blob: Blob, name: string, mime: string): Promis
       continue;
     }
     if (!r.ok) {
-      return { error: typeof d.error === 'string' ? d.error : `could not send ${name} (${r.status})` };
+      return {
+        error: typeof d.error === 'string' ? d.error : `could not send ${name} (${r.status})`,
+      };
     }
     const file = d.file as FileRef | undefined;
     if (file && typeof file.hash === 'string') return { ref: file };

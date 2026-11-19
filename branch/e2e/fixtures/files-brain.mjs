@@ -24,8 +24,14 @@ const uploads = new Map(); // id → {name, mime, size, chunks, have}
 const sessions = new Map(); // id → {info, messages}
 
 const MIME = {
-  '.pdf': 'application/pdf', '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
-  '.html': 'text/html', '.md': 'text/markdown', '.txt': 'text/plain', '.json': 'application/json',
+  '.pdf': 'application/pdf',
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.html': 'text/html',
+  '.md': 'text/markdown',
+  '.txt': 'text/plain',
+  '.json': 'application/json',
 };
 const id = (p) => `${p}${Date.now().toString(36)}${randomBytes(4).toString('hex')}`;
 const mb = (n) => {
@@ -106,8 +112,20 @@ const server = createServer(async (req, res) => {
         });
       const up = id('up');
       // an empty file is done at the start
-      if (b.size === 0) return send(res, 200, { upload: up, piece: PIECE, have: 0, file: keep(Buffer.alloc(0), b.name, b.mime || 'application/octet-stream') });
-      uploads.set(up, { name: b.name, mime: b.mime || 'application/octet-stream', size: b.size, chunks: [], have: 0 });
+      if (b.size === 0)
+        return send(res, 200, {
+          upload: up,
+          piece: PIECE,
+          have: 0,
+          file: keep(Buffer.alloc(0), b.name, b.mime || 'application/octet-stream'),
+        });
+      uploads.set(up, {
+        name: b.name,
+        mime: b.mime || 'application/octet-stream',
+        size: b.size,
+        chunks: [],
+        have: 0,
+      });
       return send(res, 200, { upload: up, piece: PIECE });
     }
     if (m === 'PUT' && (r = /^\/file\/upload\/([\w-]+)$/.exec(p))) {
@@ -117,13 +135,17 @@ const server = createServer(async (req, res) => {
       const buf = await body(req);
       if (off !== up.have) return send(res, 409, { error: 'go on from have', have: up.have });
       if (buf.length > PIECE) return send(res, 413, { error: 'a piece is over 1 MB' });
-      if (up.have + buf.length > up.size) return send(res, 400, { error: 'more than the size said' });
+      if (up.have + buf.length > up.size)
+        return send(res, 400, { error: 'more than the size said' });
       up.chunks.push(buf);
       up.have += buf.length;
       console.log(`[fake] PUT ${r[1]} offset=${off} len=${buf.length} have=${up.have}/${up.size}`);
       if (up.have < up.size) return send(res, 200, { have: up.have });
       uploads.delete(r[1]);
-      return send(res, 200, { have: up.have, file: keep(Buffer.concat(up.chunks), up.name, up.mime) });
+      return send(res, 200, {
+        have: up.have,
+        file: keep(Buffer.concat(up.chunks), up.name, up.mime),
+      });
     }
     if (m === 'GET' && (r = /^\/file\/([a-f0-9]{64})\/info$/.exec(p))) {
       const b = blobs.get(r[1]);
@@ -137,7 +159,9 @@ const server = createServer(async (req, res) => {
         const len = Math.min(Number(u.searchParams.get('len') || PIECE), PIECE);
         return send(res, 200, b.subarray(off, off + len));
       }
-      return send(res, 200, b, { 'content-type': u.searchParams.get('mime') || 'application/octet-stream' });
+      return send(res, 200, b, {
+        'content-type': u.searchParams.get('mime') || 'application/octet-stream',
+      });
     }
     if (m === 'POST' && p === '/file/artifact') {
       const b = (await json(req)) || {};
@@ -156,7 +180,8 @@ const server = createServer(async (req, res) => {
     }
 
     // --- what the session page reads ---
-    if (m === 'GET' && p === '/root') return send(res, 200, { name: ME, note: '', models: [], profiles: [], peers: [LAB] });
+    if (m === 'GET' && p === '/root')
+      return send(res, 200, { name: ME, note: '', models: [], profiles: [], peers: [LAB] });
     if (m === 'GET' && p === '/session/status') return send(res, 200, {});
     if (m === 'GET' && p === '/tree') return send(res, 200, []);
     if (m === 'GET' && p === '/event') {
@@ -166,7 +191,12 @@ const server = createServer(async (req, res) => {
       req.on('close', () => clearInterval(t));
       return;
     }
-    if (m === 'GET' && p === '/session') return send(res, 200, [...sessions.values()].map((s) => s.info));
+    if (m === 'GET' && p === '/session')
+      return send(
+        res,
+        200,
+        [...sessions.values()].map((s) => s.info)
+      );
     if (m === 'POST' && p === '/session') {
       const b = (await json(req)) || {};
       return send(res, 200, session(String(b.title || 'session')).info);
@@ -191,8 +221,18 @@ const server = createServer(async (req, res) => {
         const user = { info: { id: id('msg_'), role: 'user', time: { created: now } }, parts };
         const files = parts.filter((x) => x.type === 'file');
         const reply = {
-          info: { id: id('msg_'), role: 'assistant', parentID: user.info.id, time: { created: now + 1, completed: now + 2 } },
-          parts: [{ type: 'text', text: `got ${files.length} file${files.length === 1 ? '' : 's'}: ${files.map((f) => f.filename || f.mime).join(', ')}` }],
+          info: {
+            id: id('msg_'),
+            role: 'assistant',
+            parentID: user.info.id,
+            time: { created: now + 1, completed: now + 2 },
+          },
+          parts: [
+            {
+              type: 'text',
+              text: `got ${files.length} file${files.length === 1 ? '' : 's'}: ${files.map((f) => f.filename || f.mime).join(', ')}`,
+            },
+          ],
         };
         s.messages.push(user, reply);
         s.info.time.updated = now;
@@ -205,4 +245,6 @@ const server = createServer(async (req, res) => {
   }
 });
 
-server.listen(PORT, '127.0.0.1', () => console.log(`fake files brain "${ME}" on :${PORT} (limit ${MAX / (1024 * 1024)} MB)`));
+server.listen(PORT, '127.0.0.1', () =>
+  console.log(`fake files brain "${ME}" on :${PORT} (limit ${MAX / (1024 * 1024)} MB)`)
+);

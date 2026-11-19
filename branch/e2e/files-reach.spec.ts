@@ -78,7 +78,11 @@ function pdf(bytes: number): Buffer {
     ),
     Buffer.from(`<< /Length ${text.length} >>\nstream\n${text}\nendstream`),
     Buffer.from('<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>'),
-    Buffer.concat([Buffer.from(`<< /Length ${pad.length} >>\nstream\n`), pad, Buffer.from('\nendstream')]),
+    Buffer.concat([
+      Buffer.from(`<< /Length ${pad.length} >>\nstream\n`),
+      pad,
+      Buffer.from('\nendstream'),
+    ]),
   ];
   const parts: Buffer[] = [Buffer.from('%PDF-1.4\n%\xe2\xe3\xcf\xd3\n', 'latin1')];
   const offsets: number[] = [];
@@ -103,7 +107,9 @@ async function shot(page: Page, name: string) {
 
 /** a fresh session on the brain the app serves, opened like a tap from the list does */
 async function openSession(page: Page, label: string): Promise<string> {
-  const r = await page.request.post('/api/session', { data: { name: `e2e-files-${label}-${TAG}` } });
+  const r = await page.request.post('/api/session', {
+    data: { name: `e2e-files-${label}-${TAG}` },
+  });
   expect(r.ok(), await r.text()).toBeTruthy();
   const s = (await r.json()) as { id: string; title: string };
   made.push(s.id);
@@ -140,7 +146,9 @@ test('paperclip: a PDF and a photo go up in pieces, the message shows both, the 
   await expect(page.locator('input[type=file]')).not.toHaveAttribute('accept', /.+/);
   const chooser = page.waitForEvent('filechooser');
   await page.getByRole('button', { name: 'attach' }).tap();
-  await (await chooser).setFiles([
+  await (
+    await chooser
+  ).setFiles([
     { name: 'report.pdf', mimeType: 'application/pdf', buffer: report },
     { name: 'photo.png', mimeType: 'image/png', buffer: photo },
   ]);
@@ -175,7 +183,10 @@ test('paperclip: a PDF and a photo go up in pieces, the message shows both, the 
 
   // the message carried REFs, not data URLs
   await expect.poll(() => sends.length).toBe(1);
-  const sent = sends[0].postDataJSON() as { refs?: { hash: string; name: string }[]; images?: unknown };
+  const sent = sends[0].postDataJSON() as {
+    refs?: { hash: string; name: string }[];
+    images?: unknown;
+  };
   expect(sent.images).toBeUndefined();
   expect(sent.refs?.map((r) => r.name).sort()).toEqual(['photo.png', 'report.pdf']);
   expect(sent.refs?.find((r) => r.name === 'report.pdf')?.hash).toBe(sha(report));
@@ -201,7 +212,9 @@ test('paperclip: a PDF and a photo go up in pieces, the message shows both, the 
   const href = (await chip.getAttribute('href')) || '';
   expect(href).toMatch(new RegExp(`^/api/file/${sha(report)}\\?`));
   expect(new URL(href, 'http://x').searchParams.get('name')).toBe('report.pdf');
-  const opened = page.context().waitForEvent('request', (r) => r.url().includes(`/api/file/${sha(report)}`));
+  const opened = page
+    .context()
+    .waitForEvent('request', (r) => r.url().includes(`/api/file/${sha(report)}`));
   const tab = page.context().waitForEvent('page');
   await chip.tap();
   const res = await (await opened).response();
@@ -220,7 +233,9 @@ test('paperclip: a PDF and a photo go up in pieces, the message shows both, the 
   await expect(again.getByTestId('msg-file')).toContainText('report.pdf');
 });
 
-test('a file over the limit: the brain says so word for word, nothing is sent', async ({ page }) => {
+test('a file over the limit: the brain says so word for word, nothing is sent', async ({
+  page,
+}) => {
   await openSession(page, 'limit');
   const puts: Request[] = [];
   const sends: Request[] = [];
@@ -234,7 +249,9 @@ test('a file over the limit: the brain says so word for word, nothing is sent', 
   );
   const chooser = page.waitForEvent('filechooser');
   await page.getByRole('button', { name: 'attach' }).tap();
-  await (await chooser).setFiles([{ name: 'backup.tar', mimeType: 'application/x-tar', buffer: big }]);
+  await (
+    await chooser
+  ).setFiles([{ name: 'backup.tar', mimeType: 'application/x-tar', buffer: big }]);
   const r = await refused;
   expect(r.status()).toBe(413);
   const { error } = (await r.json()) as { error: string };
@@ -242,7 +259,9 @@ test('a file over the limit: the brain says so word for word, nothing is sent', 
   // the brain's words, exactly, on the page (the error line: its text, then its keys)
   const alert = page.getByRole('alert').filter({ hasText: error });
   await expect(alert).toBeVisible();
-  expect(await alert.evaluate((el) => (el.textContent || '').trim())).toBe(`${error} fix this dismiss`);
+  expect(await alert.evaluate((el) => (el.textContent || '').trim())).toBe(
+    `${error} fix this dismiss`
+  );
   await expect(page.getByTestId('attachment')).toHaveCount(0);
   await shot(page, 'over-limit');
   // nothing went: no piece, no message — the send key is the mic again
@@ -261,7 +280,9 @@ test('a pasted picture goes up like a picked one', async ({ page }) => {
     const dt = new DataTransfer();
     dt.items.add(new File([bytes], 'image.png', { type: 'image/png' }));
     const ta = document.querySelector('textarea[aria-label=message]')!;
-    ta.dispatchEvent(new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true }));
+    ta.dispatchEvent(
+      new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true })
+    );
   }, photo.toString('base64'));
   await expect(page.locator('[data-testid=attachment][data-state=ready]')).toHaveCount(1);
   await page.getByRole('button', { name: 'send' }).tap();
@@ -284,7 +305,12 @@ test('a file a session on another root made opens here', async ({ page }) => {
     await page.route('**/api/session/*/messages*', (route) =>
       route.fulfill({
         contentType: 'application/json',
-        headers: { 'X-Total-Count': '2', 'X-Run-State': 'none|1|assistant', 'X-Run-Live': '0', 'Cache-Control': 'no-store' },
+        headers: {
+          'X-Total-Count': '2',
+          'X-Run-State': 'none|1|assistant',
+          'X-Run-Live': '0',
+          'Cache-Control': 'no-store',
+        },
         body: JSON.stringify([
           { role: 'user', text: 'show me what you made', images: [], time: Date.now() - 60_000 },
           {
@@ -329,7 +355,10 @@ test('a file a session on another root made opens here', async ({ page }) => {
 /** The real thing, two real brains (home + lab; e2e/fixtures/real-brains.sh): MAIN starts a
  *  session on lab; its reply links a file it made there; on the phone the link opens through
  *  home, and a PDF picked inside that session reaches lab (same bytes) and opens. */
-test('a session on another root: its file opens here, a picked PDF reaches it', async ({ page, request }) => {
+test('a session on another root: its file opens here, a picked PDF reaches it', async ({
+  page,
+  request,
+}) => {
   const OC = process.env.E2E_OC_URL || '';
   const LAB_URL = process.env.E2E_LAB_URL || '';
   test.skip(!OC || !LAB_URL, 'needs the real brains (E2E_OC_URL + E2E_LAB_URL)');
@@ -339,7 +368,9 @@ test('a session on another root: its file opens here, a picked PDF reaches it', 
   await writeFile(path.join(LAB_DIR, md), '## Lab made\n\nwritten by the session on lab\n');
   try {
     // MAIN (the coordinator) starts the session on lab; the mock model follows the tool script
-    const main = (await (await request.post(`${OC}/session`, { data: { title: '[MAIN]' } })).json()) as { id: string };
+    const main = (await (
+      await request.post(`${OC}/session`, { data: { title: '[MAIN]' } })
+    ).json()) as { id: string };
     // (the mock answers the first word after "exactly:" — the link is one word)
     const brief = `Reply with exactly: [plan](/api/artifact/${md})`;
     const script = `tool:${JSON.stringify([[['session_start', { title, agent: 'build', root: LAB, brief }]]])}`;
@@ -352,7 +383,10 @@ test('a session on another root: its file opens here, a picked PDF reaches it', 
     await expect
       .poll(
         async () => {
-          const rows = (await (await request.get(`${OC}/tree`)).json()) as { id: string; title: string }[];
+          const rows = (await (await request.get(`${OC}/tree`)).json()) as {
+            id: string;
+            title: string;
+          }[];
           proxy = rows.find((r) => r.title === title)?.id || '';
           return proxy;
         },
@@ -378,13 +412,21 @@ test('a session on another root: its file opens here, a picked PDF reaches it', 
     const report = pdf(2 * MiB + 4321);
     const chooser = page.waitForEvent('filechooser');
     await page.getByRole('button', { name: 'attach' }).tap();
-    await (await chooser).setFiles([{ name: 'lab-report.pdf', mimeType: 'application/pdf', buffer: report }]);
-    await expect(page.locator('[data-testid=attachment][data-state=ready]')).toHaveCount(1, { timeout: 30_000 });
+    await (
+      await chooser
+    ).setFiles([{ name: 'lab-report.pdf', mimeType: 'application/pdf', buffer: report }]);
+    await expect(page.locator('[data-testid=attachment][data-state=ready]')).toHaveCount(1, {
+      timeout: 30_000,
+    });
     await page.getByRole('textbox', { name: 'message' }).fill('Reply with exactly: GOT-THE-PDF');
     await page.getByRole('button', { name: 'send' }).tap();
-    await expect(page.getByText('GOT-THE-PDF', { exact: true }).last()).toBeVisible({ timeout: 60_000 });
+    await expect(page.getByText('GOT-THE-PDF', { exact: true }).last()).toBeVisible({
+      timeout: 60_000,
+    });
     await expect
-      .poll(async () => (await request.get(`${LAB_URL}/file/${sha(report)}/info`)).status(), { timeout: 30_000 })
+      .poll(async () => (await request.get(`${LAB_URL}/file/${sha(report)}/info`)).status(), {
+        timeout: 30_000,
+      })
       .toBe(200);
     const mine = page.locator('[data-from=you]').filter({ hasText: 'GOT-THE-PDF' });
     const chip = mine.getByTestId('msg-file');

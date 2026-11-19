@@ -38,9 +38,9 @@ import { CARD_ST, type TreeRow } from '@/lib/card';
 import { slugify } from '@/lib/slug';
 import { diagEvent } from '@/lib/diag';
 import {
+  FILES_PER_MESSAGE,
   type FileChip,
   type FileRef,
-  FILES_PER_MESSAGE,
   isImageMime,
   refViews,
   urlHash,

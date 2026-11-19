@@ -4,10 +4,10 @@
  */
 import { NextResponse } from 'next/server';
 import {
-  cleanRefs,
   FILES_PER_MESSAGE,
-  fileUrl,
   HASH_RE,
+  cleanRefs,
+  fileUrl,
   isImageMime,
   refViews,
   urlHash,
@@ -41,7 +41,12 @@ function fileViews(parts: any[]) {
     } else if (hash) {
       const name = String(p.filename || 'file');
       const mime = String(p.mime || 'application/octet-stream');
-      files.push({ name, mime, size: Number(p.size) || 0, url: fileUrl({ hash, root, mime, name }, true) });
+      files.push({
+        name,
+        mime,
+        size: Number(p.size) || 0,
+        url: fileUrl({ hash, root, mime, name }, true),
+      });
     }
   }
   return { images, files };
@@ -238,7 +243,11 @@ export async function POST(req: Request, ctx: { params: Promise<{ id: string }> 
     if (!refs) {
       const many = Array.isArray(body.refs) && body.refs.length > FILES_PER_MESSAGE;
       return NextResponse.json(
-        { error: many ? `at most ${FILES_PER_MESSAGE} files in one message` : 'a file in this message is broken' },
+        {
+          error: many
+            ? `at most ${FILES_PER_MESSAGE} files in one message`
+            : 'a file in this message is broken',
+        },
         { status: 400 }
       );
     }
