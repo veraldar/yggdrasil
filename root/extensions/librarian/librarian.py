@@ -1,15 +1,18 @@
 #!/usr/bin/env python3
 """librarian — a yggdrasil extension (outside the core): the root's memory.
 
-A loop indexes everything said in every session of a root (and its artifacts folder) into SQLite
-full-text search, with the keywords of each session; agents also keep facts per topic. Four tools,
-served through the extension interface (yggdrasil src/ext.rs), all scope "self":
+A loop indexes everything said in every session of a root (and its artifacts folder, and a
+coordinator's reports) into SQLite full-text search, with the keywords of each session; agents
+also keep facts per topic. Four tools of scope "self" (the agent-facing schemas):
 
   search(query, limit, since_minutes)  find what was said, in any session, with where and when
   recent(minutes)                      what happened lately: every session that changed, its agent,
                                        status, headline and keywords
   remember(topic, fact)                keep a fact for later (a decision, a preference, a path)
   recall(topic)                        the facts kept for a topic, newest first
+
+Four more, scope "internal" (never in the manifest; the brain calls them over /call/):
+  status(session) · facts_for(session) · forget(id) · pinned()
 
 Run:   python3 librarian.py --root http://127.0.0.1:4101 --port 4310 --db librarian.db \
            [--artifacts DIR] [--poll 20] [--seed seed.json]
@@ -65,6 +68,26 @@ MANIFEST = {
     ],
 }
 
+# Internal tools (plan G4): for the brain itself (the context viewer's memory part) — never
+# in MANIFEST["tools"] (that list is what schemas() offers agents), only callable through /call/.
+INTERNAL_TOOLS = [
+    {"name": "status", "scope": "internal",
+     "description": "Indexing status: how many sessions/docs/facts the memory holds, and when this session was last indexed (or 'stale').",
+     "parameters": {"type": "object", "properties": {
+         "session": {"type": "string"}}}},
+    {"name": "facts_for", "scope": "internal",
+     "description": "The facts kept from this session, plus the facts that mention it.",
+     "parameters": {"type": "object", "properties": {
+         "session": {"type": "string"}}, "required": ["session"]}},
+    {"name": "forget", "scope": "internal",
+     "description": "Delete one fact by id.",
+     "parameters": {"type": "object", "properties": {
+         "id": {"type": "integer"}}, "required": ["id"]}},
+    {"name": "pinned", "scope": "internal",
+     "description": "The most-used facts across every topic (what the memory actually answers from).",
+     "parameters": {"type": "object", "properties": {}}},
+]
+
 
 def now_ms():
     return int(time.time() * 1000)
@@ -84,6 +107,30 @@ def keywords(text, n=6):
     return [w for w, _ in Counter(w for w in words if w not in STOP).most_common(n)]
 
 
+def words_of(s):
+    """The words of a topic/fact/query — the same tokenizing search() uses (plan B1)."""
+    return re.findall(r"\w+", (s or "").lower())
+
+
+# G1's secret patterns, ported from root/src/context.rs mask(): key/token/secret/password
+# assignments, Bearer tokens, sk-… and bfn[pdr]-… provider tokens, data: images.
+def mask(text):
+    s = str(text or "")
+    s = re.sub(r"data:image/[^;\"'\\\s)]*;base64,[A-Za-z0-9+/=]+",
+               lambda m: f"[image {max(1, len(m.group(0).partition(';base64,')[2]) // 1024)} KB]", s)
+    s = re.sub(r"(?i)\b(key|token|secret|password)(\s*[=:]\s*)\S+", r"\1\2…", s)
+    s = re.sub(r"Bearer \S+", "Bearer …", s)
+    s = re.sub(r"\bsk-[A-Za-z0-9_-]{15,}", "sk-…", s)
+    s = re.sub(r"\bbfn[pdr]-[A-Za-z0-9._~+/=-]+", lambda m: m.group(0)[:5] + "…", s)
+    return s
+
+
+def clip_output(s, n=2000):
+    """First and last n chars with the middle elided (long tool output keeps both ends)."""
+    s = s or ""
+    return s if len(s) <= 2 * n else s[:n] + " … " + s[-n:]
+
+
 class Library:
     def __init__(self, path):
         self.db = sqlite3.connect(path, check_same_thread=False)
@@ -98,6 +145,33 @@ class Library:
                 CREATE TABLE IF NOT EXISTS facts(id INTEGER PRIMARY KEY, topic TEXT, fact TEXT,
                     ts INTEGER, session TEXT);
             """)
+            # v1 (plan B1): FTS over the facts + source/used columns. Guarded by user_version
+            # so an existing db migrates exactly once.
+            if self.db.execute("PRAGMA user_version").fetchone()[0] < 1:
+                with self.db:
+                    self.db.executescript("""
+                        CREATE VIRTUAL TABLE IF NOT EXISTS facts_fts USING fts5(
+                            topic, fact, content='facts', content_rowid='id');
+                        CREATE TRIGGER IF NOT EXISTS facts_ai AFTER INSERT ON facts BEGIN
+                            INSERT INTO facts_fts(rowid, topic, fact) VALUES (new.id, new.topic, new.fact);
+                        END;
+                        CREATE TRIGGER IF NOT EXISTS facts_ad AFTER DELETE ON facts BEGIN
+                            INSERT INTO facts_fts(facts_fts, rowid, topic, fact)
+                            VALUES ('delete', old.id, old.topic, old.fact);
+                        END;
+                        CREATE TRIGGER IF NOT EXISTS facts_au AFTER UPDATE ON facts BEGIN
+                            INSERT INTO facts_fts(facts_fts, rowid, topic, fact)
+                            VALUES ('delete', old.id, old.topic, old.fact);
+                            INSERT INTO facts_fts(rowid, topic, fact) VALUES (new.id, new.topic, new.fact);
+                        END;
+                    """)
+                    cols = {r[1] for r in self.db.execute("PRAGMA table_info(facts)")}
+                    if "source" not in cols:
+                        self.db.execute("ALTER TABLE facts ADD COLUMN source TEXT DEFAULT 'agent'")
+                    if "used" not in cols:
+                        self.db.execute("ALTER TABLE facts ADD COLUMN used INTEGER DEFAULT 0")
+                    self.db.execute("INSERT INTO facts_fts(facts_fts) VALUES('rebuild')")
+                    self.db.execute("PRAGMA user_version = 1")
 
     # ── indexing ──────────────────────────────────────────────────────────────────────────────
     def changed(self, key, mark):
@@ -105,7 +179,24 @@ class Library:
             row = self.db.execute("SELECT mark FROM seen WHERE key=?", (key,)).fetchone()
         return not row or row[0] != mark
 
-    def put_session(self, info, messages):
+    def upsert(self, rows):
+        """B8: index by message key instead of deleting the session — other rows of the
+        session stay put, so a `?since=` fetch only touches what moved."""
+        with self.lock, self.db:
+            for body, title, key, sid, kind, ts in rows:
+                if key:
+                    self.db.execute("DELETE FROM docs WHERE key=?", (key,))
+                self.db.execute("INSERT INTO docs(body,title,key,session,kind,ts) VALUES(?,?,?,?,?,?)",
+                                (body, title, key, sid, kind, ts))
+
+    def put_report(self, sid, ev):
+        """B7c: a coordinator's inbox event (a report filed by a child session) as kind='report'."""
+        body = mask(str(ev.get("body") or ""))[:2500]
+        if body.strip():
+            self.upsert([(body, str(ev.get("title") or "report"), str(ev.get("id") or f"report:{sid}:{ev.get('at')}"),
+                          sid, "report", int(ev.get("at") or 0))])
+
+    def put_session(self, info, messages, reports=()):
         sid, title = info["id"], info.get("title") or info["id"]
         card = info.get("card") or {}
         rows, words = [], []
@@ -119,21 +210,37 @@ class Library:
                     inp = (p.get("state") or {}).get("input") or {}
                     key = next((str(inp[k]) for k in ("title", "query", "command", "filePath", "path", "url", "brief") if inp.get(k)), "")
                     parts.append(f"[tool {p.get('tool')}] {key[:300]}")
+                    out = (p.get("state") or {}).get("output")
+                    if out:
+                        # B4: a tool part that RAN (its state carries output) is its own row —
+                        # the key lets agents find what a command actually printed
+                        head = mask(f"[tool {p.get('tool')}] {key}")
+                        o = clip_output(mask(str(out)))
+                        rows.append((f"{head}\n{o}", title,
+                                     f"{mi.get('id', '')}:{p.get('call') or p.get('tool')}", sid, "tool",
+                                     int((mi.get("time") or {}).get("created") or 0)))
             body = "\n".join(parts).strip()
             if body:
+                body = mask(body)  # the index holds no secrets (G1's patterns, ported)
                 rows.append((body, title, mi.get("id", ""), sid, mi.get("role", ""), int((mi.get("time") or {}).get("created") or 0)))
                 words.append(body)
+        for ev in reports:  # B7c: the reports this session has filed (coordinators only)
+            self.put_report(sid, ev)
         cardtext = " · ".join(str(card[k]) for k in ("topic", "brief", "headline", "summary", "needs") if card.get(k))
         if cardtext:
             rows.append((cardtext, title, f"card:{sid}", sid, "card", int((info.get("time") or {}).get("updated") or 0)))
         updated = int((info.get("time") or {}).get("updated") or 0)
+        self.upsert(rows)
         with self.lock, self.db:
-            self.db.execute("DELETE FROM docs WHERE session=?", (sid,))
-            self.db.executemany("INSERT INTO docs(body,title,key,session,kind,ts) VALUES(?,?,?,?,?,?)", rows)
+            kw = ", ".join(keywords("\n".join(words)))
+            if not kw:  # an incremental pass that brought no new words keeps the old ones
+                row = self.db.execute("SELECT keywords FROM sessions WHERE id=?", (sid,)).fetchone()
+                kw = row[0] if row else ""
             self.db.execute("INSERT OR REPLACE INTO sessions VALUES(?,?,?,?,?,?,?)", (
                 sid, title, info.get("agent") or "", card.get("status") or "", card.get("headline") or "",
-                updated, ", ".join(keywords("\n".join(words)))))
+                updated, kw))
             self.db.execute("INSERT OR REPLACE INTO seen VALUES(?,?)", (f"s:{sid}", updated))
+        return len(rows)
 
     def put_artifact(self, name, text, mtime):
         with self.lock, self.db:
@@ -148,13 +255,17 @@ class Library:
         if not words:
             return "say what to look for"
         since = now_ms() - int(since_minutes) * 60_000 if since_minutes else 0
+        hits = []
         for joiner in (" AND ", " OR "):  # all the words first, then any of them
             q = joiner.join('"' + w.replace('"', "") + '"' for w in words)
             with self.lock:
+                # B5: bm25 first, then recency — 30 days old costs about as much as being
+                # ranked one step worse; the key column carries the message id (msg=)
                 hits = self.db.execute(
                     "SELECT title, session, kind, ts, key, snippet(docs, 0, '[', ']', '…', 14) FROM docs "
-                    "WHERE docs MATCH ? AND CAST(ts AS INTEGER) >= ? ORDER BY bm25(docs) LIMIT ?",
-                    (q, since, max(1, min(int(limit or 8), 25)))).fetchall()
+                    "WHERE docs MATCH ? AND CAST(ts AS INTEGER) >= ? "
+                    "ORDER BY bm25(docs) + 0.3 * ln(1 + (? - CAST(ts AS INTEGER)) / 86400000.0) LIMIT ?",
+                    (q, since, now_ms(), max(1, min(int(limit or 8), 25)))).fetchall()
             if hits:
                 break
         if not hits:
@@ -165,7 +276,8 @@ class Library:
             if kind == "artifact":
                 out.append(f"- artifact {title} ({ago(ts)}): {snip} — [{title}](/api/artifact/{title})")
             else:
-                out.append(f'- "{title}" ({kind}, {ago(ts)}, id={sid}): {snip}')
+                msg = f" msg={key}" if key and not key.startswith(("card:", "report:", "seed:")) else ""
+                out.append(f'- "{title}" ({kind}{msg}, {ago(ts)}, id={sid}): {snip}')
         return "\n".join(out)
 
     def recent(self, minutes=60):
@@ -189,18 +301,102 @@ class Library:
         topic, fact = (topic or "").strip(), (fact or "").strip()
         if not topic or not fact:
             return "need a topic and a fact"
+        ws = set(words_of(topic))
         with self.lock, self.db:
-            self.db.execute("INSERT INTO facts(topic,fact,ts,session) VALUES(?,?,?,?)", (topic, fact, now_ms(), session))
+            # dedupe: a same-topic fact sharing ≥80% of its words is a refresh, not a copy
+            for fid, tp in self.db.execute("SELECT id, topic FROM facts").fetchall():
+                tw = set(words_of(tp))
+                if ws and tw and len(ws & tw) / len(ws | tw) >= 0.8:
+                    self.db.execute("UPDATE facts SET fact=?, ts=?, session=? WHERE id=?",
+                                    (fact, now_ms(), session or "agent", fid))
+                    return f"refreshed {tp!r} (kept under {topic!r})"
+            self.db.execute("INSERT INTO facts(topic,fact,ts,session,source) VALUES(?,?,?,?,?)",
+                            (topic, fact, now_ms(), session or "agent", "agent"))
         return f"kept under {topic!r}"
 
     def recall(self, topic):
-        t = f"%{(topic or '').strip()}%"
-        with self.lock:
-            rows = self.db.execute("SELECT topic, fact, ts FROM facts WHERE topic LIKE ? OR fact LIKE ? "
-                                   "ORDER BY ts DESC LIMIT 20", (t, t)).fetchall()
+        words = words_of(topic)
+        if not words:
+            return "say what topic to recall"
+        rows = []
+        for joiner in (" AND ", " OR "):  # match all the words first, then any (plan B1)
+            q = joiner.join('"' + w.replace('"', "") + '"' for w in words)
+            with self.lock:
+                rows = self.db.execute(
+                    "SELECT f.id, f.topic, f.fact, f.ts FROM facts f JOIN facts_fts t ON t.rowid = f.id "
+                    "WHERE facts_fts MATCH ? "
+                    "ORDER BY bm25(facts_fts) + 0.3 * ln(1 + (? - f.ts) / 86400000.0) LIMIT 20",
+                    (q, now_ms())).fetchall()
+            if rows:
+                break
         if not rows:
-            return f"no facts kept for {topic!r} — try search for what was said about it"
-        return "\n".join(f"- [{tp}] {fact} ({ago(ts)})" for tp, fact, ts in rows)
+            # B1: recall falls back to what was said — search(), not a dead end
+            said = self.search(topic, 5)
+            return f"no fact kept for {topic!r}; what was said:\n{said}"
+        with self.lock, self.db:  # a hit is a used fact
+            self.db.executemany("UPDATE facts SET used = used + 1 WHERE id=?", [(r[0],) for r in rows])
+        return "\n".join(f"- [{tp}] {fact} ({ago(ts)})" for _, tp, fact, ts in rows)
+
+    def prune(self, live_ids, artifact_names=None):
+        """G7.1: the index holds what the brain holds. Facts stay, with their session."""
+        live = set(live_ids or [])
+        names = set(artifact_names or [])
+        if not live:
+            return 0  # an empty answer is a restart, not an empty brain (G7.1)
+        with self.lock, self.db:
+            gone = [r[0] for r in self.db.execute("SELECT id FROM sessions").fetchall() if r[0] not in live]
+            for sid in gone:
+                self.db.execute("DELETE FROM docs WHERE session=?", (sid,))
+                self.db.execute("DELETE FROM sessions WHERE id=?", (sid,))
+                self.db.execute("DELETE FROM seen WHERE key=?", (f"s:{sid}",))
+            dead = [r[0] for r in self.db.execute(
+                "SELECT key FROM docs WHERE kind='artifact'").fetchall() if r[0][len('artifact:'):] not in names]
+            for k in dead:
+                self.db.execute("DELETE FROM docs WHERE key=?", (k,))
+                self.db.execute("DELETE FROM seen WHERE key=?", (f"a:{k[len('artifact:'):]}",))
+        return len(gone) + len(dead)
+
+    # ── internal tools (brain only — the context viewer's memory part) ───────────────────────
+    def status(self, session=""):
+        with self.lock:
+            d = self.db.execute("SELECT count(*) FROM docs").fetchone()[0]
+            s = self.db.execute("SELECT count(*) FROM sessions").fetchone()[0]
+            f = self.db.execute("SELECT count(*) FROM facts").fetchone()[0]
+            if session:
+                row = self.db.execute("SELECT updated FROM sessions WHERE id=?", (session,)).fetchone()
+                age = row[0] if row else None
+                marks = "indexed " + ago(age) if age else "stale (never indexed)"
+            else:
+                marks = ""
+        head = f"{s} session(s), {d} document(s), {f} fact(s) in memory"
+        return head + (f"; this session: {marks}" if marks else "")
+
+    def facts_for(self, session):
+        with self.lock:
+            rows = self.db.execute(
+                "SELECT id, topic, fact, ts, session FROM facts WHERE session=? OR fact LIKE ? "
+                "ORDER BY ts DESC LIMIT 40", (session, f"%{session}%")).fetchall()
+        if not rows:
+            return f"no facts from or about {session}"
+        return "\n".join(f"- [{tp}] {fact} ({ago(ts)}) (id={fid}{'' if fs == session else f', from {fs}'})"
+                         for fid, tp, fact, ts, fs in rows)
+
+    def forget(self, fid):
+        try:
+            fid = int(fid)
+        except (TypeError, ValueError):
+            return f"not a fact id: {fid!r}"
+        with self.lock, self.db:
+            cur = self.db.execute("DELETE FROM facts WHERE id=?", (fid,))
+        return f"forgot fact {fid}" if cur.rowcount else f"no fact {fid}"
+
+    def pinned(self):
+        with self.lock:
+            rows = self.db.execute(
+                "SELECT id, topic, fact, used FROM facts ORDER BY used DESC, ts DESC LIMIT 10").fetchall()
+        if not rows:
+            return "no facts kept yet"
+        return "\n".join(f"- [{tp}] {fact} (used {u})" for fid, tp, fact, u in rows)
 
     def seed(self, path):
         """Past memory for simulations: {"facts": [{topic, fact, days_ago}], "docs": [{title, body, days_ago}]}."""
@@ -208,26 +404,56 @@ class Library:
         day = 86_400_000
         with self.lock, self.db:
             for f in d.get("facts", []):
-                self.db.execute("INSERT INTO facts(topic,fact,ts,session) VALUES(?,?,?,?)",
-                                (f["topic"], f["fact"], now_ms() - int(f.get("days_ago", 1) * day), "seed"))
+                self.db.execute("INSERT INTO facts(topic,fact,ts,session,source) VALUES(?,?,?,?,?)",
+                                (f["topic"], f["fact"], now_ms() - int(f.get("days_ago", 1) * day), "seed", "seed"))
             for i, x in enumerate(d.get("docs", [])):
                 ts = now_ms() - int(x.get("days_ago", 1) * day)
                 self.db.execute("INSERT INTO docs(body,title,key,session,kind,ts) VALUES(?,?,?,?,?,?)",
                                 (x["body"], x["title"], f"seed:{i}", x.get("session", "seed"), x.get("kind", "assistant"), ts))
 
+    def last_message_id(self, sid):
+        """The id of the last message this session reached the index with (B8's ?since=)."""
+        with self.lock:
+            row = self.db.execute(
+                "SELECT key FROM docs WHERE session=? AND kind IN ('user','assistant') AND key != '' "
+                "ORDER BY CAST(ts AS INTEGER) DESC LIMIT 1", (sid,)).fetchone()
+        return str(row[0]) if row else ""
 
-def fetch(url, timeout=15):
-    with urllib.request.urlopen(url, timeout=timeout) as r:
-        return json.load(r)
+
+def fetch(url, timeout=15, default=None):
+    """GET json; a 404 answers `default` (an empty inbox, a gone session) instead of raising."""
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as r:
+            return json.load(r)
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            return default
+        raise
 
 
 def index_once(lib, root, artifacts=None):
-    """One pass: every session whose update mark moved, every artifact whose mtime moved."""
-    n = 0
-    for info in fetch(f"{root}/session"):
+    """One pass: every session whose update mark moved, every artifact whose mtime moved.
+
+    B8: the brain is asked only for messages after the last one indexed (`?since=`), and rows
+    are keyed by message id, so a turn re-indexes a couple of rows instead of the session.
+    G7.1: what the brain no longer has leaves the index — but ONLY when /session answered 200
+    with a non-empty list; a restart (connection refused, 404, []) never wipes the memory.
+    Returns (things indexed, doc rows written)."""
+    n, rows, live = 0, 0, []
+    listing = fetch(f"{root}/session", default=[]) or []
+    for info in listing:
+        sid = info["id"]
+        live.append(sid)
+        if info.get("test") is True:  # G7.2: e2e and voice-test sessions stay out of memory
+            continue
         mark = int((info.get("time") or {}).get("updated") or 0)
-        if lib.changed(f"s:{info['id']}", mark):
-            lib.put_session(info, fetch(f"{root}/session/{info['id']}/message?internal=1", 30))
+        if lib.changed(f"s:{sid}", mark):
+            last = lib.last_message_id(sid)
+            msgs = fetch(f"{root}/session/{sid}/message?internal=1&files=0" + (f"&since={last}" if last else ""), 30, default=[]) or []
+            reports = []
+            if (info.get("agent") or "") == "coordinator":  # B7c: a door's reports are memory too
+                reports = fetch(f"{root}/session/{sid}/inbox", 15, default=[]) or []
+            rows += lib.put_session(info, msgs, reports)
             n += 1
     if artifacts and os.path.isdir(artifacts):
         for name in os.listdir(artifacts):
@@ -243,7 +469,11 @@ def index_once(lib, root, artifacts=None):
                     text = html.unescape(re.sub(r"<[^>]+>", " ", re.sub(r"(?s)<(script|style).*?</\1>", " ", text)))
                 lib.put_artifact(name, " ".join(text.split()), mtime)
                 n += 1
-    return n
+                rows += 1
+    if listing:  # the prune guard: a real answer, and only then
+        names = os.listdir(artifacts) if artifacts and os.path.isdir(artifacts) else []
+        rows += lib.prune(live, names)  # rows<0 impossible; deletions reported as rows too
+    return n, rows
 
 
 def handler_for(lib):
@@ -291,6 +521,14 @@ def handler_for(lib):
                     out = lib.remember(a.get("topic", ""), a.get("fact", ""), body.get("session", ""))
                 elif tool == "recall":
                     out = lib.recall(a.get("topic", ""))
+                elif tool == "status":  # internal: the brain itself (ext::call_internal), never an agent
+                    out = lib.status(a.get("session", ""))
+                elif tool == "facts_for":
+                    out = lib.facts_for(a.get("session", ""))
+                elif tool == "forget":
+                    out = lib.forget(a.get("id"))
+                elif tool == "pinned":
+                    out = lib.pinned()
                 else:
                     return self.send(200, {"error": f"no tool {tool}"})
                 self.send(200, {"output": out})
@@ -315,9 +553,9 @@ def main():
     def loop():
         while True:
             try:
-                n = index_once(lib, a.root.rstrip("/"), a.artifacts)
-                if n:
-                    print(f"indexed {n} change(s)", flush=True)
+                n, r = index_once(lib, a.root.rstrip("/"), a.artifacts)
+                if n or r:  # "indexed 3 session(s), 24 row(s)" — sessions and doc rows (B8)
+                    print(f"indexed {n} session(s), {r} row(s)", flush=True)
             except Exception as e:  # noqa: BLE001 — the root may be restarting
                 print(f"index pass failed: {e}", flush=True)
             time.sleep(a.poll)
