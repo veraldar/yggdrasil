@@ -15,7 +15,7 @@ P=${P3_PORT_BASE:-18510}
 MOCK=$P HOMEP=$((P + 1)) LABP=$((P + 2)) APP=$((P + 10))
 STATE=${STATE:-$HOME/.cache/p3-app-tmp/roots-sheet}
 SHOTS=${SHOTS:-$STATE/shots}
-rm -rf "$STATE" && mkdir -p "$STATE"/{home,lab,stub,app} "$SHOTS"
+rm -rf "$STATE" && mkdir -p "$STATE"/{home,lab}/work "$STATE"/{stub,app} "$SHOTS"
 
 pids=()
 stop() { for p in "${pids[@]}"; do kill "$p" 2>/dev/null || true; done; wait 2>/dev/null || true; }
@@ -78,13 +78,16 @@ PY
 ) >"$STATE/app.log" 2>&1 &
 pids+=($!)
 
+up=0
 for _ in $(seq 60); do
   if curl -sf -o /dev/null "http://127.0.0.1:$HOMEP/root" && curl -sf -o /dev/null "http://127.0.0.1:$LABP/root" &&
-    curl -s -o /dev/null "http://127.0.0.1:$APP/"; then
+    curl -sf -o /dev/null "http://127.0.0.1:$APP/"; then
+    up=1
     break
   fi
   sleep 1
 done
+[ "$up" = 1 ] || { echo "rig not up — logs in $STATE" >&2; tail -3 "$STATE"/*.log >&2; exit 1; }
 
 cd "$B"
 PW_BASE_URL="http://127.0.0.1:$APP" PW_HOME_BRAIN="http://127.0.0.1:$HOMEP" PW_LAB_BRAIN="http://127.0.0.1:$LABP" \
