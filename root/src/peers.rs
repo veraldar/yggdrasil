@@ -323,17 +323,17 @@ pub fn remote_of(st: &AppState, sid: &str) -> Option<(String, String)> {
     Some((r["root"].as_str()?.to_string(), r["id"].as_str()?.to_string()))
 }
 
-/// Posts a turn to the peer side of a proxy, asynchronously (it reports back by itself). `caller`:
-/// the session here that speaks — the peer stores it as the message's sender (`meta.from`).
-pub async fn send(st: &AppState, root: &str, rid: &str, text: &str, caller: &str) -> Result<(), String> {
+/// Posts a turn to the peer side of proxy `proxy`, asynchronously (it reports back by itself; its
+/// events come home through relay.rs, so the phone sees it live). `caller`: the session here that
+/// speaks — the peer stores it as the message's sender (`meta.from`). File parts go as references.
+pub async fn send(st: &AppState, proxy: &str, root: &str, rid: &str, parts: Vec<Value>, caller: &str) -> Result<(), String> {
     let title = st.sessions.lock().unwrap().get(caller).map(|s| s.info["title"].as_str().unwrap_or_default().to_string()).unwrap_or_default();
     let from = json!({ "session": caller, "title": title, "root": st.config.peers.me });
-    let body = json!({ "parts": [{ "type": "text", "text": text }], "meta": { "from": from } });
-    call(st, root, "POST", &format!("/session/{rid}/message?async=1&origin=none"), Some(body), 20).await.map(|_| ())
+    crate::relay::forward(st, proxy, root, rid, parts, None, json!({ "from": from }), crate::relay::Wants::Async).await.map(|_| ())
 }
 
 /// Creates the real session on `root` and the proxy here; posts the brief there.
-pub async fn start(st: &AppState, caller: &str, root: &str, title: &str, profile: &str, brief: &str, model: Option<&str>, variant: Option<&str>) -> Result<String, String> {
+pub async fn start(st: &AppState, caller: &str, root: &str, title: &str, profile: &str, brief: &str, parts: Vec<Value>, model: Option<&str>, variant: Option<&str>) -> Result<String, String> {
     let proxy = crate::new_session(st, title, Some(caller), Some(profile), None, None);
     let pid = proxy["id"].as_str().unwrap_or_default().to_string();
     let body = json!({ "title": title, "agent": profile, "model": model, "variant": variant,
@@ -347,11 +347,12 @@ pub async fn start(st: &AppState, caller: &str, root: &str, title: &str, profile
         }
     };
     crate::with_session(st, &pid, |s| {
-        s.info["remote"] = json!({ "root": root, "id": rid });
+        // made: this root started it there (removing the proxy closes it there too)
+        s.info["remote"] = json!({ "root": root, "id": rid, "made": true });
         s.info["card"] = json!({ "topic": title, "brief": brief.chars().take(600).collect::<String>(), "status": "working",
             "by": caller, "root": root, "created": now_ms(), "updated": now_ms() });
     });
-    send(st, root, &rid, brief, caller).await?;
+    send(st, &pid, root, &rid, parts, caller).await?;
     Ok(pid)
 }
 

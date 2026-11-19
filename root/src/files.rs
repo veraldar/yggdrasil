@@ -17,7 +17,7 @@
 //! new one is stored as a file at the door (`ingest_data_urls`).
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     io::{Read, Write},
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
@@ -738,14 +738,31 @@ pub fn resolve_images(st: &AppState, convo: &mut [Value]) {
     }
 }
 
-/// The hashes a set of parts names (tests, and the tree tools' `attach`).
-pub fn refs_of(parts: &[Value]) -> Vec<Value> {
-    parts.iter().filter(|p| is_ref(p) || (p["type"] == "file" && p["url"].as_str().is_some_and(|u| u.starts_with("data:")))).cloned().collect()
-}
-
-/// Distinct hashes (dedupe for logs).
-pub fn hashes(parts: &[Value]) -> HashSet<String> {
-    parts.iter().filter(|p| is_ref(p)).filter_map(|p| p["hash"].as_str().map(String::from)).collect()
+/// The file parts of the turn `sid` is answering now (its reply in progress names it), else of
+/// its newest user message — what the tree tools' `attach: true` sends on. Local paths are
+/// dropped: the receiving session's root sets its own.
+pub fn turn_files(st: &AppState, sid: &str) -> Vec<Value> {
+    let parts: Vec<Value> = {
+        let sessions = st.sessions.lock().unwrap();
+        let Some(s) = sessions.get(sid) else { return vec![] };
+        let answering = s.messages.iter().rev().find(|m| m["info"]["role"] == "assistant" && m["info"]["time"]["completed"].is_null()).and_then(|m| m["info"]["parentID"].as_str());
+        let turn = match answering {
+            Some(t) => s.messages.iter().find(|m| m["info"]["id"] == t),
+            None => s.messages.iter().rev().find(|m| m["info"]["role"] == "user" && m["info"]["meta"]["auto"] != true),
+        };
+        turn.and_then(|m| m["parts"].as_array()).into_iter().flatten().filter(|p| p["type"] == "file").cloned().collect()
+    };
+    outgoing(st, &parts)
+        .into_iter()
+        .map(|mut p| {
+            if let Some(o) = p.as_object_mut() {
+                for k in ["id", "messageID", "sessionID"] {
+                    o.remove(k);
+                }
+            }
+            p
+        })
+        .collect()
 }
 
 #[cfg(test)]

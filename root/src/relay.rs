@@ -301,8 +301,7 @@ impl After {
             }
         }
         if let Some(p) = self.resolve {
-            let st = st.clone();
-            tokio::spawn(async move { resolve(&st, &p).await });
+            tokio::spawn(resolve_later(st.clone(), p));
         }
     }
 }
@@ -413,6 +412,11 @@ fn flush_early(w: &mut Watch, turn_id: &str, after: &mut After) {
             _ => {}
         }
     }
+}
+
+/// `resolve`, boxed: it and `After::run` call each other, so one of them names its future's type.
+fn resolve_later(st: AppState, proxy: String) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
+    Box::pin(async move { resolve(&st, &proxy).await })
 }
 
 /// After an idle (or a gap): the turns still open here are looked up there; a finished one ends.
@@ -566,8 +570,7 @@ async fn follow(st: AppState, root: String, fo: Arc<Follower>) {
                     }
                     drop(ws);
                     for p in look {
-                        let st = st.clone();
-                        tokio::spawn(async move { resolve(&st, &p).await });
+                        tokio::spawn(resolve_later(st.clone(), p));
                     }
                 }
                 post.run(&st).await;
