@@ -46,6 +46,22 @@ export async function ocFetch(path: string, init?: RequestInit) {
   return text ? JSON.parse(text) : null;
 }
 
+/** The brain's own answer, unread (status, headers, a body to stream): the file routes pass
+ *  bytes and the brain's error text on as they are. Throws only when the brain is unreachable. */
+export async function ocRaw(
+  path: string,
+  init?: { method?: string; body?: Uint8Array | string; headers?: Record<string, string> }
+) {
+  const r = await undiciFetch(`${OC}${path}`, {
+    method: init?.method,
+    body: init?.body,
+    headers: init?.headers,
+    dispatcher: ocAgent,
+  } as Parameters<typeof undiciFetch>[1]);
+  console.log(`[oc] ${init?.method || 'GET'} ${path.split('?')[0]} → ${r.status}`);
+  return r;
+}
+
 /** The header a session page sends with the session id it opened. */
 export const PIN_HEADER = 'x-session-pin';
 
