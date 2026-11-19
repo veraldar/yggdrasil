@@ -64,6 +64,7 @@ use axum::{
         sse::{Event, KeepAlive, Sse},
     },
     routing::{get, post},
+    extract::ConnectInfo,
 };
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
@@ -563,7 +564,7 @@ fn sanitize_for_speech(s: &str, max_words: usize) -> String {
     kept.join(" ")
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone)]
 struct Session {
     info: Value,
     messages: Vec<Value>,
@@ -603,6 +604,8 @@ struct AppState {
     /// G1: the last captured upstream body per session (context viewer) — memory only,
     /// never persisted, so a look never moves `time.updated` or re-indexes the librarian
     ctx: Arc<Mutex<context::Store>>,
+    /// C5: POST /admin/drain set this — post_message answers 503 until the drain ends
+    draining: Arc<std::sync::atomic::AtomicBool>,
 }
 
 #[derive(Deserialize)]
@@ -1142,6 +1145,113 @@ async fn get_inbox(State(st): State<AppState>, Path(id): Path<String>) -> Respon
     match st.sessions.lock().unwrap().get(&id) {
         Some(s) => Json(Value::Array(s.inbox.clone())).into_response(),
         None => not_found(&id),
+    }
+}
+
+/// `POST /admin/drain {max_s}` (C5) — loopback-only. Sets `draining` (post_message answers 503
+/// `{"draining":true,"retry_after":N}`), waits until no run is in flight (or `max_s`, default
+/// 120), answers `{drained, still_running}`. preview-up.sh / a unit's ExecStop calls it first.
+async fn admin_drain(
+    State(st): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<std::net::SocketAddr>,
+    Json(body): Json<Value>,
+) -> Response {
+    if !peer.ip().is_loopback() {
+        return (StatusCode::FORBIDDEN, Json(json!({ "error": "loopback only" }))).into_response();
+    }
+    let max_s = body["max_s"].as_u64().unwrap_or(120).clamp(1, 600);
+    st.draining.store(true, std::sync::atomic::Ordering::Relaxed);
+    let deadline = std::time::Instant::now() + Duration::from_secs(max_s);
+    loop {
+        let running = st.running.lock().unwrap().len();
+        if running == 0 || std::time::Instant::now() >= deadline {
+            let still = st.running.lock().unwrap().keys().cloned().collect::<Vec<_>>();
+            if still.is_empty() {
+                eprintln!("DRAIN: drained in {}s", max_s - deadline.saturating_duration_since(std::time::Instant::now()).as_secs());
+            } else {
+                eprintln!("DRAIN: max_s reached, {} still running: {}", still.len(), still.join(","));
+            }
+            return Json(json!({ "drained": still.is_empty(), "still_running": still })).into_response();
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+}
+
+/// C5: a turn the previous process cut mid-run gets its owner message resent ONCE — the
+/// coordinator prompt already promises "a turn cut off by a restart is sent once more". The
+/// user message the cut turn answered (its `parentID`) is found by id and submitted again with
+/// `meta.resent_of` and a plain prefix; auto/wake turns are re-woken through schedule_wake. A
+/// SECOND cut is only reported to the parent, as today. The door session itself never gets
+/// `card.status = failed` (the card misread it as failed work for months).
+fn resent_marker() -> &'static str {
+    "[sent again after a brain restart] "
+}
+
+fn resume_interrupted(st: &AppState, interrupted: &[String]) {
+    for sid in interrupted {
+        let plan: Option<(Vec<Value>, bool, String)> = {
+            let sessions = st.sessions.lock().unwrap();
+            let Some(s) = sessions.get(sid) else { continue };
+            // the cut turn = the last assistant message without a completed time was closed by
+            // close_interrupted; the message it answered is its parentID (the newest user message
+            // with that id, auto or not)
+            let Some(cut) = s.messages.iter().rev().find(|m| {
+                m["info"]["role"] == "assistant" && m["info"]["error"]["data"]["message"].as_str() == Some("interrupted by a brain restart")
+            }) else { continue };
+            let pid = cut["info"]["parentID"].as_str().unwrap_or_default().to_string();
+            let Some(asked) = s.messages.iter().rev().find(|m| m["info"]["id"].as_str() == Some(pid.as_str())) else { continue };
+            let was_auto = asked["info"]["meta"]["auto"] == true;
+            // ONCE: the cut turn's parent IS a resent copy, or a copy of THIS message already
+            // went out after a restart — a second cut is only reported to the parent, as today
+            if !asked["info"]["meta"]["resent_of"].as_str().unwrap_or_default().is_empty()
+                || s.messages.iter().any(|m| m["info"]["meta"]["resent_of"].as_str() == Some(pid.as_str()))
+            {
+                continue;
+            }
+            let parts: Vec<Value> = asked["parts"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|p| p["type"] == "text" || (p["type"] == "file" && p["url"].is_string()))
+                .collect();
+            if parts.is_empty() {
+                continue;
+            }
+            Some((parts, was_auto, pid))
+        };
+        let Some((parts, was_auto, pid)) = plan else { continue };
+        // the prefix rides the FIRST text part; a meta marker (`resent_of`) keeps the second-cut rule
+        let mut parts = parts;
+        let first_text = parts.iter_mut().find(|p| p["type"] == "text");
+        if let Some(p) = first_text {
+            let t = p["text"].as_str().unwrap_or_default();
+            if !t.starts_with(resent_marker()) {
+                p["text"] = json!(format!("{}{}", resent_marker(), t));
+            }
+        }
+        let turn = Turn {
+            parts,
+            modality: None,
+            auto_turn: was_auto,
+            internal: false,
+            origin: None,
+            completes: None,
+            from: None,
+            digest_hint: None,
+        };
+        match submit(st, sid, turn) {
+            Ok((msg, _, _)) => {
+                let mid = msg["info"]["id"].as_str().unwrap_or_default().to_string();
+                with_session(st, sid, |s| {
+                    if let Some(m) = s.messages.iter_mut().rev().find(|m| m["info"]["id"].as_str() == Some(mid.as_str())) {
+                        m["info"]["meta"]["resent_of"] = json!(pid);
+                    }
+                });
+                eprintln!("RESTART-RESEND {sid}: resent the owner turn (answered {pid}) once");
+            }
+            Err(_) => eprintln!("RESTART-RESEND {sid}: session gone, dropped"),
+        }
     }
 }
 
@@ -1858,6 +1968,11 @@ async fn post_message(
     } else {
         None
     };
+    // C5: a drain in progress refuses NEW turns (the app treats 503 draining like a busy
+    // session and queues the message)
+    if st.draining.load(std::sync::atomic::Ordering::Relaxed) {
+        return (StatusCode::SERVICE_UNAVAILABLE, Json(json!({ "draining": true, "retry_after": 5 }))).into_response();
+    }
     let want_sse = headers
         .get(header::ACCEPT)
         .and_then(|v| v.to_str().ok())
@@ -2159,7 +2274,11 @@ fn close_interrupted(sessions: &mut HashMap<String, Session>, data_dir: &std::pa
         }
         last["info"]["time"]["completed"] = json!(now_ms());
         last["info"]["error"] = json!({ "name": "UnknownError", "data": { "message": "interrupted by a brain restart" } });
-        if s.info["card"].is_object() {
+        // C5: a restart says nothing about the WORK. The door's own card has read `failed`
+        // (wakes=56) for months because of this line; a managed child's card is corrected by
+        // its digest/wake in a moment, so only the door needs the guard.
+        let is_main = crate::is_main_title(s.info["title"].as_str().unwrap_or_default());
+        if s.info["card"].is_object() && !is_main {
             s.info["card"]["status"] = json!("failed");
         }
         persist(data_dir, id, s);
@@ -3848,6 +3967,7 @@ async fn main() {
             ("antigravity".to_string(), floor_models.0),
         ]))),
         ctx: Arc::new(Mutex::new(context::Store::default())),
+        draining: Arc::default(),
         harness_labels: Arc::new(Mutex::new(HashMap::from([
             (
                 "claude".to_string(),
@@ -3863,6 +3983,9 @@ async fn main() {
     if !interrupted.is_empty() {
         eprintln!("restart: closed {} run(s) the previous process left open", interrupted.len());
     }
+    // C5: the owner turn each cut run was answering goes out once more, automatically (the
+    // coordinator prompt promises exactly this; a second cut is only reported, never resent)
+    resume_interrupted(&state, &interrupted);
     let app = Router::new()
         .route("/session", get(list_sessions).post(create_session))
         .route("/session/status", get(session_status))
@@ -3884,6 +4007,7 @@ async fn main() {
         .route("/root", get(get_root))
         .route("/session/{id}/inbox", get(get_inbox))
         .route("/session/{id}/context", get(get_context))
+        .route("/admin/drain", post(admin_drain))
         .route("/session/{id}/notice", get(get_notice))
         .route("/session/{id}/close", post(close_session))
         .with_state(state.clone());
@@ -3900,7 +4024,7 @@ async fn main() {
 
     let listener = tokio::net::TcpListener::bind(&listen).await.expect("bind");
     eprintln!("yggdrasil listening on {listen}");
-    axum::serve(listener, app).await.unwrap();
+    axum::serve(listener, app.into_make_service_with_connect_info::<std::net::SocketAddr>()).await.unwrap();
 }
 
 #[cfg(test)]
@@ -4752,6 +4876,7 @@ mod image_tests {
             harness_models: Arc::new(Mutex::new(HashMap::new())),
             harness_labels: Arc::new(Mutex::new(HashMap::new())),
             ctx: Arc::new(Mutex::new(context::Store::default())),
+            draining: Arc::default(),
         };
         assert_eq!(profile_name_of(&st, &legacy_info), "claude");
         let prof = session_profile(&st, legacy_id);
@@ -4801,7 +4926,8 @@ mod context_tests {
 
     /// A scratch app (anthropic dialect, tools on) with one child session and MAIN.
     async fn ctx_app() -> (AppState, PathBuf) {
-        let dir = std::env::temp_dir().join(format!("ygg-ctx-{}", std::process::id()));
+        static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let dir = std::env::temp_dir().join(format!("ygg-ctx-{}-{}", std::process::id(), N.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("session")).unwrap();
         let profiles = profiles::Profiles::load(None);
@@ -4845,6 +4971,7 @@ mod context_tests {
             harness_models: Arc::new(Mutex::new(HashMap::new())),
             harness_labels: Arc::new(Mutex::new(HashMap::new())),
             ctx: Arc::new(Mutex::new(context::Store::default())),
+            draining: Arc::default(),
         };
         (st, dir)
     }
@@ -4986,6 +5113,177 @@ mod context_tests {
         let peek = tree::peek_owner_inbox_lines(&st, &main);
         assert_eq!(peek.len(), 2);
         assert_eq!(peek[0], tree::inbox_line(&evs[0]));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod c5_tests {
+    use super::*;
+
+    fn c5_app() -> (AppState, PathBuf) {
+        static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let dir = std::env::temp_dir().join(format!("ygg-c5-{}-{}", std::process::id(), N.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("session")).unwrap();
+        let profiles = profiles::Profiles::load(None);
+        let http = reqwest::Client::new();
+        let config = Config {
+            base_url: "http://127.0.0.1:1".into(),
+            dialect: Dialect::OpenAi,
+            max_tokens: 1024,
+            api_key: None,
+            model: "glm-5.3".into(),
+            models: vec!["glm-5.3".into()],
+            catalog: json!({"default": {"yggdrasil": {}}}),
+            max_steps: 5,
+            profiles: std::sync::RwLock::new(profiles),
+            tree: tree::TreeCfg { max_depth: 12, max_children: 24, digest_model: None, wake_debounce_ms: 4000, max_wakes: 60 },
+            context_files: Vec::new(),
+            peers: peers::Peers::load(),
+            ext: ext::Extensions::load(),
+            tiers: HashMap::new(),
+            vision: Vec::new(),
+            tools_enabled: true,
+            rollup_tokens: 100_000,
+            rollup_keep_tokens: 25_000,
+            voice: false,
+            voice_max_words: 300,
+            default_variant: "high".into(),
+            think_high: 4096,
+        };
+        let st = AppState {
+            sessions: Arc::new(Mutex::new(HashMap::new())),
+            running: Arc::default(),
+            run_locks: Arc::default(),
+            bus: broadcast::channel(16).0,
+            data_dir: Arc::new(dir.clone()),
+            config: Arc::new(config),
+            http: http.clone(),
+            tools: Arc::new(tools::ToolEnv { project_dir: dir.clone(), bash_timeout: Duration::from_secs(1), http }),
+            upstream: Arc::new(tokio::sync::Semaphore::new(2)),
+            wakes: Arc::default(),
+            harness_slots: Arc::new(tokio::sync::Semaphore::new(2)),
+            harness_models: Arc::new(Mutex::new(HashMap::new())),
+            harness_labels: Arc::new(Mutex::new(HashMap::new())),
+            ctx: Arc::new(Mutex::new(context::Store::default())),
+            draining: Arc::default(),
+        };
+        (st, dir)
+    }
+
+    /// A session whose last run was cut by a restart: the owner message it answered + the
+    /// assistant placeholder close_interrupted leaves behind.
+    fn cut_session(st: &AppState, title: &str) -> (String, String) {
+        let sid = new_session(st, title, None, None, None, None)["id"].as_str().unwrap().to_string();
+        let asked = make_message(&sid, "user", vec![text_part("build the importer")]);
+        let mut cut = make_message(&sid, "assistant", vec![text_part("")]);
+        cut["info"]["parentID"] = asked["info"]["id"].clone();
+        cut["info"]["error"] = json!({ "name": "UnknownError", "data": { "message": "interrupted by a brain restart" } });
+        let pid = asked["info"]["id"].as_str().unwrap().to_string();
+        st.sessions.lock().unwrap().get_mut(&sid).unwrap().messages = vec![asked, cut];
+        (sid, pid)
+    }
+
+    #[tokio::test]
+    async fn interrupted_owner_turn_is_resent_once() {
+        let (st, dir) = c5_app();
+        let (sid, pid) = cut_session(&st, "resend me");
+        resume_interrupted(&st, &[sid.clone()]);
+        let s = { st.sessions.lock().unwrap().get(&sid).cloned().unwrap() };
+        let resent: Vec<&Value> = s.messages.iter().filter(|m| m["info"]["meta"]["resent_of"].as_str() == Some(pid.as_str())).collect();
+        assert_eq!(resent.len(), 1, "exactly one resend");
+        let text = message_text(resent[0]);
+        assert!(text.starts_with(resent_marker()), "{text}");
+        assert!(text.contains("build the importer"), "the original text rides again: {text}");
+        // idempotent: a second pass (the copy is intact) adds nothing
+        resume_interrupted(&st, &[sid.clone()]);
+        let s2 = { st.sessions.lock().unwrap().get(&sid).cloned().unwrap() };
+        assert_eq!(s2.messages.iter().filter(|m| m["info"]["meta"]["resent_of"].is_string()).count(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn second_interrupt_is_reported_not_resent() {
+        let (st, dir) = c5_app();
+        let (sid, pid) = cut_session(&st, "cut twice");
+        resume_interrupted(&st, &[sid.clone()]);
+        // the RESENT copy got cut too: close_interrupted's shape on its reply
+        let s = { st.sessions.lock().unwrap().get(&sid).cloned().unwrap() };
+        let resent_id = s.messages.iter().rev().find(|m| m["info"]["meta"]["resent_of"].is_string()).map(|m| m["info"]["id"].clone()).unwrap();
+        let mut cut2 = make_message(&sid, "assistant", vec![text_part("")]);
+        cut2["info"]["parentID"] = resent_id.clone();
+        cut2["info"]["error"] = json!({ "name": "UnknownError", "data": { "message": "interrupted by a brain restart" } });
+        st.sessions.lock().unwrap().get_mut(&sid).unwrap().messages.push(cut2);
+        let before = st.sessions.lock().unwrap().get(&sid).unwrap().messages.len();
+        resume_interrupted(&st, &[sid.clone()]);
+        let after = st.sessions.lock().unwrap().get(&sid).unwrap().messages.len();
+        assert_eq!(before, after, "a second cut is never auto-resent (the parent reports it, as today)");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// C5 side fix: a restart never marks the DOOR's own card failed.
+    #[test]
+    fn restart_never_fails_the_door_card() {
+        let (st, dir) = c5_app();
+        let main = new_session(&st, "[MAIN]", None, None, None, None)["id"].as_str().unwrap().to_string();
+        let kid = new_session(&st, "worker", Some(&main), None, None, None)["id"].as_str().unwrap().to_string();
+        with_session(&st, &main, |s| s.info["card"] = json!({ "status": "idle", "wakes": 56 }));
+        with_session(&st, &kid, |s| {
+            s.info["card"] = json!({ "status": "working" });
+            let mut cut = make_message(&kid, "assistant", vec![text_part("")]);
+            cut["info"]["error"] = json!({ "name": "UnknownError", "data": { "message": "interrupted by a brain restart" } });
+            s.messages.push(cut);
+        });
+        let mut sessions: HashMap<String, Session> = {
+            let guard = st.sessions.lock().unwrap();
+            guard.iter().map(|(k, v)| (k.clone(), serde_json::from_str::<Session>(&serde_json::to_string(v).unwrap()).unwrap())).collect()
+        };
+        let _ = close_interrupted(&mut sessions, &dir);
+        // the closed map is what the next process loads: assert on it
+        let main_card = &sessions[&main].info["card"];
+        assert_eq!(main_card["status"], json!("idle"), "the door's card is untouched");
+        let kid_card = &sessions[&kid].info["card"];
+        assert_eq!(kid_card["status"], json!("failed"), "a managed child keeps today's behavior");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// C6: `turns: N` — the last N owner exchanges, clipped, tool calls as `[tool name] key`.
+    #[tokio::test]
+    async fn read_turns_returns_n_exchanges() {
+        let (st, dir) = c5_app();
+        let main = new_session(&st, "[MAIN]", None, None, None, None)["id"].as_str().unwrap().to_string();
+        let sid = new_session(&st, "worker", Some(&main), None, None, None)["id"].as_str().unwrap().to_string();
+        let mut msgs: Vec<Value> = Vec::new();
+        let mk = |role: &str, text: &str, t: i64| {
+            let mut m = make_message(&sid, role, vec![text_part(text)]);
+            m["info"]["time"]["created"] = json!(t);
+            if role == "assistant" {
+                m["info"]["time"]["completed"] = json!(t + 5);
+            }
+            m
+        };
+        msgs.push(mk("user", "first ask about alpha", 100));
+        msgs.push(mk("assistant", "first answer alpha", 105));
+        msgs.push(mk("user", "second ask about beta", 200));
+        let mut with_tool = mk("assistant", "working on beta", 205);
+        with_tool["parts"] = json!([
+            { "type": "text", "text": "working on beta" },
+            { "type": "tool", "callID": "call_1", "tool": "bash", "messageID": with_tool["info"]["id"], "sessionID": sid,
+              "state": { "status": "completed", "input": { "command": "cargo test" }, "output": "ok" } }
+        ]);
+        msgs.push(with_tool);
+        msgs.push(mk("user", "third ask about gamma", 300));
+        msgs.push(mk("assistant", "third answer gamma", 305));
+        st.sessions.lock().unwrap().get_mut(&sid).unwrap().messages = msgs;
+        let out = tree::read(&st, &main, &json!({ "id": sid, "turns": 2 })).output;
+        assert!(out.contains("last 2 exchange(s)"), "{out}");
+        assert!(out.contains("second ask about beta"), "{out}");
+        assert!(out.contains("third ask about gamma"), "{out}");
+        assert!(!out.contains("first ask about alpha"), "outside the window: {out}");
+        assert!(out.contains("[tool bash] command"), "tool call rendered as [tool name] key: {out}");
+        let one = tree::read(&st, &main, &json!({ "id": sid, "turns": 1 })).output;
+        assert!(one.contains("third ask about gamma") && !one.contains("second ask about beta"), "{one}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
