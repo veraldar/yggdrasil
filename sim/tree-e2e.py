@@ -352,7 +352,7 @@ def reach(a, tmp, main_id, say, lab_unit):
 
     # (g) a file lab's session made, opened through home
     def g():
-        lab_art = os.path.join(tmp, "lab", "artifacts")
+        lab_art = os.path.join(tmp, "lab", "work", "artifacts")  # its project's artifacts/ (YGG_PROJECT_DIR)
         mark = "LAB-ARTIFACT-" + "".join(random.choice(string.ascii_uppercase) for _ in range(6))
         body = f"<!doctype html><meta charset=utf-8><title>lab made</title><p>{mark}</p>\n"
         req(HOME_PORT, "POST", f"/session/{proxy}/message", {"parts": [{"type": "text", "text": tool([["write", {"filePath": os.path.join(lab_art, "lab-made.html"), "content": body}]])}]}, 120)
@@ -408,6 +408,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--bin", default=os.path.join(YGG, "target", "release", "yggdrasil"))
     ap.add_argument("--port-base", type=int, default=0, help="home N, lab N+1, mock N+2, librarian N+3, helper N+4")
+    ap.add_argument("--only", choices=["reach"], help="reach: only package 2's checks (after the two roots are up)")
+    ap.add_argument("--long", action="store_true", help="package 2: also a plain POST held for a 130 s turn")
     a = ap.parse_args()
     global MOCK_PORT, HOME_PORT, LAB_PORT, LIB_PORT, HELPER_PORT
     pre = "tree-e2e"
@@ -459,6 +461,10 @@ def main():
         except urllib.error.HTTPError as e:
             check("no switch to coordinator for a non-MAIN session", e.code == 400, e.code)
         say = lambda text: req(HOME_PORT, "POST", f"/session/{main_id}/message", {"parts": [{"type": "text", "text": text}]}, 60)
+        if a.only == "reach":
+            reach(a, tmp, main_id, say, units[2])
+            print(f"\n{'GREEN' if not FAILS else 'RED'}: {len(FAILS)} failure(s) {FAILS if FAILS else ''}")
+            sys.exit(1 if FAILS else 0)  # the finally below stops the units
 
         # 1. start → report → wake
         r = say(tool([["session_start", {"title": "alpha", "agent": "build", "brief": "Reply with exactly: ALPHA-DONE"}]]))
@@ -757,7 +763,13 @@ def main():
         r = say(tool([["librarian_recent", {"minutes": 10}]]))
         out = [p for p in r["parts"] if p["type"] == "tool"][0]["state"]["output"]
         check("recent lists what changed, with keywords", "session(s) changed" in out and "keywords:" in out, out[:300])
+        reach(a, tmp, main_id, say, units[2])
     finally:
+        for pid in FROZEN:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except OSError:
+                pass
         for u in units:
             subprocess.run(["systemctl", "--user", "stop", u], capture_output=True)
         shutil.rmtree(tmp, ignore_errors=True)
