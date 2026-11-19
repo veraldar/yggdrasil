@@ -17,11 +17,15 @@ Build with `TMPDIR=~/.cache/p3-tmp` (/tmp is a shared 16 GB tmpfs, near full). R
   join.sh downloads bifrost-net from GitHub, the test gives it none — P4's, reported)
 - 10 roots tests; cargo test 126 green; sim/tree-e2e.py GREEN; sim/trunk-roots-e2e.py GREEN (its tunnel probes now send the token)
 
+- p3-app merged (sheet, routes, tag, pending joins, remove; its own rig sim/roots-sheet-e2e.sh green; screenshots p3-roots-*.png)
+- bridge refuses + cuts a removed root (rootlink.rs; it only checked the device); a root off at once on a failed call; polls 30 s
+- independent review: 9 findings, all fixed (commit "review fixes"), 127 tests green, tree-e2e GREEN again
+- rig spec: 7a-7i (S10 brain side, L8 through the tunnel, S18 incl. 3rd hop refused), 7s/7z (sheet taps, remove)
+
 ## Half done
-- p3-app: WIP commit c3adaa1c (sheet, routes, tag) — sub-agent cut by the usage limit; resumed
+- sim/trunk-full-e2e.sh run with S10/S18: state ~/.cache/p3-tmp/tf, log ~/.cache/p3-tmp/tf-run.log
 
 ## Next
-4. merge p3-app when its agent reports; npm run build; sim/trunk-full-e2e.sh green
-5. S10 + S18 in the trunk-full rig (new spec steps), Pixel-7 screenshots
-6. independent review of the diff (sub-agent), then report to MAIN
-7. omarchy-lab (old public brain) only after P1 reports stage B done (home renamed `omarchy`)
+1. rig green → copy STATE/p3-s10-*.png to artifacts, report to MAIN for the integrator (P1)
+2. omarchy-lab (old public brain) + a Linux container root on the REAL trunk only after P1 reports stage B (home = `omarchy`)
+3. tell P4: join-test.sh red before p3 (join.sh downloads bifrost-net; the test gives none)
