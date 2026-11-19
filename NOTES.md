@@ -24,11 +24,13 @@ p2-reach-sim (sim helper). Temp files: ~/.cache/p2-reach/tmp (NOT /tmp: shared q
 - S3 GREEN (sim/reach/s3.py, scratch brain, real upstream; MAIN attach:true; Claude Code reads path)
 - S17 real-model GREEN (sim/reach/s17_real.py: two scratch brains, real Claude Code haiku on lab)
 
+- app merged (5/5 Pixel-7 specs on real brains; screenshots p2-files-*.png)
+- independent review: 13 findings, all fixed (b948d5c4, +1); its 4 repros in sim/reach/regress pass;
+  after the fixes: cargo test 120/120, tree-e2e 131/131 (~/.cache/p2-reach/tree-full-run2.log)
+
 ## In flight
-- app helper (p2-reach-app): composer, /api/file, refs, artifact ?root=, Playwright Pixel 7
-- sim helper (p2-reach-sim): S16, S17 in the namespace rig
-- review agent: independent review of root/src diff (report only)
+- sim helper (p2-reach-sim): S16 (trunk-rtc --scenario s16), S17 (trunk-full --scenario s17)
 
 ## Next (me)
-2. merge app branch, run its specs against the real brain, screenshots
-3. fix review findings; report branch to MAIN for P1
+1. merge sim branch when S16/S17 ran; rerun S17 real once on the final build
+2. report the branch to MAIN for P1 (integrator); tell P3 about peers::start/send signatures
