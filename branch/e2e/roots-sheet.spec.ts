@@ -145,13 +145,8 @@ test('roots sheet: rows with state → lab: MAIN, sessions, ＋ there → tag at
     await expect(row).toBeVisible({ timeout: 20_000 });
     await expect(row.getByTestId('root-tag')).toHaveText('[lab]');
     await expect(page.locator('.oz-row', { hasText: '[MAIN] lab' })).toHaveCount(0);
-    // home's own sessions carry no tag
-    await expect(page.getByTestId('root-tag')).toHaveCount(
-      await page
-        .locator('.oz-row')
-        .filter({ has: page.getByTestId('root-tag') })
-        .count()
-    );
+    // home's own sessions carry none: the one tag is lab's
+    await expect(page.getByTestId('root-tag')).toHaveCount(1);
     await shot(page, 'home-tag');
   });
 
