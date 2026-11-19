@@ -47,12 +47,12 @@ apt-get install -y -qq --no-install-recommends zbar-tools qrencode procps >/dev/
 
 echo "[QR picture]"
 python3 /repo/root/install/rootjoin.py qr "https://ap.veraldar.org/join?r=0123456789abcdef0123456789abcdef" --png /tmp/q1.png >/dev/null
-bash $B --png2bmp /tmp/q1.png /tmp/q1.bmp 200 && [ "$(head -c2 /tmp/q1.bmp)" = BM ] \
+bash $B --png2bmp /tmp/q1.png /tmp/q1.bmp 215 && [ "$(head -c2 /tmp/q1.bmp)" = BM ] \
   && [ "$(zbarimg -q --raw /tmp/q1.bmp 2>/dev/null)" = "https://ap.veraldar.org/join?r=0123456789abcdef0123456789abcdef" ]
 check 'png2bmp: rootjoin.py PNG (8-bit grey) -> BMP that decodes to the same URL' $?
 w=$(python3 -c 'import struct,sys; d=open("/tmp/q1.bmp","rb").read(); print(struct.unpack("<i", d[18:22])[0])')
-[ "$w" -ge 150 ] && [ "$w" -le 200 ]
-check "png2bmp: about 200 px (got $w): fits the installer's window" $?
+[ "$w" -ge 150 ] && [ "$w" -le 215 ]
+check "png2bmp: at most 215 px (got $w): fits the installer's window" $?
 if command -v qrencode >/dev/null; then
   qrencode -o /tmp/q2.png -s 8 -m 4 "https://ap.veraldar.org/join?r=fedcba9876543210fedcba9876543210"
   bash $B --png2bmp /tmp/q2.png /tmp/q2.bmp 200 && [ "$(zbarimg -q --raw /tmp/q2.bmp 2>/dev/null)" = "https://ap.veraldar.org/join?r=fedcba9876543210fedcba9876543210" ]

@@ -303,7 +303,7 @@ watch_join() { # join.sh's lines (masked): to setup.log; the code + QR to status
       *'Code (check it matches the phone):'*)
         c=${line##*:}; c=${c//[[:space:]]/}
         S_STATE=code S_CODE=$c S_QR=''
-        if [ -s "$STATE/join-qr.png" ] && png2bmp "$STATE/join-qr.png" "$OUT/join-qr.bmp" "${VERALDAR_QR_PX:-200}" 2>>"$LOG"; then
+        if [ -s "$STATE/join-qr.png" ] && png2bmp "$STATE/join-qr.png" "$OUT/join-qr.bmp" "${VERALDAR_QR_PX:-215}" 2>>"$LOG"; then
           S_QR=join-qr.bmp
         fi
         status ;;
@@ -331,7 +331,7 @@ if [ "$rc" != 0 ]; then
   esac
   case $errs in
     *'no model upstream'*) finish "$rc" fail W-MODEL "$last" ;;
-    *'cannot download'*|*'cannot reach the hub'*|*'hub answered 404'*|*'hub answered 5'*|*'has no yggdrasil-'*|*'curl: ('*)
+    *'cannot download'*|*'cannot reach the hub'*|*'hub answered 404'*|*'hub answered 5'*|*'has no yggdrasil-'*|*'has no build for'*|*'curl: ('*)
       finish "$rc" fail W-NET "$last" ;;
     *'python3 (with ssl) is needed'*|*'glibc'*|*'MB are free'*|*'fetching and checking the release needs'*|*'cannot start:'*)
       finish "$rc" fail W-WSL "$last" ;;
