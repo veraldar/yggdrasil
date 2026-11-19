@@ -16,3 +16,10 @@
 
 ## Next
 - Assemble frozen release ~/.local/share/yggdrasil/hub/releases/<id>/
+
+## 2026-11-19 ~23:50 stage A progress
+- Release ~/.local/share/yggdrasil/hub/releases/20261119-2343-1e94b361, `current` → it.
+- Config: ~/.config/yggdrasil/hub/{app-public.env,bridge-public.toml,admin-token,peer-token}; state ~/.local/share/yggdrasil/hub/state/devices.json (copy of old ST).
+- `scripts/hub-units.sh public-up` DONE: hub-app :4502 + hub-bridge active, AP channel up. Old trunk-preview-{app,bridge} stopped. Way back: `hub-units.sh public-back`.
+- NEXT: VPS backup tgz → vps-end-design.sh → verify. Then pair a test device + Playwright proof.
+- TODO C5 review (6 defects, see reviewer): (1) retire/fold/refile BEFORE any submit; (2) cut reply with finished tool parts → don't refile its reports (or don't fold); (3) `ended` must count only real run replies (parentID, not folded/inbox stub/summary); (4) retire only if created(W) > last_end, else just wake; (5) handled only if a wake really submits / non-wake autos → report via recover; wake budget; (6) boot id per placeholder (meta.boot) instead of wall clock; still report leftovers.
