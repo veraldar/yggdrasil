@@ -227,9 +227,9 @@ try {
 
   await step('S17.4w', 'it crossed the WireGuard link in pieces: one whole-file call is refused there (4 MB cap), a 1 MiB piece passes; the hub node carried it', async () => {
     must(turn, 'needs S17.4');
-    const log = existsSync(join(LABST, 'brain.log')) ? readFileSync(join(LABST, 'brain.log'), 'utf8') : '';
-    const pulled = log.split('\n').find((l) => l.includes(`files: pulled ${pdf.sha256}`));
-    must(pulled && /from home/.test(pulled), `lab's brain never logged pulling it from home (${log.split('\n').filter((l) => l.startsWith('files:')).slice(-2).join(' | ')})`);
+    const logOf = () => (existsSync(join(LABST, 'brain.log')) ? readFileSync(join(LABST, 'brain.log'), 'utf8') : '').split('\n');
+    const pulled = await poll(() => logOf().find((l) => l.includes(`files: pulled ${pdf.sha256}`) && /from home/.test(l)), 90_000,
+      `lab's brain never logged pulling it from home (${logOf().filter((l) => l.startsWith('files:')).slice(-2).join(' | ')})`);
     // lab's way to home is its own tunnel door: /_wg/local = the hub, inside WireGuard
     const door = `http://127.0.0.1:${env('PW_LAB_WG')}/_wg/local`;
     const whole = await brain(door, `/file/${pdf.sha256}`, { timeout: 90_000 });
@@ -258,7 +258,7 @@ try {
     const read = reqs.find((x) => x.result);
     must(read && read.result.document_bytes === pdf.size && read.result.sha256 === pdf.sha256,
       `Read handed the model ${JSON.stringify(read && read.result)}`);
-    return `"[attached by the owner: ${a.name} (${a.mime}, ${a.size}) — ${a.path.replace(STATE, '$STATE')} — …]" · Read → a ${read.result.document_bytes}-byte PDF document, sha256 equal`;
+    return `"[attached: ${a.name} (${a.mime}, ${a.size}) — ${a.path.replace(STATE, '$STATE')} — …]" · Read → a ${read.result.document_bytes}-byte PDF document, sha256 equal`;
   });
 
   await step('S17.6', `the reply holds the marker word (${pdf.marker}) — in lab's store and on the phone's screen`, async () => {

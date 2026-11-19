@@ -24,7 +24,7 @@ choices are scripted, and the scripted model only knows what Claude Code sends i
 import argparse, base64, hashlib, json, os, re, subprocess, tempfile, time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-ATTACHED = re.compile(r"\[attached by the owner: (?P<name>.+?) \((?P<mime>[^,()]+), (?P<size>[^)]+)\) — (?P<path>/.+?) — open it with your file tools\]")
+ATTACHED = re.compile(r"\[attached(?: by the owner)?: (?P<name>.+?) \((?P<mime>[^,()]+), (?P<size>[^)]+)\) — (?P<path>/.+?) — open it with your file tools\]")
 MARKER = re.compile(r"marker word is ([A-Za-z0-9][A-Za-z0-9-]*[A-Za-z0-9])")
 SAID = re.compile(r"marker word in .+? is ([A-Za-z0-9][A-Za-z0-9-]*[A-Za-z0-9])")
 ARTDIR = re.compile(r"artifacts folder(?: is|:)\s*`?(/[^\s`'\"]+)")
