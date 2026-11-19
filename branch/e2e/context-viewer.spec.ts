@@ -67,6 +67,21 @@ test('the context sheet: tabs, byte-truth, purity, no horizontal scroll', async 
   // Memory tab: the librarian's status text arrives (the twin runs the librarian)
   await page.getByTestId('ctx-tab-memory').tap();
   await expect(page.getByTestId('ctx-memory')).toBeVisible();
+  // phase 2: a fact row with its ✕; tapping it makes exactly that row disappear (the
+  // twin's librarian holds seeded facts, one of them about this session)
+  const dels = page.locator('[data-testid^="ctx-fact-del-"]');
+  const n0 = await dels.count();
+  if (n0 > 0) {
+    const id = (await dels.first().getAttribute('data-testid'))!.replace('ctx-fact-del-', '');
+    const rowText = await dels
+      .first()
+      .locator('xpath=..')
+      .innerText();
+    await dels.first().tap();
+    await expect(page.getByTestId(`ctx-fact-del-${id}`)).toHaveCount(0, { timeout: 10_000 });
+    expect((await page.locator('[data-testid^="ctx-fact-del-"]').count()).toBeLessThan(n0));
+    void rowText;
+  }
 
   // the drop line ends the Sent list; back to Sent for it
   await page.getByTestId('ctx-tab-sent').tap();

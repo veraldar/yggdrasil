@@ -46,6 +46,8 @@ type Sess = {
   harness?: string | null;
   card?: Card | null;
   archived?: boolean; // closed by its parent — hidden behind "N closed"
+  /** a test session (e2e, the voice-test page): the home list hides it (plan G7.2) */
+  test?: boolean;
 };
 
 type GHit = {
@@ -276,7 +278,7 @@ export default function SessionsPage() {
   const tops = useMemo(() => {
     const held = new Set(sessions.filter(inRoots).map((s) => s.id));
     return sessions.filter(
-      (s) => !held.has(s.id) && (!s.parentId || !byId.has(s.parentId) || held.has(s.parentId))
+      (s) => s.test !== true && !held.has(s.id) && (!s.parentId || !byId.has(s.parentId) || held.has(s.parentId))
     );
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessions, byId, rootsSlug]);

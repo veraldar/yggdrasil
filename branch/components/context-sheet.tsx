@@ -6,7 +6,8 @@
  *                the red dropped line at the end)
  *    MAIN's view what the coordinator sees of this session: tree line, card, reports, briefs,
  *                the session_read text
- *    Memory      the librarian's status and search hits for this session (phase 2 completes it)
+ *    Memory      the librarian's view of this session: index mark, facts from/about it (✕
+ *                forgets one), the top hits for its title
  *    Harness     what the harness (claude/agy/opencode) holds — only when the session runs one
  *  Two actions: "tell this session…" pre-fills its composer with "[missing context] ";
  *  "ask MAIN about this" opens MAIN with a pre-filled note naming the gap. Read-only
@@ -123,6 +124,25 @@ export function ContextSheet({
 
   const isHarness = !!summary?.harness || ((harness as { captured?: unknown } | null)?.captured != null);
 
+  // the ✕ on a fact row: DELETE /api/memory/fact/[id] → brain → librarian forget; the row
+  // disappears (the list reloads on next open — the tab keeps its data while open)
+  const forgetFact = async (fid: string) => {
+    try {
+      const r = await fetch(`/api/memory/fact/${fid}`, { method: 'DELETE', cache: 'no-store' });
+      if (!r.ok) throw new Error(`brain ${r.status}`);
+      setMemory((m) => {
+        if (!m) return m;
+        const facts = String(m.facts || '')
+          .split('\n')
+          .filter((l) => !l.includes(`(id=${fid}`))
+          .join('\n');
+        return { ...m, facts };
+      });
+    } catch (e) {
+      setErr(String(e));
+    }
+  };
+
   return (
     <div className="oz-film ctx-sheet" role="dialog" aria-label="what this session knows" data-testid="ctx-sheet">
       <header className="flex items-center gap-2 px-3 pt-[calc(10px+env(safe-area-inset-top))]">
@@ -216,8 +236,32 @@ export function ContextSheet({
         {tab === 'memory' && memory && (
           <div className="grid gap-2 text-[11px]" data-testid="ctx-memory">
             <pre className="ctx-pre whitespace-pre-wrap">{String(memory.status || 'the librarian has nothing on this yet')}</pre>
+            <pre className="ctx-pre whitespace-pre-wrap text-[var(--oz-dim)]">{String(memory.stale || '')}</pre>
+            {String(memory.facts || '').trim() && (
+              <section>
+                <h3 className="pb-1 text-[var(--oz-dim)]">facts from or about this session</h3>
+                {(memory.facts as string).split('\n').map((line, i) => {
+                  const m = line.match(/\(id=(\d+)/); // "- [topic] fact (3h ago) (id=12)"
+                  return (
+                    <p key={i} className="flex items-start gap-1 border-b border-[var(--oz-border)] py-1">
+                      <span className="min-w-0 flex-1 whitespace-pre-wrap">{line}</span>
+                      {m && (
+                        <button
+                          type="button"
+                          className="oz-del flex-none px-1 text-[var(--oz-dim)]"
+                          aria-label={`forget fact ${m[1]}`}
+                          data-testid={`ctx-fact-del-${m[1]}`}
+                          onClick={() => void forgetFact(m[1])}
+                        >
+                          ✕
+                        </button>
+                      )}
+                    </p>
+                  );
+                })}
+              </section>
+            )}
             <pre className="ctx-pre whitespace-pre-wrap text-[var(--oz-dim)]">{String(memory.search || '')}</pre>
-            <p className="text-[10px] text-[var(--oz-dim)]">facts per topic arrive with the librarian v1 (phase 2)</p>
           </div>
         )}
 

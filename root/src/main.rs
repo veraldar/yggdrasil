@@ -1062,6 +1062,7 @@ async fn get_tree(State(st): State<AppState>) -> Json<Value> {
             json!({ "id": id, "title": s.info["title"], "parentID": s.info["parentID"], "agent": profile_name_of(&st, &s.info),
                 "model": s.info["model"], "card": s.info["card"], "archived": s.info["archived"] == true,
                 "busy": running.contains_key(id), "depth": tree::depth(&sessions, id),
+                "test": s.info["test"] == true,
                 "inbox": s.inbox.iter().filter(|e| e["delivered"] != true).count(),
                 "updated": s.info["time"]["updated"] })
         })
@@ -1469,6 +1470,16 @@ async fn context_memory_part(st: &AppState, id: &str) -> Response {
         out["status"] = json!("the librarian is down");
     }
     let query = if title.is_empty() { id.to_string() } else { title };
+    // phase 2: the Memory tab's pieces — the index mark for THIS session, its facts (kept from
+    // it and about it), and the top hits for its title
+    match st.config.ext.call_internal(&st, "librarian", "status", &json!({ "session": id })).await {
+        Ok(s) => out["stale"] = json!(s),
+        Err(_) => out["stale"] = json!("unknown"),
+    }
+    match st.config.ext.call_internal(&st, "librarian", "facts_for", &json!({ "session": id })).await {
+        Ok(f) => out["facts"] = json!(f),
+        Err(e) => out["facts"] = json!(format!("(unavailable: {e})")),
+    }
     match st.config.ext.call_internal(&st, "librarian", "search", &json!({ "query": query, "limit": 5 })).await {
         Ok(hits) => out["search"] = json!(hits),
         Err(e) => out["search"] = json!(format!("(unavailable: {e})")),
