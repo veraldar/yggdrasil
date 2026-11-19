@@ -125,9 +125,15 @@ test('paperclip: a PDF and a photo go up in pieces, the message shows both, the 
   const photo = png(640, 400);
   const puts: Request[] = [];
   const sends: Request[] = [];
+  const uploadOf = new Map<string, string>(); // file name → its upload id
   page.on('request', (r) => {
     if (r.method() === 'PUT' && r.url().includes('/api/file/upload/')) puts.push(r);
     if (r.method() === 'POST' && /\/api\/session\/[^/]+\/messages$/.test(r.url())) sends.push(r);
+  });
+  page.on('response', async (r) => {
+    if (r.request().method() !== 'POST' || !r.url().endsWith('/api/file/upload')) return;
+    const d = (await r.json().catch(() => ({}))) as { upload?: string };
+    if (d.upload) uploadOf.set((r.request().postDataJSON() as { name: string }).name, d.upload);
   });
 
   // the paperclip opens the phone's picker — any file now (no accept=image/*)
@@ -148,11 +154,20 @@ test('paperclip: a PDF and a photo go up in pieces, the message shows both, the 
   await expect(page.locator('[data-testid=attachment][data-state=ready]')).toHaveCount(2, {
     timeout: 30_000,
   });
-  // pieces: the 3 MB PDF went in ≥ 2 PUTs, none over 1 MiB
-  expect(puts.length).toBeGreaterThanOrEqual(3);
-  for (const p of puts) expect(p.postDataBuffer()?.length ?? 0).toBeLessThanOrEqual(MiB);
-  const pdfPuts = puts.filter((p) => (p.postDataBuffer()?.length ?? 0) > photo.length);
-  expect(pdfPuts.length).toBeGreaterThanOrEqual(2);
+  // pieces: the 3 MB PDF went in ≥ 2 PUTs, none over 1 MiB (offsets step by ≤ 1 MiB)
+  const up = uploadOf.get('report.pdf') || '';
+  expect(up).not.toBe('');
+  const offsets = puts
+    .filter((p) => p.url().includes(`/api/file/upload/${up}?`))
+    .map((p) => Number(new URL(p.url()).searchParams.get('offset')));
+  expect(offsets.length).toBeGreaterThanOrEqual(2);
+  expect(offsets[0]).toBe(0);
+  for (let i = 1; i < offsets.length; i++) {
+    expect(offsets[i] - offsets[i - 1]).toBeGreaterThan(0);
+    expect(offsets[i] - offsets[i - 1]).toBeLessThanOrEqual(MiB);
+  }
+  expect(report.length - offsets[offsets.length - 1]).toBeLessThanOrEqual(MiB);
+  expect(uploadOf.has('photo.png')).toBe(true);
 
   await page.getByRole('textbox', { name: 'message' }).fill('the report and a photo');
   await shot(page, 'composer');
@@ -224,8 +239,10 @@ test('a file over the limit: the brain says so word for word, nothing is sent', 
   expect(r.status()).toBe(413);
   const { error } = (await r.json()) as { error: string };
   expect(error).toMatch(/^backup\.tar is .+\. The limit is \d+ MB per file\.$/);
-  // the brain's words, exactly, on the page
-  await expect(page.getByText(error, { exact: true })).toBeVisible();
+  // the brain's words, exactly, on the page (the error line: its text, then its keys)
+  const alert = page.getByRole('alert').filter({ hasText: error });
+  await expect(alert).toBeVisible();
+  expect(await alert.evaluate((el) => (el.textContent || '').trim())).toBe(`${error} fix this dismiss`);
   await expect(page.getByTestId('attachment')).toHaveCount(0);
   await shot(page, 'over-limit');
   // nothing went: no piece, no message — the send key is the mic again
