@@ -80,6 +80,7 @@ mod harness;
 mod peers;
 mod profiles;
 mod rollup;
+mod roots;
 mod tools;
 mod tree;
 
@@ -821,6 +822,16 @@ async fn create_session(State(st): State<AppState>, body: Option<Json<Value>>) -
         return attach_harness(&st, &body);
     }
     let title = body["title"].as_str().filter(|t| !t.is_empty()).unwrap_or("New session");
+    // the phone starts a session on another root (the roots sheet): made there, a proxy here
+    if let Some(root) = body["root"].as_str().filter(|r| !r.is_empty() && *r != st.config.peers.me) {
+        if body["report_to"].is_object() {
+            return bad_request("a session another root asks for runs here (no root)");
+        }
+        return match roots::create_remote(&st, root, title, body["agent"].as_str()).await {
+            Ok(info) => Json(info).into_response(),
+            Err(e) => (StatusCode::BAD_GATEWAY, Json(json!({ "error": e }))).into_response(),
+        };
+    }
     let model = body["model"].as_str().or(body["model"]["id"].as_str());
     let info = new_session(&st, title, body["parentID"].as_str(), body["agent"].as_str(), model, body["variant"].as_str());
     // G7.2: an e2e / voice-test session is marked once at birth. GET /session still lists it
@@ -835,11 +846,15 @@ async fn create_session(State(st): State<AppState>, body: Option<Json<Value>>) -
             return Json(i).into_response();
         }
     }
-    // a peer root asked for this session: its turns report home (peers.rs)
+    // a peer root asked for this session: its turns report home (peers.rs); the hop count rides
+    // with it (L6: work passed on past peers::MAX_HOPS is refused)
     if body["report_to"]["root"].is_string() && body["report_to"]["session"].is_string() {
         let id = info["id"].as_str().unwrap_or_default().to_string();
         if let Some(i) = with_session(&st, &id, |s| {
             s.info["report_to"] = body["report_to"].clone();
+            if let Some(h) = body["hops"].as_u64().filter(|h| *h > 0) {
+                s.info["hops"] = json!(h.min(10));
+            }
             s.info.clone()
         }) {
             return Json(i).into_response();
@@ -2107,6 +2122,13 @@ fn sender_of(v: &Value) -> Option<Value> {
     let mut out = json!({ "session": session, "title": title });
     if let Some(r) = f("root") {
         out["root"] = json!(r);
+        // the proxy on that root it spoke through (its answer goes back there) and the hop count
+        if let Some(p) = f("proxy") {
+            out["proxy"] = json!(p);
+        }
+        if let Some(h) = v["hops"].as_u64() {
+            out["hops"] = json!(h.min(10));
+        }
     }
     Some(out)
 }
@@ -2124,6 +2146,8 @@ fn sender_label(from: &Value) -> Option<String> {
 /// user message, the per-request event stream, and the run's result.
 fn submit(st: &AppState, id: &str, turn: Turn) -> Result<Submitted, Response> {
     let Turn { parts, modality, auto_turn, internal, origin, completes, from, digest_hint } = turn;
+    // a session on another root asked (peers::send): this turn's answer goes back to its proxy there
+    let asker = from.as_ref().and_then(|f| Some(tree::Target::Peer { root: f["root"].as_str()?.to_string(), proxy: f["proxy"].as_str()?.to_string() }));
     // Text parts go upstream; file parts (data: URLs) are stored so the transcript keeps them.
     let parts: Vec<Value> = parts
         .into_iter()
@@ -2227,7 +2251,7 @@ fn submit(st: &AppState, id: &str, turn: Turn) -> Result<Submitted, Response> {
         drop(ticket);
         // root-coord: a session under a manager reports into its inbox (digest + card + wake);
         // a plain async origin outside the tree keeps the 11-12 completion turn
-        match tree::report_target(&st, &id, origin.as_deref()) {
+        match asker.or_else(|| tree::report_target(&st, &id, origin.as_deref())) {
             Some(target) => tree::on_turn_end(&st, &id, target, result),
             None => {
                 if let Some(origin) = origin {
@@ -4049,8 +4073,15 @@ async fn main() {
         .route("/admin/drain", post(admin_drain))
         .route("/session/{id}/notice", get(get_notice))
         .route("/session/{id}/close", post(close_session))
+        .route("/root/{name}/sessions", get(roots::get_sessions))
+        .route("/root/{name}/adopt", post(roots::post_adopt))
+        .route("/root/peers/{name}", axum::routing::delete(roots::delete_peer))
+        .route("/tree/placed", post(roots::post_placed))
+        // L8: a call from another root carries the peer token, whatever route it names
+        .layer(axum::middleware::from_fn_with_state(state.clone(), peers::gate))
         .with_state(state.clone());
     tree::recover(&state, interrupted);
+    roots::ensure_main(&state);
     peers::spawn_watch(&state);
     ext::spawn_watch(&state);
     spawn_harness_models(&state);
