@@ -39,6 +39,14 @@ async function shot(page: Page, name: string) {
   if (SHOTS) await page.screenshot({ path: join(SHOTS, `p3-roots-${name}.png`) });
 }
 
+/** the roots key → the sheet (a tap before the page is live is tried again) */
+async function openSheet(page: Page) {
+  await expect(async () => {
+    await page.getByRole('button', { name: 'roots', exact: true }).tap();
+    await expect(page.getByTestId('roots-sheet')).toBeVisible({ timeout: 1500 });
+  }).toPass({ timeout: 20_000 });
+}
+
 /** a press held past the sheet's 0.5 s, by a finger that does not move */
 async function hold(page: Page, el: Locator) {
   const b = await el.boundingBox();
@@ -85,7 +93,7 @@ test('roots sheet: rows with state → lab: MAIN, sessions, ＋ there → tag at
 
   await test.step('home → the roots key → home first (home · on), then lab (on · linux)', async () => {
     await page.goto('/');
-    await page.getByRole('button', { name: 'roots', exact: true }).tap();
+    await openSheet(page);
     const sheet = page.getByTestId('roots-sheet');
     await expect(sheet).toBeVisible();
     const rows = sheet.getByTestId('root-row');
@@ -124,7 +132,7 @@ test('roots sheet: rows with state → lab: MAIN, sessions, ＋ there → tag at
   const TITLE = `made on lab ${Date.now() % 100000}`;
   await test.step('＋ on lab → a session there, opened here', async () => {
     await page.goto('/');
-    await page.getByRole('button', { name: 'roots', exact: true }).tap();
+    await openSheet(page);
     await page.getByTestId('root-row').nth(1).tap();
     await expect(page.getByTestId('root-main')).toBeVisible();
     await page.getByTestId('roots-new').tap();
@@ -151,7 +159,7 @@ test('roots sheet: rows with state → lab: MAIN, sessions, ＋ there → tag at
   });
 
   await test.step('hold lab → "Remove lab?" → Remove → the row is gone', async () => {
-    await page.getByRole('button', { name: 'roots', exact: true }).tap();
+    await openSheet(page);
     const lab = page.locator('[data-testid="root-row"][data-root="lab"]');
     await expect(lab).toBeVisible();
     // a hold on home asks nothing
@@ -180,7 +188,76 @@ test('roots sheet: rows with state → lab: MAIN, sessions, ＋ there → tag at
     expect(after.roots?.some((x) => x.name === 'lab')).toBe(false);
     // a reload keeps it gone
     await page.goto('/');
-    await page.getByRole('button', { name: 'roots', exact: true }).tap();
+    await openSheet(page);
     await expect(page.getByTestId('root-row')).toHaveCount(1);
+  });
+});
+
+test.describe('away', () => {
+  // the app's service worker would answer before page.route could shape the answer
+  test.use({ serviceWorkers: 'block' });
+
+  test('a computer that is away: greyed, "last seen …", its sessions greyed too', async ({
+    page,
+    context,
+  }) => {
+    const base = new URL(test.info().project.use.baseURL || 'http://127.0.0.1:18520');
+    await context.addCookies([
+      { name: 'bifrost_device', value: TOKEN, domain: base.hostname, path: '/', httpOnly: true },
+    ]);
+    const seen = Date.now() - 5 * 60_000;
+    // the brain only calls a root away 3 minutes after its last answer: the answer is shaped here
+    await page.route('**/api/roots', (r) =>
+      r.fulfill({
+        json: {
+          home: { name: 'home', os: 'linux', running: 1, main: null },
+          roots: [
+            {
+              id: 'mac-studio',
+              name: 'Mac Studio',
+              os: 'macos',
+              reachable: false,
+              seen,
+              running: 0,
+            },
+            {
+              id: 'old-box',
+              name: 'old-box',
+              os: 'linux',
+              reachable: false,
+              seen: null,
+              running: 0,
+            },
+          ],
+        },
+      })
+    );
+    await page.route('**/api/roots/mac-studio/sessions', (r) =>
+      r.fulfill({
+        json: {
+          root: 'mac-studio',
+          reachable: false,
+          main: { id: 'm1', proxy: 'p1', title: '[MAIN]' },
+          sessions: [
+            { id: 's1', title: 'render the site', status: 'done', updated: seen, proxy: 'p2' },
+            { id: 's2', title: 'photos import', status: 'blocked', updated: seen - 3_600_000 },
+          ],
+        },
+      })
+    );
+    await page.goto('/');
+    await openSheet(page);
+    const mac = page.locator('[data-testid="root-row"][data-root="mac-studio"]');
+    await expect(mac.getByTestId('root-state')).toHaveText('last seen 5 min ago');
+    await expect(mac).toHaveCSS('opacity', '0.5');
+    await expect(
+      page.locator('[data-testid="root-row"][data-root="old-box"]').getByTestId('root-state')
+    ).toHaveText('off');
+    await shot(page, 'away');
+    await mac.tap();
+    await expect(page.getByTestId('roots-state')).toHaveText('last seen 5 min ago');
+    await expect(page.getByTestId('root-sess')).toHaveCount(2);
+    await expect(page.getByTestId('root-sess').first()).toHaveCSS('opacity', '0.5');
+    await shot(page, 'away-view');
   });
 });
