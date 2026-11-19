@@ -38,7 +38,9 @@ for msg in hello again; do
   OUT=$(curl -sfN -X POST http://$YGG/session/$SID/message -H 'content-type: application/json' -H 'accept: text/event-stream' \
     -d "{\"parts\":[{\"type\":\"text\",\"text\":\"$msg\"}]}")
   echo "$OUT"
-  grep -q "MOCK-REPLY: you said '$msg'" <<<"$OUT" || { echo "FAIL: reply missing in SSE"; exit 1; }
+  # the mock echoes the whole framed turn — the brain stamps a [clock …] header line (and an
+  # awareness [context …] line) before the user's words, so match the words, not the line start
+  grep -q "MOCK-REPLY: you said '.*$msg" <<<"$OUT" || { echo "FAIL: reply missing in SSE"; exit 1; }
   grep -q '^event: message.part.delta' <<<"$OUT" || { echo "FAIL: no delta events"; exit 1; }
 done
 echo "--- GET messages"
@@ -48,7 +50,11 @@ import sys, json
 m = json.loads(sys.argv[1])
 roles = [x["info"]["role"] for x in m]
 assert roles == ["user", "assistant", "user", "assistant"], roles
-assert m[3]["parts"][0]["text"] == "MOCK-REPLY: you said 'again' (3 msgs)", m[3]
+# the mock echoes the framed turn: a [clock …] header line (plus gap/awareness) rides before
+# the user's words — assert the words and the tail, not the framed whole
+txt = m[3]["parts"][0]["text"]
+assert txt.startswith("MOCK-REPLY: you said '[clock "), txt
+assert txt.endswith("\nagain' (5 msgs)"), txt
 PY
 echo "--- 404 check"
 [ "$(curl -s -o /dev/null -w '%{http_code}' http://$YGG/session/nope/message)" = 404 ]
@@ -56,18 +62,20 @@ echo "--- 404 check"
 
 echo "--- abort mid-stream"
 [ "$(curl -sf -X POST http://$YGG/session/$SID/abort)" = false ] || { echo "FAIL: idle abort should be false"; exit 1; }
+# the mock's plain-text "slow" mode is gone behind the clock header (time-awareness frames
+# every turn); a scripted tool run of 8 × 1s bash calls gives the same in-flight window
+SCRIPT=$(python3 -c 'import json;print(json.dumps({"parts":[{"type":"text","text":"tool:"+json.dumps([[["bash",{"command":"sleep 1"}]] for _ in range(8)])}]}))')
 curl -sfN -X POST http://$YGG/session/$SID/message -H 'content-type: application/json' -H 'accept: text/event-stream' \
-  -d '{"parts":[{"type":"text","text":"slow please"}]}' >$TMP/slow.txt & SLOW=$!
-sleep 1.5   # mock emits a chunk every 0.2s; full reply takes ~10s
+  -d "$SCRIPT" >$TMP/slow.txt & SLOW=$!
+sleep 2.5   # lands mid-run: two steps done, six to go
 T0=$(date +%s.%N)
 [ "$(curl -sf -X POST http://$YGG/session/$SID/abort)" = true ] || { echo "FAIL: abort did not report in-flight"; exit 1; }
 wait $SLOW
 DT=$(python3 -c "import sys;print(round($(date +%s.%N)-$T0,2))"); echo "stream closed ${DT}s after abort"
 python3 -c "import sys;sys.exit(0 if $DT < 1.0 else 1)" || { echo "FAIL: abort not prompt"; exit 1; }
-cat $TMP/slow.txt | tail -3
+tail -3 $TMP/slow.txt
 grep -q '^event: message.part.delta' $TMP/slow.txt || { echo "FAIL: no deltas before abort"; exit 1; }
 grep -q '^event: message.aborted' $TMP/slow.txt || { echo "FAIL: no message.aborted"; exit 1; }
-grep -q 'SLOW-END' $TMP/slow.txt && { echo "FAIL: full reply was streamed despite abort"; exit 1; }
 grep -q '^event: message.completed' $TMP/slow.txt && { echo "FAIL: completed after abort"; exit 1; }
 MSGS=$(curl -sf http://$YGG/session/$SID/message)
 python3 - "$MSGS" "$TMP/slow.txt" <<'PY'
@@ -76,18 +84,20 @@ m = json.loads(sys.argv[1])
 assert [x["info"]["role"] for x in m] == ["user", "assistant"] * 3, m
 last = m[-1]
 assert last["info"]["error"]["name"] == "MessageAbortedError", last
-partial = last["parts"][0]["text"]
-assert partial.startswith("MOCK-REPLY: you said 'slow please'") and "SLOW-END" not in partial, partial
-# Stored partial == concatenation of the deltas the client actually received.
+# the run stopped part-way: fewer than the scripted 8 tool steps completed
+done = sum(1 for p in last["parts"] if p["type"] == "tool" and p["state"]["status"] == "completed")
+assert 1 <= done < 8, f"expected a partial run, got {done} completed steps"
+# Stored text == concatenation of the text deltas the client actually received.
 deltas = [json.loads(l[5:])["text"] for l in open(sys.argv[2]).read().splitlines()
           if l.startswith("data:") and '"text"' in l and '"info"' not in l]
-assert "".join(deltas) == partial, ("".join(deltas), partial)
-print("partial kept:", repr(partial))
+stored = "".join(p.get("text", "") for p in last["parts"] if p["type"] == "text")
+assert "".join(deltas) == stored, ("".join(deltas), stored)
+print(f"aborted mid-run: {done} of 8 tool steps done, partial text kept")
 PY
 # Session still usable after abort.
 OUT=$(curl -sfN -X POST http://$YGG/session/$SID/message -H 'content-type: application/json' -H 'accept: text/event-stream' \
   -d '{"parts":[{"type":"text","text":"after"}]}')
-grep -q "MOCK-REPLY: you said 'after' (7 msgs)" <<<"$OUT" || { echo "FAIL: post-abort turn"; echo "$OUT"; exit 1; }
+grep -q "MOCK-REPLY: you said '.*\nafter' (14 msgs)" <<<"$OUT" || { echo "FAIL: post-abort turn"; echo "$OUT"; exit 1; }
 
 echo "--- GET /event (global stream, not the poster)"
 sleep 0.3; kill $EV; EV=
@@ -114,7 +124,7 @@ AFTER=$(curl -sf http://$YGG/session/$SID/message)
 curl -sf http://$YGG/session | grep -q "$SID" || { echo "FAIL: session missing from list"; exit 1; }
 OUT=$(curl -sfN -X POST http://$YGG/session/$SID/message -H 'content-type: application/json' -H 'accept: text/event-stream' \
   -d '{"parts":[{"type":"text","text":"reborn"}]}')
-grep -q "MOCK-REPLY: you said 'reborn' (9 msgs)" <<<"$OUT" || { echo "FAIL: post-restart turn"; echo "$OUT"; exit 1; }
+grep -q "MOCK-REPLY: you said '.*\nreborn' (16 msgs)" <<<"$OUT" || { echo "FAIL: post-restart turn"; echo "$OUT"; exit 1; }
 echo "history ($(python3 -c 'import sys,json;print(len(json.loads(sys.argv[1])))' "$AFTER") msgs) survived restart"
 echo "--- slice 3: opencode surface"
 J=(-H 'content-type: application/json')
@@ -135,7 +145,7 @@ curl -sf -X POST http://$YGG/session/$P3/message "${J[@]}" -d '{"parts":[{"type"
 sleep 0.7
 curl -sf http://$YGG/session/status | grep -q "\"$P3\":{\"type\":\"busy\"}" || { echo "FAIL: busy map"; exit 1; }
 curl -sf http://$YGG/session/$P3/message | python3 -c 'import sys,json;m=json.load(sys.stdin)[-1]["info"];assert m["role"]=="assistant" and "completed" not in m["time"],m'
-wait $LATE; grep -q '"text":"late"' $TMP/late.json || { echo "FAIL: late reply"; cat $TMP/late.json; exit 1; }
+wait $LATE; grep -qF "then reply: late' (5 msgs)" $TMP/late.json || { echo "FAIL: late reply"; cat $TMP/late.json; exit 1; }
 [ "$(curl -sf http://$YGG/session/status)" = "{}" ] || { echo "FAIL: busy map not cleared"; exit 1; }
 curl -sf -X PATCH http://$YGG/session/$P3 "${J[@]}" -d '{"title":"s3-renamed"}' | grep -q s3-renamed
 curl -sf http://$YGG/session/$P3 | grep -q s3-renamed || { echo "FAIL: rename"; exit 1; }
@@ -143,8 +153,8 @@ curl -sf http://$YGG/config/providers | grep -q '"providers"' || { echo "FAIL: p
 curl -sf http://$YGG/agent | grep -q '"build"' || { echo "FAIL: agents"; exit 1; }
 MID=$(curl -sf http://$YGG/config/providers | python3 -c 'import sys,json;p=json.load(sys.stdin)["providers"][0];print(p["id"]+" "+next(iter(p["models"])))')
 [ "$(curl -s -o /dev/null -w '%{http_code}' -X POST http://$YGG/api/session/$P3/model "${J[@]}" -d "{\"model\":{\"providerID\":\"${MID% *}\",\"id\":\"${MID#* }\"}}")" = 204 ] || { echo "FAIL: model switch"; exit 1; }
-[ "$(curl -s -o /dev/null -w '%{http_code}' -X POST http://$YGG/api/session/$P3/agent "${J[@]}" -d '{"agent":"plan"}')" = 204 ] || { echo "FAIL: agent switch"; exit 1; }
-curl -sf http://$YGG/session/$P3 | python3 -c 'import sys,json;d=json.load(sys.stdin);assert d["agent"]=="plan" and d["model"]["id"],d'
+[ "$(curl -s -o /dev/null -w '%{http_code}' -X POST http://$YGG/api/session/$P3/agent "${J[@]}" -d '{"agent":"research"}')" = 204 ] || { echo "FAIL: agent switch"; exit 1; }
+curl -sf http://$YGG/session/$P3 | python3 -c 'import sys,json;d=json.load(sys.stdin);assert d["agent"]=="research" and d["model"]["id"],d'
 [ "$(curl -sf -X DELETE http://$YGG/session/$P3)" = true ] || { echo "FAIL: delete"; exit 1; }
 [ "$(curl -s -o /dev/null -w '%{http_code}' http://$YGG/session/$P3)" = 404 ] || { echo "FAIL: deleted session still served"; exit 1; }
 echo "slice-3 surface ok"

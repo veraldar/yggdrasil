@@ -1,5 +1,6 @@
 //! Profiles (root-coord, 11-12): what a session IS — its role prompt, the tools it may call,
-//! its default model + thinking, its step cap, whether its old exchanges fold, and whether it
+//! its default model + thinking, its step cap (an explicit opt-in — NO built-in agent ships one,
+//! owner 11-19; `steps: 0` clears it), whether its old exchanges fold, and whether it
 //! manages other sessions. opencode's agent shape, extended:
 //!
 //! ```json
@@ -216,14 +217,14 @@ fn allow_only(tools: &[&str]) -> Vec<Rule> {
 }
 
 pub fn builtins() -> Vec<Profile> {
-    let p = |name: &str, description: &str, prompt: &str, steps: usize, fold: bool, sessions: bool, rules: Vec<Rule>| Profile {
+    let p = |name: &str, description: &str, prompt: &str, steps: Option<usize>, fold: bool, sessions: bool, rules: Vec<Rule>| Profile {
         name: name.into(),
         description: description.into(),
         mode: "primary".into(),
         prompt: prompt.into(),
         model: None,
         variant: None,
-        steps: Some(steps),
+        steps,
         fold,
         sessions,
         rules,
@@ -234,25 +235,25 @@ pub fn builtins() -> Vec<Profile> {
         "coordinator",
         "the user's door: talks with you, routes work to sessions it manages, reports back what matters",
         COORDINATOR_PROMPT,
-        12,
+        None,
         true,
         true,
         allow_only(&["read", "glob", "grep", "webfetch", "todowrite"]),
     );
     coordinator.variant = Some("off".into());
     coordinator.prompt_lite = Some(COORDINATOR_LITE.into());
-    let mut lead = p("lead", "owns a project end to end: plans, splits into sub-sessions, iterates until done", LEAD_PROMPT, 80, false, true, allow_all());
+    let mut lead = p("lead", "owns a project end to end: plans, splits into sub-sessions, iterates until done", LEAD_PROMPT, None, false, true, allow_all());
     lead.prompt_lite = Some(LEAD_LITE.into());
-    let mut build = p("build", "does one concrete task fully: code, run, test, fix", BUILD_PROMPT, 100, false, false, allow_all());
+    let mut build = p("build", "does one concrete task fully: code, run, test, fix", BUILD_PROMPT, None, false, false, allow_all());
     build.prompt_lite = Some(BUILD_LITE.into());
-    let mut fix = p("fix", "repairs something broken: reproduces it, finds the root cause, fixes it and proves it with a test", FIX_PROMPT, 100, false, false, allow_all());
+    let mut fix = p("fix", "repairs something broken: reproduces it, finds the root cause, fixes it and proves it with a test", FIX_PROMPT, None, false, false, allow_all());
     fix.prompt_lite = Some(FIX_LITE.into());
     vec![
         coordinator,
         lead,
         build,
         fix,
-        p("research", "reads, fetches and compares; answers with evidence", RESEARCH_PROMPT, 60, false, false, allow_all()),
+        p("research", "reads, fetches and compares; answers with evidence", RESEARCH_PROMPT, None, false, false, allow_all()),
         // few agents (user 11-13: "too many agent types"; fix asked for 11-13); opencode / codex stay a harness choice
         // for agents you make in the editor
         review_profile(),
@@ -295,7 +296,7 @@ fn review_profile() -> Profile {
         },
         model: None,
         variant: None,
-        steps: Some(60),
+        steps: None,
         fold: false,
         sessions: false,
         rules,
@@ -428,7 +429,7 @@ impl Profiles {
                 p.variant = Some(m.into());
             }
             if let Some(n) = a["steps"].as_u64() {
-                p.steps = Some(n.max(1) as usize);
+                p.steps = (n > 0).then_some(n.max(1) as usize); // 0 clears the cap
             }
             if let Some(b) = a["fold"].as_bool() {
                 p.fold = b;
@@ -546,8 +547,9 @@ impl Profiles {
         if body.get("prompt_lite").is_some() {
             p.prompt_lite = body["prompt_lite"].as_str().filter(|t| !t.trim().is_empty()).map(String::from);
         }
+        // a cap is an explicit opt-in (owner 11-19: no built-in ships one); `steps: 0` clears it
         if let Some(n) = body["steps"].as_u64() {
-            p.steps = Some(n.clamp(1, 500) as usize);
+            p.steps = (n > 0).then_some(n.clamp(1, 500) as usize);
         }
         if let Some(b) = body["sessions"].as_bool() {
             if door && !b {
@@ -947,6 +949,28 @@ mod tests {
         assert_eq!(raw["keep"], "me", "unknown keys survive an edit");
         assert!(ps.remove("claude").is_err() && ps.remove("agy").is_err() && ps.remove("AGI").is_err() && ps.remove("tester").is_ok());
         assert!(Profiles::load(f.to_str()).get("tester").is_none());
+    }
+
+    #[test]
+    fn no_builtin_ships_a_step_cap() {
+        // owner 11-19: the built-in caps (lead 80, build/fix 100, research/review 60) killed
+        // real sessions mid-turn, "no final reply". A cap is an explicit opt-in (an agents
+        // file or an editor edit); nothing built-in ships one.
+        let ps = Profiles::load(None);
+        for p in ps.by_name.values() {
+            assert!(p.steps.is_none(), "{} ships steps={:?} — built-ins are uncapped", p.name, p.steps);
+        }
+        // the opt-in still lands, and 0 clears it
+        let dir = std::env::temp_dir().join(format!("ygg-steps-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("agents.json");
+        std::fs::write(&f, r#"{"agent":{"build":{"steps":7}}}"#).unwrap();
+        let ps = Profiles::load(f.to_str());
+        assert_eq!(ps.get("build").unwrap().steps, Some(7));
+        let mut ps = Profiles::load(f.to_str());
+        ps.upsert("build", &json!({"steps": 0})).unwrap();
+        assert_eq!(ps.get("build").unwrap().steps, None, "steps: 0 clears the cap");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

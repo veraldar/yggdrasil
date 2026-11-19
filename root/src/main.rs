@@ -24,8 +24,9 @@
 //!                          `/config/providers` + `/agent` (default: one provider = the upstream model,
 //!                          agents build + plan)
 //!   YGG_PROJECT_DIR        slice 6a: where tools run / relative paths resolve (default: cwd)
-//!   YGG_MAIN_BASH_TIMEOUT_MS / YGG_MAIN_MAX_STEPS  caps for sessions titled [MAIN] (default 15000 ms / 6 steps)
-//!   YGG_MAX_STEPS          upstream calls per run before the loop gives up (default: 100)
+//!   YGG_MAIN_BASH_TIMEOUT_MS  bash cap for sessions titled [MAIN] (default 15000 ms)
+//!   YGG_MAX_STEPS          upstream calls per run before the loop gives up (default: NO cap —
+//!                          set a number to bound a run; 0/unset = infinite)
 //!   YGG_BASH_TIMEOUT_MS    default bash tool timeout (default: 120000)
 //!   YGG_TOOLS              `0` = don't declare tools (plain relay, for tool-less upstreams)
 //!   YGG_ROLLUP_TOKENS      slice 6b: estimated-token limit for the upstream history (default 200000,
@@ -376,7 +377,7 @@ struct Config {
     model: String,
     models: Vec<String>,
     catalog: Value,
-    max_steps: usize,
+    max_steps: usize, // usize::MAX = no cap (the default; YGG_MAX_STEPS sets one explicitly)
     /// root-coord: the agents — what each session is (role prompt, tools, model, harness…);
     /// editable at runtime (PUT /agent/:name), persisted to YGG_PROFILES
     profiles: std::sync::RwLock<profiles::Profiles>,
@@ -2527,8 +2528,22 @@ async fn harness_event(st: &AppState, id: &str, tx: &mpsc::Sender<Event>, run: &
     }
 }
 
+/// The run's step cap: the agent's own `steps` when it sets one, else the global `YGG_MAX_STEPS`
+/// — the minimum when both are set (the global stays the ceiling an operator can enforce
+/// fleet-wide). NO CAP by default (owner 11-19: sessions died mid-turn hitting 80/100-call caps
+/// with no final reply — an agent doing long work must never be cut off by a number). A cap is an
+/// explicit opt-in; `usize::MAX` means uncapped.
+fn resolve_step_cap(prof: Option<usize>, global: usize) -> usize {
+    prof.unwrap_or(usize::MAX).min(global).max(1)
+}
+
+fn step_cap(st: &AppState, prof: &profiles::Profile) -> usize {
+    resolve_step_cap(prof.steps, st.config.max_steps)
+}
+
 /// The agent loop: call upstream; no tool calls → done; else execute each call
-/// (serially, in order), append the results, call again. At most `max_steps` upstream
+/// (serially, in order), append the results, call again. No step cap by default
+/// (step_cap: an explicit `steps`/`YGG_MAX_STEPS` still bounds a run that never ends).
 /// calls per run — the cap turns a model that never stops calling tools into an error.
 async fn agent_loop(
     st: &AppState,
@@ -2574,7 +2589,7 @@ async fn agent_loop(
     if let Some(last) = convo.iter_mut().rev().find(|m| m["role"] == "user") {
         prefix_text(last, &context_line(tokens, st.config.rollup_tokens));
     }
-    let max = prof.steps.unwrap_or(st.config.max_steps).min(st.config.max_steps).max(1);
+    let max = step_cap(st, &prof);
     let mut quiet_nudged = false;
     for _ in 0..max {
         if st.config.rollup_tokens > 0 {
@@ -3380,7 +3395,9 @@ async fn main() {
         ext: ext::Extensions::load(),
         tiers,
         vision: std::env::var("YGG_VISION_MODELS").unwrap_or_default().split(',').map(str::trim).filter(|m| !m.is_empty()).map(String::from).collect(),
-        max_steps: env_num("YGG_MAX_STEPS", 100).max(1) as usize,
+        // no cap by default (owner 11-19): YGG_MAX_STEPS still sets one explicitly —
+        // `0` or unset = infinite; the cap is an opt-in, never the shipped default
+        max_steps: match env_num("YGG_MAX_STEPS", 0) { 0 => usize::MAX, n => n.max(1) as usize },
         tools_enabled: std::env::var("YGG_TOOLS").map_or(true, |v| v != "0"),
         voice: std::env::var("YGG_VOICE").map_or(false, |v| v == "1"),
         // a safety limit, not a style: the note keeps replies short, the voice commands control
@@ -4316,6 +4333,21 @@ mod image_tests {
     }
 
     #[test]
+    fn step_cap_is_opt_in_and_uncapped_by_default() {
+        // owner 11-19: a lead died at 80 upstream calls, a build at 100, both "no final reply".
+        // The default now caps nothing: the global is usize::MAX unless YGG_MAX_STEPS sets one,
+        // and no built-in profile ships `steps` (profiles.rs: no_builtin_ships_a_step_cap).
+        let cap = resolve_step_cap;
+        assert_eq!(cap(None, usize::MAX), usize::MAX, "no global, no profile → uncapped");
+        assert_eq!(cap(Some(100), usize::MAX), 100, "an explicit global is the ceiling");
+        assert_eq!(cap(None, 100), 100, "a profile without steps inherits an explicit global");
+        assert_eq!(cap(Some(80), usize::MAX), 80, "a profile cap applies alone");
+        assert_eq!(cap(Some(200), 100), 100, "global ceiling beats a higher profile cap");
+        assert_eq!(cap(Some(80), 100), 80, "the smaller of the two wins");
+        assert_eq!(cap(Some(0), usize::MAX), 1, "a nonsense 0 never yields an unrunnable loop");
+    }
+
+    #[test]
     fn legacy_agi_session_and_new_agy_resolve_cleanly() {
         let dir = std::env::temp_dir().join(format!("ygg-main-alias-{}", std::process::id()));
         let _ = std::fs::create_dir_all(dir.join("session"));
@@ -4329,7 +4361,7 @@ mod image_tests {
             model: "glm-5.3".into(),
             models: vec!["glm-5.3".into()],
             catalog: json!({"default": {"yggdrasil": {}}}),
-            max_steps: 20,
+            max_steps: 20, // an explicit global cap still bounds every loop in this test
             profiles: std::sync::RwLock::new(profiles),
             tree: tree::TreeCfg { max_depth: 12, max_children: 24, digest_model: None, wake_debounce_ms: 4000, max_wakes: 60 },
             context_files: Vec::new(),
