@@ -74,7 +74,7 @@ After=network-online.target
 ExecStart=/usr/local/bin/trunk-ap ap -c /etc/trunk-ap/ap.toml
 LoadCredential=cert:/etc/trunk-ap/cert.pem
 LoadCredential=key:/etc/trunk-ap/key.pem
-DynamicUser=yes
+# (the VPS's unit has DynamicUser=yes: inside docker a dynamic user cannot read its credentials)
 Restart=always
 RestartSec=2
 [Install]
@@ -148,7 +148,7 @@ set -e
 c=/etc/yggdrasil-trunk/trunk.conf a=/etc/yggdrasil-trunk/ap.toml
 for l in NAME=$NAME BEHIND_PROXY=1 PORT=4443 ICE_PORT=4479 CERT=acme WEBROOT=/var/www/acme FIREWALL=0 ADOPTED_FROM=/etc/trunk-ap; do grep -qx "\$l" \$c; done
 grep -qx 'listen = "127.0.0.1:4443"' \$a; grep -qx 'proxy_protocol = true' \$a
-[ "\$(grep ^bridge_token_sha256 \$a)" = "\$(grep ^bridge_token_sha256 /etc/trunk-ap/ap.toml)" ]
+h() { sed -n 's/^bridge_token_sha256 = "\\([0-9a-f]*\\)".*/\\1/p' "\$1"; }; [ -n "\$(h \$a)" ] && [ "\$(h \$a)" = "\$(h /etc/trunk-ap/ap.toml)" ]
 grep -qx acme /etc/yggdrasil-trunk/cert.source
 ss -Hltnp 'sport = :4479' | grep -q bifrost-net
 EOF
