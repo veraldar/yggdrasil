@@ -325,3 +325,74 @@ test('a file a session on another root made opens here', async ({ page }) => {
     await rm(path.join(HOME_DIR, local), { force: true });
   }
 });
+
+/** The real thing, two real brains (home + lab; e2e/fixtures/real-brains.sh): MAIN starts a
+ *  session on lab; its reply links a file it made there; on the phone the link opens through
+ *  home, and a PDF picked inside that session reaches lab (same bytes) and opens. */
+test('a session on another root: its file opens here, a picked PDF reaches it', async ({ page, request }) => {
+  const OC = process.env.E2E_OC_URL || '';
+  const LAB_URL = process.env.E2E_LAB_URL || '';
+  test.skip(!OC || !LAB_URL, 'needs the real brains (E2E_OC_URL + E2E_LAB_URL)');
+  const md = `e2e-lab-made-${TAG}.md`;
+  const title = `lab work ${TAG}`;
+  await mkdir(LAB_DIR, { recursive: true });
+  await writeFile(path.join(LAB_DIR, md), '## Lab made\n\nwritten by the session on lab\n');
+  try {
+    // MAIN (the coordinator) starts the session on lab; the mock model follows the tool script
+    const main = (await (await request.post(`${OC}/session`, { data: { title: '[MAIN]' } })).json()) as { id: string };
+    // (the mock answers the first word after "exactly:" — the link is one word)
+    const brief = `Reply with exactly: [plan](/api/artifact/${md})`;
+    const script = `tool:${JSON.stringify([[['session_start', { title, agent: 'build', root: LAB, brief }]]])}`;
+    const said = await request.post(`${OC}/session/${main.id}/message`, {
+      data: { parts: [{ type: 'text', text: script }] },
+      timeout: 60_000,
+    });
+    expect(said.ok(), await said.text()).toBeTruthy();
+    let proxy = '';
+    await expect
+      .poll(
+        async () => {
+          const rows = (await (await request.get(`${OC}/tree`)).json()) as { id: string; title: string }[];
+          proxy = rows.find((r) => r.title === title)?.id || '';
+          return proxy;
+        },
+        { timeout: 30_000 }
+      )
+      .not.toBe('');
+    made.push(proxy);
+
+    // the owner opens that session: the reply's link names lab, the file renders and opens
+    await page.goto(`/session/${encodeURIComponent(title.replace(/\s+/g, '-'))}?id=${proxy}`);
+    await expect(page.getByRole('heading', { name: 'Lab made' })).toBeVisible({ timeout: 30_000 });
+    const link = page.getByRole('link', { name: 'plan', exact: true });
+    expect(await link.getAttribute('href')).toMatch(
+      new RegExp(`^/api/artifact/${md.replace(/\./g, '\\.')}\\?root=${LAB}&session=\\S+$`)
+    );
+    const tab = page.context().waitForEvent('page');
+    await link.tap();
+    const t = await tab;
+    await expect(t.locator('body')).toContainText('written by the session on lab');
+    await t.close();
+
+    // a PDF picked inside it goes to lab — the same bytes — and opens from the message
+    const report = pdf(2 * MiB + 4321);
+    const chooser = page.waitForEvent('filechooser');
+    await page.getByRole('button', { name: 'attach' }).tap();
+    await (await chooser).setFiles([{ name: 'lab-report.pdf', mimeType: 'application/pdf', buffer: report }]);
+    await expect(page.locator('[data-testid=attachment][data-state=ready]')).toHaveCount(1, { timeout: 30_000 });
+    await page.getByRole('textbox', { name: 'message' }).fill('Reply with exactly: GOT-THE-PDF');
+    await page.getByRole('button', { name: 'send' }).tap();
+    await expect(page.getByText('GOT-THE-PDF', { exact: true }).last()).toBeVisible({ timeout: 60_000 });
+    await expect
+      .poll(async () => (await request.get(`${LAB_URL}/file/${sha(report)}/info`)).status(), { timeout: 30_000 })
+      .toBe(200);
+    const mine = page.locator('[data-from=you]').filter({ hasText: 'GOT-THE-PDF' });
+    const chip = mine.getByTestId('msg-file');
+    await expect(chip).toContainText('lab-report.pdf');
+    const got = await page.request.get((await chip.getAttribute('href')) || '');
+    expect(got.status()).toBe(200);
+    expect(sha(await got.body())).toBe(sha(report));
+  } finally {
+    await rm(path.join(LAB_DIR, md), { force: true });
+  }
+});
