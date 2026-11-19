@@ -24,10 +24,12 @@ export async function uploadFile(blob: Blob, name: string, mime: string): Promis
   if (!start.ok || typeof s.upload !== 'string') {
     return { error: typeof s.error === 'string' ? s.error : `could not send ${name} (${start.status})` };
   }
+  // an empty file is done at the start (the brain answers its REF there)
+  const done = s.file as FileRef | undefined;
+  if (done && typeof done.hash === 'string') return { ref: done };
   const piece = Math.max(1, Math.min(Number(s.piece) || PIECE_MAX, PIECE_MAX));
   let have = 0;
   let misses = 0;
-  // at least one piece: an empty file is finished by its one empty piece
   for (;;) {
     let r: Response;
     try {

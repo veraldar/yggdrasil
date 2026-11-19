@@ -105,6 +105,8 @@ const server = createServer(async (req, res) => {
           limit: MAX,
         });
       const up = id('up');
+      // an empty file is done at the start
+      if (b.size === 0) return send(res, 200, { upload: up, piece: PIECE, have: 0, file: keep(Buffer.alloc(0), b.name, b.mime || 'application/octet-stream') });
       uploads.set(up, { name: b.name, mime: b.mime || 'application/octet-stream', size: b.size, chunks: [], have: 0 });
       return send(res, 200, { upload: up, piece: PIECE });
     }
@@ -113,7 +115,7 @@ const server = createServer(async (req, res) => {
       if (!up) return send(res, 404, { error: 'no such upload' });
       const off = Number(u.searchParams.get('offset'));
       const buf = await body(req);
-      if (off !== up.have) return send(res, 409, { have: up.have });
+      if (off !== up.have) return send(res, 409, { error: 'go on from have', have: up.have });
       if (buf.length > PIECE) return send(res, 413, { error: 'a piece is over 1 MB' });
       if (up.have + buf.length > up.size) return send(res, 400, { error: 'more than the size said' });
       up.chunks.push(buf);
