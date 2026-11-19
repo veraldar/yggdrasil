@@ -75,10 +75,12 @@ use tokio_stream::wrappers::{BroadcastStream, ReceiverStream};
 mod anthropic;
 mod context;
 mod ext;
+mod files;
 mod gate;
 mod harness;
 mod peers;
 mod profiles;
+mod relay;
 mod rollup;
 mod tools;
 mod tree;
@@ -606,6 +608,10 @@ struct AppState {
     ctx: Arc<Mutex<context::Store>>,
     /// C5: POST /admin/drain set this — post_message answers 503 until the drain ends
     draining: Arc<std::sync::atomic::AtomicBool>,
+    /// package 2: the event journal (`/event/feed`) and the proxies followed on other roots
+    relay: Arc<relay::Relay>,
+    /// package 2: uploads in progress and pulls from other roots (files.rs)
+    files: Arc<files::Files>,
 }
 
 #[derive(Deserialize)]
@@ -743,7 +749,9 @@ fn replace_message(st: &AppState, sid: &str, msg: &Value) {
 }
 
 fn publish(st: &AppState, kind: &str, props: Value) {
-    let _ = st.bus.send(json!({ "type": kind, "properties": props }));
+    let ev = json!({ "type": kind, "properties": props });
+    relay::journal(st, &ev);
+    let _ = st.bus.send(ev);
 }
 
 /// Sends an event to the posting client's stream (named SSE event, slice-1 shape)
@@ -1525,6 +1533,17 @@ async fn get_session(State(st): State<AppState>, Path(id): Path<String>) -> Resp
     let info = st.sessions.lock().unwrap().get(&id).map(|s| s.info.clone());
     match info {
         Some(mut i) => {
+            // a proxy: the agent and model are what that root runs (this copy can lag a switch)
+            if let Some((root, rid)) = peers::remote_of(&st, &id) {
+                if let Ok(r) = peers::call(&st, &root, "GET", &format!("/session/{rid}"), None, 3).await {
+                    for k in ["model", "agent", "harness"] {
+                        if !r[k].is_null() {
+                            i[k] = r[k].clone();
+                        }
+                    }
+                }
+                return Json(i).into_response();
+            }
             with_agent(&st, &mut i);
             Json(i).into_response()
         }
@@ -1553,6 +1572,15 @@ async fn patch_session(State(st): State<AppState>, Path(id): Path<String>, Json(
     });
     match info {
         Some(info) => {
+            // a proxy's title and step cap change there too (best effort: this copy is the phone's)
+            if let Some((root, rid)) = peers::remote_of(&st, &id) {
+                let st2 = st.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = peers::call(&st2, &root, "PATCH", &format!("/session/{rid}"), Some(body), 15).await {
+                        eprintln!("relay: rename on {root}: {e}");
+                    }
+                });
+            }
             publish(&st, "session.updated", json!({ "info": info }));
             Json(info).into_response()
         }
@@ -1565,6 +1593,16 @@ async fn delete_session(State(st): State<AppState>, Path(id): Path<String>) -> R
     let Some(s) = st.sessions.lock().unwrap().remove(&id) else { return not_found(&id) };
     if let Some(n) = st.running.lock().unwrap().remove(&id) {
         n.notify_one();
+    }
+    // a proxy: stop following it; one this root started there is closed there too
+    if let (Some(root), Some(rid)) = (s.info["remote"]["root"].as_str(), s.info["remote"]["id"].as_str()) {
+        relay::forget(&st, &id);
+        if s.info["remote"]["made"] == true {
+            let (st2, root, rid) = (st.clone(), root.to_string(), rid.to_string());
+            tokio::spawn(async move {
+                let _ = peers::call(&st2, &root, "POST", &format!("/session/{rid}/close"), Some(json!({ "reason": "removed by the owner" })), 15).await;
+            });
+        }
     }
     let _ = std::fs::remove_file(session_path(&st.data_dir, &id));
     publish(&st, "session.deleted", json!({ "info": s.info }));
@@ -1601,20 +1639,32 @@ async fn list_messages(
     Query(q): Query<HashMap<String, String>>,
 ) -> Response {
     let with_internal = q.get("internal").is_some_and(|v| v == "1" || v == "true");
-    // a proxy reads its peer: the phone opens a session on another root through this one
+    // a proxy reads its peer: the phone opens a session on another root through this one. While
+    // the phone reads it, its events come home (busy, idle, live text: relay.rs)
     if let Some((root, rid)) = peers::remote_of(&st, &id) {
-        return match peers::call(&st, &root, "GET", &format!("/session/{rid}/message"), None, 20).await {
-            Ok(v) => Json(v).into_response(),
-            Err(e) => (StatusCode::BAD_GATEWAY, Json(json!({ "error": e }))).into_response(),
+        relay::view(&st, &id, &root, &rid);
+        let path = format!("/session/{rid}/message{}", if with_internal { "?internal=1" } else { "" });
+        return match peers::call(&st, &root, "GET", &path, None, 20).await {
+            Ok(mut v) => {
+                point_links(&mut v, &root, &rid);
+                Json(v).into_response()
+            }
+            Err(e) => (StatusCode::BAD_GATEWAY, Json(json!({ "error": relay::no_answer(&root, &e) }))).into_response(),
         };
     }
     match st.sessions.lock().unwrap().get(&id) {
-        Some(s) => Json(Value::Array(transcript(&s.messages, with_internal))).into_response(),
+        Some(s) => {
+            // `?from=<message id>`: that message and the ones after it (a root following a turn)
+            let at = q.get("from").and_then(|f| s.messages.iter().position(|m| m["info"]["id"] == f.as_str())).unwrap_or(0);
+            Json(Value::Array(transcript(&s.messages[at..], with_internal))).into_response()
+        }
         None => not_found(&id),
     }
 }
 
-/// `POST /session/:id/abort` — like opencode: returns `true` if a reply was in flight.
+/// `POST /session/:id/abort` — like opencode: returns `true` if a reply was in flight. A proxy's
+/// turn followed here is stopped there through its handle (relay.rs); otherwise the other root
+/// is asked directly.
 async fn abort_session(State(st): State<AppState>, Path(id): Path<String>) -> Response {
     if !st.sessions.lock().unwrap().contains_key(&id) {
         return not_found(&id);
@@ -1625,7 +1675,56 @@ async fn abort_session(State(st): State<AppState>, Path(id): Path<String>) -> Re
             n.notify_one();
             Json(true).into_response()
         }
-        None => Json(false).into_response(),
+        None => match peers::remote_of(&st, &id) {
+            Some((root, rid)) => match relay::abort_remote(&st, &root, &rid).await {
+                Ok(b) => Json(b).into_response(),
+                Err(e) => (StatusCode::BAD_GATEWAY, Json(json!({ "error": e }))).into_response(),
+            },
+            None => Json(false).into_response(),
+        },
+    }
+}
+
+/// Text parts of a transcript read from `root`: their artifact links open there (files.rs).
+fn point_links(v: &mut Value, root: &str, rid: &str) {
+    for m in v.as_array_mut().into_iter().flatten() {
+        for p in m["parts"].as_array_mut().into_iter().flatten().filter(|p| p["type"] == "text") {
+            if let Some(t) = p["text"].as_str().filter(|t| t.contains("/api/artifact/")) {
+                p["text"] = json!(files::point_artifact_links(t, root, rid));
+            }
+        }
+    }
+}
+
+/// A switch (model, agent) on a proxy: made there, then this copy takes that root's word.
+async fn switch_remote(st: &AppState, id: &str, root: &str, rid: &str, what: &str, body: Value) -> Response {
+    if let Err(e) = peers::call(st, root, "POST", &format!("/api/session/{rid}/{what}"), Some(body), 20).await {
+        return remote_error(root, &e);
+    }
+    if let Ok(r) = peers::call(st, root, "GET", &format!("/session/{rid}"), None, 10).await {
+        let info = with_session(st, id, |s| {
+            for k in ["model", "agent", "harness"] {
+                s.info[k] = r[k].clone();
+            }
+            s.info.clone()
+        });
+        if let Some(info) = info {
+            publish(st, "session.updated", json!({ "info": info }));
+        }
+    }
+    StatusCode::NO_CONTENT.into_response()
+}
+
+/// Another root's refusal, passed on with its own status and words (`root lab: 400 … {"error":…}`).
+fn remote_error(root: &str, e: &str) -> Response {
+    let rest = e.strip_prefix(&format!("root {root}: ")).unwrap_or(e);
+    let code = rest.get(..3).and_then(|c| c.parse::<u16>().ok()).filter(|c| (400..500).contains(c)).and_then(|c| StatusCode::from_u16(c).ok());
+    match code {
+        Some(c) => {
+            let msg = rest.find('{').and_then(|i| serde_json::from_str::<Value>(&rest[i..]).ok()).and_then(|v| v["error"].as_str().map(String::from)).unwrap_or_else(|| rest.to_string());
+            (c, Json(json!({ "error": msg }))).into_response()
+        }
+        None => (StatusCode::BAD_GATEWAY, Json(json!({ "error": relay::no_answer(root, e) }))).into_response(),
     }
 }
 
@@ -1644,6 +1743,9 @@ async fn list_agents(State(st): State<AppState>) -> Json<Value> {
 /// The model must exist in the catalog. Recorded on the session; the upstream call
 /// still goes to the one configured upstream model (single-provider relay).
 async fn switch_model(State(st): State<AppState>, Path(id): Path<String>, Json(body): Json<Value>) -> Response {
+    if let Some((root, rid)) = peers::remote_of(&st, &id) {
+        return switch_remote(&st, &id, &root, &rid, "model", body).await;
+    }
     let (Some(mid), Some(pid)) = (body["model"]["id"].as_str(), body["model"]["providerID"].as_str()) else {
         return bad_request("model needs id + providerID");
     };
@@ -1698,6 +1800,9 @@ async fn switch_model(State(st): State<AppState>, Path(id): Path<String>, Json(b
 /// defaults at once — its model and thinking level, and its harness (a different harness starts
 /// a fresh harness session) — and keeps its history; the model can still be changed afterwards.
 async fn switch_agent(State(st): State<AppState>, Path(id): Path<String>, Json(body): Json<Value>) -> Response {
+    if let Some((root, rid)) = peers::remote_of(&st, &id) {
+        return switch_remote(&st, &id, &root, &rid, "agent", body).await;
+    }
     let Some(name) = body["agent"].as_str() else { return bad_request("agent required") };
     let main = st.sessions.lock().unwrap().get(&id).is_some_and(|s| is_main_title(s.info["title"].as_str().unwrap_or_default()));
     if name == "coordinator" && !main {
@@ -1975,15 +2080,49 @@ async fn post_message(
     Json(body): Json<PostMessage>,
 ) -> Response {
     let is_async = q.get("async").is_some_and(|v| v == "1" || v == "true");
-    // a proxy forwards to its peer (the peer reports the turn home by itself)
+    let want_sse = headers
+        .get(header::ACCEPT)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|a| a.contains("text/event-stream"));
+    // a file sent as a data: URL is stored as a file here; the message keeps a reference
+    let mut parts = body.parts;
+    files::ingest_data_urls(&st, &mut parts);
+    // a proxy: the turn goes to its root without waiting there for its end; that root's events
+    // come back under this id, and its client here is answered like a local one (relay.rs)
     if let Some((root, rid)) = peers::remote_of(&st, &id) {
-        let body = json!({ "parts": body.parts, "modality": body.modality });
-        let path = if is_async { format!("/session/{rid}/message?async=1&origin=none") } else { format!("/session/{rid}/message") };
+        let mut meta = json!({});
+        for k in ["auto", "internal", "from"] {
+            if let Some(v) = body.meta.as_ref().map(|m| &m[k]).filter(|v| !v.is_null()) {
+                meta[k] = v.clone();
+            }
+        }
+        if body.internal {
+            meta["internal"] = json!(true);
+        }
         with_session(&st, &id, |s| s.info["card"]["status"] = json!("working"));
-        return match peers::call(&st, &root, "POST", &path, Some(body), 900).await {
-            Ok(v) => Json(v).into_response(),
+        let wants = if is_async { relay::Wants::Async } else if want_sse { relay::Wants::Sse } else { relay::Wants::Plain };
+        return match relay::forward(&st, &id, &root, &rid, parts, body.modality, meta, wants).await {
+            Ok(f) if is_async => Json(json!({ "turn_id": f.turn_id, "origin": Value::Null, "sessionID": id, "status": "queued" })).into_response(),
+            Ok(relay::Forwarded { stream: Some(rx), .. }) => Sse::new(ReceiverStream::new(rx).map(Ok::<_, Infallible>)).keep_alive(KeepAlive::default()).into_response(),
+            Ok(relay::Forwarded { done: Some(done), .. }) => match done.await {
+                Ok(Ok(msg)) => Json(msg).into_response(),
+                Ok(Err(e)) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e }))).into_response(),
+                Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": "the session was removed" }))).into_response(),
+            },
+            Ok(_) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": "no answer channel" }))).into_response(),
             Err(e) => (StatusCode::BAD_GATEWAY, Json(json!({ "error": e }))).into_response(),
         };
+    }
+    // a turn another root forwarded carries a key: sent twice (its answer got lost on the line),
+    // it still runs once
+    let key = body.meta.as_ref().and_then(|m| m["key"].as_str()).filter(|k| !k.is_empty() && k.len() <= 64).map(String::from);
+    if let Some(k) = &key {
+        let seen = st.sessions.lock().unwrap().get(&id).and_then(|s| {
+            s.messages.iter().rev().take(200).find(|m| m["info"]["meta"]["key"] == k.as_str()).map(|m| m["info"]["id"].clone())
+        });
+        if let Some(turn_id) = seen {
+            return Json(json!({ "turn_id": turn_id, "origin": Value::Null, "sessionID": id, "status": "queued", "again": true })).into_response();
+        }
     }
     let origin = if is_async {
         match resolve_origin(&st, &id, q.get("origin").or(body.origin.as_ref()).map(String::as_str)) {
@@ -1998,20 +2137,16 @@ async fn post_message(
     if st.draining.load(std::sync::atomic::Ordering::Relaxed) {
         return (StatusCode::SERVICE_UNAVAILABLE, Json(json!({ "draining": true, "retry_after": 5 }))).into_response();
     }
-    let want_sse = headers
-        .get(header::ACCEPT)
-        .and_then(|v| v.to_str().ok())
-        .is_some_and(|a| a.contains("text/event-stream"));
     let auto_turn = body.meta.as_ref().is_some_and(|m| m["auto"] == true);
     let internal = body.internal
         || body.meta.as_ref().is_some_and(|m| m["internal"] == true)
-        || body.parts.iter().any(|p| p["internal"] == true);
+        || parts.iter().any(|p| p["internal"] == true);
     // root-coord: automation posting to the door (watcher landings, lane verdict requests)
     // becomes an inbox report, digested like a session's turn — not a turn in MAIN's
     // transcript. The POST answers at once with the stored (internal) record.
     let door = st.sessions.lock().unwrap().get(&id).map(|s| profile_name_of(&st, &s.info)).as_deref() == Some("coordinator");
     if door && auto_turn && !is_async {
-        let text = body.parts.iter().filter(|p| p["type"] == "text").filter_map(|p| p["text"].as_str()).collect::<Vec<_>>().join("\n");
+        let text = parts.iter().filter(|p| p["type"] == "text").filter_map(|p| p["text"].as_str()).collect::<Vec<_>>().join("\n");
         if text.trim().is_empty() {
             return bad_request("no text parts");
         }
@@ -2034,11 +2169,20 @@ async fn post_message(
     }
     // a session on another root speaking (peers::send): its sender rides `meta.from`
     let from = body.meta.as_ref().and_then(|m| sender_of(&m["from"]));
-    let turn = Turn { parts: body.parts, modality: body.modality, auto_turn, internal, origin: origin.clone(), completes: None, from, digest_hint: None };
+    let turn = Turn { parts, modality: body.modality, auto_turn, internal, origin: origin.clone(), completes: None, from, digest_hint: None };
     let (user_msg, rx, done_rx) = match submit(&st, &id, turn) {
         Ok(t) => t,
         Err(r) => return r,
     };
+    if let Some(k) = key {
+        // not part of what the model reads (cache law holds)
+        let mid = user_msg["info"]["id"].clone();
+        with_session(&st, &id, |s| {
+            if let Some(m) = s.messages.iter_mut().find(|m| m["info"]["id"] == mid) {
+                m["info"]["meta"]["key"] = json!(k);
+            }
+        });
+    }
     if is_async {
         return Json(json!({ "turn_id": user_msg["info"]["id"], "origin": origin, "sessionID": id, "status": "queued" }))
             .into_response();
@@ -2208,6 +2352,9 @@ fn submit(st: &AppState, id: &str, turn: Turn) -> Result<Submitted, Response> {
     let (done_tx, done_rx) = oneshot::channel::<Result<Value, String>>();
     let (st, id, turn_id) = (st.clone(), id.to_string(), user_msg["info"]["id"].as_str().unwrap_or_default().to_string());
     tokio::spawn(async move {
+        // the files this message names are here before it runs (pulled from the root that has
+        // them), each with a path a tool can open (files.rs)
+        files::prepare(&st, &id, &turn_id).await;
         let result = match gate.admit(&ticket).await {
             gate::Admit::Go(mut permit) => {
                 let queue_ms = enqueued.elapsed().as_millis() as u64;
@@ -2379,19 +2526,33 @@ fn upstream_history(messages: &[Value]) -> Vec<Value> {
                     text = format!("{pre}{text}");
                 }
             }
+            // every other file: a line with its path (a small text file inline), frozen on the part
+            // before the turn ran (files::prepare), so these bytes never change (cache law)
+            if role == "user" && !compaction {
+                for t in m["parts"].as_array().into_iter().flatten().filter(|p| !p["mime"].as_str().is_some_and(|t| t.starts_with("image/"))).filter_map(files::model_text) {
+                    if !text.is_empty() {
+                        text.push_str("\n\n");
+                    }
+                    text.push_str(&t);
+                }
+            }
             if role == "user" && !compaction && !text.is_empty() && is_voice_turn(m) {
                 // last text block of the stored voice turn; a pure function of
                 // stored history, so earlier bytes never change (cache law)
                 text.push('\n');
                 text.push_str(VOICE_TURN_NOTE);
             }
-            let images: Vec<&str> = if role == "user" && !compaction {
+            let images: Vec<String> = if role == "user" && !compaction {
                 m["parts"]
                     .as_array()
                     .into_iter()
                     .flatten()
                     .filter(|p| p["type"] == "file" && p["mime"].as_str().is_some_and(|t| t.starts_with("image/")))
-                    .filter_map(|p| p["url"].as_str().filter(|u| u.starts_with("data:")))
+                    .filter_map(|p| match p["url"].as_str() {
+                        Some(u) if u.starts_with("data:") => Some(u.to_string()),
+                        // a stored file: read when the request is made (files::resolve_images)
+                        _ => p["hash"].as_str().map(|h| format!("{}{h}:{}", files::IMAGE_MARK, p["mime"].as_str().unwrap_or("image/png"))),
+                    })
                     .collect()
             } else {
                 Vec::new()
@@ -2871,10 +3032,13 @@ fn harness_prompt(history: &[Value], turn_id: &str, auto: bool) -> String {
         return history.iter().rev().find(user).map(message_text).unwrap_or_default();
     };
     if !auto {
+        // the files it carries: one line each, with a path the harness's own tools open (files.rs)
+        let files = files::harness_lines(&history[at]);
+        let text = if files.is_empty() { message_text(&history[at]) } else { format!("{}\n\n{files}", message_text(&history[at])) };
         // another session wrote it, not the user: the harness reads who (the terminal shows it too)
         return match sender_label(&history[at]["info"]["meta"]["from"]) {
-            Some(f) => format!("[from session {f}]\n{}", message_text(&history[at])),
-            None => message_text(&history[at]),
+            Some(f) => format!("[from session {f}]\n{text}"),
+            None => text,
         };
     }
     let reports: Vec<String> =
@@ -2929,16 +3093,60 @@ async fn harness_loop(st: &AppState, id: &str, prompt: String, tx: &mpsc::Sender
     // G1: a harness turn's context is the prompt + the system we hand it + its argv (secrets masked)
     let (argv, _) = kind.argv(model.as_deref(), resume.as_deref(), &cwd, &prompt, system.as_deref(), attach);
     context::capture_harness(st, id, run.upstream_calls as usize + 1, &prompt, system.as_deref().unwrap_or_default(), &argv);
-    let _slot = st.harness_slots.acquire().await.map_err(|e| e.to_string())?;
+    // a harness turn says it is alive once a minute — while it waits for a slot, and inside one
+    // long quiet command — so whoever watches the event stream never takes it for a hung run
+    // (the app stops a run that is silent for ten minutes). After an hour without a word from
+    // the harness it stops saying so.
+    let alive = || publish(st, "session.status", json!({ "sessionID": id, "status": { "type": "busy" } }));
+    let mut beat = tokio::time::interval(Duration::from_secs(60));
+    beat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let _slot = {
+        let slot = st.harness_slots.acquire();
+        tokio::pin!(slot);
+        loop {
+            tokio::select! {
+                s = &mut slot => break s.map_err(|e| e.to_string())?,
+                _ = beat.tick() => alive(),
+            }
+        }
+    };
     let (etx, mut erx) = mpsc::unbounded_channel::<harness::Ev>();
     let fut = harness::run(kind, model.as_deref(), resume.as_deref(), &cwd, &prompt, system.as_deref(), attach, move |ev| {
         let _ = etx.send(ev.clone());
     });
     tokio::pin!(fut);
+    let mut heard = std::time::Instant::now();
+    // the conversation's id is kept as soon as the conversation has said or done something: a
+    // turn that then fails or is cut (a usage limit, a restart) goes on in the same conversation
+    // on the next message, never in a new one. (A copy's first turn keeps the old rule.)
+    let mut said: Option<String> = None;
     let result = loop {
         tokio::select! {
             r = &mut fut => break r,
-            Some(ev) = erx.recv() => harness_event(st, id, tx, run, ev).await,
+            Some(ev) = erx.recv() => {
+                heard = std::time::Instant::now();
+                match &ev {
+                    harness::Ev::Session(sid) if !sid.is_empty() && !fork_now => said = Some(sid.clone()),
+                    harness::Ev::Text(_) | harness::Ev::Delta(_) | harness::Ev::Tool { .. } => {
+                        if let Some(sid) = said.take() {
+                            with_session(st, id, |s| {
+                                if !s.info["harness"].is_object() {
+                                    s.info["harness"] = json!({});
+                                }
+                                s.info["harness"]["kind"] = json!(kind.name());
+                                s.info["harness"]["id"] = json!(sid);
+                            });
+                        }
+                    }
+                    _ => {}
+                }
+                harness_event(st, id, tx, run, ev).await
+            }
+            _ = beat.tick() => {
+                if heard.elapsed() < Duration::from_secs(3600) {
+                    alive();
+                }
+            }
         }
     };
     while let Ok(ev) = erx.try_recv() {
@@ -3141,6 +3349,7 @@ pub(crate) enum Mode {
 
 fn assemble(st: &AppState, id: &str, messages: &[Value], mode: Mode) -> (Vec<Value>, context::Dropped) {
     let mut convo = upstream_history(messages); // roll-up runs AFTER the reply (rollup_after_reply)
+    files::resolve_images(st, &mut convo);
     // TIME-AWARENESS + CACHE LAW: static preamble at position 0; each user
     // turn carries a header derived purely from stored created timestamps
     // (this turn's message was stamped ≈ now), so history is byte-stable.
@@ -3998,7 +4207,7 @@ async fn main() {
         tools: Arc::new(tool_env),
         upstream: Arc::new(tokio::sync::Semaphore::new(max_inflight)),
         wakes: Arc::default(),
-        harness_slots: Arc::new(tokio::sync::Semaphore::new(env_num("YGG_MAX_HARNESS", 3).max(1) as usize)),
+        harness_slots: Arc::new(tokio::sync::Semaphore::new(env_num("YGG_MAX_HARNESS", 8).max(1) as usize)),
         harness_models: Arc::new(Mutex::new(HashMap::from([
             ("claude".to_string(), vec!["opus".to_string(), "sonnet".to_string(), "haiku".to_string()]),
             ("opencode".to_string(), vec!["default".to_string()]),
@@ -4007,6 +4216,8 @@ async fn main() {
         ]))),
         ctx: Arc::new(Mutex::new(context::Store::default())),
         draining: Arc::default(),
+        relay: Arc::default(),
+        files: Arc::default(),
         harness_labels: Arc::new(Mutex::new(HashMap::from([
             (
                 "claude".to_string(),
@@ -4049,7 +4260,14 @@ async fn main() {
         .route("/admin/drain", post(admin_drain))
         .route("/session/{id}/notice", get(get_notice))
         .route("/session/{id}/close", post(close_session))
+        .route("/event/feed", post(relay::feed))
+        .route("/file/upload", post(files::upload_start))
+        .route("/file/upload/{upload}", axum::routing::put(files::upload_piece))
+        .route("/file/artifact", post(files::share_artifact))
+        .route("/file/{hash}", get(files::get_file))
+        .route("/file/{hash}/info", get(files::file_info))
         .with_state(state.clone());
+    files::sweep(&state);
     tree::recover(&state, interrupted);
     peers::spawn_watch(&state);
     ext::spawn_watch(&state);
@@ -4916,6 +5134,8 @@ mod image_tests {
             harness_labels: Arc::new(Mutex::new(HashMap::new())),
             ctx: Arc::new(Mutex::new(context::Store::default())),
             draining: Arc::default(),
+            relay: Arc::default(),
+            files: Arc::default(),
         };
         assert_eq!(profile_name_of(&st, &legacy_info), "claude");
         let prof = session_profile(&st, legacy_id);
@@ -5011,6 +5231,8 @@ mod context_tests {
             harness_labels: Arc::new(Mutex::new(HashMap::new())),
             ctx: Arc::new(Mutex::new(context::Store::default())),
             draining: Arc::default(),
+            relay: Arc::default(),
+            files: Arc::default(),
         };
         (st, dir)
     }
@@ -5239,6 +5461,8 @@ mod c5_tests {
             harness_labels: Arc::new(Mutex::new(HashMap::new())),
             ctx: Arc::new(Mutex::new(context::Store::default())),
             draining: Arc::default(),
+            relay: Arc::default(),
+            files: Arc::default(),
         };
         (st, dir)
     }
