@@ -604,8 +604,9 @@ struct AppState {
     /// G1: the last captured upstream body per session (context viewer) — memory only,
     /// never persisted, so a look never moves `time.updated` or re-indexes the librarian
     ctx: Arc<Mutex<context::Store>>,
-    /// C5: POST /admin/drain set this — post_message answers 503 until the drain ends
-    draining: Arc<std::sync::atomic::AtomicBool>,
+    /// C5: POST /admin/drain sets this — post_message answers 503 until this time (ms; 0 = not
+    /// draining). It runs out by itself: a drain that no restart follows never blocks for good.
+    draining: Arc<std::sync::atomic::AtomicU64>,
 }
 
 #[derive(Deserialize)]
@@ -1148,9 +1149,11 @@ async fn get_inbox(State(st): State<AppState>, Path(id): Path<String>) -> Respon
     }
 }
 
-/// `POST /admin/drain {max_s}` (C5) — loopback-only. Sets `draining` (post_message answers 503
-/// `{"draining":true,"retry_after":N}`), waits until no run is in flight (or `max_s`, default
-/// 120), answers `{drained, still_running}`. preview-up.sh / a unit's ExecStop calls it first.
+/// `POST /admin/drain {max_s, hold_s}` (C5) — loopback-only. Refuses new turns (post_message
+/// answers 503 `{"draining":true,"retry_after":N}`), waits until no run is in flight (or `max_s`,
+/// default 120), answers `{drained, still_running}`. preview-up.sh / a unit's ExecStop calls it
+/// first. The refusal then holds `hold_s` more (default 60) for the restart to come, and ends by
+/// itself after that; `{"cancel":true}` ends it at once (a deploy that stopped half-way).
 async fn admin_drain(
     State(st): State<AppState>,
     ConnectInfo(peer): ConnectInfo<std::net::SocketAddr>,
@@ -1159,100 +1162,209 @@ async fn admin_drain(
     if !peer.ip().is_loopback() {
         return (StatusCode::FORBIDDEN, Json(json!({ "error": "loopback only" }))).into_response();
     }
+    use std::sync::atomic::Ordering::Relaxed;
+    if body["cancel"] == true {
+        st.draining.store(0, Relaxed);
+        eprintln!("DRAIN: cancelled, new turns are taken again");
+        return Json(json!({ "draining": false })).into_response();
+    }
     let max_s = body["max_s"].as_u64().unwrap_or(120).clamp(1, 600);
-    st.draining.store(true, std::sync::atomic::Ordering::Relaxed);
-    let deadline = std::time::Instant::now() + Duration::from_secs(max_s);
+    let hold_s = body["hold_s"].as_u64().unwrap_or(60).min(600);
+    let started = std::time::Instant::now();
+    st.draining.store(now_ms() + (max_s + hold_s) * 1000, Relaxed);
+    let deadline = started + Duration::from_secs(max_s);
     loop {
         let running = st.running.lock().unwrap().len();
         if running == 0 || std::time::Instant::now() >= deadline {
             let still = st.running.lock().unwrap().keys().cloned().collect::<Vec<_>>();
             if still.is_empty() {
-                eprintln!("DRAIN: drained in {}s", max_s - deadline.saturating_duration_since(std::time::Instant::now()).as_secs());
+                eprintln!("DRAIN: drained in {}s", started.elapsed().as_secs());
             } else {
                 eprintln!("DRAIN: max_s reached, {} still running: {}", still.len(), still.join(","));
             }
-            return Json(json!({ "drained": still.is_empty(), "still_running": still })).into_response();
+            // still refused for hold_s (the restart is on its way), unless cancelled meanwhile
+            if st.draining.load(Relaxed) != 0 {
+                st.draining.store(now_ms() + hold_s * 1000, Relaxed);
+            }
+            return Json(json!({ "drained": still.is_empty(), "still_running": still, "hold_s": hold_s })).into_response();
         }
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
 }
 
-/// C5: a turn the previous process cut mid-run gets its owner message resent ONCE — the
-/// coordinator prompt already promises "a turn cut off by a restart is sent once more". The
-/// user message the cut turn answered (its `parentID`) is found by id and submitted again with
-/// `meta.resent_of` and a plain prefix; auto/wake turns are re-woken through schedule_wake. A
-/// SECOND cut is only reported to the parent, as today. The door session itself never gets
-/// `card.status = failed` (the card misread it as failed work for months).
+/// Is a drain refusing new turns right now?
+fn is_draining(st: &AppState) -> bool {
+    now_ms() < st.draining.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// C5: what the previous process cut mid-run is taken up again ONCE, by itself — the coordinator
+/// prompt promises "a turn cut off by a restart is sent once more".
+/// - A real message (the owner's, or a brief from another session) goes out again as text, with
+///   `meta.resent_of` and a plain prefix, from the same sender (a brief resent without its
+///   sender read as the owner's own words). One that was waiting behind the cut turn too.
+/// - An automatic turn is never sent again as its old text (lead 11-19: at 20:58 a resent wake
+///   handed MAIN an out-of-date report and MAIN put a session it had just closed back to work).
+///   A cut wake is retired from the model's view, the reports it carried go back in the inbox
+///   only while they still hold (`tree::refile_cut_wake`), and the session is woken through
+///   `schedule_wake` from what is in its inbox now.
+/// - A SECOND cut is only reported to the parent, as before; a closed session gets nothing back.
+/// Returns the sessions taken care of here: `tree::recover` reports the others to their parents.
+/// The door session itself never gets `card.status = failed` (the card misread it for months).
 fn resent_marker() -> &'static str {
     "[sent again after a brain restart] "
 }
 
-fn resume_interrupted(st: &AppState, interrupted: &[String]) {
-    for sid in interrupted {
-        let plan: Option<(Vec<Value>, bool, String)> = {
+const CUT: &str = "interrupted by a brain restart";
+
+fn is_cut(m: &Value) -> bool {
+    m["info"]["role"] == "assistant" && m["info"]["error"]["data"]["message"].as_str() == Some(CUT)
+}
+
+/// A wake (`tree::wake`): automatic, carrying inbox reports.
+fn is_wake(m: &Value) -> bool {
+    m["info"]["meta"]["auto"] == true
+        && (m["info"]["meta"]["events"].is_array() || m["info"]["meta"]["digest_hint"].is_string() || message_text(m).starts_with("[inbox]"))
+}
+
+fn resume_interrupted(st: &AppState, cuts: &[(String, Vec<String>)]) -> Vec<String> {
+    let mut handled = Vec::new();
+    for (sid, cut_ids) in cuts {
+        // the plan, read under the lock: (owner/brief messages to send again, cut wakes, any
+        // automatic turn left, a second cut seen)
+        let plan = {
             let sessions = st.sessions.lock().unwrap();
             let Some(s) = sessions.get(sid) else { continue };
-            // the cut turn = the last assistant message without a completed time was closed by
-            // close_interrupted; the message it answered is its parentID (the newest user message
-            // with that id, auto or not)
-            let Some(cut) = s.messages.iter().rev().find(|m| {
-                m["info"]["role"] == "assistant" && m["info"]["error"]["data"]["message"].as_str() == Some("interrupted by a brain restart")
-            }) else { continue };
-            let pid = cut["info"]["parentID"].as_str().unwrap_or_default().to_string();
-            let Some(asked) = s.messages.iter().rev().find(|m| m["info"]["id"].as_str() == Some(pid.as_str())) else { continue };
-            let was_auto = asked["info"]["meta"]["auto"] == true;
-            // ONCE: the cut turn's parent IS a resent copy, or a copy of THIS message already
-            // went out after a restart — a second cut is only reported to the parent, as today
-            if !asked["info"]["meta"]["resent_of"].as_str().unwrap_or_default().is_empty()
-                || s.messages.iter().any(|m| m["info"]["meta"]["resent_of"].as_str() == Some(pid.as_str()))
-            {
+            if s.info["archived"] == true {
+                handled.push(sid.clone()); // closed: nothing comes back, and nobody is told
                 continue;
             }
-            let parts: Vec<Value> = asked["parts"]
-                .as_array()
-                .cloned()
-                .unwrap_or_default()
-                .into_iter()
-                .filter(|p| p["type"] == "text" || (p["type"] == "file" && p["url"].is_string()))
+            let ms = &s.messages;
+            let created = |m: &Value| m["info"]["time"]["created"].as_u64().unwrap_or(0);
+            let by_id = |id: &str| ms.iter().find(|m| m["info"]["id"].as_str() == Some(id));
+            let cut_here = |m: &Value| m["info"]["id"].as_str().is_some_and(|id| cut_ids.iter().any(|c| c == id));
+            // the turns the cut replies were answering (one without a parentID: the user message
+            // just before it)
+            let answering: Vec<&Value> = ms
+                .iter()
+                .enumerate()
+                .filter(|(_, m)| cut_here(m))
+                .filter_map(|(i, m)| match m["info"]["parentID"].as_str() {
+                    Some(p) => by_id(p),
+                    None => ms[..i].iter().rev().find(|u| u["info"]["role"] == "user" && !is_compaction(u)),
+                })
                 .collect();
-            if parts.is_empty() {
-                continue;
+            let Some(since) = answering.iter().map(|m| created(m)).min() else { continue };
+            // a reply that ran to its end (an upstream error is an end; a restart's cut is not)
+            let ended = |r: &Value| r["info"]["role"] == "assistant" && r["info"]["time"]["completed"].is_number() && !is_cut(r) && !cut_here(r);
+            let last_end = ms.iter().filter(|r| ended(r)).map(|r| created(r)).max().unwrap_or(0);
+            let mut resend: Vec<(Vec<Value>, String, Value, Option<String>, bool)> = Vec::new();
+            let mut wakes: Vec<Value> = Vec::new();
+            let mut autos = false;
+            let mut second = false;
+            for m in ms.iter().filter(|m| m["info"]["role"] == "user" && !is_compaction(m) && m["info"]["meta"]["inbox"] != true && m["info"]["meta"]["retired"].is_null()) {
+                let meta = &m["info"]["meta"];
+                if meta["auto"] == true {
+                    // pending = no run that started after it was stored ran to its end (every
+                    // run sees every stored auto message; coalesced ones get no reply of their own)
+                    if created(m) > last_end || answering.iter().any(|a| a["info"]["id"] == m["info"]["id"]) {
+                        autos = true;
+                        if is_wake(m) {
+                            wakes.push(m.clone());
+                        }
+                    }
+                    continue;
+                }
+                let id = m["info"]["id"].as_str().unwrap_or_default();
+                if created(m) < since || ms.iter().any(|r| ended(r) && r["info"]["parentID"].as_str() == Some(id)) {
+                    continue; // before this restart's cut, or answered
+                }
+                // ONCE: it IS a resent copy, or a copy of it already went out after a restart
+                if !meta["resent_of"].as_str().unwrap_or_default().is_empty() || ms.iter().any(|x| x["info"]["meta"]["resent_of"].as_str() == Some(id)) {
+                    second = true;
+                    continue;
+                }
+                let parts: Vec<Value> = m["parts"]
+                    .as_array()
+                    .cloned()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter(|p| p["type"] == "text" || (p["type"] == "file" && p["url"].is_string()))
+                    .map(|mut p| {
+                        if let Some(o) = p.as_object_mut() {
+                            o.remove("internal");
+                        }
+                        p
+                    })
+                    .collect();
+                if !parts.is_empty() {
+                    resend.push((parts, id.to_string(), meta["from"].clone(), meta["origin"].as_str().map(String::from), meta["internal"] == true));
+                }
             }
-            Some((parts, was_auto, pid))
+            (resend, wakes, autos, second)
         };
-        let Some((parts, was_auto, pid)) = plan else { continue };
-        // the prefix rides the FIRST text part; a meta marker (`resent_of`) keeps the second-cut rule
-        let mut parts = parts;
-        let first_text = parts.iter_mut().find(|p| p["type"] == "text");
-        if let Some(p) = first_text {
-            let t = p["text"].as_str().unwrap_or_default();
-            if !t.starts_with(resent_marker()) {
-                p["text"] = json!(format!("{}{}", resent_marker(), t));
+        let (resend, wakes, autos, second) = plan;
+        let mut sent = 0;
+        for (mut parts, pid, from, origin, internal) in resend {
+            // the prefix rides the FIRST text part; `meta.resent_of` keeps the second-cut rule
+            if let Some(p) = parts.iter_mut().find(|p| p["type"] == "text") {
+                let t = p["text"].as_str().unwrap_or_default();
+                if !t.starts_with(resent_marker()) {
+                    p["text"] = json!(format!("{}{}", resent_marker(), t));
+                }
+            }
+            let turn = Turn {
+                parts,
+                modality: None,
+                auto_turn: false,
+                internal,
+                // the same sender and the same report target as the message it copies
+                origin: origin.filter(|o| st.sessions.lock().unwrap().contains_key(o)),
+                completes: None,
+                from: from.is_object().then_some(from),
+                digest_hint: None,
+            };
+            match submit(st, sid, turn) {
+                Ok((msg, _, _)) => {
+                    let mid = msg["info"]["id"].as_str().unwrap_or_default().to_string();
+                    with_session(st, sid, |s| {
+                        if let Some(m) = s.messages.iter_mut().rev().find(|m| m["info"]["id"].as_str() == Some(mid.as_str())) {
+                            m["info"]["meta"]["resent_of"] = json!(pid);
+                        }
+                        if s.info["card"].is_object() && !is_main_title(s.info["title"].as_str().unwrap_or_default()) {
+                            s.info["card"]["status"] = json!("working");
+                        }
+                    });
+                    sent += 1;
+                    eprintln!("RESTART-RESEND {sid}: sent {pid} again once");
+                }
+                Err(_) => eprintln!("RESTART-RESEND {sid}: session gone, dropped"),
             }
         }
-        let turn = Turn {
-            parts,
-            modality: None,
-            auto_turn: was_auto,
-            internal: false,
-            origin: None,
-            completes: None,
-            from: None,
-            digest_hint: None,
-        };
-        match submit(st, sid, turn) {
-            Ok((msg, _, _)) => {
-                let mid = msg["info"]["id"].as_str().unwrap_or_default().to_string();
-                with_session(st, sid, |s| {
-                    if let Some(m) = s.messages.iter_mut().rev().find(|m| m["info"]["id"].as_str() == Some(mid.as_str())) {
-                        m["info"]["meta"]["resent_of"] = json!(pid);
+        // cut wakes: out of the model's view (its reply is folded with it), their still-true
+        // reports back in the inbox, and one fresh wake from the inbox as it is now
+        let mut back = 0;
+        for w in &wakes {
+            back += tree::refile_cut_wake(st, sid, w);
+            let wid = w["info"]["id"].clone();
+            with_session(st, sid, |s| {
+                for m in s.messages.iter_mut() {
+                    if m["info"]["id"] == wid {
+                        m["info"]["meta"]["retired"] = json!("cut by a brain restart");
+                    } else if m["info"]["role"] == "assistant" && m["info"]["parentID"] == wid && is_cut(m) {
+                        m["info"]["meta"]["folded"] = json!(true);
                     }
-                });
-                eprintln!("RESTART-RESEND {sid}: resent the owner turn (answered {pid}) once");
-            }
-            Err(_) => eprintln!("RESTART-RESEND {sid}: session gone, dropped"),
+                }
+            });
+        }
+        if autos {
+            tree::schedule_wake(st, sid, st.config.tree.wake_debounce_ms);
+            eprintln!("RESTART-REWAKE {sid}: {} cut wake(s) retired, {back} report(s) still true put back; woken from the inbox as it is now", wakes.len());
+        }
+        if !second && (sent > 0 || autos) {
+            handled.push(sid.clone());
         }
     }
+    handled
 }
 
 /// `GET /session/{id}/context` (G1) — what this session's model was last sent, or what the next
@@ -1995,7 +2107,7 @@ async fn post_message(
     };
     // C5: a drain in progress refuses NEW turns (the app treats 503 draining like a busy
     // session and queues the message)
-    if st.draining.load(std::sync::atomic::Ordering::Relaxed) {
+    if is_draining(&st) {
         return (StatusCode::SERVICE_UNAVAILABLE, Json(json!({ "draining": true, "retry_after": 5 }))).into_response();
     }
     let want_sse = headers
@@ -2289,27 +2401,62 @@ fn post_completion(st: &AppState, origin: &str, target: &str, turn_id: &str, res
 }
 
 /// A restart kills every run in flight: their placeholders (assistant, never completed) are
-/// closed as errors so the transcript and the tree stop waiting on them. Returns their sessions.
-fn close_interrupted(sessions: &mut HashMap<String, Session>, data_dir: &std::path::Path) -> Vec<String> {
+/// closed as errors so the transcript and the tree stop waiting on them. Every open placeholder,
+/// not just the newest message: a turn cut while later messages waited behind it stayed
+/// "running" for good and the message behind it was never answered (11-19, a brief from MAIN).
+/// `since` = when the previous process started (`data/.booted`): only a placeholder made after
+/// it was cut by THIS restart; an older one is a leftover, closed and nothing more. `None` (no
+/// mark yet) = only the newest message counts, as before the mark existed.
+/// Returns the sessions this restart cut, each with the placeholders it closed (oldest first).
+fn close_interrupted(sessions: &mut HashMap<String, Session>, data_dir: &std::path::Path, since: Option<u64>) -> Vec<(String, Vec<String>)> {
     let mut out = Vec::new();
     for (id, s) in sessions.iter_mut() {
-        let Some(last) = s.messages.last_mut() else { continue };
-        if last["info"]["role"] != "assistant" || last["info"]["time"]["completed"].is_number() {
+        let last = s.messages.len().saturating_sub(1);
+        let open: Vec<usize> = (0..s.messages.len())
+            .filter(|&i| s.messages[i]["info"]["role"] == "assistant" && !s.messages[i]["info"]["time"]["completed"].is_number())
+            .collect();
+        if open.is_empty() {
             continue;
         }
-        last["info"]["time"]["completed"] = json!(now_ms());
-        last["info"]["error"] = json!({ "name": "UnknownError", "data": { "message": "interrupted by a brain restart" } });
+        let mut cut = Vec::new();
+        let mut real = false;
+        for i in open {
+            let this_restart = match since {
+                Some(t) => s.messages[i]["info"]["time"]["created"].as_u64().unwrap_or(u64::MAX) >= t,
+                None => i == last,
+            };
+            // what it was answering: an automatic turn (a wake) says nothing about the work
+            let pid = s.messages[i]["info"]["parentID"].as_str().unwrap_or_default().to_string();
+            let auto = s.messages.iter().any(|m| m["info"]["id"].as_str() == Some(pid.as_str()) && m["info"]["meta"]["auto"] == true);
+            let m = &mut s.messages[i];
+            m["info"]["time"]["completed"] = json!(now_ms());
+            m["info"]["error"] = json!({ "name": "UnknownError", "data": { "message": CUT } });
+            if this_restart {
+                cut.push(m["info"]["id"].as_str().unwrap_or_default().to_string());
+                real |= !auto;
+            }
+        }
         // C5: a restart says nothing about the WORK. The door's own card has read `failed`
         // (wakes=56) for months because of this line; a managed child's card is corrected by
         // its digest/wake in a moment, so only the door needs the guard.
         let is_main = crate::is_main_title(s.info["title"].as_str().unwrap_or_default());
-        if s.info["card"].is_object() && !is_main {
+        if s.info["card"].is_object() && !is_main && real {
             s.info["card"]["status"] = json!("failed");
         }
         persist(data_dir, id, s);
-        out.push(id.clone());
+        if !cut.is_empty() {
+            out.push((id.clone(), cut));
+        }
     }
     out
+}
+
+/// When the previous process started (`data/.booted`), and this start marked in its place.
+fn boot_mark(data_dir: &std::path::Path) -> Option<u64> {
+    let path = data_dir.join(".booted");
+    let prev = std::fs::read_to_string(&path).ok().and_then(|t| t.trim().parse().ok());
+    let _ = std::fs::write(&path, now_ms().to_string());
+    prev
 }
 
 /// Rebuilds the upstream conversation from stored messages. Assistant messages replay
@@ -2351,8 +2498,9 @@ fn upstream_history(messages: &[Value]) -> Vec<Value> {
         if i < start {
             continue;
         }
-        // root-coord: automation records filed in the inbox never reach a model
-        if m["info"]["meta"]["inbox"] == true {
+        // root-coord: automation records filed in the inbox never reach a model; nor does a wake
+        // a restart cut (C5: rebuilt from the inbox instead — its reply is folded with it)
+        if m["info"]["meta"]["inbox"] == true || m["info"]["meta"]["retired"].is_string() {
             continue;
         }
         if role == "user" && !compaction {
@@ -2472,7 +2620,7 @@ fn first_line(s: &str, max: usize) -> String {
 /// and anything unanswered stay verbatim; the stored transcript (UI) is untouched.
 fn collapse_stale_station(messages: &mut [Value]) {
     let autos: Vec<usize> = (0..messages.len())
-        .filter(|&i| messages[i]["info"]["role"] == "user" && messages[i]["info"]["meta"]["auto"] == true)
+        .filter(|&i| messages[i]["info"]["role"] == "user" && messages[i]["info"]["meta"]["auto"] == true && messages[i]["info"]["meta"]["retired"].is_null())
         .collect();
     if autos.len() <= STATION_KEEP {
         return;
@@ -3941,7 +4089,7 @@ async fn main() {
     std::fs::create_dir_all(data_dir.join("session")).expect("create YGG_DATA_DIR");
     let mut sessions = load_sessions(&data_dir);
     eprintln!("loaded {} session(s) from {}", sessions.len(), data_dir.display());
-    let interrupted = close_interrupted(&mut sessions, &data_dir);
+    let interrupted = close_interrupted(&mut sessions, &data_dir, boot_mark(&data_dir));
     // root-coord migration: MAIN carries its profile explicitly (the phone shows the registry
     // default for unpinned sessions, and that default is `build` again)
     let door_model = config.profiles.read().unwrap().get("coordinator").and_then(|p| p.model.clone()).filter(|m| config.models.contains(m));
@@ -4022,9 +4170,11 @@ async fn main() {
     if !interrupted.is_empty() {
         eprintln!("restart: closed {} run(s) the previous process left open", interrupted.len());
     }
-    // C5: the owner turn each cut run was answering goes out once more, automatically (the
-    // coordinator prompt promises exactly this; a second cut is only reported, never resent)
-    resume_interrupted(&state, &interrupted);
+    // C5: what each cut run was answering is taken up once more, automatically (the coordinator
+    // prompt promises exactly this): real messages sent again, wakes rebuilt from the inbox; a
+    // second cut is only reported to the parent (tree::recover, below)
+    let resumed = resume_interrupted(&state, &interrupted);
+    let interrupted: Vec<String> = interrupted.into_iter().map(|(sid, _)| sid).filter(|sid| !resumed.contains(sid)).collect();
     let app = Router::new()
         .route("/session", get(list_sessions).post(create_session))
         .route("/session/status", get(session_status))
@@ -5244,31 +5394,49 @@ mod c5_tests {
     }
 
     /// A session whose last run was cut by a restart: the owner message it answered + the
-    /// assistant placeholder close_interrupted leaves behind.
-    fn cut_session(st: &AppState, title: &str) -> (String, String) {
+    /// assistant placeholder close_interrupted leaves behind. Returns (session, asked, cut).
+    fn cut_session3(st: &AppState, title: &str) -> (String, String, String) {
         let sid = new_session(st, title, None, None, None, None)["id"].as_str().unwrap().to_string();
         let asked = make_message(&sid, "user", vec![text_part("build the importer")]);
         let mut cut = make_message(&sid, "assistant", vec![text_part("")]);
         cut["info"]["parentID"] = asked["info"]["id"].clone();
-        cut["info"]["error"] = json!({ "name": "UnknownError", "data": { "message": "interrupted by a brain restart" } });
+        cut["info"]["error"] = json!({ "name": "UnknownError", "data": { "message": CUT } });
         let pid = asked["info"]["id"].as_str().unwrap().to_string();
+        let cid = cut["info"]["id"].as_str().unwrap().to_string();
         st.sessions.lock().unwrap().get_mut(&sid).unwrap().messages = vec![asked, cut];
-        (sid, pid)
+        (sid, pid, cid)
+    }
+
+    fn msg_at(sid: &str, role: &str, text: &str, at: u64) -> Value {
+        let mut m = make_message(sid, role, vec![text_part(text)]);
+        m["info"]["time"]["created"] = json!(at);
+        if role == "assistant" {
+            m["info"]["time"]["completed"] = json!(at + 1);
+        }
+        m
+    }
+
+    /// The live store's shape after a load: the sessions as the next process reads them.
+    fn reload(st: &AppState) -> HashMap<String, Session> {
+        let guard = st.sessions.lock().unwrap();
+        guard.iter().map(|(k, v)| (k.clone(), serde_json::from_str::<Session>(&serde_json::to_string(v).unwrap()).unwrap())).collect()
     }
 
     #[tokio::test]
     async fn interrupted_owner_turn_is_resent_once() {
         let (st, dir) = c5_app();
-        let (sid, pid) = cut_session(&st, "resend me");
-        resume_interrupted(&st, &[sid.clone()]);
+        let (sid, pid, cid) = cut_session3(&st, "resend me");
+        let handled = resume_interrupted(&st, &[(sid.clone(), vec![cid.clone()])]);
+        assert_eq!(handled, vec![sid.clone()], "taken up here: the parent is not told");
         let s = { st.sessions.lock().unwrap().get(&sid).cloned().unwrap() };
         let resent: Vec<&Value> = s.messages.iter().filter(|m| m["info"]["meta"]["resent_of"].as_str() == Some(pid.as_str())).collect();
         assert_eq!(resent.len(), 1, "exactly one resend");
         let text = message_text(resent[0]);
         assert!(text.starts_with(resent_marker()), "{text}");
         assert!(text.contains("build the importer"), "the original text rides again: {text}");
+        assert!(resent[0]["info"]["meta"]["from"].is_null(), "the owner's message stays the owner's");
         // idempotent: a second pass (the copy is intact) adds nothing
-        resume_interrupted(&st, &[sid.clone()]);
+        resume_interrupted(&st, &[(sid.clone(), vec![cid])]);
         let s2 = { st.sessions.lock().unwrap().get(&sid).cloned().unwrap() };
         assert_eq!(s2.messages.iter().filter(|m| m["info"]["meta"]["resent_of"].is_string()).count(), 1);
         let _ = std::fs::remove_dir_all(&dir);
@@ -5277,19 +5445,170 @@ mod c5_tests {
     #[tokio::test]
     async fn second_interrupt_is_reported_not_resent() {
         let (st, dir) = c5_app();
-        let (sid, pid) = cut_session(&st, "cut twice");
-        resume_interrupted(&st, &[sid.clone()]);
+        let (sid, _pid, cid) = cut_session3(&st, "cut twice");
+        resume_interrupted(&st, &[(sid.clone(), vec![cid])]);
         // the RESENT copy got cut too: close_interrupted's shape on its reply
         let s = { st.sessions.lock().unwrap().get(&sid).cloned().unwrap() };
         let resent_id = s.messages.iter().rev().find(|m| m["info"]["meta"]["resent_of"].is_string()).map(|m| m["info"]["id"].clone()).unwrap();
         let mut cut2 = make_message(&sid, "assistant", vec![text_part("")]);
         cut2["info"]["parentID"] = resent_id.clone();
-        cut2["info"]["error"] = json!({ "name": "UnknownError", "data": { "message": "interrupted by a brain restart" } });
+        cut2["info"]["error"] = json!({ "name": "UnknownError", "data": { "message": CUT } });
+        let cid2 = cut2["info"]["id"].as_str().unwrap().to_string();
         st.sessions.lock().unwrap().get_mut(&sid).unwrap().messages.push(cut2);
         let before = st.sessions.lock().unwrap().get(&sid).unwrap().messages.len();
-        resume_interrupted(&st, &[sid.clone()]);
+        let handled = resume_interrupted(&st, &[(sid.clone(), vec![cid2])]);
         let after = st.sessions.lock().unwrap().get(&sid).unwrap().messages.len();
-        assert_eq!(before, after, "a second cut is never auto-resent (the parent reports it, as today)");
+        assert_eq!(before, after, "a second cut is never auto-resent");
+        assert!(handled.is_empty(), "…it is reported to the parent (tree::recover), as before");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Lead 11-19 (the 20:58 incident): a cut WAKE is not sent again as its old text. MAIN had
+    /// closed the session the wake reported on; the resent wake made MAIN start it again.
+    #[tokio::test]
+    async fn cut_wake_is_not_resent_and_a_closed_sessions_report_stays_out() {
+        let (st, dir) = c5_app();
+        let main = new_session(&st, "[MAIN]", None, None, None, None)["id"].as_str().unwrap().to_string();
+        let kid = new_session(&st, "fix session", Some(&main), None, None, None)["id"].as_str().unwrap().to_string();
+        let t0 = 1_000_000u64;
+        with_session(&st, &kid, |s| s.messages = vec![msg_at(&kid, "user", "fix it", t0), msg_at(&kid, "assistant", "QUESTION: go on?", t0 + 10)]);
+        let ev = json!({ "id": "evt_old", "at": t0 + 20, "from": kid, "title": "fix session", "status": "blocked",
+            "headline": "waiting for a go", "relevance": "decision", "delivered": true });
+        let mut wake = msg_at(&main, "user", "[inbox] Reports from your sessions since the user last heard from you:\n- \"fix session\" (blocked): waiting for a go (id=X)\n", t0 + 30);
+        wake["info"]["meta"] = json!({ "auto": true, "internal": true, "events": ["evt_old"], "digest_hint": "\"fix session\" (blocked): waiting for a go" });
+        let mut cut = msg_at(&main, "assistant", "", t0 + 31);
+        cut["info"]["parentID"] = wake["info"]["id"].clone();
+        cut["info"]["error"] = json!({ "name": "UnknownError", "data": { "message": CUT } });
+        let (wid, cid) = (wake["info"]["id"].clone(), cut["info"]["id"].as_str().unwrap().to_string());
+        with_session(&st, &main, |s| {
+            s.inbox = vec![ev.clone()];
+            s.messages = vec![msg_at(&main, "user", "hi", t0 - 100), msg_at(&main, "assistant", "hello", t0 - 90), wake, cut];
+        });
+        // MAIN closed the session before the restart
+        with_session(&st, &kid, |s| s.info["archived"] = json!(true));
+        let n = st.sessions.lock().unwrap().get(&main).unwrap().messages.len();
+        let handled = resume_interrupted(&st, &[(main.clone(), vec![cid])]);
+        assert_eq!(handled, vec![main.clone()]);
+        let s = st.sessions.lock().unwrap().get(&main).cloned().unwrap();
+        assert_eq!(s.messages.len(), n, "nothing is sent again as text");
+        assert!(s.messages.iter().all(|m| m["info"]["meta"]["resent_of"].is_null()));
+        let w = s.messages.iter().find(|m| m["info"]["id"] == wid).unwrap();
+        assert!(w["info"]["meta"]["retired"].is_string(), "the cut wake is out of the model's view");
+        let up = serde_json::to_string(&upstream_history(&s.messages)).unwrap();
+        assert!(!up.contains("waiting for a go"), "the old report never reaches the model again: {up}");
+        assert_eq!(s.inbox[0]["delivered"], json!(true), "a closed session's report does not come back");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// …and a report that still holds goes back in the inbox, and the wake is rebuilt from it.
+    #[tokio::test]
+    async fn cut_wake_puts_back_the_reports_that_still_hold() {
+        let (st, dir) = c5_app();
+        let main = new_session(&st, "[MAIN]", None, None, None, None)["id"].as_str().unwrap().to_string();
+        let a = new_session(&st, "still open", Some(&main), None, None, None)["id"].as_str().unwrap().to_string();
+        let b = new_session(&st, "moved on", Some(&main), None, None, None)["id"].as_str().unwrap().to_string();
+        let t0 = 2_000_000u64;
+        with_session(&st, &a, |s| s.messages = vec![msg_at(&a, "user", "do a", t0)]);
+        // b was given more work after its report: its next report will say where it is
+        with_session(&st, &b, |s| s.messages = vec![msg_at(&b, "user", "do b", t0), msg_at(&b, "user", "and more", t0 + 50)]);
+        let ev = |id: &str, from: &str| json!({ "id": id, "at": t0 + 20, "from": from, "title": "t", "status": "done", "headline": "h", "relevance": "decision", "delivered": true });
+        // an older wake (no recorded ids): its senders are named in its text
+        let mut wake = msg_at(&main, "user", &format!("[inbox] Reports from your sessions since the user last heard from you:\n- \"a\" (done): h (id={a})\n- \"b\" (done): h (id={b})\n"), t0 + 30);
+        wake["info"]["meta"] = json!({ "auto": true, "internal": true });
+        let mut cut = msg_at(&main, "assistant", "", t0 + 31);
+        cut["info"]["parentID"] = wake["info"]["id"].clone();
+        cut["info"]["error"] = json!({ "name": "UnknownError", "data": { "message": CUT } });
+        let cid = cut["info"]["id"].as_str().unwrap().to_string();
+        with_session(&st, &main, |s| {
+            s.inbox = vec![ev("evt_a", &a), ev("evt_b", &b)];
+            s.messages = vec![msg_at(&main, "user", "hi", t0 - 100), msg_at(&main, "assistant", "hello", t0 - 90), wake, cut];
+        });
+        resume_interrupted(&st, &[(main.clone(), vec![cid])]);
+        let s = st.sessions.lock().unwrap().get(&main).cloned().unwrap();
+        let delivered = |id: &str| s.inbox.iter().find(|e| e["id"] == id).unwrap()["delivered"].clone();
+        assert_eq!(delivered("evt_a"), json!(false), "still true: back in the inbox");
+        assert_eq!(delivered("evt_b"), json!(true), "out of date: stays out");
+        assert!(st.wakes.lock().unwrap().contains(&main), "one fresh wake is on its way");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A brief from another session goes out again from that session, never as the owner's words.
+    #[tokio::test]
+    async fn resent_brief_keeps_its_sender() {
+        let (st, dir) = c5_app();
+        let main = new_session(&st, "[MAIN]", None, None, None, None)["id"].as_str().unwrap().to_string();
+        let kid = new_session(&st, "worker", Some(&main), None, None, None)["id"].as_str().unwrap().to_string();
+        let mut brief = msg_at(&kid, "user", "build the importer", 3_000_000);
+        brief["info"]["meta"] = json!({ "origin": main, "from": { "session": main, "title": "[MAIN]" } });
+        let mut cut = msg_at(&kid, "assistant", "", 3_000_010);
+        cut["info"]["parentID"] = brief["info"]["id"].clone();
+        cut["info"]["error"] = json!({ "name": "UnknownError", "data": { "message": CUT } });
+        let (bid, cid) = (brief["info"]["id"].clone(), cut["info"]["id"].as_str().unwrap().to_string());
+        with_session(&st, &kid, |s| s.messages = vec![brief, cut]);
+        resume_interrupted(&st, &[(kid.clone(), vec![cid])]);
+        let s = st.sessions.lock().unwrap().get(&kid).cloned().unwrap();
+        let copy = s.messages.iter().find(|m| m["info"]["meta"]["resent_of"] == bid).expect("resent once");
+        assert_eq!(copy["info"]["meta"]["from"]["session"], json!(main), "from the same session");
+        assert_eq!(copy["info"]["meta"]["origin"], json!(main), "reports to the same place");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A message waiting behind the cut turn: its placeholder was not the newest message, so it
+    /// stayed "running" for good and the message behind it was never answered (11-19).
+    #[tokio::test]
+    async fn message_waiting_behind_a_cut_turn_is_sent_again_too() {
+        let (st, dir) = c5_app();
+        let sid = new_session(&st, "busy", None, None, None, None)["id"].as_str().unwrap().to_string();
+        let t0 = 4_000_000u64;
+        let first = msg_at(&sid, "user", "first", t0);
+        let mut open = make_message(&sid, "assistant", vec![text_part("")]);
+        open["info"]["parentID"] = first["info"]["id"].clone();
+        open["info"]["time"] = json!({ "created": t0 + 5 });
+        let second = msg_at(&sid, "user", "second, typed while it worked", t0 + 10);
+        // an older leftover from a process before the last one: closed, nothing more
+        let old_q = msg_at(&sid, "user", "ancient", t0 - 1000);
+        let mut old_open = make_message(&sid, "assistant", vec![text_part("")]);
+        old_open["info"]["parentID"] = old_q["info"]["id"].clone();
+        old_open["info"]["time"] = json!({ "created": t0 - 990 });
+        with_session(&st, &sid, |s| s.messages = vec![old_q, old_open, first, open, second]);
+        let mut sessions = reload(&st);
+        let cuts = close_interrupted(&mut sessions, &dir, Some(t0 - 500));
+        assert_eq!(cuts.len(), 1);
+        assert_eq!(cuts[0].1.len(), 1, "only the placeholder made since the last start is this restart's cut");
+        assert!(sessions[&sid].messages.iter().all(|m| m["info"]["role"] != "assistant" || m["info"]["time"]["completed"].is_number()), "every open placeholder is closed");
+        *st.sessions.lock().unwrap() = sessions;
+        resume_interrupted(&st, &cuts);
+        let s = st.sessions.lock().unwrap().get(&sid).cloned().unwrap();
+        let resent: Vec<String> = s.messages.iter().filter(|m| m["info"]["meta"]["resent_of"].is_string()).map(message_text).collect();
+        assert_eq!(resent.len(), 2, "{resent:?}");
+        assert!(resent[0].ends_with("first") && resent[1].ends_with("second, typed while it worked"), "{resent:?}");
+        // without a start mark (the first start with this code): only the newest message counts
+        let mut again = reload(&st);
+        for m in again.get_mut(&sid).unwrap().messages.iter_mut() {
+            if m["info"]["role"] == "assistant" {
+                m["info"]["time"].as_object_mut().unwrap().remove("completed");
+            }
+        }
+        let cuts = close_interrupted(&mut again, &dir, None);
+        assert!(cuts.is_empty() || cuts[0].1.len() <= 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A drain that no restart follows ends by itself, and `cancel` ends it at once.
+    #[tokio::test]
+    async fn drain_runs_out_and_can_be_cancelled() {
+        let (st, dir) = c5_app();
+        let lo = ConnectInfo(std::net::SocketAddr::from(([127, 0, 0, 1], 9)));
+        let r = admin_drain(State(st.clone()), lo, Json(json!({ "max_s": 1, "hold_s": 0 }))).await;
+        assert_eq!(r.status(), StatusCode::OK);
+        assert!(!is_draining(&st), "nothing running, no hold: new turns are taken at once");
+        let _ = admin_drain(State(st.clone()), lo, Json(json!({ "max_s": 1, "hold_s": 60 }))).await;
+        assert!(is_draining(&st), "held for the restart");
+        let _ = admin_drain(State(st.clone()), lo, Json(json!({ "cancel": true }))).await;
+        assert!(!is_draining(&st), "cancelled");
+        let far = ConnectInfo(std::net::SocketAddr::from(([10, 0, 0, 2], 9)));
+        let r = admin_drain(State(st.clone()), far, Json(json!({}))).await;
+        assert_eq!(r.status(), StatusCode::FORBIDDEN);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -5310,7 +5629,7 @@ mod c5_tests {
             let guard = st.sessions.lock().unwrap();
             guard.iter().map(|(k, v)| (k.clone(), serde_json::from_str::<Session>(&serde_json::to_string(v).unwrap()).unwrap())).collect()
         };
-        let _ = close_interrupted(&mut sessions, &dir);
+        let _ = close_interrupted(&mut sessions, &dir, None);
         // the closed map is what the next process loads: assert on it
         let main_card = &sessions[&main].info["card"];
         assert_eq!(main_card["status"], json!("idle"), "the door's card is untouched");

@@ -1126,7 +1126,7 @@ fn take_events(st: &AppState, parent: &str, door: bool) -> Vec<Value> {
 }
 
 /// One pending wake per session; it collects whatever is undelivered when it fires.
-fn schedule_wake(st: &AppState, parent: &str, delay_ms: u64) {
+pub(crate) fn schedule_wake(st: &AppState, parent: &str, delay_ms: u64) {
     if !st.wakes.lock().unwrap().insert(parent.to_string()) {
         return;
     }
@@ -1163,9 +1163,81 @@ fn wake(st: &AppState, parent: &str) {
     with_session(st, parent, |s| s.info["card"]["wakes"] = json!(wakes + 1));
     let turn = Turn { parts: vec![text_part(&text)], modality: None, auto_turn: true, internal: true, origin: None, completes: None, from: None, digest_hint: Some(digest_hint_of(&events)) };
     match crate::submit(st, parent, turn) {
-        Ok(_) => eprintln!("TREE woke {parent} with {} report(s)", events.len()),
+        Ok((msg, _, _)) => {
+            // which reports it carries (C5: a wake cut by a restart puts back only the ones
+            // still true). Not rendered to any model, so the cache law is untouched.
+            let mid = msg["info"]["id"].clone();
+            let ids: Vec<Value> = events.iter().map(|e| e["id"].clone()).filter(|v| v.is_string()).collect();
+            with_session(st, parent, |s| {
+                if let Some(m) = s.messages.iter_mut().rev().find(|m| m["info"]["id"] == mid) {
+                    m["info"]["meta"]["events"] = json!(ids);
+                }
+            });
+            eprintln!("TREE woke {parent} with {} report(s)", events.len())
+        }
         Err(_) => eprintln!("TREE wake of {parent} failed"),
     }
+}
+
+/// C5, a wake cut by a restart (lead 11-19): its text is never sent again — at 20:58 that handed
+/// MAIN an old report about a session it had just closed, and MAIN put that session back to work.
+/// The reports it carried go back in the inbox only while they still hold: the session that sent
+/// one is open, has filed nothing newer here, and was given nothing new since. The wake that
+/// follows (`schedule_wake`) is built from the inbox as it is then. Returns how many went back.
+pub(crate) fn refile_cut_wake(st: &AppState, parent: &str, wake: &Value) -> usize {
+    let back: Vec<String> = {
+        let sessions = st.sessions.lock().unwrap();
+        let Some(s) = sessions.get(parent) else { return 0 };
+        let created = wake["info"]["time"]["created"].as_u64().unwrap_or(u64::MAX);
+        let at = |e: &Value| e["at"].as_u64().unwrap_or(0);
+        // the reports it carried: recorded on the wake since 11-19; an older wake names its
+        // senders in its text (`(id=…)`), and carried the newest report of each
+        let carried: Vec<String> = match wake["info"]["meta"]["events"].as_array() {
+            Some(ids) => ids.iter().filter_map(|v| v.as_str().map(String::from)).collect(),
+            None => {
+                let text = message_text(wake);
+                let froms: HashSet<&str> = text.match_indices("(id=").filter_map(|(i, _)| text[i + 4..].split(')').next()).collect();
+                froms
+                    .iter()
+                    .filter_map(|f| {
+                        s.inbox
+                            .iter()
+                            .filter(|e| e["from"].as_str() == Some(*f) && e["delivered"] == true && at(e) <= created)
+                            .max_by_key(|e| at(e))
+                            .and_then(|e| e["id"].as_str().map(String::from))
+                    })
+                    .collect()
+            }
+        };
+        let holds = |e: &Value| {
+            let from = e["from"].as_str().unwrap_or_default();
+            if from == "external" {
+                return true; // an automation's report: no session to check it against
+            }
+            if s.inbox.iter().any(|o| o["from"].as_str() == Some(from) && at(o) > at(e)) {
+                return false; // that session has said something newer
+            }
+            let Some(src) = sessions.get(from) else { return false };
+            // closed since, or given more to do since: its next report will say where it is
+            !is_archived(src) && !src.messages.iter().any(|m| m["info"]["role"] == "user" && m["info"]["time"]["created"].as_u64().unwrap_or(0) > at(e))
+        };
+        s.inbox
+            .iter()
+            .filter(|e| e["delivered"] == true && e["id"].as_str().is_some_and(|id| carried.iter().any(|c| c == id)))
+            .filter(|e| holds(e))
+            .filter_map(|e| e["id"].as_str().map(String::from))
+            .collect()
+    };
+    if !back.is_empty() {
+        with_session(st, parent, |s| {
+            for e in s.inbox.iter_mut() {
+                if e["id"].as_str().is_some_and(|id| back.iter().any(|b| b == id)) {
+                    e["delivered"] = json!(false);
+                }
+            }
+        });
+    }
+    back.len()
 }
 
 /// How a door wake that carries an outcome ends — no (quiet) offered; the run loop retries a
@@ -1297,7 +1369,8 @@ pub fn external_report(st: &AppState, door: &str, text: &str) {
     });
 }
 
-/// A brain restart killed these runs: their cards say so and their parents hear it.
+/// A brain restart killed these runs and they were not taken up again (C5: a second cut, or
+/// nothing left to send): their cards say so and their parents hear it.
 pub fn recover(st: &AppState, interrupted: Vec<String>) {
     for sid in interrupted {
         if let Some(target) = report_target(st, &sid, None) {
