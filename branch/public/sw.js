@@ -5,7 +5,15 @@
  * changes: the app shell and first contact (pairing) still come from the network. */
 
 self.addEventListener('install', () => self.skipWaiting());
-self.addEventListener('activate', (e) => e.waitUntil(self.clients.claim()));
+self.addEventListener('activate', (e) => e.waitUntil((async () => {
+  self.clients.claim();
+  // this SW never caches the app shell — so any cache left by an older
+  // SW (a precache era) is stale weight: purge everything that isn't ours
+  try {
+    const keep = 'bifrost-pin';
+    await Promise.all((await caches.keys()).filter((k) => k !== keep).map((k) => caches.delete(k)));
+  } catch {}
+})()));
 
 /* page id → its pinned-channel state: off | connecting | pinned | fallback | reconnecting | refused */
 const pinStates = new Map();
