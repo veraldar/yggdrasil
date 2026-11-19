@@ -26,6 +26,13 @@ never from this one — bash reads scripts as it goes, an edit here breaks a run
 - Mac pre-test: join.sh bootstrap on the real Mac with a test release incl. macos archive — up to the hub ask
 - tree-next 4060a9fb merged
 
+## Review (independent sub-agent, 01:00): 5 real bugs + 4 small — all fixed, commit "p4: fixes from the independent review"
+- retested: adopt-test 11/11 (+ PROXY mismatch refused, backup timer left alone); key guard unit test; tag guard
+  (local tag elsewhere, origin tag elsewhere) stops before any build, in a scratch clone with a stand-in key
+- not yet re-run after the fixes: the full S11 rig (join.sh change is macOS/Rosetta + one message only)
+- make_tag (after signing) is exercised only by a full real-path run: do the dress rehearsal (scratch clone, stand-in
+  key, --mac-host, Windows exe) once p4-win is merged
+
 ## Half done
 - Windows installer: sub-agent in ~/Work/p4-win (branch p4-win)
 
