@@ -129,7 +129,7 @@ docker cp "$BIN" "$C:/opt/bifrost-net" >/dev/null
 vps "cd /opt/trunk/install && bash trunk.sh --adopt /etc/trunk-ap --binary /opt/bifrost-net -y" >"$STATE/2-adopt.log" 2>&1; rc=$?
 sleep 2
 check a1 "trunk.sh --adopt /etc/trunk-ap: exit 0 ($rc), 'adopted', the token kept (the connect line still works)" \
-  bash -c "[ $rc = 0 ] && grep -q '==> adopted: trunk-ap.service stopped and disabled' '$STATE/2-adopt.log' && grep -q 'token kept' '$STATE/2-adopt.log'"
+  bash -c "[ $rc = 0 ] && grep -q 'adopted: trunk-ap.service stopped and disabled' '$STATE/2-adopt.log' && grep -q 'token kept' '$STATE/2-adopt.log'"
 check a2 "the same key (the pin) and the same certificate served on :443" \
   bash -c "docker exec $C cmp -s /etc/trunk-ap/key.pem /etc/yggdrasil-trunk/key.pem && [ '$(pin)' = '$PIN0' ] && [ '$(certfp)' = '$FP0' ]"
 check a3 "through :443: /pair 503 (answering, no hub), the hub's OLD token 400 (accepted), a wrong one 401, the website 200" \

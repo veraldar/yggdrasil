@@ -270,7 +270,7 @@ probe_ap() { # → the HTTP status the access point gives a pinned request on it
   local b64 c=000 p
   b64=$(openssl pkey -in "$KEY" -pubout -outform DER 2>/dev/null | openssl dgst -sha256 -binary | base64)
   p=(curl -sk -o /dev/null -m 5 -w '%{http_code}' --pinnedpubkey "sha256//$b64" --resolve "$NAME:$PORT:127.0.0.1" "https://$NAME:$PORT/")
-  [ "$BEHIND" = 1 ] && p=("${p[@]:0:7}" --haproxy-protocol "${p[@]:7}")
+  [ "$BEHIND" = 1 ] && p=(curl --haproxy-protocol "${p[@]:1}")   # (never between -w and its format)
   for _ in $(seq 20); do c=$("${p[@]}" 2>/dev/null || true); [ "$c" != 000 ] && break; sleep 0.5; done
   echo "$c"
 }
@@ -974,7 +974,7 @@ say "pin: $PIN"
 # ----------------------------------------------------------------------------------- the end
 line() { printf '%s\n' "────────────────────────────────────────────────────────────────────────────────"; }
 echo
-if [ "$BEHIND" = 1 ]; then
+if [ "$BEHIND" = 1 ] && ! systemctl is-active --quiet yggdrasil-sni-443; then   # a running router needs no how-to
   line
   cat <<EOF
  :443 is your website's. Send the name $NAME to the trunk — pick ONE:
