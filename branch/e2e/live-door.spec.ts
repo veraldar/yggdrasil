@@ -10,7 +10,8 @@ import { type Page, chromium, devices, expect, test } from '@playwright/test';
  * device's "voice tests" switch sends the roots to the `voice-test` session. The device is revoked
  * at the end. Run by hand (nothing in CI): PW_LIVE=1 npx playwright test -c playwright.live-door.config.ts
  */
-const AP = 'https://ap.veraldar.org';
+const TAIL = process.env.PW_DOOR === 'tailnet'; // the same turns on the tailnet door (no pairing)
+const AP = TAIL ? process.env.PW_TAILNET || 'https://omarchy.tail5435b1.ts.net:8447' : 'https://ap.veraldar.org';
 const TAILNET = process.env.PW_TAILNET || 'https://omarchy.tail5435b1.ts.net:8447';
 const APP = 'http://127.0.0.1:4502'; // the public app on the box (admin from loopback)
 const BRAIN = 'http://127.0.0.1:4101';
@@ -102,34 +103,44 @@ test('ap.veraldar.org on a phone: pair, end to end, type, talk, hear, same turns
   const phone = await ctx.newPage();
   let deviceId = '';
   try {
-    // ---- pair: the box mints a one-use code (what the QR carries), the phone opens it
-    const code = await fetch(`${APP}/api/pair/code`, {
-      method: 'POST',
-      headers: { authorization: `Bearer ${ADMIN}`, 'content-type': 'application/json' },
-      body: JSON.stringify({ name: 'p1-proof (test, removed after)' }),
-    });
-    expect(code.status).toBe(200);
-    const { url } = (await code.json()) as { url: string };
-    expect(url.startsWith(`${AP}/pair#`)).toBe(true);
-    const t0 = Date.now();
-    await phone.goto(url);
-    await phone.waitForURL(`${AP}/`, { timeout: 60_000 });
-    deviceId = await phone.evaluate(() => String(JSON.parse(localStorage.getItem('bifrost.pin') || 'null')?.deviceId || ''));
-    expect(deviceId).toMatch(/^dev_/);
-    await expect(phone.getByTestId('roots')).toBeVisible({ timeout: 30_000 });
-    note(`paired ${deviceId} in ${Date.now() - t0} ms`);
-    // ---- the pinned channel: "end to end"
-    await expect(phone.getByTestId('pin-state')).toHaveAttribute('data-state', 'pinned', { timeout: 30_000 });
-    const via = await phone.evaluate(async () => {
-      const r = await fetch('/api/build', { cache: 'no-store' });
-      return { status: r.status, via: r.headers.get('x-bifrost-via'), body: await r.text() };
-    });
-    expect(via.status).toBe(200);
-    expect(via.via).toBe('pinned');
-    note(`pinned channel up; /api/build over it: ${via.body}`);
-    const probe = await phone.evaluate(async () => (await fetch('/api/token')).status);
-    expect(probe, 'voice is available to this device').toBe(200);
-    await shot(phone, '1-home-end-to-end');
+    if (!TAIL) {
+      // ---- pair: the box mints a one-use code (what the QR carries), the phone opens it
+      const code = await fetch(`${APP}/api/pair/code`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${ADMIN}`, 'content-type': 'application/json' },
+        body: JSON.stringify({ name: 'p1-proof (test, removed after)' }),
+      });
+      expect(code.status).toBe(200);
+      const { url } = (await code.json()) as { url: string };
+      expect(url.startsWith(`${AP}/pair#`)).toBe(true);
+      const t0 = Date.now();
+      await phone.goto(url);
+      await phone.waitForURL(`${AP}/`, { timeout: 60_000 });
+      deviceId = await phone.evaluate(() => String(JSON.parse(localStorage.getItem('bifrost.pin') || 'null')?.deviceId || ''));
+      expect(deviceId).toMatch(/^dev_/);
+      await expect(phone.getByTestId('roots')).toBeVisible({ timeout: 30_000 });
+      note(`paired ${deviceId} in ${Date.now() - t0} ms`);
+      // ---- the pinned channel: "end to end"
+      await expect(phone.getByTestId('pin-state')).toHaveAttribute('data-state', 'pinned', { timeout: 30_000 });
+      const via = await phone.evaluate(async () => {
+        const r = await fetch('/api/build', { cache: 'no-store' });
+        return { status: r.status, via: r.headers.get('x-bifrost-via'), body: await r.text() };
+      });
+      expect(via.status).toBe(200);
+      expect(via.via).toBe('pinned');
+      note(`pinned channel up; /api/build over it: ${via.body}`);
+      const probe = await phone.evaluate(async () => (await fetch('/api/token')).status);
+      expect(probe, 'voice is available to this device').toBe(200);
+      await shot(phone, '1-home-end-to-end');
+
+    } else {
+      await phone.goto(`${AP}/`);
+      await expect(phone.getByTestId('roots')).toBeVisible({ timeout: 30_000 });
+      const probe = await phone.evaluate(async () => (await fetch('/api/token')).status);
+      expect(probe, 'voice is available on the tailnet door').toBe(200);
+      await shot(phone, '1-home-tailnet');
+      note('tailnet door open, voice available');
+    }
 
     // ---- the voice-test session (made on first use by the app itself)
     await phone.evaluate(async () => {
@@ -181,15 +192,17 @@ test('ap.veraldar.org on a phone: pair, end to end, type, talk, hear, same turns
     const reply = (await msgs()).filter((m) => m.info.role === 'assistant').pop()!;
     note(`answer spoken: speaking ${speakAt - released} ms after release, ${heard.toFixed(1)} s played (${room.bytes ? `${room.bytes} bytes over the voice room` : 'over the pinned channel (the agent had left the room)'}); MAIN of voice-test said "${textOf(reply).slice(0, 80)}"`);
 
-    // ---- the same turns on the tailnet door
-    const t = await browser.newContext({ ...devices['Pixel 7'], storageState: { cookies: [], origins: [{ origin: TAILNET, localStorage: [{ name: 'bifrost-door', value: 'v2' }, { name: 'bifrost-first-turn', value: '1' }] }] } });
-    const home = await t.newPage();
-    await home.goto(`${TAILNET}/session/voice-test`);
-    await expect(home.getByText(tag, { exact: true })).toBeVisible({ timeout: 60_000 });
-    await expect(home.getByText(/two plus two|2 ?\+ ?2/i).last()).toBeVisible({ timeout: 30_000 });
-    await shot(home, '4-same-turns-on-8447');
-    note('the same typed and spoken turns are on :8447');
-    await t.close();
+    if (!TAIL) {
+      // ---- the same turns on the tailnet door
+      const t = await browser.newContext({ ...devices['Pixel 7'], storageState: { cookies: [], origins: [{ origin: TAILNET, localStorage: [{ name: 'bifrost-door', value: 'v2' }, { name: 'bifrost-first-turn', value: '1' }] }] } });
+      const home = await t.newPage();
+      await home.goto(`${TAILNET}/session/voice-test`);
+      await expect(home.getByText(tag, { exact: true })).toBeVisible({ timeout: 60_000 });
+      await expect(home.getByText(/two plus two|2 ?\+ ?2/i).last()).toBeVisible({ timeout: 30_000 });
+      await shot(home, '4-same-turns-on-8447');
+      note('the same typed and spoken turns are on :8447');
+      await t.close();
+    }
   } finally {
     // the test device goes: revoked by the box (admin), then out of the devices file
     if (deviceId) {

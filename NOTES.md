@@ -27,3 +27,10 @@
 - 23:56 STAGE A PROVEN: trunk-rtc-e2e GREEN on build; live-door.spec.ts PASS on real ap.veraldar.org (pair 1.6 s, pinned, typed 5.6 s, hold→talk 1.7 s, spoken STT ok, answer spoken 4.9 s after release, same turns on :8447). Screens in artifacts ap-door-*.png. Test devices removed from state/devices.json.
 - Found: voice agent refuses calls when the box is busy (cgroup load = whole login). Public door got its own agent hub-voice-agent (AGENT_NAME=bifrost-hub, AGENT_LOAD=off). :8447's rc-preview-agent still has the flaw → fix in stage B (one agent, AGENT_LOAD=off, both apps).
 - Owner's phone dev_ad128180 is in devices.json but must re-pair (new bridge DTLS key, pinned channel).
+- 23:59 :8447 checked the same way (PW_DOOR=tailnet): PASS (typed 7.4 s, hold→talk 1.1 s, spoken answer 5.3 s).
+- Owner pairing artifact: artifacts/ap-pair.html (one-use code, exp extended to 01:59). DELETE it once used (check state/devices.json codes[].used for the code created at /tmp/p1-owner-code-created) or at expiry.
+
+## NEXT (in order)
+1. Fix the 6 C5 review defects (see TODO above), tests for each, cargo test + tree-e2e.
+2. Twin check of the C5 fix: a deploy cuts sessions' turns; each gets its turn sent again in its own conversation (sim/acceptance/twin-up.sh).
+3. Stage B: hub-units.sh grows brain/librarian/cclive/tailnet app units; one voice agent (AGENT_LOAD=off) for both apps; YGG_ROOT_NAME=omarchy + YGG_PEERS_FROM=http://127.0.0.1:4503/_roots + YGG_PEER_TOKEN; switch script with health check + auto-rollback; linger (decided L12); deploy brain with C5 fix as part of it, when no owner turn runs.
