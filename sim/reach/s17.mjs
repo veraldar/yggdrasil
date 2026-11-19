@@ -187,7 +187,8 @@ try {
     turn = got[got.length - 1];
     must(got.length === 1, `${got.length} user messages with the question on lab`);
     const files = (turn.parts || []).filter((p) => p.type === 'file');
-    must(files.length === 1, `lab's message has ${files.length} file part(s): ${JSON.stringify((turn.parts || []).map((p) => ({ type: p.type, name: p.filename, len: (p.text || p.url || '').length })))}`);
+    const pieces = responses.filter((r) => r.url.includes('/api/file/upload')).map((r) => `${r.method} ${r.url.replace(/^.*\/api\/file\/upload\/?[^?]*/, '') || '(start)'} ${r.status}${r.via ? ' via ' + r.via : ''}`);
+    must(files.length === 1, `lab's message has ${files.length} file part(s) — the phone's upload: ${pieces.join(', ') || 'none'}`);
     const f = files[0];
     must(f.hash === pdf.sha256 && Number(f.size) === pdf.size, `file part ${JSON.stringify({ hash: f.hash, size: f.size, url: String(f.url).slice(0, 40) })} ≠ sha ${pdf.sha256.slice(0, 12)} size ${pdf.size}`);
     must(!String(f.url || '').startsWith('data:'), 'the file rode as a data: URL');
