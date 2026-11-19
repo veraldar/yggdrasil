@@ -11,7 +11,7 @@ test.use({ ...devices['Pixel 7'] });
 test.describe.configure({ mode: 'serial' });
 test.setTimeout(300_000);
 
-const OC = process.env.E2E_OC_URL || 'http://127.0.0.1:4101';
+const OC = process.env.E2E_OC_URL || 'http://127.0.0.1:4250'; // the twin (e2e/GUARD.md): never a silent live default
 const tag = Date.now().toString(36).slice(-5);
 const A = { name: `e2e-order-a-${tag}`, id: '' };
 const B = { name: `e2e-order-b-${tag}`, id: '' };
@@ -119,8 +119,9 @@ test('one status word: "working" while it works, "terminal" for a terminal\'s co
   const words = await page.locator('.oz-row .oz-st').allTextContents();
   expect(words.length).toBeGreaterThan(0);
   for (const w of words) expect(['working', 'terminal'], `status word "${w}"`).toContain(w);
-  // :8447 has terminal conversations continued here (the scratch ones): they say "terminal"
-  expect(words).toContain('terminal');
+  // a terminal's conversation says "terminal" — on the twin the runner makes one (verify-8447's
+  // runs had the owner's scratch conversations; the twin has none until we do)
+  if (process.env.E2E_TERMINAL_ROW === '1') expect(words).toContain('terminal');
   await idle(request, A.id);
   await page.goto('/');
   await expect(rowA.locator('.oz-st')).toHaveCount(0); // done: no word, nothing longer

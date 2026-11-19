@@ -14,7 +14,7 @@ export function voiceCommandsSpec(kind: string, wav: string) {
     page,
     request,
   }) => {
-    const pv = process.env.E2E_OC_URL || 'http://127.0.0.1:4101';
+    const pv = process.env.E2E_OC_URL || 'http://127.0.0.1:4250'; // the twin (e2e/GUARD.md)
     const MAIN = (
       (await (await request.get(`${pv}/session`)).json()) as { id: string; title: string }[]
     ).find((x) => x.title === '[MAIN]')!.id;

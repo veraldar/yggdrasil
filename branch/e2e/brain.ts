@@ -25,7 +25,13 @@ function envLocalBrain(): string | undefined {
 
 const LIVE_APP = !process.env.PW_BASE_URL || process.env.PW_BASE_URL.includes(':8080');
 
-export const OC =
-  process.env.E2E_OC_URL ||
-  process.env.OPENCODE_URL ||
-  (LIVE_APP ? 'http://127.0.0.1:4096' : envLocalBrain() || 'http://127.0.0.1:4096');
+/** phase 0 (plan G7.3): a live brain is never a silent default. The twin (:4250) is.
+ *  E2E_ALLOW_LIVE=1 is the explicit human override (a read-write run on live, on purpose). */
+const FALLBACK = LIVE_APP ? 'http://127.0.0.1:4096' : envLocalBrain() || 'http://127.0.0.1:4096';
+const NO_DEFAULT = process.env.E2E_OC_URL || process.env.OPENCODE_URL;
+export const OC = NO_DEFAULT || (process.env.E2E_ALLOW_LIVE === '1' ? FALLBACK : 'http://127.0.0.1:4250');
+if (!NO_DEFAULT && process.env.E2E_ALLOW_LIVE !== '1') {
+  // said once per worker, not per test — the runner always sets E2E_OC_URL, so this
+  // reaching a log means somebody ran a suite without a brain pinned
+  console.warn('[e2e] no E2E_OC_URL: defaulting to the twin :4250 (E2E_ALLOW_LIVE=1 to touch live)');
+}

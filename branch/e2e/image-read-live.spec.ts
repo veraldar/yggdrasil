@@ -11,7 +11,7 @@ test.setTimeout(150_000);
 type M = { info: { role: string; time: { completed?: number } }; parts: { type: string; text?: string }[] };
 
 test('a picture with text: MAIN reads it back', async ({ page, request }) => {
-  const oc = process.env.E2E_OC_URL || 'http://127.0.0.1:4101';
+  const oc = process.env.E2E_OC_URL || 'http://127.0.0.1:4250'; // the twin (e2e/GUARD.md)
   const MAIN = ((await (await request.get(`${oc}/session`)).json()) as { id: string; title: string }[]).find(
     (x) => x.title === '[MAIN]'
   )!.id;

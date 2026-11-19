@@ -10,7 +10,7 @@ test.use({ ...devices['Pixel 7'] });
 test.describe.configure({ mode: 'serial' });
 test.setTimeout(300_000);
 
-const BRAIN = process.env.TS_BRAIN || 'http://127.0.0.1:4101';
+const BRAIN = process.env.TS_BRAIN || 'http://127.0.0.1:4250'; // the twin (e2e/GUARD.md)
 const tag = Date.now().toString(36);
 const NAME = `e2e-who-${tag}`;
 let id = '';
