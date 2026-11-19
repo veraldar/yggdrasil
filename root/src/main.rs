@@ -1407,20 +1407,34 @@ fn context_harness_part(st: &AppState, id: &str, c: &context::Captured) -> Value
 /// MAIN got from it, the session_start/session_send parts that name it, and the session_read
 /// text. Locks only; never a take_events, never a persist.
 fn context_main_view(st: &AppState, id: &str) -> Response {
-    let sessions = st.sessions.lock().unwrap();
-    let Some(s) = sessions.get(id) else { return not_found(id) };
-    // MAIN: the newest [MAIN] session on this root
-    let main = sessions
-        .values()
-        .filter(|s| is_main_title(s.info["title"].as_str().unwrap_or_default()))
-        .max_by_key(|s| s.info["time"]["updated"].as_u64().unwrap_or(0));
-    let Some(m) = main else { return not_found("MAIN") };
-    let mid = m.info["id"].as_str().unwrap_or_default().to_string();
-    let tree_line = tree::card_line(st, id, s, 1);
-    let card = s.info["card"].clone();
-    let reports: Vec<Value> = m.inbox.iter().filter(|e| e["from"].as_str() == Some(id)).cloned().collect();
-    let briefs: Vec<Value> = m
-        .messages
+    // snapshot what we need under the lock, then release it: card_line and read take the
+    // sessions lock themselves (a reentrant .lock() on a std Mutex deadlocks the brain)
+    let (sid_info, main_row, main_inbox, main_messages) = {
+        let sessions = st.sessions.lock().unwrap();
+        let Some(s) = sessions.get(id) else { return not_found(id) };
+        // MAIN: the newest [MAIN] session on this root
+        let main = sessions
+            .values()
+            .filter(|s| is_main_title(s.info["title"].as_str().unwrap_or_default()))
+            .max_by_key(|s| s.info["time"]["updated"].as_u64().unwrap_or(0));
+        let Some(m) = main else { return not_found("MAIN") };
+        (
+            s.info.clone(),
+            m.info["id"].as_str().unwrap_or_default().to_string(),
+            m.inbox.clone(),
+            m.messages.clone(),
+        )
+    };
+    let mid = main_row;
+    let card = sid_info["card"].clone();
+    let tree_line = {
+        // card_line reads st.running (its own lock) and the Session it is handed — a minimal
+        // clone for it, not the shared map
+        let s = Session { info: sid_info.clone(), messages: Vec::new(), todo: Vec::new(), inbox: Vec::new() };
+        tree::card_line(st, id, &s, 1)
+    };
+    let reports: Vec<Value> = main_inbox.iter().filter(|e| e["from"].as_str() == Some(id)).cloned().collect();
+    let briefs: Vec<Value> = main_messages
         .iter()
         .filter(|msg| {
             msg["info"]["role"] == "user"
@@ -5055,6 +5069,38 @@ mod context_tests {
         assert_eq!(code, axum::http::StatusCode::OK);
         assert!(!raw.to_string().contains("sk-test-secret-0123456789"), "raw view is masked");
         assert!(raw.to_string().contains("abc123") == false || raw.to_string().contains("key"), "the seeded assignment is hidden or the marker word remains");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// G1 regression (found live on the twin): main_view must not deadlock. The handler
+    /// snapshots under the sessions lock and releases it BEFORE tree::read / card_line, which
+    /// take the same lock themselves — a std Mutex is not reentrant, and holding it across
+    /// those calls wedged the whole brain (every endpoint, not just this one).
+    #[tokio::test]
+    async fn main_view_never_deadlocks() {
+        let (st, dir) = ctx_app().await;
+        let main = new_session(&st, "[MAIN]", None, None, None, None)["id"].as_str().unwrap().to_string();
+        let sid = new_session(&st, "worker", Some(&main), None, None, None)["id"].as_str().unwrap().to_string();
+        // a capture must exist: main_view (and memory/harness) answer from st.ctx
+        let body = json!({ "model": "m", "messages": [
+            { "role": "user", "content": "build it" },
+            { "role": "assistant", "content": "done" },
+        ], "stream": true });
+        let (blocks, tools) = context::classify_body(&body);
+        let c = context::Captured {
+            at: now_ms(), step: 1, model: "m".into(), variant: String::new(), dialect: "anthropic".into(),
+            body, blocks, tools, dropped: context::Dropped::default(), harness: None,
+        };
+        st.ctx.lock().unwrap().put(sid.clone(), c);
+        let (code, v) = get(&st, &sid, "part=main_view").await;
+        assert_eq!(code, axum::http::StatusCode::OK, "main_view answers");
+        assert!(v["tree_line"].is_string(), "the tree line is there");
+        assert!(v["session_read"].as_str().is_some_and(|t| !t.is_empty()), "session_read rendered");
+        // and the brain is still alive for everything else (the deadlock took ALL endpoints)
+        let (code, _) = get(&st, &main, "part=summary").await;
+        assert_eq!(code, axum::http::StatusCode::OK);
+        let (code, _) = get(&st, &sid, "part=memory").await;
+        assert_eq!(code, axum::http::StatusCode::OK);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

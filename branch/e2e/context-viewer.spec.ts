@@ -10,10 +10,10 @@ import { type Page, devices, expect, test } from '@playwright/test';
 const S = `ctx-view-${Math.random().toString(36).slice(2, 8)}`;
 test.use({ ...devices['Pixel 7'] });
 
-async function brainSession(id: string): Promise<{ info: { time?: { updated?: number }; title?: string } }> {
+async function brainSession(id: string): Promise<{ time?: { updated?: number }; title?: string }> {
   const r = await fetch(`${OC}/session/${id}`);
   expect(r.ok).toBeTruthy();
-  return r.json();
+  return r.json(); // the brain returns the session info flat (no .info wrapper)
 }
 
 async function openSheet(page: Page) {
@@ -39,7 +39,7 @@ test('the context sheet: tabs, byte-truth, purity, no horizontal scroll', async 
   const sessions = (await (await fetch(`${OC}/session`)).json()) as Array<{ id: string; title: string }>;
   const row = sessions.find((s) => s.title === S);
   expect(row).toBeTruthy();
-  const before = (await brainSession(row!.id)).info.time?.updated;
+  const before = (await brainSession(row!.id))?.time?.updated;
 
   // the sheet: all 4 tabs render (Harness is harness-only; a root session on the
   // twin still shows the 3 core tabs)
@@ -81,6 +81,6 @@ test('the context sheet: tabs, byte-truth, purity, no horizontal scroll', async 
 
   // the sheet is pure: close it; the brain's time.updated is unchanged
   await page.getByTestId('ctx-close').tap();
-  const after = (await brainSession(row!.id)).info.time?.updated;
+  const after = (await brainSession(row!.id))?.time?.updated;
   expect(after).toBe(before);
 });
