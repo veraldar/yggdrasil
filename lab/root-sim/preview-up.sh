@@ -17,6 +17,23 @@ ART="$HOME/Work/root-coord-pwa/artifacts" # lib/artifacts.ts: the worktree's ../
 # the running unit's environment (upstream key included) — reused as is, a few keys set
 # (systemd quotes values with spaces, e.g. YGG_ROOT_NOTE: split like a shell would)
 mapfile -t ENVV < <(systemctl --user show "$UNIT" -p Environment --value | python3 -c 'import shlex,sys; print("\n".join(shlex.split(sys.stdin.read())))' | grep -vE '^(YGG_MODELS|YGG_VISION_MODELS|YGG_ARTIFACTS_DIR|YGG_EXTENSIONS|YGG_HARNESS_LIVE|YGG_OPENCODE_XDG_DATA|YGG_OPENCODE_XDG_CONFIG|YGG_HARNESS_HELPER|YGG_HARNESS_HELPER_TOKEN|YGG_HARNESS_RUNNER)=')
+# the unit gone (11-19: an agent's `pkill -f yggdrasil` took every brain down, and a transient unit
+# keeps no environment once it is gone): the copy saved at the last start, else brain-up.sh's base
+if [ "${#ENVV[@]}" -le 10 ] && [ -s "$UI/brain.env" ]; then
+  mapfile -t ENVV < <(grep -vE '^(YGG_MODELS|YGG_VISION_MODELS|YGG_ARTIFACTS_DIR|YGG_EXTENSIONS|YGG_HARNESS_LIVE)=' "$UI/brain.env")
+  echo "environment: from $UI/brain.env (the unit was gone)"
+elif [ "${#ENVV[@]}" -le 10 ]; then
+  case "$NAME" in preview) PORT0=4101 ;; ui) PORT0=4191 ;; *) PORT0= ;; esac
+  [ -n "$PORT0" ] || { echo "no environment read from $UNIT"; exit 1; }
+  mapfile -t ENVV < <(set -a; . "$HOME/.config/yggdrasil/yggdrasil.env"; set +a
+    printf '%s\n' "YGG_UPSTREAM_BASE_URL=$YGG_UPSTREAM_BASE_URL" "YGG_UPSTREAM_API_KEY=$YGG_UPSTREAM_API_KEY" \
+      "YGG_UPSTREAM_STYLE=${YGG_UPSTREAM_STYLE:-anthropic}" "YGG_UPSTREAM_MODEL=glm-5.3-flash" "YGG_MAX_TOKENS=16384" \
+      "YGG_THINK_HIGH=8192" "YGG_DEFAULT_VARIANT=high" "YGG_VOICE=1" "YGG_LISTEN=127.0.0.1:$PORT0" "YGG_DATA_DIR=$UI/data" \
+      "YGG_PROJECT_DIR=$UI/work" "YGG_MAX_INFLIGHT=5" "YGG_WAKE_DEBOUNCE_MS=4000" "YGG_PROFILES=$UI/agents.json" \
+      "YGG_ROOT_NAME=omarchy-$NAME" "HOME=$HOME" "VIRTUAL_ENV=$HOME/.cache/root-sim/_venv" \
+      "PATH=$HOME/.local/bin:$HOME/.local/share/mise/installs/node/latest/bin:$HOME/.local/share/mise/installs/opencode/latest:$HOME/.local/share/mise/installs/codex/latest/bin:$HOME/.cache/root-sim/_venv/bin:/usr/local/bin:/usr/bin:/bin")
+  echo "environment: rebuilt from brain-up.sh's base (the unit was gone, no saved copy)"
+fi
 ENVV+=("YGG_MODELS=glm-5.3-flash,glm-5.3,glm-5.2" "YGG_VISION_MODELS=glm-5.3-flash" "YGG_ARTIFACTS_DIR=$ART")
 [ "${#ENVV[@]}" -gt 10 ] || { echo "no environment read from $UNIT"; exit 1; }
 
@@ -96,9 +113,12 @@ PY
 systemctl --user stop "$UNIT" 2>/dev/null || true
 install -m755 "$BIN" "$UI/bin/yggdrasil"
 mkdir -p "$ART"
-args=(--user --unit "$UNIT" --collect
+# a stray kill (any agent has full access) brings it back in 2 s; `systemctl stop` still stops it
+args=(--user --unit "$UNIT" --collect -p Restart=always -p RestartSec=2
   -p "StandardOutput=append:$UI/brain.log" -p "StandardError=append:$UI/brain.log")
 for e in "${ENVV[@]}"; do args+=(--setenv="$e"); done
+# saved for a start after the unit is gone (0600: the upstream key is in it)
+(umask 077; printf '%s\n' "${ENVV[@]}" > "$UI/brain.env")
 systemd-run "${args[@]}" "$UI/bin/yggdrasil" >/dev/null
 for _ in $(seq 1 40); do curl -sf -m 2 "$B/root" >/dev/null && break; sleep 0.5; done
 curl -sf -m 5 "$B/root" | python3 -c 'import json,sys; d=json.load(sys.stdin); print("'"$NAME"' brain up:", [(m["id"], m["tier"]) for m in d["models"]])'
