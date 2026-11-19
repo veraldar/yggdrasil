@@ -5,6 +5,7 @@
 #   BIFROST_AUTH=devices, one seeded device; roots.json names lab as a joined root) →
 #   Playwright on a Pixel 7: branch/e2e/roots-sheet.spec.ts.
 # Needs: root/target/release/yggdrasil and branch/.next (npm run build) of this tree.
+# First, without a phone: a pending join survives two app restarts (joins-pending.json).
 # Ports 18510-18520 (P3_PORT_BASE moves them). State under ~/.cache/p3-app-tmp (STATE=…).
 # Stops only what it started, by PID. SHOTS=<dir> keeps the screenshots.
 set -euo pipefail
@@ -44,7 +45,7 @@ brain() { # name port peers [extra env…]
 brain home "$HOMEP" "lab=http://127.0.0.1:$LABP"
 brain lab "$LABP" "home=http://127.0.0.1:$HOMEP" YGG_ROOT_MAIN=1 YGG_HOME_ROOT=home
 
-# one paired phone (devices.json: an access token for the region `next start` sees, "unknown"),
+# one paired phone (devices.json: an access token for its region — server.mjs stamps the peer: loopback),
 # and lab as a root this hub joined (roots.json — the remove marks it revoked)
 TOKEN=$(head -c 48 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 40)
 python3 - "$STATE" "$TOKEN" <<'PY'
@@ -54,9 +55,9 @@ now = int(time.time() * 1000)
 far = now + 7 * 86400_000
 iso = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
 h = lambda s: hashlib.sha256(s.encode()).hexdigest()
-dev = {"id": "dev_e2e0root", "name": "pixel", "created": iso, "revoked": False, "region": "unknown",
-       "lastRegion": "unknown", "regionChanges": 0, "lastSeen": iso, "refreshHash": h("refresh-" + tok),
-       "refreshExp": far, "prevRefresh": [], "access": [{"hash": h(tok), "exp": far, "region": "unknown"}],
+dev = {"id": "dev_e2e0root", "name": "pixel", "created": iso, "revoked": False, "region": "loopback",
+       "lastRegion": "loopback", "regionChanges": 0, "lastSeen": iso, "refreshHash": h("refresh-" + tok),
+       "refreshExp": far, "prevRefresh": [], "access": [{"hash": h(tok), "exp": far, "region": "loopback"}],
        "roots": ["lab"]}
 for name, body in (("devices.json", {"version": 2, "killEpoch": 0, "devices": [dev], "codes": []}),
                    ("roots.json", {"version": 1, "roots": [{"id": "lab", "name": "lab", "os": "linux",
@@ -68,20 +69,29 @@ for name, body in (("devices.json", {"version": 2, "killEpoch": 0, "devices": [d
     os.chmod(p, 0o600)
 PY
 
-(
-  cd "$B"
-  exec env -i PATH="$PATH" HOME="$STATE/app" NODE_ENV=production \
-    BIFROST_AUTH=devices BIFROST_DEVICES_FILE="$STATE/devices.json" \
-    BIFROST_MAIN_TITLE='[MAIN]' OPENCODE_URL="http://127.0.0.1:$HOMEP" \
-    ARTIFACTS_DIR="$STATE/artifacts-app" ARTIFACTS_MAIN_DIR= YGG_PEER_TOKEN="$PEER" \
-    node node_modules/next/dist/bin/next start -p "$APP" -H 127.0.0.1
-) >"$STATE/app.log" 2>&1 &
-pids+=($!)
+app_up() { # (re)start the app; its PID in $APP_PID
+  (
+    cd "$B"
+    exec env -i PATH="$PATH" HOME="$STATE/app" NODE_ENV=production \
+      BIFROST_AUTH=devices BIFROST_DEVICES_FILE="$STATE/devices.json" \
+      BIFROST_MAIN_TITLE='[MAIN]' OPENCODE_URL="http://127.0.0.1:$HOMEP" \
+      ARTIFACTS_DIR="$STATE/artifacts-app" ARTIFACTS_MAIN_DIR= YGG_PEER_TOKEN="$PEER" \
+      PORT="$APP" HOST=127.0.0.1 node server.mjs
+  ) >>"$STATE/app.log" 2>&1 &
+  APP_PID=$!
+  pids+=("$APP_PID")
+  for _ in $(seq 60); do
+    curl -sf -o /dev/null "http://127.0.0.1:$APP/" && return 0
+    sleep 0.5
+  done
+  echo "the app did not come up — $STATE/app.log" >&2
+  return 1
+}
+app_up
 
 up=0
 for _ in $(seq 60); do
-  if curl -sf -o /dev/null "http://127.0.0.1:$HOMEP/root" && curl -sf -o /dev/null "http://127.0.0.1:$LABP/root" &&
-    curl -sf -o /dev/null "http://127.0.0.1:$APP/"; then
+  if curl -sf -o /dev/null "http://127.0.0.1:$HOMEP/root" && curl -sf -o /dev/null "http://127.0.0.1:$LABP/root"; then
     up=1
     break
   fi
@@ -89,7 +99,32 @@ for _ in $(seq 60); do
 done
 [ "$up" = 1 ] || { echo "rig not up — logs in $STATE" >&2; tail -3 "$STATE"/*.log >&2; exit 1; }
 
+# ---- pending joins outlive an app restart (joins-pending.json: mode 600, no raw secret) ----
+A="http://127.0.0.1:$APP"
+CK="Cookie: bifrost_device=$TOKEN"
+J=$(curl -sf -X POST -H 'Content-Type: application/json' -d '{"name":"mac","os":"macos","host":"mac.local"}' "$A/api/roots/join")
+REQ=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["req"])' <<<"$J")
+SEC=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["secret"])' <<<"$J")
+for _ in $(seq 20); do [ -f "$STATE/joins-pending.json" ] && break; sleep 0.2; done
+check() { if [ "$2" = "$3" ]; then echo "ok   $1"; else echo "FAIL $1: got $2, want $3" >&2; exit 1; fi; }
+check "joins-pending.json mode" "$(stat -c %a "$STATE/joins-pending.json")" 600
+check "joins-pending.json holds no raw join secret" "$(grep -c "$SEC" "$STATE/joins-pending.json" || true)" 0
+kill "$APP_PID"; wait "$APP_PID" 2>/dev/null || true
+app_up
+check "after a restart the joiner still polls pending" \
+  "$(curl -s -o /dev/null -w '%{http_code}' -H "x-join-secret: $SEC" "$A/api/roots/join/$REQ")" 202
+check "after a restart the phone still sees it pending" \
+  "$(curl -s -H "$CK" "$A/api/roots/join/$REQ/view" | python3 -c 'import json,sys; print(json.load(sys.stdin)["status"])')" pending
+check "it can still be refused" "$(curl -s -o /dev/null -w '%{http_code}' -X POST -H "$CK" "$A/api/roots/join/$REQ/refuse")" 200
+kill "$APP_PID"; wait "$APP_PID" 2>/dev/null || true
+app_up
+check "a refusal outlives a restart too" \
+  "$(curl -s -H "x-join-secret: $SEC" "$A/api/roots/join/$REQ" | python3 -c 'import json,sys; print(json.load(sys.stdin)["status"])')" refused
+check "the console (no device) gets a plain 403 from /api/roots, not a pairing 401" \
+  "$(curl -s -o /dev/null -w '%{http_code}' "$A/api/roots")" 403
+
+# ---- the phone ----
 cd "$B"
-PW_BASE_URL="http://127.0.0.1:$APP" PW_HOME_BRAIN="http://127.0.0.1:$HOMEP" PW_LAB_BRAIN="http://127.0.0.1:$LABP" \
+PW_BASE_URL="$A" PW_HOME_BRAIN="http://127.0.0.1:$HOMEP" PW_LAB_BRAIN="http://127.0.0.1:$LABP" \
   PW_DEVICE_TOKEN="$TOKEN" PW_RIG_STATE="$STATE" PW_SHOTS="$SHOTS" E2E_OC_URL="http://127.0.0.1:$HOMEP" \
   npx playwright test -c playwright.roots-sheet.config.ts "$@"

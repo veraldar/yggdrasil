@@ -332,7 +332,11 @@ export function RootsSheet({
         </h2>
         {row && (
           <>
-            <span className="flex-none text-[10px]" style={dim} data-testid="roots-state">
+            <span
+              className="flex-none text-[10px]"
+              style={{ color: row.reachable ? 'var(--oz-success)' : 'var(--oz-dim)' }}
+              data-testid="roots-state"
+            >
               {stateOf(row)}
             </span>
             <button
