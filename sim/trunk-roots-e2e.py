@@ -60,8 +60,14 @@ def free_port(udp=False):
             return p
 
 
+PEER_TOK = ""   # set in main(): a brain-to-brain call through a tunnel carries it, as the brains' own do (L8)
+
+
 def call(port, method, path, body=None, headers=None, timeout=30, raw=None):
-    """(status, parsed json or raw text)"""
+    """(status, parsed json or raw text). A call through a WireGuard node (/_wg/…) with no headers
+    given carries the peer token: every brain refuses a call from another root without it (L8)."""
+    if headers is None and path.startswith("/_wg/") and PEER_TOK:
+        headers = {"x-ygg-peer": PEER_TOK}
     data = raw if raw is not None else (json.dumps(body).encode() if body is not None else None)
     h = {"content-type": "application/json", **(headers or {})}
     r = urllib.request.Request(f"http://127.0.0.1:{port}{path}", data=data, method=method, headers=h)
@@ -176,7 +182,9 @@ def main():
     mock_p, home_p, mac_p, br_p, rl_p, peer_p, ap_p = (free_port() for _ in range(7))
     hub_wg, mac_wg, rogue_wg, thief_wg, lab_wg, lab_p = (free_port() for _ in range(6))
     hub_udp, relay_udp, mac_udp, mac_pipe, rogue_udp, rogue_pipe, thief_udp, thief_pipe, lab_udp, lab_pipe = (free_port(True) for _ in range(10))
+    global PEER_TOK
     secret, peer_tok = os.urandom(16).hex(), "e2e-peer-" + os.urandom(6).hex()
+    PEER_TOK = peer_tok
     raw_phone, raw_other = "bfnd-" + os.urandom(18).hex(), "bfnd-" + os.urandom(18).hex()
     sha = lambda s: hashlib.sha256(s.encode()).hexdigest()
 
@@ -322,7 +330,7 @@ rootlink = "127.0.0.1:{tap.port}"
             check("home → mac: /_wg/mac/root answered by the mac brain (inside WireGuard)", st == 200 and isinstance(v, dict) and v.get("name") == "mac", (st, v))
             st, v = call(mac_wg, "GET", "/_wg/local/root")
             check("mac → home: /_wg/local/root answered by the home brain (inside WireGuard)", st == 200 and isinstance(v, dict) and v.get("name") == "home", (st, v))
-            st, v = call(mac_wg, "POST", "/_wg/local/tree/report", {"proxy": "nope", "event": {}})
+            st, v = call(mac_wg, "POST", "/_wg/local/tree/report", {"proxy": "nope", "event": {}}, {})
             check("a report without x-ygg-peer is refused by home (the header is not invented)", st == 401, (st, v))
             st, v = call(mac_wg, "POST", "/_wg/local/tree/report", {"proxy": "nope", "event": {}}, {"x-ygg-peer": peer_tok})
             check("…and with it, it passes the token check (unknown proxy → 404)", st == 404, (st, v))

@@ -13,15 +13,15 @@ Build with `TMPDIR=~/.cache/p3-tmp` (/tmp is a shared 16 GB tmpfs, near full). R
 - B7b merged from p3-search (librarian_search roots:"all", POST /ext/{name}/call peer-only, fallback text search)
 - tree-next 4a5f7244 merged
 
+- installer: rootjoin.py brain-env writes YGG_ROOT_MAIN=1 + YGG_HOME_ROOT (checked by hand; join-test.sh is red BEFORE p3 too:
+  join.sh downloads bifrost-net from GitHub, the test gives it none — P4's, reported)
+- 10 roots tests; cargo test 126 green; sim/tree-e2e.py GREEN; sim/trunk-roots-e2e.py GREEN (its tunnel probes now send the token)
+
 ## Half done
 - p3-app: WIP commit c3adaa1c (sheet, routes, tag) — sub-agent cut by the usage limit; resumed
 
 ## Next
-1. rootjoin.py brain-env: YGG_ROOT_MAIN=1 + YGG_HOME_ROOT=<hub>; trunk-full-joiner.py the same
-2. Rust tests: ensure_main_creates_one_and_only_one, learned_root_gets_one_main_proxy, adopt_is_idempotent_and_keeps_report_to,
-   removed_root_archives_its_proxies, gate_refuses_no_token_and_wrong_token, hops_past_two_refused, relay refused remote,
-   owner_typing_into_root_main_is_an_owner_turn_but_session_send_is_not
-3. cargo test green; trunk-full-e2e.sh + trunk-roots-e2e.py still green
-4. S10 + S18 in the trunk-full rig (new spec steps), Pixel-7 screenshots
-5. independent review of the diff (sub-agent), then report to MAIN
-6. omarchy-lab (old public brain) only after P1 reports stage B done (home renamed `omarchy`)
+4. merge p3-app when its agent reports; npm run build; sim/trunk-full-e2e.sh green
+5. S10 + S18 in the trunk-full rig (new spec steps), Pixel-7 screenshots
+6. independent review of the diff (sub-agent), then report to MAIN
+7. omarchy-lab (old public brain) only after P1 reports stage B done (home renamed `omarchy`)
