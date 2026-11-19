@@ -167,7 +167,7 @@ if [ $BUILD = 1 ]; then
     (cd "$ROOT" && git ls-files -co --exclude-standard -z | tar --null -cf - -T -) | tar -xf - -C "$SRC"
   fi
   printf '%s\n' "$DESCRIBE" >"$CACHE/describe"
-  if [ $DIRTY = 0 ]; then git -C "$ROOT" rev-parse HEAD >"$CACHE/commit"; else echo dirty >"$CACHE/commit"; fi
+  if [ $DIRTY = 0 ]; then git -C "$ROOT" rev-parse HEAD >"$CACHE/commit"; else echo "dirty-$(date +%s)" >"$CACHE/commit"; fi
   EPOCH=$(git -C "$ROOT" log -1 --format=%ct); printf '%s\n' "$EPOCH" >"$CACHE/epoch"
 else
   [ -d "$SRC" ] && [ -x "$CACHE/target-bullseye/root/release/yggdrasil" ] && [ -d "$CACHE/app/standalone" ] || die "--no-build: nothing built yet"
@@ -206,7 +206,9 @@ fi
 # here; the signing key never leaves this machine. --no-build reuses them when they were built from this commit.
 MAC=$CACHE/mac MREM=.cache/yggdrasil-release-mac
 if [ $BUILD = 1 ]; then rm -rf "$MAC"; fi
-if [ $BUILD = 1 ] && [ -n "$MAC_HOST" ]; then
+# --no-build --mac-host: the Mac part alone, from the same cached sources, when it is not there for this build
+if [ -n "$MAC_HOST" ] && { [ $BUILD = 1 ] || [ "$(cat "$MAC/commit" 2>/dev/null)" != "$(cat "$CACHE/commit")" ]; }; then
+  rm -rf "$MAC"
   say "macOS arm64: yggdrasil + bifrost-net (root build), cargo on $MAC_HOST (~/$MREM)"
   [ "$(ssh -o BatchMode=yes -o ConnectTimeout=15 "$MAC_HOST" 'uname -sm')" = "Darwin arm64" ] || die "$MAC_HOST: not an Apple-silicon Mac, or ssh does not answer"
   tar -C "$SRC" -cf - root trunk | ssh -o BatchMode=yes "$MAC_HOST" "rm -rf ~/$MREM/src && mkdir -p ~/$MREM/src && tar -xf - -C ~/$MREM/src" ||
