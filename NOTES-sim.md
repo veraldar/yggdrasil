@@ -55,7 +55,28 @@ Brain: `CARGO_TARGET_DIR=/home/dweeb_xyz/.cache/p2-reach/target cargo build --re
   Both rigs take APP_DIR=<built app> (default branch/). Drivers: sim/reach/{s16,s17}.mjs + rig-lib.mjs.
   sim/reach/cc_model.py = the scripted model for lab's real Claude Code; joiner --brain-env.
 
+## Results (p2-reach ac6ecf28 merged: brain + app; logs under sim-tmp/)
+- Defaults on the merged app: trunk-full GREEN 19/19 (55 s), trunk-rtc GREEN 10/10 (50 s).
+- S16 (s16-lab-3.log, 194 s): hands-free on lab 5/5 PASS (words once on lab, modality voice, the
+  answer spoken: 1.9 MB of room audio = the box's TTS bytes, STT 88 % lab's reply; still once 20 s
+  later). Hold: words once PASS; modality FAIL; spoken FAIL — the CONTROL on a local session
+  (s16-home-2.log) fails the same "spoken" step: app behaviour, not package 2.
+- S17 (s17-run4.log, 30 s, S17_HARNESS_UPLOAD=1): S17.4 FAIL (the phone's upload); everything after
+  PASS on the harness upload: lab pulled 6.1 MiB from home over WireGuard (a whole-file call through
+  the tunnel → 502 "body over 4194304 bytes", a 1 MiB piece → 200), the real Claude Code got the path,
+  its Read sent the model the exact PDF (6395995 bytes, sha equal), marker named, marker.html written,
+  the phone tapped /api/artifact/marker.html?root=lab&session=… → 200 text/html, marker on the page.
+
 ## Findings
+- APP (p2-reach-app): the phone's upload over the pinned channel fails on a piece, intermittently:
+  run 2 piece 2, run 4 piece 5 → 500 from Next before the route runs ("TypeError: Response body
+  object should not be disturbed or locked … fromNodeNextRequest … api/file/upload/[upload]/route").
+  The same three 1 MiB PUTs straight to the app on loopback pass, devices AND tailnet mode → it is the
+  trunk path (phone SW → pinned data channel → bridge → server.mjs). Then the composer sends the
+  question WITHOUT the file when send is tapped while/after the upload fails (runs 2 and 4); when the
+  error shows first it reads "could not send report.pdf (500)" (run 3).
+- Brain wording: the harness line is "[attached: NAME (MIME, SIZE) — path — open it with your file
+  tools]" (files.rs:692); the contract said "[attached by the owner: …]".
 - S16 hold (push to talk, text mode) on a SESSION page: the words reach lab once (PASS), but
   (a) the agent marks the turn `modality: voice` only in hands-free (agent.py `voice = mode == "free"`)
       — run 1 without "over": modality absent; and a hold whose speech ends in "over" is committed as a
@@ -68,5 +89,5 @@ Brain: `CARGO_TARGET_DIR=/home/dweeb_xyz/.cache/p2-reach/target cargo build --re
   the scripted model answers the compaction calls "OK."; harmless here, worth knowing for real runs.
 
 ## Half done / next
-- S17 runs (run 1 died on a driver bug, fixed); S16 rerun with one phone launch per way.
-- Then: rerun trunk-full + trunk-rtc default scenarios on the merged app (stay green?).
+- S17 strict (no S17_HARNESS_UPLOAD) goes green only when the phone's pinned-channel upload is fixed.
+- S16 hold: needs a product decision (should a held turn be voice + spoken on a session page?).
