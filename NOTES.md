@@ -43,8 +43,11 @@ never from this one — bash reads scripts as it goes, an edit here breaks a run
 - rehearsal 1 running on a TEMP merge (p4-run2 detached: p4-release + p4-win)
 
 ## 11-20 noon — lead's instructions (L13–L17; the owner left decisions to the lead)
-- the Windows helper is gone; I finish p4-win myself. L15: the model page (done: fc887457+ in p4-win,
-  bootstrap-test 32/32; wine test running; independent review running)
+- the Windows helper is gone; I finish p4-win myself. L15: the model page done in p4-win.
+- independent review of p4-win: 9 findings (2 high: non-ASCII user name / wsl notices broke the wslpath round
+  trip) — all fixed in p4-win ("win + join.sh: fixes from the independent review"), incl. join.sh bin/start|stop
+  stale pid after reboot (shared file: Linux + Mac too). bootstrap-test 32/32; stale-pid test /tmp/p4-holdtest.sh ok;
+  wine test rerun pending
 - then: merge p4-win → p4-release, rehearsal 2 on the real merge (+ Linux rig OT_DIST, Mac check, wine on its exe),
   report the branch to P1 (P1 merges + deploys)
 - v0.9.1 DRAFT only after P1 says packages 2 and 3 are merged and live; then S11 vs the draft, Mac M4–M8 (real Mac,
