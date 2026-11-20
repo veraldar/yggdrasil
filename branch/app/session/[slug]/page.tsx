@@ -51,6 +51,7 @@ import { clearAsked, ensureNotifyPermission, markAsked, notifyReply } from '@/li
 import { PENDING_TTL_MS } from '@/lib/pending-ttl';
 import { markRead } from '@/lib/read';
 import { lastHeard, markHeard } from '@/lib/heard';
+import { type Held, heldReply } from '@/lib/held-reply';
 import {
   DOOR_KEY,
   FIRST_TURN_KEY,
@@ -2373,7 +2374,7 @@ export default function SessionView({
   // here, once: the completed reply to the spoken user message that landed after the press
   // (the brain marks it `voice`; a typed message never is, so it is never spoken for a hold
   // that caught nothing). The written reply stays on screen as always.
-  const heldRef = useRef<{ before: number; user?: string } | null>(null);
+  const heldRef = useRef<Held | null>(null);
   useEffect(() => {
     const h = heldRef.current;
     if (!h) return;
@@ -2381,25 +2382,9 @@ export default function SessionView({
       heldRef.current = null; // hands-free came on meanwhile: its cycle speaks the reply
       return;
     }
-    let ui = h.user ? msgs.findIndex((m) => m.id === h.user) : -1;
-    if (ui < 0) {
-      ui = msgs.findIndex(
-        (m) =>
-          m.role === 'user' &&
-          m.modality === 'voice' &&
-          m.time > h.before &&
-          !m.queued &&
-          !m.from &&
-          !m.auto
-      );
-      if (ui < 0) return;
-      h.user = msgs[ui].id;
-    }
-    const u = msgs[ui];
-    const after = msgs.slice(ui + 1).filter((m) => m.role === 'assistant' && m.text.trim());
-    // its own reply (the message it answers); a brain that does not say: the next one
-    const a = after.find((m) => m.parent && m.parent === u.id) || after.find((m) => !m.parent);
-    if (!a || a.done === false) return;
+    const { user, reply: a } = heldReply(msgs, h);
+    if (user) h.user = user;
+    if (!a) return;
     heldRef.current = null;
     if (a.time <= lastHeard(slug)) return; // the first-turn walk already said it
     diagEvent('voice', 'held turn: its reply is spoken');
