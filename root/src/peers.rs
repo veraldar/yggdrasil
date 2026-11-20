@@ -62,6 +62,9 @@ pub struct Peers {
     pub failed: Mutex<HashMap<String, u64>>,
     /// name → lists in a row the learned root was missing from (`forget_unlisted`)
     pub absent: Mutex<HashMap<String, u32>>,
+    /// the roots the owner approved with "Same as the home root": they may ask this root for its
+    /// model settings (roots.rs `get_model`; kept in the data dir)
+    pub shares: Mutex<HashSet<String>>,
 }
 
 /// Work passed from root to root more often than this is refused (L6): two MAINs can never hand
@@ -179,6 +182,7 @@ impl Peers {
             removed: Mutex::new(HashSet::new()),
             failed: Mutex::new(HashMap::new()),
             absent: Mutex::new(HashMap::new()),
+            shares: Mutex::new(HashSet::new()),
         }
     }
 
