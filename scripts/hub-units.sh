@@ -433,6 +433,7 @@ setenv() {
 # prints a value
 wg_files() {
   local roots=$HUB/state/roots.json
+  umask 077 # brain.env holds the model key: its rewritten copy is never readable by others, not for a moment
   [ -f "$CONF/wg-hub.key" ] || "$HUB/current/bin/bifrost-net" wg-key "$CONF/wg-hub.key" >/dev/null || return 1
   chmod 600 "$CONF/wg-hub.key"
   [ -s "$CONF/wg-hub.key.pub" ] || return 1
