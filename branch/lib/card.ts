@@ -10,6 +10,10 @@ export type Card = {
   summary?: string;
   needs?: string; // a question for the user ('' = none)
   updated?: number;
+  /** the computer (root) it runs on — set on a proxy of a session that lives on another root */
+  root?: string;
+  /** 'root-main' = the proxy of another root's MAIN (it lives in the roots sheet, not the list) */
+  kind?: string;
 };
 
 /** one row of the brain's GET /tree (via /api/tree) */

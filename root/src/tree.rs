@@ -284,6 +284,8 @@ pub async fn run(st: &AppState, caller: &str, name: &str, input: &Value) -> Out 
 }
 
 /// The tree tools on another root: start there, or act on a proxy (peers.rs). `None` = local.
+/// Work placed on another root carries its hop count; past `peers::MAX_HOPS` it is refused (L6),
+/// and an approval never travels to another root either.
 async fn run_remote(st: &AppState, caller: &str, name: &str, input: &Value) -> Option<Out> {
     let me = st.config.peers.me.clone();
     if name == "session_start" {
@@ -293,12 +295,19 @@ async fn run_remote(st: &AppState, caller: &str, name: &str, input: &Value) -> O
         if brief.trim().is_empty() {
             return Some(err("brief required".into()));
         }
+        if relays_approval(brief) {
+            return Some(err(RELAY_REFUSED.into()));
+        }
+        let hops = crate::roots::hops_here(st, caller) + 1;
+        if let Some(no) = crate::roots::hop_refusal(st, hops) {
+            return Some(err(no));
+        }
         let parts = match with_files(st, caller, input, brief) {
             Ok(p) => p,
             Err(o) => return Some(o),
         };
         let title = unique_title(&st.sessions.lock().unwrap(), title);
-        return Some(match crate::peers::start(st, caller, root, &title, profile, brief, parts, input["model"].as_str(), input["variant"].as_str()).await {
+        return Some(match crate::peers::start(st, caller, root, &title, profile, brief, parts, input["model"].as_str(), input["variant"].as_str(), hops).await {
             Ok(pid) => {
                 publish(st, "tree.updated", json!({ "sessionID": pid, "parentID": caller }));
                 ok(format!("STARTED, NOT DONE YET: id={pid} \"{title}\" ({profile}) on root {root} reports back when finished. Tell the user it is on its way (→ {title}); never say it is done."))
@@ -314,12 +323,25 @@ async fn run_remote(st: &AppState, caller: &str, name: &str, input: &Value) -> O
     Some(match name {
         "session_send" => {
             let msg = input["message"].as_str().unwrap_or_default();
+            if msg.trim().is_empty() && input["attach"] != true {
+                return Some(err("message required".into()));
+            }
+            if relays_approval(msg) {
+                return Some(err(RELAY_REFUSED.into()));
+            }
+            let hops = crate::roots::hops_here(st, caller) + 1;
+            if let Some(no) = crate::roots::hop_refusal(st, hops) {
+                return Some(err(no));
+            }
             let parts = match with_files(st, caller, input, msg) {
                 Ok(p) => p,
                 Err(o) => return Some(o),
             };
-            with_session(st, &target, |s| s.info["card"]["status"] = json!("working"));
-            match crate::peers::send(st, &target, &root, &rid, parts, caller).await {
+            with_session(st, &target, |s| {
+                s.info["card"]["status"] = json!("working");
+                s.info["asked_by"] = json!(caller); // a proxy with no parent: its answer goes to the asker
+            });
+            match crate::peers::send(st, &target, &root, &rid, parts, caller, hops).await {
                 Ok(()) => ok(format!("SENT, NOT DONE YET: id={target} on root {root} reports back when finished. Tell the user it is on its way; never say it is done.")),
                 Err(e) => err(e),
             }
@@ -337,7 +359,16 @@ async fn run_remote(st: &AppState, caller: &str, name: &str, input: &Value) -> O
             }
         }
         "session_close" => {
+            if st.sessions.lock().unwrap().get(&target).is_some_and(crate::roots::is_root_main) {
+                return Some(err(format!("that is {root}'s MAIN — it is never closed from another computer")));
+            }
             let reason = input["reason"].as_str().unwrap_or("closed");
+            // another root's own work (adopted, or placed there by a third root): closed here only
+            let theirs = st.sessions.lock().unwrap().get(&target).is_some_and(|s| s.info["card"]["adopted"] == true || s.info["card"]["placed_by"].is_object());
+            if theirs {
+                archive_family(st, &target, reason);
+                return Some(ok(format!("closed id={target} here; it is {root}'s own work and goes on there")));
+            }
             let _ = crate::peers::call(st, &root, "POST", &format!("/session/{rid}/close"), Some(json!({ "reason": reason })), 15).await;
             archive_family(st, &target, reason);
             ok(format!("closed id={target} (on root {root})"))
@@ -357,11 +388,13 @@ pub(crate) fn card_line(st: &AppState, id: &str, s: &Session, indent: usize) -> 
     let on = s.info["remote"]["root"].as_str().map(|r| format!(" on {r}"))
         .or_else(|| s.info["report_to"]["root"].as_str().map(|r| format!(" for root {r}")))
         .unwrap_or_default();
+    // another root's MAIN (roots.rs): named as what it is, not by the stand-in agent here
+    let who = if crate::roots::is_root_main(s) { "MAIN".to_string() } else { crate::profile_name_of(st, &s.info) };
     format!(
         "{}- \"{}\" [{}{on}, {}, {} ago] {}{} (id={id})",
         "  ".repeat(indent),
         title_of(s),
-        crate::profile_name_of(st, &s.info),
+        who,
         status,
         ago(s.info["time"]["updated"].as_u64().unwrap_or(0)),
         one_line(head, 160),
@@ -400,7 +433,7 @@ fn find(st: &AppState, caller: &str, input: &Value) -> Out {
 }
 
 /// A title unique by slug (the phone resolves sessions by title slug) and never MAIN's.
-fn unique_title(sessions: &HashMap<String, Session>, want: &str) -> String {
+pub(crate) fn unique_title(sessions: &HashMap<String, Session>, want: &str) -> String {
     let base = one_line(want, 80);
     let base = if base.is_empty() || crate::slug(&base) == "main" { "work".to_string() } else { base };
     let taken: HashSet<String> = sessions.values().map(|s| crate::slug(&title_of(s))).collect();
@@ -460,9 +493,14 @@ fn start(st: &AppState, caller: &str, input: &Value) -> Out {
     let variant = input["variant"].as_str().filter(|v| !v.is_empty());
     let info = crate::new_session(st, &title, Some(caller), Some(&profile), model, variant);
     let sid = info["id"].as_str().unwrap_or_default().to_string();
+    let hops = crate::roots::hops_here(st, caller);
     with_session(st, &sid, |s| {
         s.info["card"] = json!({ "topic": title, "brief": clip(brief, 600), "status": "working", "by": caller,
             "created": now_ms(), "updated": now_ms() });
+        // L6: work placed here from another root stays counted in what it starts here
+        if hops > 0 {
+            s.info["hops"] = json!(hops);
+        }
     });
     let parts = match with_files(st, caller, input, brief) {
         Ok(p) => p,
@@ -484,7 +522,7 @@ fn start(st: &AppState, caller: &str, input: &Value) -> Out {
 // The coordinator relayed "the owner said" until an agent outside every sandbox minted a key and
 // posted its code in a chat; these two checks make that move impossible rather than discouraged.
 
-const RELAY_REFUSED: &str = "a brief is your own words: never pass on the user's approval or \"the user said\" — permissions, keys, access and approvals are the user's to give, themselves, in the session that asks";
+pub(crate) const RELAY_REFUSED: &str = "a brief is your own words: never pass on the user's approval or \"the user said\" — permissions, keys, access and approvals are the user's to give, themselves, in the session that asks";
 
 /// Words that mark a question only the owner may answer.
 fn owner_only_question(q: &str) -> bool {
@@ -496,7 +534,7 @@ fn owner_only_question(q: &str) -> bool {
 }
 
 /// A message that carries the owner's approval second-hand.
-fn relays_approval(m: &str) -> bool {
+pub(crate) fn relays_approval(m: &str) -> bool {
     let m = m.to_lowercase();
     ["the user approves", "the owner approves", "user's approval", "owner's approval", "the user said yes", "the owner said yes",
         "the owner has approved", "the user has approved", "on the owner's say-so", "on the user's say-so", "their exact words",
@@ -964,11 +1002,22 @@ fn write_card(st: &AppState, sid: &str, ev: &Value) {
 }
 
 /// Where a finished turn reports.
+#[derive(Clone)]
 pub enum Target {
     /// a managing session on this root
     Local(String),
     /// the proxy of this session on the root that asked for it
     Peer { root: String, proxy: String },
+}
+
+impl Target {
+    pub fn same(&self, o: &Target) -> bool {
+        match (self, o) {
+            (Target::Local(a), Target::Local(b)) => a == b,
+            (Target::Peer { root: a, proxy: p }, Target::Peer { root: b, proxy: q }) => a == b && p == q,
+            _ => false,
+        }
+    }
 }
 
 /// Its managing parent, else the turn's origin when that one manages sessions here, else the
@@ -999,8 +1048,11 @@ pub fn accept_report(st: &AppState, proxy: &str, mut ev: Value) -> bool {
     let (parent, title) = {
         let sessions = st.sessions.lock().unwrap();
         let Some(s) = sessions.get(proxy).filter(|s| s.info["remote"].is_object()) else { return false };
-        (parent_of(s), title_of(s))
+        // a proxy with no parent (adopted, listed, the phone's): the session that asked through it
+        (parent_of(s).or_else(|| s.info["asked_by"].as_str().filter(|a| sessions.contains_key(*a)).map(String::from)), title_of(s))
     };
+    // home holds a copy of this work (placed between two other roots): it gets the report too
+    crate::roots::forward_home(st, proxy, &ev);
     ev["from"] = json!(proxy);
     ev["title"] = json!(title);
     ev["delivered"] = json!(false);
@@ -1021,6 +1073,13 @@ pub fn accept_report(st: &AppState, proxy: &str, mut ev: Value) -> bool {
 
 /// A turn of `sid` ended: digest it, card it, file the event with `parent`, wake per policy.
 pub fn on_turn_end(st: &AppState, sid: &str, target: Target, result: Result<Value, String>) {
+    on_turn_end_to(st, sid, vec![target], false, result)
+}
+
+/// The same, to every target. `forced`: the first target asked this turn from another root — it
+/// hears back even while this session still waits on its own sub-sessions (a MAIN asked "status?"
+/// answers, whatever runs under it).
+pub fn on_turn_end_to(st: &AppState, sid: &str, targets: Vec<Target>, forced: bool, result: Result<Value, String>) {
     // coalesced auto turns share one result: report each finished reply once
     if let Ok(m) = &result {
         let mid = m["info"]["id"].clone();
@@ -1047,28 +1106,35 @@ pub fn on_turn_end(st: &AppState, sid: &str, target: Target, result: Result<Valu
                 s.info["card"]["status"] = json!(fact_status(&f));
             }
         });
-        let ev = digest(&st, &sid, &f).await;
+        let mut ev = digest(&st, &sid, &f).await;
         write_card(&st, &sid, &ev);
-        let parent = match &target {
-            Target::Local(p) => p.clone(),
-            Target::Peer { root, proxy } => format!("{root}/{proxy}"),
-        };
-        eprintln!(
-            "TREE {} -> {}: {} / {} — {}",
-            sid,
-            parent,
-            ev["status"].as_str().unwrap_or("?"),
-            ev["relevance"].as_str().unwrap_or("?"),
-            ev["headline"].as_str().unwrap_or_default()
-        );
-        // a session still waiting on its own sub-sessions keeps its parent quiet
-        if ev["status"] == "working" && ev["relevance"] == "routine" {
-            publish(&st, "tree.updated", json!({ "sessionID": sid }));
-            return;
+        // L6: the hop count rides with the report, so the wake it causes keeps counting
+        let hops = crate::roots::hops_here(&st, &sid);
+        if hops > 0 {
+            ev["hops"] = json!(hops);
         }
-        match target {
-            Target::Local(p) => deliver(&st, &p, ev),
-            Target::Peer { root, proxy } => crate::peers::report(&st, &root, &proxy, ev).await,
+        for (i, target) in targets.into_iter().enumerate() {
+            let parent = match &target {
+                Target::Local(p) => p.clone(),
+                Target::Peer { root, proxy } => format!("{root}/{proxy}"),
+            };
+            eprintln!(
+                "TREE {} -> {}: {} / {} — {}",
+                sid,
+                parent,
+                ev["status"].as_str().unwrap_or("?"),
+                ev["relevance"].as_str().unwrap_or("?"),
+                ev["headline"].as_str().unwrap_or_default()
+            );
+            // a session still waiting on its own sub-sessions keeps its parent quiet
+            if ev["status"] == "working" && ev["relevance"] == "routine" && !(forced && i == 0) {
+                publish(&st, "tree.updated", json!({ "sessionID": sid }));
+                continue;
+            }
+            match target {
+                Target::Local(p) => deliver(&st, &p, ev.clone()),
+                Target::Peer { root, proxy } => crate::peers::report(&st, &root, &proxy, ev.clone()).await,
+            }
         }
     });
 }
@@ -1199,7 +1265,12 @@ fn wake(st: &AppState, parent: &str) {
         return;
     }
     let text = if door { door_wake_text(&events) } else { lead_wake_text(&events) };
-    with_session(st, parent, |s| s.info["card"]["wakes"] = json!(wakes + 1));
+    // L6: the wake carries the highest hop count of what it reports
+    let hops = events.iter().filter_map(|e| e["hops"].as_u64()).max().unwrap_or(0);
+    with_session(st, parent, |s| {
+        s.info["card"]["wakes"] = json!(wakes + 1);
+        s.info["wake_hops"] = json!(hops);
+    });
     let turn = Turn { parts: vec![text_part(&text)], modality: None, auto_turn: true, internal: true, origin: None, completes: None, from: None, digest_hint: Some(digest_hint_of(&events)) };
     match crate::submit(st, parent, turn) {
         Ok((msg, _, _)) => {

@@ -62,3 +62,20 @@ export async function deviceOf(req: Request): Promise<Device | null> {
   const gate = await checkAccess(token, regionOfReq(req));
   return gate.ok ? gate.device : null;
 }
+
+/**
+ * The roots sheet's gate (GET /api/roots and /api/roots/<root>/{sessions,adopt,remove}).
+ * Devices mode: a live DEVICE (deviceOf). The box console and the admin token — which the
+ * middleware lets through with no device — get a plain 403 there, never a `reauth` 401 (the
+ * console has no device to pair: a 401 would send its home page to /pair). Tailnet mode: the
+ * tailnet is the gate, as for every session route (middleware.ts) — the :8447 front door.
+ */
+export async function rootsGate(req: Request): Promise<'ok' | 401 | 403> {
+  if (process.env.BIFROST_AUTH !== 'devices') return 'ok';
+  if (await deviceOf(req)) return 'ok';
+  const expected = process.env.BIFROST_ADMIN_TOKEN || '';
+  const presented = bearerOf(req);
+  if (presented && expected && same(presented, expected)) return 403;
+  if (!presented && !cookieOf(req, 'bifrost_device') && adminOk(req)) return 403;
+  return 401;
+}

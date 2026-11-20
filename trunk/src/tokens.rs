@@ -107,6 +107,15 @@ impl TokenStore {
         }
     }
 
+    /// The tree's roots registry the app keeps beside the devices file (BIFROST_ROOTS_FILE wins,
+    /// as in the app's lib/roots.ts).
+    pub fn roots_file(&self) -> PathBuf {
+        match std::env::var("BIFROST_ROOTS_FILE") {
+            Ok(f) if !f.trim().is_empty() => PathBuf::from(f.trim()),
+            _ => self.path.with_file_name("roots.json"),
+        }
+    }
+
     fn with<T>(&self, f: impl FnOnce(&Snapshot) -> T) -> T {
         self.with_fresh(false, f)
     }

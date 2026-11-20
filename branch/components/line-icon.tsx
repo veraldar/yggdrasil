@@ -25,6 +25,13 @@ const ICONS = {
   log: ['M2.5 3.5h11', 'M2.5 6.5h11', 'M2.5 9.5h11', 'M2.5 12.5h6.5'],
   // context: a lens over lines — what the model was actually sent (G1)
   context: ['M5.5 2.5h8v8h-2.5', 'M2.5 5.5h8v8h-8z', 'M4.5 8h4M6.5 6v4'],
+  // roots: a trunk standing on the ground line, its roots spreading under it — every computer
+  roots: [
+    'M8 1.75v12.5',
+    'M2.25 6.25h11.5',
+    'M8 8.75c-2 0-4 1.25-5 4.5',
+    'M8 8.75c2 0 4 1.25 5 4.5',
+  ],
 } as const;
 
 export type LineIconName = keyof typeof ICONS;

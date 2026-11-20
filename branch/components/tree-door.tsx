@@ -20,7 +20,7 @@
  *              the words say so. Speaking: the rail breathes green. No sound
  *              at all: said in words, never a silent wait.
  *  Afterwards the front page carries the tree as crown + roots: the roots
- *  are the way to MAIN (components/roots.tsx, MAINFRAME-C 10-26). */
+ *  are the way to MAIN (components/main-bar.tsx, MAINFRAME-C 10-26). */
 import { useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { YggTree } from '@/components/ygg';
