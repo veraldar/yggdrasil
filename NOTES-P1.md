@@ -73,3 +73,4 @@
 - DEPLOY: scripts/hub-units.sh release → R3 id in /tmp/p1-release-id → ~/Work/tree-next/scripts/hub-units.sh deploy <R3> (CUTS MY TURN; log ~/.local/share/yggdrasil/hub/logs/switch.log)
 - AFTER: health; voice checks: live-door AP + tailnet back to back TWICE (the case that failed); remove test devices from state/devices.json; pairing link for the owner (check devices.json first; delete old ap-pair.html); work/AGENTS.md rule 2 → hub-units.sh deploy; P3's stage-B message (lead-next.md) if not sent; report to MAIN with commit hashes + strict-L16 default noted + reboot window question.
 - 23:15 DEPLOYED R3 20261120-2314-e05a27d9 (tree-next e05a27d9), health ok, build QmdTZgxcB-002AbLbBbuq. NEXT: voice checks ×2 both doors.
+- 23:41 voice fixes round 2 (presence by sid, serving/draining marks, app calls the serving agent) deployed: release 20261120-2341-a8b73cbf, units voice-agent+apps only. NEXT: live-door ×3 both doors.
