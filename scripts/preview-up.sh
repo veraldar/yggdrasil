@@ -18,6 +18,12 @@ TREE=$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)
 BIN=${1:-$TREE/root/target/release/yggdrasil}
 [ -x "$BIN" ] || { echo "no brain binary: $BIN (build it first: (cd $TREE/root && cargo build --release))"; exit 1; }
 ART="$HOME/Work/root-coord-pwa/artifacts" # lib/artifacts.ts: the worktree's ../artifacts
+# stage B (11-20): the :8447 / ap.veraldar.org brain is the persistent unit hub-brain, from a frozen
+# release. Starting the transient rootsim-preview beside it would fight it for :4101.
+if [ "$NAME" = preview ] && systemctl --user is-enabled -q hub-brain 2>/dev/null; then
+  echo "the home root's brain is hub-brain now (a frozen release). Deploy: scripts/hub-units.sh release, then scripts/hub-units.sh deploy <id> — the integrator only."
+  exit 1
+fi
 
 # run by an agent inside this brain (its shell lives in the brain's own unit): stopping the brain
 # would kill this script half-way and leave no brain (11-19 20:26) — go on in a unit of its own

@@ -246,8 +246,8 @@ health() {
   chk "ap.veraldar.org answers (HSTS)" "curl -sI -m 10 https://ap.veraldar.org/ | grep -qi strict-transport"
   for _ in $(seq 1 30); do tail -n 50 "$LOGS/bridge.log" | grep -q 'channel up' && break; sleep 1; done
   chk "bridge: channel to the access point up" "tail -n 50 $LOGS/bridge.log | grep -q 'channel up'"
-  for _ in $(seq 1 45); do grep -q 'registered worker' <(tail -n 200 "$LOGS/voice-agent.log") && break; sleep 1; done
-  chk "voice agent registered" "tail -n 200 $LOGS/voice-agent.log | grep -q 'registered worker'"
+  for _ in $(seq 1 60); do curl -sf -m 2 -o /dev/null http://127.0.0.1:18084/ && break; sleep 1; done
+  chk "voice agent up (its worker answers on :18084)" "curl -sf -m 5 http://127.0.0.1:18084/"
   return $ok
 }
 
@@ -283,9 +283,10 @@ switch() {
   systemctl --user restart hub-brain hub-librarian hub-cclive
   systemctl --user restart hub-app-tailnet
   for u in hub-voice-agent hub-app hub-bridge; do systemctl --user is-active -q "$u" || systemctl --user start "$u"; done
+  # the root's new name where the bridge reads it is already `omarchy` (bridge-public.toml [node])
   echo "-- health"
   if health; then
-    loginctl enable-linger "$USER" && echo "-- linger: $(loginctl show-user "$USER" -p Linger)"
+    loginctl enable-linger "$(id -un)" && echo "-- linger: $(loginctl show-user "$(id -un)" -p Linger)"
     echo "== STAGE B: switched, healthy"
     status
   else
@@ -322,11 +323,12 @@ deploy() {
   [ -d "$HUB/releases/$id" ] || die "no release $id"
   detach deploy "$id"
   prev=$(readlink "$HUB/current" || true)
+  if systemctl --user is-active -q hub-brain; then "$HOME/Work/tree-next/scripts/preview-backup.sh" || echo "backup failed — going on"; fi
   ln -sfn "$HUB/releases/$id" "$HUB/current"
   render
   # the brain drains in its ExecStop; the others restart at once
   for u in $ALL; do systemctl --user is-active -q "$u" && systemctl --user restart "$u"; done
-  if [ -n "$(systemctl --user is-active hub-brain 2>/dev/null | grep -x active)" ] && ! health; then
+  if systemctl --user is-active -q hub-brain && ! health; then
     echo "== deploy $id: health check failed — back to $prev"
     ln -sfn "$prev" "$HUB/current"
     for u in $ALL; do systemctl --user is-active -q "$u" && systemctl --user restart "$u"; done

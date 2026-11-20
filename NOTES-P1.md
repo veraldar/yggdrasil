@@ -51,3 +51,12 @@
   6. P2 message from lead-next.md (if ≤1 other package session running)
 - 12:20 steps 1–3 done: brain R2 live (4 cut turns resent once), hub-units deploy R2, tailnet-up (:8101 = hub-app-tailnet; rc-preview-pwa gone, way back tailnet-back). Both doors build x9449bAf62qkHlr_B9inB.
 - 12:25 S14 both doors PASS (mic); P1–P5 → fable; P2 message WAITING (P1+P4 running); owner pair link ap-pair.html until 15:20 (delete when used/expired); milestone posted to MAIN inbox. NEXT: stage B.
+
+## STAGE B (11-20 12:45)
+- L14 withdrawn (owner 12:19): no run cap. Lead sent P2, P5 itself; P3's stage-B message (lead-next.md "To P3") is MINE to send after stage B.
+- scripts/hub-units.sh: units hub-brain (drain in ExecStop, Restart=always), hub-librarian, hub-cclive, + existing hub-voice-agent/app/app-tailnet/bridge; `switch` (backup → drain → stop rootsim-preview + rc-preview-{librarian,cclive,agent} → enable+start hub units → health → linger; on failure stageb_back puts the transient units back), `stageb-back`, `health`, `deploy <id>` (brain too, health-based rollback).
+- ~/.config/yggdrasil/hub/brain.env = preview brain.env + YGG_ROOT_NAME=omarchy, YGG_PEERS_FROM=http://127.0.0.1:4503/_roots, YGG_PEER_TOKEN.
+- Tested: unit shape on a scratch copy (drain → restart → resend once; kill -9 → back in 2 s). Old root name only in message text (no stored links).
+- preview-up.sh refuses once hub-brain is enabled (says: hub-units.sh deploy).
+- RUN: ~/Work/tree-next/scripts/hub-units.sh switch   ← CUTS MY TURN. Log: ~/.local/share/yggdrasil/hub/logs/switch.log
+- AFTER (when resent): read switch.log; hub-units.sh health + status; loginctl show-user dweeb_xyz -p Linger; live-door spec both doors (mic); S14; update work/AGENTS.md rule 2 (deploy = hub-units.sh deploy); send P3 its message; report to MAIN: stage B done + reboot window question + pairing link (ap-pair.html valid until 15:20).
