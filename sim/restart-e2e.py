@@ -11,7 +11,10 @@ stop, start on the same data.
   C     a brief from MAIN running (sleep)
   L     a lead: its own turn running (sleep) · a wake waiting behind it with its kid LK's report
 
-    restart-e2e.py [--bin PATH]     exit 0 = all green
+  H     (HARNESS=1) a Claude Code session on haiku, cut while its Bash tool runs: the resend goes
+        on in THE SAME Claude Code conversation (its id unchanged, both prompts in its file)
+
+    restart-e2e.py [--bin PATH]     exit 0 = all green   (HARNESS=1: the Claude Code leg too)
 """
 import argparse, json, os, subprocess, sys, tempfile, time, urllib.request
 
@@ -85,6 +88,11 @@ def main():
            "YGG_UPSTREAM_MODEL": "mock", "YGG_WAKE_DEBOUNCE_MS": "400", "YGG_LISTEN": f"127.0.0.1:{PORT}",
            "YGG_DATA_DIR": os.path.join(tmp, "data"), "YGG_PROJECT_DIR": os.path.join(tmp, "work"),
            "YGG_PROFILES": os.path.join(tmp, "agents.json"), "YGG_ROOT_NAME": "restart"}
+    harness = os.environ.get("HARNESS") == "1"
+    if harness:
+        cc = os.path.expanduser("~/.local/share/mise/installs/claude/latest")
+        env.update({"HOME": os.path.expanduser("~"), "PATH": f"{cc}:/usr/local/bin:/usr/bin:/bin"})
+    hid, h = "", ""
     try:
         unit(units[0], ["python3", os.path.join(YGG, "mock", "mock_upstream.py"), str(MOCK)], {})
         unit(units[1], [a.bin], env)
@@ -94,23 +102,32 @@ def main():
         k, c, lead = new("K", main_id, "build"), new("C", main_id, "build"), new("L", main_id, "lead")
         lk = new("LK", lead, "build")
         sender = {"from": {"session": main_id, "title": "[MAIN]"}}
+        if harness:
+            h = req("POST", "/session", {"title": "H", "agent": "claude", "model": "haiku"})["id"]
+            req("POST", f"/session/{h}/message", {"parts": [{"type": "text", "text": "Reply with exactly: H-ONE"}]}, 180)
+            hid = (req("GET", f"/session/{h}").get("harness") or {}).get("id", "")
+            check("H: a Claude Code conversation exists", bool(hid), req("GET", f"/session/{h}").get("harness"))
+            post(h, "Use your Bash tool to run the command `sleep 45`, then reply with exactly: H-TWO")
 
         # turns in flight at the deploy
-        post(main_id, "sleep 25 then Reply with exactly: MAIN-BUSY")
-        post(c, "sleep 25 then Reply with exactly: C-DONE", sender)
-        post(lead, "sleep 25 then Reply with exactly: L-BUSY", sender)
+        post(main_id, "sleep 60 then Reply with exactly: MAIN-BUSY")
+        post(c, "sleep 60 then Reply with exactly: C-DONE", sender)
+        post(lead, "sleep 60 then Reply with exactly: L-BUSY", sender)
         # reports that queue wakes behind them
         post(k, "Reply with exactly: K-DONE")
         post(lk, "Reply with exactly: LK-DONE")
         req("POST", f"/session/{main_id}/message", {"parts": [{"type": "text", "text": "nightly backup finished"}], "meta": {"auto": True}})
         waiting = lambda sid: [m for m in users(sid) if (m["info"].get("meta") or {}).get("auto") and (m["info"].get("meta") or {}).get("events") is not None]
-        check("before: two wakes wait behind MAIN's running turn", wait(lambda: len(waiting(main_id)) >= 2, 20), [text(m)[:80] for m in waiting(main_id)])
+        both = lambda: " ".join(text(m) for m in waiting(main_id))
+        check("before: wakes with K's and the automation's reports wait behind MAIN's running turn", wait(lambda: '"K"' in both() and "nightly backup" in both(), 20), both()[:200])
         check("before: a wake waits behind L's running turn", wait(lambda: len(waiting(lead)) >= 1, 20))
         old_wake_ids = {m["info"]["id"] for m in waiting(main_id) + waiting(lead)}
         k_ev = [e for e in req("GET", f"/session/{main_id}/inbox") if e["from"] == k]
         check("before: K's report is in MAIN's inbox", bool(k_ev))
         req("POST", f"/session/{k}/close", {"reason": "done with it"})
-        n_before = {s: len(users(s)) for s in (main_id, c, lead)}
+        if harness:
+            tool_on = lambda: any(p.get("type") == "tool" for m in msgs(h) if m["info"]["role"] == "assistant" for p in m["parts"])
+            check("H: its Bash tool is running at the deploy", wait(tool_on, 40))
 
         # the deploy: drain (turns still running), stop, start the next process on the same data
         d = req("POST", "/admin/drain", {"max_s": 2}, 10)
@@ -137,20 +154,39 @@ def main():
         lines = (main_copy[0]["info"].get("meta") or {}).get("inbox_lines", []) if main_copy else []
         later = [m for m in users(main_id) if m["info"]["id"] not in old_wake_ids and (m["info"].get("meta") or {}).get("auto") and (m["info"].get("meta") or {}).get("events") is not None]
         fresh_texts = " ".join(lines) + " " + " ".join(text(m) for m in later)
+        entries = [l for l in lines if "nightly backup" in l] + [l for m in later for l in text(m).splitlines() if l.startswith('- "nightly backup')]
         check("MAIN: the closed session K's report does not come back", "K-DONE" not in fresh_texts and '"K"' not in fresh_texts, fresh_texts[:300])
-        check("MAIN: the automation report comes back once, fresh", fresh_texts.count("nightly backup") == 1, fresh_texts[:300])
+        check("MAIN: the automation report comes back once, fresh", len(entries) == 1, entries)
         # L: the kid's report rebuilt into a fresh wake, after the resent brief
         fresh_l = wait(lambda: [m for m in users(lead) if m["info"]["id"] not in old_wake_ids and (m["info"].get("meta") or {}).get("events")], 60)
         check("L: a fresh wake rebuilt from the inbox (LK's report)", fresh_l and "LK-DONE" in text(fresh_l[0]), [text(m)[:120] for m in (fresh_l or [])])
         # every resent turn answered
         for sid, want in ((main_id, "MAIN-BUSY"), (c, "C-DONE"), (lead, "L-BUSY")):
-            got = wait(lambda: any(m["info"]["role"] == "assistant" and want in text(m) for m in msgs(sid)), 60)
+            got = wait(lambda: any(m["info"]["role"] == "assistant" and want in text(m) for m in msgs(sid)), 90)
             check(f"answered after the restart: {want}", bool(got))
         check("no session got a duplicate turn", all(len([m for m in users(s) if (m["info"].get("meta") or {}).get("resent_of")]) <= 1 for s in (main_id, c, lead)))
         check("the brain marked this process for the next restart", os.path.exists(os.path.join(tmp, "data", ".booted")))
+        if harness:
+            copies = [m for m in users(h) if (m["info"].get("meta") or {}).get("resent_of")]
+            check("H: sent again once", len(copies) == 1, [text(m)[:80] for m in copies])
+            got = wait(lambda: any(m["info"]["role"] == "assistant" and "H-TWO" in text(m) for m in msgs(h)), 150)
+            check("H: answered after the restart (H-TWO)", bool(got))
+            after = (req("GET", f"/session/{h}").get("harness") or {}).get("id", "")
+            check("H: the same Claude Code conversation (id unchanged)", after == hid, (hid, after))
+            import glob
+            files = glob.glob(os.path.expanduser(f"~/.claude/projects/*/{hid}.jsonl"))
+            body = open(files[0]).read() if files else ""
+            check("H: its conversation holds the first turn, the cut one and the resent one",
+                  "H-ONE" in body and body.count("sleep 45") >= 2 and "[sent again after a brain restart]" in body, files)
     finally:
         for u in units:
             subprocess.run(["systemctl", "--user", "stop", u], capture_output=True)
+        if hid:  # the twin's Claude Code conversation: its own project folder, removed by id
+            import glob, shutil
+            for f in glob.glob(os.path.expanduser(f"~/.claude/projects/*/{hid}.jsonl")):
+                d = os.path.dirname(f)
+                if "restart-e2e-" in d:
+                    shutil.rmtree(d, ignore_errors=True)
         print(f"data kept in {tmp}" if fails else "", end="")
     print(f"\nRESTART-E2E: {'GREEN' if not fails else 'RED: ' + ', '.join(fails)}")
     sys.exit(1 if fails else 0)
