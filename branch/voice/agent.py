@@ -165,6 +165,30 @@ _SILENCE_HALLUCINATIONS = {
 }
 
 
+class Presence:
+    """Is the person in the room? By connection (sid), and by what they just did: a call from the
+    phone in the last seconds (a hold, a commit, the deck) is a person here, whatever the lists say."""
+
+    ALIVE_S = 8.0
+
+    def __init__(self, sids: set[str] | None = None) -> None:
+        self.sids: set[str] = set(sids or ())
+        self.touched = time.monotonic() if self.sids else 0.0
+
+    def joined(self, sid: str) -> None:
+        self.sids.add(sid)
+        self.touch()
+
+    def left(self, sid: str) -> None:
+        self.sids.discard(sid)
+
+    def touch(self) -> None:
+        self.touched = time.monotonic()
+
+    def here(self, by_name: bool = False) -> bool:
+        return bool(self.sids) or by_name or (self.touched > 0 and time.monotonic() - self.touched < self.ALIVE_S)
+
+
 WAITING_ATTR = "bifrost.waiting"
 
 
@@ -651,34 +675,61 @@ async def entrypoint(ctx: JobContext) -> None:
     # With close_on_disconnect=False the session survives; this task ends the
     # job once the last commit has settled — and stays alive through
     # back-to-back holds that race the tail.
-    async def _human_left_grace() -> None:
-        def _human_present() -> bool:
-            return human_identity in {p.identity for p in ctx.room.remote_participants.values()}
+    # Who is here, by CONNECTION (sid), not by name: the phone keeps one identity, and when it
+    # moves from one page to the next the new connection can arrive before the old one's goodbye —
+    # the room's by-name list then drops the person who is here (11-20 22:16: the job serving a
+    # room left in the middle of a hold; it logged the words and threw them away).
+    presence = Presence({p.sid for p in ctx.room.remote_participants.values() if p.identity == human_identity})
+    grace_running = False
 
-        while True:
-            # a fast re-hold rejoins the same room while this tail is
-            # running — the job stays theirs until they leave for good
-            if _human_present():
-                await asyncio.sleep(0.5)
-                continue
-            waited = 0.0
-            while commit_in_flight and waited < 15.0:  # bounded: never pin the job
-                await asyncio.sleep(0.2)
-                waited += 0.2
-            await asyncio.sleep(4.0)  # tail: let the opencode POST land
-            if _human_present() or commit_in_flight:  # new hold raced in
-                continue
-            break
+    async def _human_left_grace() -> None:
+        nonlocal grace_running
+        if grace_running:
+            return
+        grace_running = True
+
+        def _human_present() -> bool:
+            by_name = human_identity in {p.identity for p in ctx.room.remote_participants.values()}
+            return presence.here(by_name)
+
+        try:
+            while True:
+                # a fast re-hold rejoins the same room while this tail is
+                # running — the job stays theirs until they leave for good
+                if _human_present():
+                    await asyncio.sleep(0.5)
+                    continue
+                waited = 0.0
+                while commit_in_flight and waited < 15.0:  # bounded: never pin the job
+                    await asyncio.sleep(0.2)
+                    waited += 0.2
+                await asyncio.sleep(4.0)  # tail: let the opencode POST land
+                if _human_present() or commit_in_flight:  # new hold raced in
+                    continue
+                break
+        finally:
+            grace_running = False
         ctx.shutdown("session closed")
+
+    def _on_participant_connected(participant) -> None:
+        if participant.identity == human_identity:
+            presence.joined(participant.sid)
 
     def _on_participant_disconnected(participant) -> None:
         if participant.identity != human_identity:
             return
+        presence.left(participant.sid)
         asyncio.ensure_future(_human_left_grace())
 
+    ctx.room.on("participant_connected", _on_participant_connected)
     ctx.room.on("participant_disconnected", _on_participant_disconnected)
+    # the person left while this job still waited for the room (their goodbye came before this
+    # line): leave after the tail too — a job that never heard it stayed in its room for hours
+    if not presence.here(human_identity in {p.identity for p in ctx.room.remote_participants.values()}):
+        asyncio.ensure_future(_human_left_grace())
 
     async def _ptt_begin_rpc(data) -> str:
+        presence.touch()
         # a PTT hold must be ONE message: VAD endpointing would auto-commit
         # on every mid-sentence pause, flushing partial transcripts as
         # separate opencode messages — switch to manual turns for the hold
@@ -718,6 +769,7 @@ async def entrypoint(ctx: JobContext) -> None:
             commit_in_flight = False
 
     async def _commit_turn_rpc(data) -> str:
+        presence.touch()
         # the phone can call this while the session is already closing (stale
         # room, participant disconnect race) — raising here surfaces as a raw
         # RPC error/timeout on the phone; a "not-running" answer lets it
@@ -738,6 +790,7 @@ async def entrypoint(ctx: JobContext) -> None:
         return "ok"
 
     async def _ptt_abort_rpc(data) -> str:
+        presence.touch()
         # Discord-style slide-to-cancel: drop the buffered turn, keep keyword
         # turn-taking, commit nothing
         try:
@@ -755,6 +808,7 @@ async def entrypoint(ctx: JobContext) -> None:
     deck = {"text": "", "stopped": 0.0, "seg_over": False}
 
     async def _deck_state_rpc(data) -> str:
+        presence.touch()
         # the phone says when its deck speaks a reply (keywords-only window) and when it stops —
         # and, speaking, the text it speaks (its echo is dropped from what the mic heard)
         try:
@@ -793,6 +847,7 @@ async def entrypoint(ctx: JobContext) -> None:
             await client.aclose()
 
     async def _tts_stream_rpc(data) -> str:
+        presence.touch()
         if not APP_URL:
             return json.dumps({"status": 0, "why": "off"})
         try:

@@ -12,8 +12,9 @@
 #   hub-units.sh public-back        the way back: hub units stopped, the old hub-up.sh stack started
 #   hub-units.sh tailnet-up         the tailnet app (:8101) from `current` instead of rc-preview-pwa
 #   hub-units.sh tailnet-back       rc-preview-pwa again
-#   hub-units.sh deploy <id>        `current` → releases/<id>, running hub units restarted (the brain drains
-#                                   first), back to the previous release if the health check fails
+#   hub-units.sh deploy <id> [unit…] `current` → releases/<id>, running hub units restarted (the brain drains
+#                                   first), back to the previous release if the health check fails. With
+#                                   units named (e.g. hub-voice-agent) only those restart: no turn is cut
 #   hub-units.sh switch             STAGE B: brain, librarian, live helper, voice agent and both apps become
 #                                   these units (enabled, linger on); the transient rootsim-preview /
 #                                   rc-preview-* stop; root renamed `omarchy`. Health check after; on a
@@ -352,30 +353,32 @@ tailnet_back() {
 # a new release behind every hub unit that is running: `current` moves, the units restart, and if
 # an app does not answer `current` goes back (the brain is preview-up.sh's, until stage B)
 deploy() {
-  local id=${1:?release id} prev u brain=0 bad=0
+  local id=${1:?release id} prev u brain=0 bad=0 only
+  shift
+  only=" $* "
   [ -d "$HUB/releases/$id" ] || die "no release $id"
   [ -x "$HUB/releases/$id/bin/yggdrasil" ] || die "release $id has no brain"
-  detach deploy "$id"
+  for u in "$@"; do case " $ALL " in *" $u "*) ;; *) die "unknown unit $u (one of: $ALL)" ;; esac; done
+  # only named units (e.g. `deploy <id> hub-voice-agent`): the brain keeps running, no turn is cut
+  case "$only" in "  " | *" hub-brain "*) detach deploy "$id" "$@" ;; *) echo "== $(date -Is) hub-units deploy $id $*" ;; esac
   prev=$(readlink "$HUB/current" || true)
-  systemctl --user is-active -q hub-brain && brain=1
-  if [ "$brain" = 1 ]; then "$HOME/Work/tree-next/scripts/preview-backup.sh" || echo "backup failed — going on"; fi
   local running=""
-  for u in $ALL; do systemctl --user is-active -q "$u" && running="$running $u"; done
+  for u in $ALL; do
+    systemctl --user is-active -q "$u" || continue
+    case "$only" in "  " | *" $u "*) running="$running $u" ;; esac
+  done
+  case " $running " in *" hub-brain "*) brain=1 ;; esac
+  if [ "$brain" = 1 ]; then "$HOME/Work/tree-next/scripts/preview-backup.sh" || echo "backup failed — going on"; fi
   ln -sfn "$HUB/releases/$id" "$HUB/current"
   render
   # the brain drains in its ExecStop; the others restart at once
   for u in $running; do systemctl --user restart "$u" || bad=1; done
-  if [ "$bad" = 0 ]; then
-    if [ "$brain" = 1 ]; then health || bad=1; else
-      wait_http http://127.0.0.1:4502/api/build || bad=1
-      case " $running " in *" hub-app-tailnet "*) wait_http http://127.0.0.1:8101/api/build || bad=1 ;; esac
-    fi
-  fi
+  if [ "$bad" = 0 ]; then health || bad=1; fi
   if [ "$bad" = 1 ]; then
     echo "== deploy $id: failed — back to $prev"
     ln -sfn "$prev" "$HUB/current"
     for u in $running; do systemctl --user restart "$u" || true; done
-    [ "$brain" = 1 ] && { health || echo "!! the previous release does not pass the health check either"; }
+    health || echo "!! the previous release does not pass the health check either"
     exit 1
   fi
   echo "== deploy $id: done"
@@ -403,7 +406,7 @@ case "${1:-status}" in
   public-back) public_back ;;
   tailnet-up) tailnet_up ;;
   tailnet-back) tailnet_back ;;
-  deploy) deploy "${2:-}" ;;
+  deploy) shift; deploy "$@" ;;
   switch) switch ;;
   stageb-back) detach stageb-back; stageb_back ;;
   health) health ;;

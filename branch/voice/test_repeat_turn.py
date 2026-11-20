@@ -73,5 +73,19 @@ check("two that wait at once: exactly one takes it, the other leaves", sorted(pa
 three = [V(m, [(o, True) for o in ("agent-a", "agent-b", "agent-c") if o != m]) for m in ("agent-a", "agent-b", "agent-c")]
 check("three that wait: one takes, two leave — never none, never two", three.count("take") == 1 and three.count("leave") == 2, three)
 
+# 3. the person is here by CONNECTION: a new page's hello can come before the old page's goodbye
+from agent import Presence
+pr = Presence({"PA_old"})
+pr.joined("PA_new"); pr.left("PA_old")          # hello first, goodbye after (11-20 22:16)
+pr.touched = 0.0                                 # …and no recent call from the phone
+check("moving to the next page: the person is still here", pr.here(by_name=False))
+pr.left("PA_new")
+check("gone for good: not here", not pr.here(by_name=False))
+pr.touch()
+check("a call from the phone a moment ago: here, whatever the lists say", pr.here(by_name=False))
+pr.touched = time.monotonic() - 60
+check("…and that runs out", not pr.here(by_name=False))
+check("nobody was ever here: not here", not Presence().here())
+
 print("REPEAT-TURN: " + ("GREEN" if not fails else f"RED ({fails})"))
 sys.exit(1 if fails else 0)
