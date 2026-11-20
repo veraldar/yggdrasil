@@ -8,15 +8,20 @@
 # report's masking, keepalive.vbs -> launcher.bat, the uninstaller.
 # What it cannot prove: real WSL, UAC, RunOnce after a real restart, SmartScreen, Windows' own fonts (see NOTES-win.md).
 #
-#   win/launcher-test.sh [EXE] [--shots DIR]     EXE default: built now with scripts/build-win.sh 0.9.1 (the tree's
-#                                                join.sh); --shots: a PNG of each screen (win-installer-<screen>.png)
+#   win/launcher-test.sh [EXE] [--join FILE] [--shots DIR]
+#     EXE      Veraldar-Setup-<version>.exe (the version is taken from its name); default: built now with
+#              scripts/build-win.sh 0.9.1 and the tree's join.sh
+#     --join   the join.sh the exe must embed byte for byte (default: the tree's root/install/join.sh; a release's
+#              exe: dist/<version>/join.sh, the stamped one)
+#     --shots  a PNG of each screen (win-installer-<screen>.png) into DIR
 set -euo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
 REPO=$(cd "$HERE/.." && pwd)
-EXE='' SHOTS=''
+EXE='' SHOTS='' JOINSH=$REPO/root/install/join.sh
 while [ $# -gt 0 ]; do
   case $1 in
     --shots) SHOTS=$(mkdir -p "$2" && cd "$2" && pwd); shift ;;
+    --join) JOINSH=${2:?--join FILE}; shift ;;
     *) EXE=$1 ;;
   esac
   shift
@@ -34,6 +39,11 @@ TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 if [ -z "$EXE" ]; then EXE=$("$REPO/scripts/build-win.sh" 0.9.1 "$REPO/root/install/join.sh" "$TMP"); fi
 EXE=$(cd "$(dirname "$EXE")" && pwd)/$(basename "$EXE")
+VERSION=$(basename "$EXE" | sed -n 's/^Veraldar-Setup-\([0-9][0-9A-Za-z.+-]*\)\.exe$/\1/p')
+[ -n "$VERSION" ] || { echo "launcher-test: $EXE is not named Veraldar-Setup-<version>.exe" >&2; exit 64; }
+[ -f "$JOINSH" ] || { echo "launcher-test: no join.sh at $JOINSH" >&2; exit 64; }
+JOINSH=$(cd "$(dirname "$JOINSH")" && pwd)/$(basename "$JOINSH")
+echo "testing $(basename "$EXE") (version $VERSION), expecting it to embed $JOINSH"
 SHOTARGS=(); [ -n "$SHOTS" ] && SHOTARGS=(-v "$SHOTS:/shots")
 
 INNER=$(cat <<'INNER'
@@ -118,7 +128,7 @@ calls | grep -qxF -- "-d | Ubuntu | -u | root | -e | bash | $UI/wsl-bootstrap.sh
 check 'step 2: wsl -u root wsl-bootstrap.sh --setup --user alice (its default user; packages by apt-get, no password)' $?
 calls | grep -qxF -- "$(J Ubuntu alice)"
 check 'step 4: wsl -d Ubuntu -u alice -e bash <installed wsl-bootstrap.sh> --hub https://ap.veraldar.org --name TESTPC --out <install folder>' $?
-cmp -s "$I/join.sh" /repo/root/install/join.sh && ! grep -q $'\r' "$I/wsl-bootstrap.sh" && grep -q $'\r' "$I/launcher.bat" && ! grep -q 'git clone' "$I/wsl-bootstrap.sh"
+cmp -s "$I/join.sh" /x/join.sh && ! grep -q $'\r' "$I/wsl-bootstrap.sh" && grep -q $'\r' "$I/launcher.bat" && ! grep -q 'git clone' "$I/wsl-bootstrap.sh"
 check 'install folder: join.sh embedded byte for byte, wsl-bootstrap.sh LF (no git clone), launcher.bat CRLF' $?
 [ -f "$I/join-qr.bmp" ] && [ "$(head -c 2 "$I/join-qr.bmp")" = BM ]
 check 'step 5: the QR BMP the window showed came from the real bootstrap (join.sh PNG -> BMP)' $?
@@ -128,13 +138,13 @@ check 'step 6: Startup "Veraldar" entry; keepalive.vbs -> launcher.bat -> wsl -d
 tr -d '\r' <"$I/wsl.ini" | grep -qx 'distro=Ubuntu' && tr -d '\r' <"$I/wsl.ini" | grep -qx 'user=alice' && tr -d '\r' <"$I/wsl.ini" | grep -qx 'name=TESTPC'
 check 'wsl.ini: distro, user, name (launcher.bat and the uninstaller read it)' $?
 R=$(report)
-grep -q '^installer:  Veraldar-Setup 0.9.1$' <<<"$R" && grep -q '^windows:    Windows 10 .*x86_64$' <<<"$R" && grep -q '^wsl:        WSL version: 2.3.26.0$' <<<"$R" \
+grep -qxF "installer:  Veraldar-Setup $VERSION" <<<"$R" && grep -q '^windows:    Windows 10 .*x86_64$' <<<"$R" && grep -q '^wsl:        WSL version: 2.3.26.0$' <<<"$R" \
   && grep -q '^distro:     Ubuntu (Ubuntu 24.04.1 LTS), kernel 5.15.167.4-microsoft-standard-WSL2, Linux user alice$' <<<"$R" \
   && grep -q '^  4-5 join     approved on the phone$' <<<"$R" && [ "$(sed -n '/^last 40 log lines/,$p' <<<"$R" | wc -l)" -le 41 ] \
   && grep -q 'Code (check it matches the phone):  K7QM2XWP' <<<"$R" && [ -z "$(LC_ALL=C grep -n '[^[:print:][:space:]]' <<<"$R")" ]
 check 'step 7: install-report.txt: versions, distro, each step, the last 40 log lines, plain ASCII' $?
-wine reg query 'HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\Veraldar' /v DisplayVersion 2>/dev/null | grep -q '0.9.1'
-check 'Apps list: Veraldar 0.9.1 (per user)' $?
+wine reg query 'HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\Veraldar' /v DisplayVersion 2>/dev/null | tr -d '\r' | sed -n 's/.*REG_SZ *//p' | grep -qxF "$VERSION"
+check "Apps list: Veraldar $VERSION (per user)" $?
 key Return; wait_exit
 
 echo "[keepalive.vbs -> launcher.bat, again (as at logon)]"
@@ -231,5 +241,6 @@ echo; echo "$pass/$((pass + fail)) checks passed"
 [ "$fail" = 0 ]
 INNER
 )
-docker run --rm --hostname testpc -v "$EXE:/x/setup.exe:ro" -v "$REPO:/repo:ro" ${SHOTARGS[@]+"${SHOTARGS[@]}"} \
+docker run --rm --hostname testpc -e VERSION="$VERSION" -v "$EXE:/x/setup.exe:ro" -v "$JOINSH:/x/join.sh:ro" -v "$REPO:/repo:ro" \
+  ${SHOTARGS[@]+"${SHOTARGS[@]}"} \
   --entrypoint bash "$IMAGE" -c "$INNER"
