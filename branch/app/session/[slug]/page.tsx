@@ -3040,8 +3040,9 @@ export default function SessionView({
         </p>
       )}
 
-      {/* who wrote it: one writer's messages and the replies to them (only when there are several) */}
-      {writers.names.length > 1 && !(logOn && logMsgs) && (
+      {/* who wrote it: one writer's messages and the replies to them (only when there are several;
+          not on MAIN — there the filter has nothing to separate, owner 11-20) */}
+      {writers.names.length > 1 && !isMainSlug(slug) && !(logOn && logMsgs) && (
         <div className="oz-chips pt-2" data-testid="who-filter">
           {[['all', 'all'] as [string, string], ...writers.names].map(([k, n]) => (
             <button key={k} aria-pressed={whoOn === k} data-who={k} onClick={() => setWho(k)}>
