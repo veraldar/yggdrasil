@@ -334,9 +334,12 @@ if stage a; then
   docker cp ot-vps-a:/etc/yggdrasil-trunk/cert.pem "$STATE/sim/trunk-ca.pem" >/dev/null; chmod 644 "$STATE/sim/trunk-ca.pem"
   # deb443: the third machine's --cacert also has to trust the fake GitHub's https (the real one is a public CA)
   [ "$JOINER" = deb443 ] && cat "$STATE/sim/rig-ca.pem" >>"$STATE/sim/trunk-ca.pem"
-  # the weekly update trusts this run's throwaway key too (a drop-in: test plumbing, not trunk.sh's)
-  vps ot-vps-a "mkdir -p /etc/systemd/system/yggdrasil-trunk-update.service.d && printf '[Service]\nEnvironment=YGG_RELEASE_TEST_SIGNERS=$TS\n' \
-    >/etc/systemd/system/yggdrasil-trunk-update.service.d/test-signers.conf && systemctl daemon-reload"
+  # the weekly update trusts this run's throwaway key too (a drop-in: test plumbing, not trunk.sh's) — a test release
+  # only: a real-stamped one (OT_DIST) trusts the key it embeds, and refuses the override
+  if [ $REALSTAMP = 0 ]; then
+    vps ot-vps-a "mkdir -p /etc/systemd/system/yggdrasil-trunk-update.service.d && printf '[Service]\nEnvironment=YGG_RELEASE_TEST_SIGNERS=$TS\n' \
+      >/etc/systemd/system/yggdrasil-trunk-update.service.d/test-signers.conf && systemctl daemon-reload"
+  fi
 
   # ------------------------------------------------------------------------------- the home computer
   say "stage a: a plain Debian 12 home computer — the release's install.sh, the line pasted at its prompt"
