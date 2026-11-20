@@ -71,10 +71,14 @@ mkcase() { # NAME — debian:12, the CA trusted, a normal user, the release unpa
 
 # drive the terminal install on a pty, as the user, inside the container
 typed() { # NAME ENVSTRING LOGOUT — runs install.sh --brain-only --now via drive_install.py
+  # on a pty, typing the answers; the transcript is written INSIDE the container and copied
+  # out after (streaming the pty over the docker-exec channel wedges now and then)
   docker cp "$HERE/drive_install.py" msm-"$1":/tmp/drive_install.py >/dev/null
-  docker exec -u "$HU" -e HOME=$HH -e MSM_INPUTS="$2" msm-"$1" \
-    python3 /tmp/drive_install.py bash -c "cd ~/yggdrasil-$VER/root/install && bash install.sh --brain-only --now" \
-    >"$STATE/log/$3" 2>&1
+  docker exec -d -u "$HU" -e HOME=$HH -e MSM_INPUTS="$2" -e TRANSCRIPT=/tmp/transcript -e DONEFILE=/tmp/drive.done \
+    msm-"$1" python3 /tmp/drive_install.py bash -c "cd ~/yggdrasil-$VER/root/install && bash install.sh --brain-only --now"
+  for i in $(seq 120); do docker exec -u "$HU" msm-"$1" test -e /tmp/drive.done >/dev/null 2>&1 && break; sleep 2; done
+  docker cp msm-"$1":/tmp/transcript "$STATE/log/$3" >/dev/null 2>&1
+  docker exec -u "$HU" msm-"$1" rm -f /tmp/transcript /tmp/drive.done /tmp/drive_install.py
 }
 
 # one model turn: start the brain with its env file, create a session, post a message
