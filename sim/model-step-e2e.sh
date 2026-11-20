@@ -83,7 +83,7 @@ turn() { # NAME LOGOUT
     set -e
     cd ~
     (setsid nohup env $(sed -n 's/^\([A-Z_]*\)=\(.*\)$/\1=\2/p' ~/.config/yggdrasil/yggdrasil.env | xargs) \
-       ~/.local/bin/yggdrasil >brain.log 2>&1 &)
+       ~/.local/bin/yggdrasil >brain.log 2>&1 </dev/null &)
     for i in $(seq 60); do curl -sf http://127.0.0.1:4096/session >/dev/null 2>&1 && break; sleep 0.5; done
     S=$(curl -sf -X POST http://127.0.0.1:4096/session -H "content-type: application/json" -d "{\"title\":\"msm\"}" | python3 -c "import sys,json;print(json.load(sys.stdin)[\"id\"])")
     curl -s -X POST http://127.0.0.1:4096/session/$S/message -H "content-type: application/json" \
@@ -266,7 +266,7 @@ docker exec -u "$HU" msm-caprobe bash -c '
   mkdir -p ~/.config/yggdrasil
   printf "YGG_UPSTREAM_BASE_URL=https://api.z.ai/api/anthropic\nYGG_UPSTREAM_STYLE=anthropic\nYGG_UPSTREAM_API_KEY=sk-test-zai-0123456789abcdef\nYGG_UPSTREAM_MODEL=glm-5.3-flash\nYGG_LISTEN=127.0.0.1:4196\n" >~/.config/yggdrasil/yggdrasil.env
   cd ~/yggdrasil-0.9.1-rc.2-linux-x86_64
-  (setsid nohup env $(cat ~/.config/yggdrasil/yggdrasil.env | xargs) ./bin/yggdrasil >~/brain-ca.log 2>&1 & echo $! >~/brain.pid)
+  (setsid nohup env $(cat ~/.config/yggdrasil/yggdrasil.env | xargs) ./bin/yggdrasil >~/brain-ca.log 2>&1 </dev/null & echo $! >~/brain.pid)
   for i in $(seq 40); do curl -sf http://127.0.0.1:4196/session >/dev/null 2>&1 && break; sleep 0.5; done
   S=$(curl -sf -X POST http://127.0.0.1:4196/session -H "content-type: application/json" -d "{\"title\":\"ca\"}" | python3 -c "import sys,json;print(json.load(sys.stdin)[\"id\"])")
   curl -s -X POST http://127.0.0.1:4196/session/$S/message -H "content-type: application/json" -d "{\"parts\":[{\"type\":\"text\",\"text\":\"hi\"}]}" >/dev/null
@@ -277,7 +277,7 @@ else
   # retry with SSL_CERT_FILE to find what it honours
   docker exec -u "$HU" msm-caprobe bash -c '
     cd ~/yggdrasil-0.9.1-rc.2-linux-x86_64
-    (setsid nohup env SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt $(cat ~/.config/yggdrasil/yggdrasil.env | xargs) ./bin/yggdrasil >~/brain-ca2.log 2>&1 & echo $! >~/brain2.pid)
+    (setsid nohup env SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt $(cat ~/.config/yggdrasil/yggdrasil.env | xargs) ./bin/yggdrasil >~/brain-ca2.log 2>&1 </dev/null & echo $! >~/brain2.pid)
     sleep 5; kill $(cat ~/brain2.pid) 2>/dev/null; exit 0' >>"$STATE/log/caprobe.log" 2>&1
   caev2=$(uplog | grep -c api.z.ai || true)
   [ "$caev2" -gt 0 ] && CA_RESULT="NO by system store alone; YES with SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt" \
