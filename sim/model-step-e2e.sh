@@ -72,7 +72,7 @@ mkcase() { # NAME — debian:12, the CA trusted, a normal user, the release unpa
 # drive the terminal install on a pty, as the user, inside the container
 typed() { # NAME ENVSTRING LOGOUT — runs install.sh --brain-only --now via drive_install.py
   docker cp "$HERE/drive_install.py" msm-"$1":/tmp/drive_install.py >/dev/null
-  docker exec -i -u "$HU" -e HOME=$HH -e MSM_INPUTS="$2" msm-"$1" \
+  docker exec -u "$HU" -e HOME=$HH -e MSM_INPUTS="$2" msm-"$1" \
     python3 /tmp/drive_install.py bash -c "cd ~/yggdrasil-$VER/root/install && bash install.sh --brain-only --now" \
     >"$STATE/log/$3" 2>&1
 }
