@@ -165,6 +165,18 @@ _SILENCE_HALLUCINATIONS = {
 }
 
 
+WAITING_ATTR = "bifrost.waiting"
+
+
+def sibling_verdict(me: str, others: list[tuple[str, bool]]) -> str:
+    """One agent per room. `others`: the other agents in the room as (identity, is it waiting too).
+    "wait" while one of them serves or drains (it is not waiting); once only waiting ones are left
+    (or none): "take" when this identity sorts first, else "leave" — exactly one of them takes it."""
+    if any(not waiting for _, waiting in others):
+        return "wait"
+    return "take" if all(me < ident for ident, _ in others) else "leave"
+
+
 def _is_noise_turn(text: str) -> bool:
     # punctuation → space (so "uh-huh" == "uh huh"), keep letters + CJK
     norm = re.sub(r"[^a-z0-9\u4e00-\u9fff]+", " ", text.lower()).strip()
@@ -191,6 +203,9 @@ class OpenCodeLLM(llm.LLM):
         # VAD re-commits turns as A, A+B, A+B+C… while the previous reply is
         # still playing; only the delta may reach opencode (see _run)
         self.last_prompt = ""
+        # the stored turn `last_prompt` came from, and when it was sent (see OpenCodeStream._run)
+        self.last_item: str | None = None
+        self.last_sent_at = 0.0
         # the keyword commit's own words (voice-fixes 11-14): the session's user-turn buffer also
         # holds what the agent dropped (the reply's echo, speech over a reply), so a keyword commit
         # hands its curated text here and that — not the buffer — is what reaches opencode
@@ -406,13 +421,21 @@ class OpenCodeStream(LLMStream):
         # transcript with A, A+呃, A+呃+B…) — identical means already sent,
         # a strict extension means only the new tail is actually new
         prev = self._oc.last_prompt
-        if prev and prompt == prev:
+        # identical words are "already sent" only when it is the SAME stored turn again (a hold
+        # that caught nothing leaves the earlier turn newest; one utterance committed twice in a
+        # burst). The same words said AGAIN are a new turn: "yes" … "yes", "next" … "next" — a
+        # job stays in its room for hours, and the second one was dropped in silence (11-20).
+        item = getattr(last, "id", None)
+        again = item is None or item == self._oc.last_item or time.monotonic() - self._oc.last_sent_at < 2.0
+        if prev and prompt == prev and again:
             logger.info("opencode bridge: duplicate cumulative turn, skipping")
             return
-        send = prompt[len(prev) :].strip() if prev and prompt.startswith(prev) else prompt
+        send = prompt[len(prev) :].strip() if prev and prompt != prev and prompt.startswith(prev) else prompt
         # update even when dropping: a discarded noise prefix must never
         # resurface later as the "new tail" of a cumulative re-commit
         self._oc.last_prompt = prompt
+        self._oc.last_item = item
+        self._oc.last_sent_at = time.monotonic()
         if curated is not None:
             if curated != send:
                 logger.info("keyword turn sends its own words (%d of %d chars)", len(curated), len(send))
@@ -563,9 +586,29 @@ async def entrypoint(ctx: JobContext) -> None:
     # the old job's exit left ~30s of dead air and every hold/tap failed
     # with "no voice agent in the room". Wait out the drain; only a
     # sibling that will not leave is a real duplicate.
+    # Two jobs that wait at the same time used to wait for EACH OTHER: the one serving left, each
+    # still saw the other, both shut down after 20 s — a room with no agent, the turn spoken into
+    # it lost (11-20, both doors used back to back). A waiting job says so (an attribute); once
+    # only waiting jobs are left, the one whose identity sorts first takes the room and the
+    # others leave at once.
+    me = ctx.room.local_participant
+
+    async def _waiting(on: bool) -> None:
+        try:
+            await me.set_attributes({WAITING_ATTR: "1" if on else ""})
+        except Exception:  # noqa: BLE001 — an older server: the 20 s rule below still holds
+            pass
+
+    await _waiting(True)
     for i in range(80):  # ~20s at 250ms — drain tail is commit grace + 4s
-        if not any(p.identity != human_identity for p in ctx.room.remote_participants.values()):
+        others = [p for p in ctx.room.remote_participants.values() if p.identity != human_identity]
+        verdict = sibling_verdict(me.identity, [(p.identity, (p.attributes or {}).get(WAITING_ATTR) == "1") for p in others])
+        if verdict == "take":
             break
+        if verdict == "leave":
+            logger.info("another waiting agent takes room '%s' — leaving", ctx.room.name)
+            ctx.shutdown("duplicate agent")
+            return
         if i == 0:
             logger.info(
                 "previous agent draining in room '%s' — waiting for it to leave", ctx.room.name
@@ -575,6 +618,7 @@ async def entrypoint(ctx: JobContext) -> None:
         logger.warning("another agent still in room '%s' after 20s — shutting down", ctx.room.name)
         ctx.shutdown("duplicate agent")
         return
+    await _waiting(False)
 
     # ---- mode awareness (req 10-02) ----
     # The phone publishes its interaction mode ('text' | 'free') as its
