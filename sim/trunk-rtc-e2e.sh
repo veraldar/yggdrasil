@@ -33,6 +33,11 @@
 #       only ever talks to home); the phone holds the mic inside a session that lives on lab (a proxy
 #       on home); the words reach lab once, the answer is spoken on the phone. Driver:
 #       sim/reach/s16.mjs (instead of e2e/trunk-rtc.spec.ts). Same world, same table.
+#   sim/trunk-rtc-e2e.sh --scenario films
+#       The site's films (package 5): two more brains on the box, "studio" and "workshop", each with its
+#       own MAIN, peers of home; the model is sim/films/film_upstream.py (scripted lines). Driver:
+#       sim/films/films.mjs records the phone's screen; sim/films/cut.py cuts and captions. Run it
+#       through sim/films/record.sh.
 #   APP_DIR=<a built app>            the app (and its voice agent) to run; default: this tree's branch/
 #
 # Needs: root/target/release/yggdrasil + trunk/target/release/bifrost-net (cargo build --release),
@@ -45,12 +50,12 @@ ROOT=$(cd "$(dirname "$0")/.." && pwd)
 SCENARIO=${TRUNK_RTC_SCENARIO:-rtc}
 while [ $# -gt 0 ]; do
   case "$1" in
-    --scenario) SCENARIO=${2:?--scenario rtc|s16}; shift 2 ;;
+    --scenario) SCENARIO=${2:?--scenario rtc|s16|films}; shift 2 ;;
     --scenario=*) SCENARIO=${1#*=}; shift ;;
-    *) echo "usage: $0 [--scenario rtc|s16]"; exit 2 ;;
+    *) echo "usage: $0 [--scenario rtc|s16|films]"; exit 2 ;;
   esac
 done
-case "$SCENARIO" in rtc | s16) ;; *) echo "unknown scenario $SCENARIO (rtc|s16)"; exit 2 ;; esac
+case "$SCENARIO" in rtc | s16 | films) ;; *) echo "unknown scenario $SCENARIO (rtc|s16|films)"; exit 2 ;; esac
 if [ -z "${TRUNK_RTC_NS:-}" ]; then
   exec unshare --user --map-root-user --net --mount --pid --fork --mount-proc \
     env TRUNK_RTC_NS=1 TRUNK_RTC_SCENARIO="$SCENARIO" "$0"
@@ -170,9 +175,18 @@ if [ "$SCENARIO" = s16 ]; then
   PEER="peer-$(head -c 12 /dev/urandom | od -An -tx1 | tr -d ' \n')"
   PEERS_HOME=(YGG_PEERS="lab=http://127.0.0.1:$LABP" YGG_PEER_TOKEN="$PEER")
 fi
+# films: two more roots on this box, each with its own MAIN; the model speaks the films' lines
+FILM_ROOTS=(studio workshop)
+MOCK_PY="$ROOT/root/mock/mock_upstream.py"
+if [ "$SCENARIO" = films ]; then
+  PEER="peer-$(head -c 12 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+  PEERS_HOME=(YGG_PEERS="studio=http://127.0.0.1:$LABP,workshop=http://127.0.0.1:$((LABP + 1))" YGG_PEER_TOKEN="$PEER")
+  MOCK_PY="$ROOT/sim/films/film_upstream.py"
+  mkdir -p "$STATE/artifacts-app"
+fi
 LK_KEY=APIsim$(head -c 6 /dev/urandom | od -An -tx1 | tr -d ' \n')
 LK_SECRET=$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')
-on home python3 "$ROOT/root/mock/mock_upstream.py" "$MOCK" >"$STATE/mock.log" 2>&1 &
+on home env FILMS_ART="$STATE/artifacts-app" python3 "$MOCK_PY" "$MOCK" >"$STATE/mock.log" 2>&1 &
 pids+=($!)
 on home env -i PATH="$PATH" HOME="$STATE/home" YGG_UPSTREAM_BASE_URL="http://127.0.0.1:$MOCK" \
   YGG_UPSTREAM_STYLE=anthropic YGG_UPSTREAM_API_KEY=mock YGG_UPSTREAM_MODEL=mock \
@@ -191,6 +205,21 @@ if [ "$SCENARIO" = s16 ]; then
     YGG_PEERS="home=http://127.0.0.1:$HOMEP" YGG_PEER_TOKEN="$PEER" \
     "$YGG_BIN" >"$STATE/lab.log" 2>&1 &
   pids+=($!)
+fi
+if [ "$SCENARIO" = films ]; then
+  for i in 0 1; do
+    n=${FILM_ROOTS[$i]}; port=$((LABP + i)); other=${FILM_ROOTS[$((1 - i))]}; oport=$((LABP + 1 - i))
+    mkdir -p "$STATE/$n/work"
+    on home env -i PATH="$PATH" HOME="$STATE/$n" YGG_UPSTREAM_BASE_URL="http://127.0.0.1:$MOCK" \
+      YGG_UPSTREAM_STYLE=anthropic YGG_UPSTREAM_API_KEY=mock YGG_UPSTREAM_MODEL=mock YGG_WAKE_DEBOUNCE_MS=400 \
+      YGG_PROVIDERS="$STATE/$n/none.json" YGG_ARTIFACTS_DIR="$STATE/$n/work/artifacts" \
+      YGG_DATA_DIR="$STATE/$n/data" YGG_PROFILES="$STATE/$n/agents.json" \
+      YGG_PROJECT_DIR="$STATE/$n/work" YGG_LISTEN="127.0.0.1:$port" YGG_ROOT_NAME="$n" \
+      YGG_ROOT_MAIN=1 YGG_HOME_ROOT=home \
+      YGG_PEERS="home=http://127.0.0.1:$HOMEP,$other=http://127.0.0.1:$oport" YGG_PEER_TOKEN="$PEER" \
+      "$YGG_BIN" >"$STATE/$n.log" 2>&1 &
+    pids+=($!)
+  done
 fi
 on home env EDGE_MODELS="$VOICE_DIR/models" EDGE_PORT=$VOICEP EDGE_THREADS=4 \
   "$VOICE_DIR/venv/bin/python" -m uvicorn --app-dir "$VOICE_DIR" voice_server:app --host 127.0.0.1 --port $VOICEP \
@@ -275,6 +304,8 @@ for _ in $(seq 120); do
   if on home curl -sf -o /dev/null "http://127.0.0.1:$APP/pair" &&
     on home curl -sf -o /dev/null "http://127.0.0.1:$HOMEP/session" &&
     { [ "$SCENARIO" != s16 ] || on home curl -sf -o /dev/null "http://127.0.0.1:$LABP/session"; } &&
+    { [ "$SCENARIO" != films ] || { on home curl -sf -o /dev/null "http://127.0.0.1:$LABP/session" &&
+      on home curl -sf -o /dev/null "http://127.0.0.1:$((LABP + 1))/session"; }; } &&
     on home curl -sf -o /dev/null "http://127.0.0.1:$VOICEP/healthz" &&
     grep -q "channel up" "$STATE/bridge.log" &&
     grep -qi "registered worker" "$STATE/agent.log" &&
@@ -307,6 +338,13 @@ if [ "$SCENARIO" = s16 ]; then
     PW_HOME="http://127.0.0.1:$HOMEP" PW_LAB="http://127.0.0.1:$LABP" PW_VOICE="http://127.0.0.1:$VOICEP/v1" \
     PW_PHONE_CHROME="$PHONE_CHROME" APP_DIR="$B" \
     node "$ROOT/sim/reach/s16.mjs" 2>&1 | tee "$STATE/e2e.log"
+  rc=${PIPESTATUS[0]}
+elif [ "$SCENARIO" = films ]; then
+  on home env PW_AP_URL="$AP_URL" PW_AP_IP="$VPS" PW_BASE_URL="http://127.0.0.1:$APP" PW_STATE="$STATE" \
+    PW_HOME="http://127.0.0.1:$HOMEP" PW_ROOTS="studio=http://127.0.0.1:$LABP,workshop=http://127.0.0.1:$((LABP + 1))" \
+    PW_VOICE="http://127.0.0.1:$VOICEP/v1" PW_PHONE_CHROME="$PHONE_CHROME" APP_DIR="$B" PW_PEER_TOKEN="$PEER" \
+    FILMS_OUT="${FILMS_OUT:-$STATE/films}" FILMS_ONLY="${FILMS_ONLY:-}" \
+    node "$ROOT/sim/films/films.mjs" 2>&1 | tee "$STATE/e2e.log"
   rc=${PIPESTATUS[0]}
 else
 on home env PW_AP_URL="$AP_URL" PW_AP_IP="$VPS" PW_BASE_URL="http://127.0.0.1:$APP" PW_STATE="$STATE" \
