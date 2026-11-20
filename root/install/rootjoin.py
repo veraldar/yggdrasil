@@ -2,8 +2,15 @@
 """rootjoin.py — the stdlib half of join.sh: the hub's join API, the QR, link-token refill.
 
   rootjoin.py join  --state DIR --hub URL --name N --os OS --host H [--wg-pub KEY] [--qr-png P] [--open-qr] [--new]
+                    [--model home]         "Same as the home root": said in the join request
   rootjoin.py refill --state DIR [--min 5] [--every SECS]
   rootjoin.py brain-env --state DIR --out FILE --listen ADDR --data DIR --project DIR --peer-port P [--upstream FILE]
+                    [--no-upstream-ok]     no model yet is fine (it comes from the home root after the approval)
+  rootjoin.py model-fetch --state DIR --peer-port P --out FILE [--wait SECS]   "Same as the home root": GET the home
+                                           brain's /root/model through THIS root's WireGuard node (the tunnel:
+                                           end to end), write the four YGG_UPSTREAM_* lines to FILE (mode 600).
+                                           Exit 0 · 7 the home root has no such route (older) · 8 refused ·
+                                           9 its model is on the home machine itself · 11 no answer in SECS
   rootjoin.py wg-config --state DIR --out FILE --brain-port B --peer-port P   this root's WireGuard node config
                                            (prints changed|unchanged; exit 5 = the approval had no tunnel)
   rootjoin.py fetch-net --base URL --arch A --out FILE   the bifrost-net release asset: SHA256SUMS signed by the
@@ -193,6 +200,8 @@ def cmd_join(o):
         body = {"name": o.name, "os": o.os, "host": o.host}
         if o.wg_pub:
             body["wg_pub"] = o.wg_pub
+        if getattr(o, "model", None) == "home":   # "Same as the home root" (an older hub ignores the field)
+            body["model"] = "home"
         try:
             st, ans = http("POST", hub_join(hub, "/api/roots/join"), o.cacert, body=body)
         except NetError as e:
@@ -397,11 +406,13 @@ def cmd_brain_env(o):
             order.append(k)
         vals[k] = v
     base = vals.get("YGG_UPSTREAM_BASE_URL", "")
-    if not base:
+    if not base and o.no_upstream_ok:
+        base = None   # "Same as the home root": the model comes over the root link after the approval
+    elif not base:
         print("rootjoin: no model upstream: set YGG_UPSTREAM_BASE_URL (and _API_KEY, _MODEL) or pass --upstream-env FILE",
               file=sys.stderr)
         return 5
-    if not re.match(r"^https?://", base):
+    if base is not None and not re.match(r"^https?://", base):
         fail("YGG_UPSTREAM_BASE_URL must start with http:// or https://")
     lines = ["# yggdrasil-root brain — written by join.sh on every run. The upstream lines (and any other",
              "# YGG_* you add) are kept; the lines below the blank line come from the join and are rewritten.",
@@ -444,6 +455,65 @@ def cmd_brain_env(o):
 
 
 # -------------------------------------------------------------------------------- dial / get
+def cmd_model_fetch(o):
+    """'Same as the home root': the home brain's model settings, asked INSIDE the tunnel (this root's own
+    WireGuard node -> `local`, the home brain) with the peer token; written to --out (600) as the four
+    YGG_UPSTREAM_* lines. Never over the plaintext peer path, and the key is never printed."""
+    root = load_json(os.path.join(o.state, "root.json"))
+    if not root:
+        fail("not joined yet (no root.json)")
+    if not root.get("wg"):
+        print("rootjoin: no WireGuard tunnel with the home root: its model is only sent inside one", file=sys.stderr)
+        return 8
+    url = "http://127.0.0.1:%d/_wg/local/root/model" % o.peer_port
+    headers = {"accept": "application/json", "x-ygg-root": str(root.get("root_id", ""))}
+    if root.get("peer_token"):
+        headers["x-ygg-peer"] = root["peer_token"]
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))   # loopback: never through a proxy
+    deadline, missing, last = time.time() + o.wait, 0, "no answer"
+    while True:
+        st, raw = 0, b""
+        try:
+            with opener.open(urllib.request.Request(url, headers=headers), timeout=10) as r:
+                st, raw = r.status, r.read(65536)
+        except urllib.error.HTTPError as e:
+            st = e.code
+        except (urllib.error.URLError, OSError) as e:
+            last = str(getattr(e, "reason", e))
+        if st == 200:
+            try:
+                m = json.loads(raw.decode())
+            except ValueError:
+                m = None
+            vals = [m.get(k) if isinstance(m, dict) else None for k in ("base_url", "style", "model", "api_key")]
+            base, style, model, key = vals
+            if (not all(isinstance(v, str) for v in vals) or any("\n" in v or "\r" in v for v in vals)
+                    or not re.match(r"^https?://[^\s]+$", base) or style not in ("openai", "anthropic") or not model):
+                print("rootjoin: the home root's answer is not a model (base_url, style, model, api_key)", file=sys.stderr)
+                return 8
+            write_private(o.out, "YGG_UPSTREAM_BASE_URL=%s\nYGG_UPSTREAM_STYLE=%s\nYGG_UPSTREAM_MODEL=%s\n"
+                                 "YGG_UPSTREAM_API_KEY=%s\n" % (base, style, model, key))
+            say("    model: %s at %s (%s) — the home root's" % (model, urllib.parse.urlsplit(base).netloc.rsplit("@", 1)[-1], style))
+            return 0
+        if st in (401, 403):
+            return 8
+        if st == 409:
+            return 9
+        if st == 404:
+            # the home brain has no such route (older than v0.9.1) — or the node does not know `local` yet:
+            # only a 404 that stays is the first
+            missing += 1
+            last = "404"
+            if missing >= 5:
+                return 7
+        elif st:
+            last = "HTTP %d" % st
+        if time.time() >= deadline:
+            print("rootjoin: the home root did not answer inside the tunnel (%s)" % last, file=sys.stderr)
+            return 11
+        time.sleep(2)
+
+
 def cmd_dial(o):
     root = load_json(os.path.join(o.state, "root.json")) or fail("not joined: no root.json in %s" % o.state)
     u = urllib.parse.urlsplit(root["rootlink_url"])
@@ -881,6 +951,7 @@ def main(argv):
     j.add_argument("--open-qr", action="store_true")
     j.add_argument("--new", action="store_true", help="join again even if root.json exists")
     j.add_argument("--wg-pub", help="this machine's WireGuard public key (the approval pins it)")
+    j.add_argument("--model", choices=["home"], help="'Same as the home root': said in the join request")
     r = with_state(sub.add_parser("refill"))
     r.add_argument("--min", type=int, default=5)
     r.add_argument("--every", type=float, default=0, help="loop: refill, sleep SECS, forever")
@@ -889,6 +960,11 @@ def main(argv):
         b.add_argument(a, required=True)
     b.add_argument("--peer-port", type=int, required=True)
     b.add_argument("--upstream")
+    b.add_argument("--no-upstream-ok", action="store_true")
+    mf = with_state(sub.add_parser("model-fetch"))
+    mf.add_argument("--peer-port", type=int, required=True)
+    mf.add_argument("--out", required=True)
+    mf.add_argument("--wait", type=float, default=90)
     w = with_state(sub.add_parser("wg-config"))
     w.add_argument("--out", required=True)
     w.add_argument("--brain-port", type=int, required=True)
@@ -910,7 +986,7 @@ def main(argv):
         o.cacert = read_conf(o.state).get("CACERT") or None
     return {"join": cmd_join, "refill": cmd_refill, "brain-env": cmd_brain_env, "dial": cmd_dial,
             "get": cmd_get, "qr": cmd_qr, "probe": cmd_probe, "wg-config": cmd_wg_config,
-            "fetch-net": cmd_fetch_net}[o.cmd](o)
+            "fetch-net": cmd_fetch_net, "model-fetch": cmd_model_fetch}[o.cmd](o)
 
 
 if __name__ == "__main__":

@@ -11,9 +11,12 @@
 #   bash install.sh --update         the newest signed release, if newer — then the same install
 #   bash install.sh --uninstall      remove it all from this computer (lists what goes, asks first; -y: no question)
 #
-#   --upstream-env FILE   the model: YGG_UPSTREAM_BASE_URL / _API_KEY / _MODEL / _STYLE lines. Without it, the
-#                         first run asks in the terminal (the key is not shown) — or takes those variables
-#                         from the environment. Kept in ~/.config/yggdrasil/yggdrasil.env (mode 600).
+#   --model-provider P    the model the brain thinks with: zai | openrouter | anthropic | openai (the provider's
+#                         address is filled in; its key comes from YGG_UPSTREAM_API_KEY in the environment, never
+#                         the command line) | other (with --upstream-env). --model M: not the provider's default.
+#                         Without it, the first run asks in the terminal (the key is not shown).
+#   --upstream-env FILE   the model as YGG_UPSTREAM_BASE_URL / _API_KEY / _MODEL / _STYLE lines (or those variables
+#                         from the environment). Kept in ~/.config/yggdrasil/yggdrasil.env (mode 600).
 #   --no-start            install, but enable/start nothing
 #   --direct              no systemd user session here (containers, WSL): run each piece with nohup;
 #                         logs in ~/.local/state/bifrost/log/
@@ -55,7 +58,7 @@ warn() { printf '\033[1;33m!!\033[0m  %s\n' "$*" >&2; }
 die()  { printf '\033[1;31mxx\033[0m  %s\n' "$1" >&2; exit "${2:-1}"; }
 
 MODE=full NOW=0 START=1 DIRECT=0 SKIP=, TRUNK_ARG='' ASK_TRUNK=0 PAIR=0 UPDATE=0 UNINSTALL=0 YES=0
-WANT_VERSION='' FROM_SOURCE=0 UPSTREAM_FILE=''
+WANT_VERSION='' FROM_SOURCE=0 UPSTREAM_FILE='' MODEL_PROVIDER_ARG='' MODEL_ARG=''
 PASS=()   # the arguments a release's own install.sh gets (all but --update / --version)
 while [ $# -gt 0 ]; do
   case $1 in
@@ -70,12 +73,14 @@ while [ $# -gt 0 ]; do
       case ${2:-} in ''|-*) ASK_TRUNK=1 ;; *) PASS+=("$1"); shift; TRUNK_ARG=$1 ;; esac ;;
     --trunk=*) TRUNK_ARG=${1#--trunk=} ;;
     --upstream-env) [ -n "${2:-}" ] || die "--upstream-env needs a FILE" 64; PASS+=("$1"); shift; UPSTREAM_FILE=$1 ;;
+    --model-provider) [ -n "${2:-}" ] || die "--model-provider needs a name" 64; PASS+=("$1"); shift; MODEL_PROVIDER_ARG=$1 ;;
+    --model) [ -n "${2:-}" ] || die "--model needs a name" 64; PASS+=("$1"); shift; MODEL_ARG=$1 ;;
     --update) UPDATE=1; shift; continue ;;
     --version) [ -n "${2:-}" ] || die "--version needs vX.Y.Z" 64; WANT_VERSION=${2#v}; shift 2; continue ;;
     --from-source) FROM_SOURCE=1 ;;
     --uninstall) UNINSTALL=1 ;;
     -y|--yes) YES=1 ;;
-    -h|--help) sed -n '2,36p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,39p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) die "unknown option: $1 (see --help)" 64 ;;
   esac
   PASS+=("$1")
@@ -351,15 +356,16 @@ if [ -n "$UPSTREAM_FILE" ]; then
     printf -v "$k" '%s' "$v"
   done <"$UPSTREAM_FILE"
 fi
-if [ -z "${YGG_UPSTREAM_BASE_URL:-}" ] && ! grep -q '^YGG_UPSTREAM_BASE_URL=.' "$ENV_FILE" 2>/dev/null && [ -t 0 ]; then
-  echo "The brain needs a model to think with: any OpenAI- or Anthropic-compatible API (or a local one)."
-  read -r -p "  Base URL [https://api.openai.com/v1]: " YGG_UPSTREAM_BASE_URL
-  YGG_UPSTREAM_BASE_URL=${YGG_UPSTREAM_BASE_URL:-https://api.openai.com/v1}
-  st=openai; case $YGG_UPSTREAM_BASE_URL in *anthropic*) st=anthropic ;; esac
-  read -r -p "  Dialect openai|anthropic [$st]: " YGG_UPSTREAM_STYLE; YGG_UPSTREAM_STYLE=${YGG_UPSTREAM_STYLE:-$st}
-  read -r -p "  Model [gpt-4o-mini]: " YGG_UPSTREAM_MODEL; YGG_UPSTREAM_MODEL=${YGG_UPSTREAM_MODEL:-gpt-4o-mini}
-  # shellcheck disable=SC2034  # read through ${!k} (UP_KEYS) when the env file is written
-  read -r -s -p "  API key (not shown; empty for a local server): " YGG_UPSTREAM_API_KEY; echo
+# The model step (model-step.sh: the same choices and words as join.sh and the Windows installer; on the home
+# computer there is no "Same as the home root", and Z AI comes first).
+# shellcheck source=root/install/model-step.sh
+. "$HERE/model-step.sh"
+if [ "$MODEL_PROVIDER_ARG" = same ]; then
+  die "--model-provider same is for a computer that joins (join.sh): this is the home root — zai, openrouter, anthropic, openai or other" 64
+elif [ -n "$MODEL_PROVIDER_ARG" ]; then
+  model_from_provider "$MODEL_PROVIDER_ARG" "$MODEL_ARG" || die "$MODEL_ERR" 64
+elif [ -z "${YGG_UPSTREAM_BASE_URL:-}" ] && ! grep -q '^YGG_UPSTREAM_BASE_URL=.' "$ENV_FILE" 2>/dev/null && [ -t 0 ]; then
+  model_step home || die "no model chosen" 64
 fi
 
 # ---------------------------------------------------------------------------- your trunk's line
@@ -404,7 +410,7 @@ install_brain() {
   # env file: create once. Your upstream URL and key survive re-runs. The model asked above (or --upstream-env,
   # or YGG_* in the environment) seeds it — and fills it in later when it still has no upstream.
   if [ -e "$ENV_FILE" ]; then
-    if ! grep -q '^YGG_UPSTREAM_BASE_URL=.' "$ENV_FILE" && [ -n "${YGG_UPSTREAM_BASE_URL:-}" ]; then
+    if { ! grep -q '^YGG_UPSTREAM_BASE_URL=.' "$ENV_FILE" || [ -n "$MODEL_PROVIDER_ARG" ]; } && [ -n "${YGG_UPSTREAM_BASE_URL:-}" ]; then   # (--model-provider: a change asked for)
       for k in "${UP_KEYS[@]}"; do if [ -n "${!k:-}" ]; then envset "$ENV_FILE" "$k" "${!k}"; fi; done
       say "config  $ENV_FILE (the model set)"; CHANGED="${CHANGED}yggdrasil.service "
     else say "config  $ENV_FILE (kept)"; fi

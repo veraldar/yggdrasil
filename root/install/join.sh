@@ -20,8 +20,13 @@
 #   --hub URL             the hub your phone is paired with (needed for the first join only)
 #   --name NAME           this root's name in the tree (default: the hostname)
 #   --dir DIR             everything this root keeps (default ~/.local/share/yggdrasil-root)
-#   --upstream-env FILE   the model: YGG_UPSTREAM_BASE_URL / _API_KEY / _MODEL / _STYLE lines. Default: the
-#                         same variables from the environment; asked for when run in a terminal. Kept on re-runs.
+#   --model-provider P    the model this root thinks with: same (as the home root: handed over inside the tunnel
+#                         once you approve — the default when joining) | zai | openrouter | anthropic | openai
+#                         (the provider's address is filled in; its key comes from YGG_UPSTREAM_API_KEY in the
+#                         environment, never the command line) | other (with --upstream-env). In a terminal
+#                         join.sh asks instead. --model M: another model than the provider's default.
+#   --upstream-env FILE   the model as YGG_UPSTREAM_BASE_URL / _API_KEY / _MODEL / _STYLE lines (or the same
+#                         variables from the environment). Kept on re-runs.
 #   --qr-png FILE         where the QR picture goes (default DIR/join-qr.png)   --open-qr   show it on screen
 #   --brain-bin FILE      use this yggdrasil binary (default: DIR/bin, the release's, the repo's build, ~/.local/bin,
 #                         PATH, else the signed release on Linux/WSL x86_64)
@@ -38,7 +43,8 @@
 #   --cacert FILE         trust this CA for the hub (tests with a self-signed hub ONLY)
 #   --version vX.Y.Z      another release than this script's own
 #
-# Exit: 0 joined and running · 3 refused on the phone · 4 the request expired · 64 usage · 1 anything else.
+# Exit: 0 joined and running · 3 refused on the phone · 4 the request expired · 6 joined, but no model came from
+# the home root (run join.sh again and pick a provider) · 64 usage · 1 anything else.
 set -euo pipefail
 umask 077
 
@@ -62,10 +68,11 @@ REPO=$(cd "$HERE/../.." && pwd)
 say()  { printf '\033[1m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m!!\033[0m  %s\n' "$*" >&2; }
 die()  { printf '\033[1;31mxx\033[0m  %s\n' "$1" >&2; exit "${2:-1}"; }
-usage() { sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,47p' "$0" | sed 's/^# \{0,1\}//'; }
 
 HUB='' NAME='' DIR='' UPSTREAM_FILE='' QR_PNG='' OPEN_QR='' BRAIN_BIN=${YGG_BINARY:-} BUILD=0 BRAIN_PORT='' PEER_PORT='' NET_BIN=''
 PROJECT_DIR='' SUPERVISOR=auto START=1 CACERT='' REJOIN=0 STOP=0 UNINSTALL=0 YES=0 WANT_VERSION=''
+MODEL_PROVIDER_ARG='' MODEL_ARG=''
 need() { [ $# -ge 2 ] && [ -n "$2" ] || die "$1 needs a value" 64; }
 while [ $# -gt 0 ]; do
   case $1 in
@@ -73,6 +80,8 @@ while [ $# -gt 0 ]; do
     --name) need "$@"; NAME=$2; shift ;;
     --dir) need "$@"; DIR=$2; shift ;;
     --upstream-env) need "$@"; UPSTREAM_FILE=$2; shift ;;
+    --model-provider) need "$@"; MODEL_PROVIDER_ARG=$2; shift ;;
+    --model) need "$@"; MODEL_ARG=$2; shift ;;
     --qr-png) need "$@"; QR_PNG=$2; shift ;;
     --open-qr) OPEN_QR=1 ;;
     --brain-bin) need "$@"; BRAIN_BIN=$2; shift ;;
@@ -430,37 +439,45 @@ case $NET_OUT in # the Linux build links libopus
   *'error while loading shared libraries'*) die "bifrost-net cannot start: ${NET_OUT%%$'\n'*} — $(pkg_hint libopus0)" ;;
 esac
 
-# ------------------------------------------------------------------------------ 2. upstream
-UP_ARGS=() UP_TMP=
+# ------------------------------------------------------------------------------ 2. the model
+# The model step (model-step.sh: the same choices and words as install.sh and the Windows installer). What is
+# given wins (--upstream-env, --model-provider, YGG_UPSTREAM_* in the environment, a model this root already
+# has); else a terminal is asked; else — no terminal, nothing given — "Same as the home root": MODEL_SRC=home,
+# the join request says so, and the settings come over the root link (inside WireGuard) once you approve.
+# shellcheck source=root/install/model-step.sh
+. "$HERE/model-step.sh"
+UP_ARGS=() UP_TMP='' MODEL_SRC=''
 cleanup() { [ -n "$UP_TMP" ] && rm -f "$UP_TMP"; return 0; }
 trap cleanup EXIT
+up_tmp() { # the chosen provider's four lines into a file of ours (600), handed to rootjoin.py; the key leaves the shell
+  UP_TMP=$(mktemp "$DIR/.upstream.XXXXXX")
+  printf 'YGG_UPSTREAM_BASE_URL=%s\nYGG_UPSTREAM_STYLE=%s\nYGG_UPSTREAM_MODEL=%s\nYGG_UPSTREAM_API_KEY=%s\n' \
+    "$YGG_UPSTREAM_BASE_URL" "$YGG_UPSTREAM_STYLE" "$YGG_UPSTREAM_MODEL" "${YGG_UPSTREAM_API_KEY:-}" >"$UP_TMP"
+  unset YGG_UPSTREAM_API_KEY
+  UP_ARGS=(--upstream "$UP_TMP")
+}
 if [ -n "$UPSTREAM_FILE" ]; then
   [ -r "$UPSTREAM_FILE" ] || die "--upstream-env $UPSTREAM_FILE: not readable"
   UP_ARGS=(--upstream "$UPSTREAM_FILE")
-elif [ -z "${YGG_UPSTREAM_BASE_URL:-}" ] && ! grep -q '^YGG_UPSTREAM_BASE_URL=.' "$DIR/brain.env" 2>/dev/null; then
-  if [ -t 0 ]; then # interactive: ask once; the key is read without echo and only ever written to brain.env
-    echo "This root needs a model to think with (any OpenAI- or Anthropic-compatible API)."
-    read -r -p "  Base URL [https://api.openai.com/v1]: " u; u=${u:-https://api.openai.com/v1}
-    s=openai; case $u in *anthropic*) s=anthropic ;; esac
-    read -r -p "  Dialect openai|anthropic [$s]: " a; s=${a:-$s}
-    read -r -p "  Model [gpt-4o-mini]: " m; m=${m:-gpt-4o-mini}
-    read -r -s -p "  API key (not shown; empty for a local server): " k; echo
-    UP_TMP=$(mktemp "$DIR/.upstream.XXXXXX")
-    printf 'YGG_UPSTREAM_BASE_URL=%s\nYGG_UPSTREAM_STYLE=%s\nYGG_UPSTREAM_MODEL=%s\nYGG_UPSTREAM_API_KEY=%s\n' "$u" "$s" "$m" "$k" >"$UP_TMP"
-    unset k
-    UP_ARGS=(--upstream "$UP_TMP")
-  else
-    die "no model upstream. Pass --upstream-env FILE with lines like
-      YGG_UPSTREAM_BASE_URL=https://api.openai.com/v1
-      YGG_UPSTREAM_API_KEY=sk-...
-      YGG_UPSTREAM_MODEL=gpt-4o-mini
-    (YGG_UPSTREAM_STYLE=anthropic for an Anthropic-shaped API), or export those variables." 64
-  fi
+elif [ "$MODEL_PROVIDER_ARG" = same ]; then
+  MODEL_SRC=home
+elif [ -n "$MODEL_PROVIDER_ARG" ]; then
+  model_from_provider "$MODEL_PROVIDER_ARG" "$MODEL_ARG" || die "$MODEL_ERR" 64
+  [ "$MODEL_PROVIDER_ARG" = other ] || up_tmp
+elif [ -n "${YGG_UPSTREAM_BASE_URL:-}" ] || grep -q '^YGG_UPSTREAM_BASE_URL=.' "$DIR/brain.env" 2>/dev/null; then
+  :   # given in the environment, or this root already has its model: kept
+elif [ -t 0 ]; then
+  model_step join || die "no model chosen" 64
+  if [ "$MODEL_PROVIDER" = same ]; then MODEL_SRC=home; else up_tmp; fi
+else
+  MODEL_SRC=home
 fi
 brain_env() { # write DIR/brain.env: the upstream now; plus the join's lines once joined
   local rc=0 out
+  local home=(); [ "$MODEL_SRC" = home ] && home=(--no-upstream-ok)   # the model comes after the approval
   out=$("$PY" "$HELPER" brain-env --state "$DIR" --out "$DIR/brain.env" --listen "127.0.0.1:$BRAIN_PORT" \
-    --data "$DIR/data" --project "$PROJECT_DIR" --peer-port "$PEER_PORT" ${UP_ARGS[@]+"${UP_ARGS[@]}"}) || rc=$?
+    --data "$DIR/data" --project "$PROJECT_DIR" --peer-port "$PEER_PORT" ${UP_ARGS[@]+"${UP_ARGS[@]}"} \
+    ${home[@]+"${home[@]}"}) || rc=$?
   [ $rc = 5 ] && die "no model upstream: pass --upstream-env FILE (see --help)" 64
   [ $rc = 0 ] || die "could not write $DIR/brain.env"
   if [ "$out" = changed ]; then CHANGED=1; fi
@@ -497,8 +514,10 @@ if [ $JOINED = 1 ] && [ $REJOIN = 0 ]; then
 else
   [ $REJOIN = 1 ] && [ $JOINED = 1 ] && say "rejoin: asking $HUB for a new join (the current one stays until this is approved)"
   rc=0 NEW_FLAG=; [ $REJOIN = 1 ] && NEW_FLAG=--new
+  MODEL_FLAG=; [ "$MODEL_SRC" = home ] && MODEL_FLAG='--model home'
+  # shellcheck disable=SC2086  # the two flags are words on purpose
   "$PY" "$HELPER" join --state "$DIR" --hub "$HUB" --name "$NAME" --os "$OS" --host "$HOSTN" --wg-pub "$WG_PUB" \
-    --qr-png "$QR_PNG" ${OPEN_QR:+--open-qr} ${CACERT:+--cacert "$CACERT"} $NEW_FLAG || rc=$?
+    --qr-png "$QR_PNG" ${OPEN_QR:+--open-qr} ${CACERT:+--cacert "$CACERT"} $NEW_FLAG $MODEL_FLAG || rc=$?
   case $rc in
     0) CHANGED=1
        if [ "$KEYFILE" != "$DIR/wg.key" ]; then mv -f "$KEYFILE" "$DIR/wg.key"; mv -f "$KEYFILE.pub" "$DIR/wg.key.pub"; fi ;;
@@ -543,6 +562,12 @@ if [ "$TUNNEL" = 1 ]; then PEER_FLAGS="--wg-udp 127.0.0.1:$BRAIN_PORT --wg-node 
 put "$BIN/run-brain" 755 <<EOF
 #!/bin/sh
 # yggdrasil-root: the brain, with $DIR/brain.env (generated by join.sh)
+# no model yet ("Same as the home root": it comes over the root link once the join is approved): wait for it
+n=0
+while ! grep -q '^YGG_UPSTREAM_BASE_URL=.' '$DIR/brain.env' 2>/dev/null; do
+  [ \$((n % 150)) = 0 ] && echo "\$(date '+%F %T') no model yet: waiting for it (join.sh asks the home root; or run join.sh again and pick a provider)"
+  n=\$((n + 1)); sleep 2
+done
 while IFS= read -r l || [ -n "\$l" ]; do   # KEY=value lines, taken literally (no expansion)
   # shellcheck disable=SC2163
   case \$l in ''|'#'*) ;; *=*) export "\$l" ;; esac
@@ -761,7 +786,29 @@ case $SUP in
 esac
 
 # ---------------------------------------------------------------------------- 7. the result
-if [ $START = 1 ]; then
+# "Same as the home root": the services are up (the dialer links, the WireGuard node shakes hands) — ask the home
+# brain for its model INSIDE the tunnel, write it to brain.env, and the waiting brain starts. Never over the
+# plaintext peer path: without a tunnel there is no "same".
+NO_MODEL=''
+if [ "$MODEL_SRC" = home ]; then
+  if [ "$TUNNEL" != 1 ]; then
+    NO_MODEL="the home root runs no WireGuard node, and its model is only ever sent inside one"
+  elif [ $START = 0 ]; then
+    NO_MODEL="--no-start: the home root is asked for its model when the services run"
+  else
+    say "model: asking the home root for its own (over the root link, inside WireGuard)"
+    UP_TMP=$(mktemp "$DIR/.upstream.XXXXXX"); rc=0
+    "$PY" "$HELPER" model-fetch --state "$DIR" --peer-port "$PEER_PORT" --out "$UP_TMP" --wait "${JOIN_MODEL_WAIT:-90}" || rc=$?
+    case $rc in
+      0) UP_ARGS=(--upstream "$UP_TMP"); MODEL_SRC=''; brain_env; rm -f "$UP_TMP"; UP_TMP= ;;
+      7) NO_MODEL="the home root is an older version: it cannot hand its model over" ;;
+      8) NO_MODEL="the home root refused to hand its model to this computer" ;;
+      9) NO_MODEL="the home root's model runs on the home computer itself, so this computer cannot use it" ;;
+      *) NO_MODEL="the home root did not answer inside the tunnel" ;;
+    esac
+  fi
+fi
+if [ $START = 1 ] && [ -z "$NO_MODEL" ]; then
   up=0
   for _ in $(seq 1 "${JOIN_BRAIN_WAIT:-30}"); do "$PY" "$HELPER" probe "$BRAIN_URL/root" 2>/dev/null && { up=1; break; }; sleep 0.5; done
   if [ $up = 1 ]; then say "brain up on $BRAIN_URL"; else warn "the brain is not answering on $BRAIN_URL yet — see the log ($SUP)"; fi
@@ -776,3 +823,8 @@ cat <<EOF
   logs      $(case $SUP in systemd) echo "journalctl --user -u yggdrasil-root-brain -u yggdrasil-root-dial -f" ;; *) echo "$LOG/" ;; esac)
   stop      $0 --stop     re-run: $0 (keeps this join)     remove: $0 --uninstall
 EOF
+if [ -n "$NO_MODEL" ]; then
+  warn "joined, but this root has no model yet: $NO_MODEL."
+  warn "Run join.sh again and pick a provider (the join is kept; the brain starts as soon as it has a model)."
+  exit 6
+fi
