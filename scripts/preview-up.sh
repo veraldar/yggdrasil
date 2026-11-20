@@ -42,7 +42,7 @@ mapfile -t ENVV < <(systemctl --user show "$UNIT" -p Environment --value | pytho
 # the unit gone (11-19: an agent's `pkill -f yggdrasil` took every brain down, and a transient unit
 # keeps no environment once it is gone): the copy saved at the last start, else brain-up.sh's base
 if [ "${#ENVV[@]}" -le 10 ] && [ -s "$UI/brain.env" ]; then
-  mapfile -t ENVV < <(grep -vE '^(YGG_MODELS|YGG_VISION_MODELS|YGG_ARTIFACTS_DIR|YGG_EXTENSIONS|YGG_HARNESS_LIVE)=' "$UI/brain.env")
+  mapfile -t ENVV < <(grep -vE '^(YGG_MODELS|YGG_VISION_MODELS|YGG_ARTIFACTS_DIR|YGG_EXTENSIONS|YGG_HARNESS_LIVE|YGG_OPENCODE_XDG_DATA|YGG_OPENCODE_XDG_CONFIG|YGG_HARNESS_HELPER|YGG_HARNESS_HELPER_TOKEN|YGG_HARNESS_RUNNER)=' "$UI/brain.env")
   echo "environment: from $UI/brain.env (the unit was gone)"
 elif [ "${#ENVV[@]}" -le 10 ]; then
   case "$NAME" in preview) PORT0=4101 ;; ui) PORT0=4191 ;; *) PORT0= ;; esac
