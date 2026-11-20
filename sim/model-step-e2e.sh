@@ -70,24 +70,22 @@ mkcase() { # NAME — debian:12, the CA trusted, a normal user, the release unpa
 }
 
 # drive the terminal install on a pty, as the user, inside the container
-typed() { # NAME ENVSTRING LOGOUT — runs install.sh --brain-only --now via drive_install.py
-  # on a pty, typing the answers; the transcript is written INSIDE the container and copied
-  # out after (streaming the pty over the docker-exec channel wedges now and then)
-  # run SYNCHRONOUSLY (docker exec -d + polling wedged nondeterministically); python exits
-  # when the install does, writes the transcript inside and touches DONEFILE — the outer
-  # timeout is the safety net for the rare hang; one retry on a fresh home
+typed() { # NAME ENVSTRING LOGOUT — install.sh --brain-only --now on a pty, typing the answers.
+  # Detached inside the container (docker exec -d — an attached client wedged nondeterministically);
+  # a timeout inside kills a stuck driver; the host polls for the done marker; 3 attempts,
+  # a fresh home between them. Done = the env file exists (written only after the model step).
   docker cp "$HERE/drive_install.py" msm-"$1":/tmp/drive_install.py >/dev/null
-  for try in 1 2; do
+  docker cp "$HERE/msm_run.sh" msm-"$1":/tmp/msm_run.sh >/dev/null
+  for try in 1 2 3; do
     docker exec -u "$HU" -w $HH msm-"$1" rm -f /tmp/transcript /tmp/drive.done
-    timeout 180 docker exec -u "$HU" -e HOME=$HH -e MSM_INPUTS="$2" -e TRANSCRIPT=/tmp/transcript -e DONEFILE=/tmp/drive.done \
-      msm-"$1" python3 -u /tmp/drive_install.py bash -c "cd ~/yggdrasil-$VER/root/install && bash install.sh --brain-only --now" >/dev/null 2>&1
-    # done = the env file exists (install.sh writes it only after the model step); retry
-    # only when it does not, wiping the half-installed home first
-    docker exec -u "$HU" -w $HH msm-"$1" test -e .config/yggdrasil/yggdrasil.env && break
+    docker exec -d -u "$HU" -e HOME=$HH -e MSM_INPUTS="$2" -e TRANSCRIPT=/tmp/transcript -e DONEFILE=/tmp/drive.done \
+      msm-"$1" bash /tmp/msm_run.sh
+    for i in $(seq 120); do docker exec -u "$HU" msm-"$1" test -e /tmp/drive.done >/dev/null 2>&1 && break; sleep 2; done
+    docker exec -u "$HU" -w $HH msm-"$1" test -e .config/yggdrasil/yggdrasil.env >/dev/null 2>&1 && break
     docker exec -u "$HU" -w $HH msm-"$1" rm -rf .config .local
   done
   docker cp msm-"$1":/tmp/transcript "$STATE/log/$3" >/dev/null 2>&1
-  docker exec -u "$HU" msm-"$1" rm -f /tmp/transcript /tmp/drive.done /tmp/drive_install.py
+  docker exec -u "$HU" msm-"$1" rm -f /tmp/transcript /tmp/drive.done /tmp/drive_install.py /tmp/msm_run.sh
 }
 
 # one model turn: start the brain with its env file, create a session, post a message
@@ -124,7 +122,7 @@ sweep() { # NAME KEY — the key is only in the env file: mode 600, once, nowher
     e=~/.config/yggdrasil/yggdrasil.env
     m=\$(stat -c %a \$e)
     n=\$(grep -c '$k' \$e)
-    hits=\$(grep -rl -- '$k' ~ /tmp 2>/dev/null | grep -v '^\$e\$' | tr '\n' ' ')
+    hits=\$(grep -rl -- '$k' ~ /tmp 2>/dev/null | grep -vxF "\$e" | tr '\\n' ' ')
     echo \"mode=\$m inenv=\$n elsewhere=[\$hits]\"
     " 2>&1)
   docker logs "$c" >"$STATE/log/$c-docker.log" 2>&1
