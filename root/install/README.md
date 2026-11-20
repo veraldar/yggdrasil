@@ -253,20 +253,23 @@ asks first; `-y` skips the question). Other options: `--name` (default: the host
 `$HOME`), `--no-start`, `--build`. `--cacert` is only for tests against a self-signed hub.
 Exit codes: `0` joined and running · `3` refused on the phone · `4` expired · `64` usage · `1` other.
 
-**Windows: not part of v0.9.0, untested.** `win/Veraldar-Setup.exe` (see `win/README.txt`) has never
-run on a real Windows PC, and its launcher still clones this repository inside WSL (branch `BRANCH`
-in `launcher.bat`) instead of fetching the signed release; the `join.sh` it runs then takes the brain
-and the node from the signed release. The QR lands on the
-Windows Desktop and opens there. `keepalive.vbs` keeps WSL and the root running, and starts them
-at logon.
+**Windows: `Veraldar-Setup-<version>.exe`** (built by `scripts/build-win.sh`, see `win/README.txt`).
+One window, no terminal: it checks Windows and WSL2 (installing WSL with one UAC prompt and a
+restart when it is missing), sets up the Linux user and packages without a question, asks for the
+trunk address, runs this release's stamped `join.sh` (embedded byte for byte) inside WSL through
+`win/wsl-bootstrap.sh`, and shows the code and the QR in its own window until the phone approves.
+`keepalive.vbs` -> `launcher.bat` starts the root and keeps WSL awake, at logon too. Failures end
+with a step code (W-OS, W-WSL, W-NET, W-SIG, W-JOIN, W-MODEL, W-RUN) and
+`%LOCALAPPDATA%\Veraldar\install-report.txt`. Tested under wine with a fake `wsl.exe`; not yet run
+on a real Windows PC (`win/NOTES-win.md`).
 
 **Tests:**
 - `./join-test.sh` runs locally; `./join-test.sh --docker` runs in a clean `ubuntu:24.04`. Both
   use a fake hub that speaks the contract above and a fake trunk on `/rootlink` that needs the
-  real `root-dial.py` to link and earn a pong. They need `python3 openssl zbar-tools`, and `git`
-  for the WSL bootstrap case.
-- `win/launcher-test.sh` runs the installer, launcher and keepalive under wine with a recording
-  fake `wsl.exe`.
+  real `root-dial.py` to link and earn a pong. They need `python3 openssl zbar-tools`.
+- `win/launcher-test.sh` runs the installer under wine (Xvfb, xdotool) with a scripted fake
+  `wsl.exe` that runs the real `wsl-bootstrap.sh`: a case per step code. `win/bootstrap-test.sh`
+  runs `wsl-bootstrap.sh` in a fresh Ubuntu container.
 
 ## Upgrade / uninstall
 

@@ -1,118 +1,272 @@
 #!/usr/bin/env bash
-# launcher-test.sh — Veraldar-Setup.exe + launcher.bat + keepalive.vbs under wine, with a FAKE wsl.exe that
-# records its arguments (no WSL here). Proves the Windows half's logic: install + shortcuts, the WSL gate,
-# the hub asked once and remembered, wslpath for the script path, the exact bash command line, exit codes,
-# --change-hub -> --rejoin, the keepalive's wsl.exe call, and the uninstaller stopping the root.
-# What it cannot prove: real WSL, real Explorer, powershell's Desktop lookup (wine has no powershell, so
-# the %USERPROFILE%\Desktop fallback is what runs here), real cmd's line-ending handling (see calls()).
+# launcher-test.sh — Veraldar-Setup-<version>.exe under wine, in its own window (Xvfb, driven with xdotool), with a
+# FAKE wsl.exe (win/test/fake-wsl.c) that records every call and answers per case from a scenario file. Its
+# "-e bash wsl-bootstrap.sh …" calls run the REAL wsl-bootstrap.sh as a Unix process, with win/test/fake-join.sh
+# as join.sh: the step codes come out of the real classification, the code and the QR BMP out of the real
+# bootstrap. One case per step code (W-OS, W-WSL x2, W-NET, W-SIG, W-JOIN x4, W-MODEL, W-RUN), success, the
+# restart + /continue path, a non-Debian default distribution, a mistyped address, Cancel while waiting, the
+# report's masking, keepalive.vbs -> launcher.bat, the uninstaller.
+# What it cannot prove: real WSL, UAC, RunOnce after a real restart, SmartScreen, Windows' own fonts (see NOTES-win.md).
 #
-#   win/launcher-test.sh [IMAGE]     a Debian image with wine (default veraldar-wine-check:local); apt adds mingw
+#   win/launcher-test.sh [EXE] [--join FILE] [--shots DIR]
+#     EXE      Veraldar-Setup-<version>.exe (the version is taken from its name); default: built now with
+#              scripts/build-win.sh 0.9.1 and the tree's join.sh
+#     --join   the join.sh the exe must embed byte for byte (default: the tree's root/install/join.sh; a release's
+#              exe: dist/<version>/join.sh, the stamped one)
+#     --shots  a PNG of each screen (win-installer-<screen>.png) into DIR
 set -euo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
-IMAGE=${1:-veraldar-wine-check:local}
-[ -f "$HERE/Veraldar-Setup.exe" ] || { echo "build Veraldar-Setup.exe first (see veraldar.nsi)" >&2; exit 1; }
+REPO=$(cd "$HERE/.." && pwd)
+EXE='' SHOTS='' JOINSH=$REPO/root/install/join.sh
+while [ $# -gt 0 ]; do
+  case $1 in
+    --shots) SHOTS=$(mkdir -p "$2" && cd "$2" && pwd); shift ;;
+    --join) JOINSH=${2:?--join FILE}; shift ;;
+    *) EXE=$1 ;;
+  esac
+  shift
+done
+IMAGE=${WINE_IMAGE:-veraldar-wine-test:local}
+if ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
+  echo "building $IMAGE (wine + mingw + imagemagick + xdotool)" >&2
+  docker build -q -t "$IMAGE" - >/dev/null <<'EOF'
+FROM veraldar-wine-check:local
+RUN apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
+    gcc-mingw-w64-x86-64 imagemagick xdotool python3 >/dev/null && rm -rf /var/lib/apt/lists/*
+EOF
+fi
+TMP=$(mktemp -d)
+trap 'rm -rf "$TMP"' EXIT
+if [ -z "$EXE" ]; then EXE=$("$REPO/scripts/build-win.sh" 0.9.1 "$REPO/root/install/join.sh" "$TMP"); fi
+EXE=$(cd "$(dirname "$EXE")" && pwd)/$(basename "$EXE")
+VERSION=$(basename "$EXE" | sed -n 's/^Veraldar-Setup-\([0-9][0-9A-Za-z.+-]*\)\.exe$/\1/p')
+[ -n "$VERSION" ] || { echo "launcher-test: $EXE is not named Veraldar-Setup-<version>.exe" >&2; exit 64; }
+[ -f "$JOINSH" ] || { echo "launcher-test: no join.sh at $JOINSH" >&2; exit 64; }
+JOINSH=$(cd "$(dirname "$JOINSH")" && pwd)/$(basename "$JOINSH")
+echo "testing $(basename "$EXE") (version $VERSION), expecting it to embed $JOINSH"
+SHOTARGS=(); [ -n "$SHOTS" ] && SHOTARGS=(-v "$SHOTS:/shots")
 
 INNER=$(cat <<'INNER'
 set -u
-export DEBIAN_FRONTEND=noninteractive WINEPREFIX=/tmp/wp WINEDEBUG=-all DISPLAY=
-apt-get update -qq >/dev/null 2>&1
-apt-get install -y -qq gcc-mingw-w64-x86-64 >/dev/null 2>&1 || { echo "mingw install failed"; exit 1; }
-cat > /tmp/wsl.c <<'C'
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-int main(int argc, char **argv) {   /* fake wsl.exe: one line per call, args joined by " | " */
-    FILE *f = fopen("C:\\wsl-calls.txt", "a");
-    for (int i = 1; i < argc; i++) fprintf(f, "%s%s", argv[i], i + 1 < argc ? " | " : "");
-    fprintf(f, "\n"); fclose(f);
-    const char *mode = getenv("FAKE_WSL");
-    if (mode && !strcmp(mode, "missing")) return 1;
-    if (argc >= 4 && !strcmp(argv[2], "wslpath")) { printf("WSLPATH(%s)\n", argv[argc - 1]); return 0; }
-    if (argc >= 3 && !strcmp(argv[2], "bash")) { const char *rc = getenv("FAKE_RC"); return rc ? atoi(rc) : 0; }
-    return 0;
-}
-C
-x86_64-w64-mingw32-gcc -O2 -o /tmp/wsl.exe /tmp/wsl.c || exit 1
+export WINEPREFIX=/tmp/wp WINEDEBUG=-all DISPLAY=:99
+Xvfb :99 -screen 0 1024x768x24 >/dev/null 2>&1 &
+x86_64-w64-mingw32-gcc -O2 -o /tmp/wsl.exe /repo/win/test/fake-wsl.c || { echo "fake wsl.exe: build failed"; exit 1; }
 wineboot -i >/dev/null 2>&1 </dev/null
-cp /tmp/wsl.exe "$WINEPREFIX/drive_c/windows/wsl.exe"   # C:\windows: on PATH, no WoW64 redirection
-wine /w/Veraldar-Setup.exe /S >/dev/null 2>&1 </dev/null
+cp /tmp/wsl.exe $WINEPREFIX/drive_c/windows/system32/wsl.exe
+mkdir -p $WINEPREFIX/drive_c/fake /tmp/www && echo pong >/tmp/www/root
+python3 -m http.server 4180 --bind 127.0.0.1 --directory /tmp/www >/dev/null 2>&1 &   # the root's brain, for "ok"
 U=$WINEPREFIX/drive_c/users/root
 I=$U/AppData/Local/Veraldar
+UI=$WINEPREFIX/dosdevices/c:/users/root/AppData/Local/Veraldar    # the install folder, as the fake's wslpath gives it
+STARTUP="$U/AppData/Roaming/Microsoft/Windows/Start Menu/Programs/StartUp"   # wine's spelling
 CALLS=$WINEPREFIX/drive_c/wsl-calls.txt
+TESTKEY=sk-test-K3Y-0123456789abcdefGHIJklmn   # typed on the model page; must reach join.sh and nothing else
 pass=0 fail=0
-check() { # check NAME STATUS
+check() { # NAME STATUS
   if [ "$2" = 0 ]; then pass=$((pass + 1)); echo "  PASS  $1"
-  else fail=$((fail + 1)); echo "  FAIL  $1"; printf '%s\n' "${OUT:-}" | tail -6; tail -3 "$CALLS" 2>/dev/null; fi
+  else fail=$((fail + 1)); echo "  FAIL  $1"; tail -n 8 "$I/setup.log" 2>/dev/null | tr -d '\r'; tail -n 4 "$CALLS" 2>/dev/null; fi
 }
-run_rc() { # the batch's exit code (the pipeline above reports tr's)
-  : > "$CALLS"
-  (cd "$I" && printf "$1" | timeout 90 wine cmd /c launcher.bat ${2:-} >/tmp/out 2>&1); RC=$?
-  OUT=$(tr -d '\r' </tmp/out)
+reset() { # a clean PC for the next case
+  [ -f /tmp/inst.rc ] || [ -z "$(win)" ] || { wineserver -k; sleep 1; }   # a case that failed half-way: its windows go
+  rm -rf "$I" $WINEPREFIX/drive_c/fake/state.ini "$CALLS" /tmp/wslhome /tmp/fakewsl "$STARTUP/Veraldar.lnk" \
+    "$U/AppData/Local/Microsoft/WindowsApps/ubuntu.exe" /tmp/inst.rc
+  wine reg delete 'HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\Veraldar' /f >/dev/null 2>&1
+  wine reg delete 'HKCU\Software\Microsoft\Windows\CurrentVersion\RunOnce' /v Veraldar /f >/dev/null 2>&1
 }
-# wine's cmd keeps the CR/LF of a set /p or for /f line inside the variable (real cmd strips it), so a
-# value can arrive with a line break in it; wsl-bootstrap.sh strips CR/LF/blanks from --hub (join-test.py
-# checks that). Calls are compared with CR/LF inside arguments removed.
-calls() { tr -d '\r' < "$CALLS" | sed -e ':a' -e 'N' -e '$!ba' -e 's/\n | / | /g'; }
-last_bash() { calls | grep -F ' | bash | ' | tail -1; }
-hubtxt() { tr -d '\r' < "$I/hub.txt"; }
-BOOT='WSLPATH(C:\users\root\AppData\Local\Veraldar\wsl-bootstrap.sh)'
-QR='C:\users\root\Desktop\Veraldar-Join-QR.png'
-WANT="-e | bash | $BOOT | --hub | https://hub.example.org | --branch | main | --repo | https://github.com/veraldar/yggdrasil.git | --qr-win | $QR"
+scenario() { { printf '[wsl]\r\n'; for kv in "$@"; do printf '%s\r\n' "$kv"; done; } >$WINEPREFIX/drive_c/fake/scenario.ini; }
+start() { rm -f /tmp/inst.rc; (wine "$@" >/dev/null 2>&1 </dev/null; echo $? >/tmp/inst.rc) & }
+wait_log() { local i; for i in $(seq 1 $((${2:-90} * 5))); do grep -qF -- "$1" "$I/setup.log" 2>/dev/null && return 0; sleep 0.2; done; return 1; }
+win() { xdotool search --onlyvisible --name "${1:-Veraldar}" 2>/dev/null | tail -n 1; }
+wait_win() { local i; for i in $(seq 1 150); do [ -n "$(win "$@")" ] && return 0; sleep 0.2; done; return 1; }
+key() { local w; w=$(win); [ -n "$w" ] || return 1; xdotool windowfocus "$w" 2>/dev/null; sleep 0.3; xdotool key "$@"; }
+typein() { local w; w=$(win); xdotool windowfocus "$w" 2>/dev/null; sleep 0.2; xdotool key Home shift+End BackSpace; xdotool type --delay 20 "$1"; }
+click_cancel() { # the Cancel button: 58 px from the right, 23 from the bottom of the window
+  local w g W H; w=$(win); eval "$(xdotool getwindowgeometry --shell "$w")"
+  xdotool mousemove --window "$w" $((WIDTH - 58)) $((HEIGHT - 23)) click 1
+}
+wait_exit() { local i; for i in $(seq 1 150); do [ -f /tmp/inst.rc ] && return 0; sleep 0.2; done; return 1; }
+shot() { [ -d /shots ] || return 0; sleep 0.6; local w; w=$(win "${2:-Veraldar}"); [ -n "$w" ] && import -window "$w" "/shots/win-installer-$1.png" 2>/dev/null; }
+report() { tr -d '\r' <"$I/install-report.txt" 2>/dev/null; }
+result() { report | sed -n 's/^result: *//p'; }
+calls() { tr -d '\r' <"$CALLS" 2>/dev/null; }
+WI='C:\users\root\AppData\Local\Veraldar'   # the install folder as Windows names it: wsl.exe --cd takes it, no path comes back
+J() { printf -- '-d | %s | -u | %s | --cd | %s | -e | bash | ./wsl-bootstrap.sh | --hub | %s | --name | TESTPC | --out | .' "$1" "$2" "$WI" "${3:-https://ap.veraldar.org}"; }
+KEEP='-e | sh | -c | s=$HOME/.local/share/yggdrasil-root/bin/start; [ -x $s ] && exec $s --hold'
+STOP="--cd | $WI | -e | bash | ./join.sh | --stop"   # join.sh --stop: services disabled too, the hold ended
+flow() { # JOIN-MODE [SHOT] [scenario...]: a whole install through the address page to the last page
+  local mode=$1 name=${2:-}; shift 2
+  reset; scenario default=ok "join=$mode" wait=2 "$@"; start /x/setup.exe
+  wait_log 'page: address' 180 && key Return && wait_log 'page: model' 30 && key Return && wait_log 'page: done' 120
+  local rc=$?
+  [ -n "$name" ] && shot "$name"
+  key Return; wait_exit
+  return $rc
+}
 
-echo "[install]"
-[ -f "$I/launcher.bat" ] && [ -f "$I/wsl-bootstrap.sh" ] && [ -f "$I/keepalive.vbs" ] && [ -f "$I/README.txt" ]
-check 'installer: launcher.bat, wsl-bootstrap.sh, keepalive.vbs, README.txt in %LOCALAPPDATA%\Veraldar' $?
-[ "$(find "$U" -iname '*Veraldar*.lnk' | wc -l)" = 5 ] && [ -f "$U/AppData/Roaming/Microsoft/Windows/Start Menu/Programs/StartUp/Veraldar root.lnk" ]
-check 'installer: Desktop + 3 Start menu shortcuts + "Veraldar root" in Startup' $?
-! grep -q $'\r' "$I/wsl-bootstrap.sh" && grep -q $'\r' "$I/launcher.bat"
-check 'installer: wsl-bootstrap.sh has LF line endings, launcher.bat CRLF' $?
+echo "[1 Windows: W-OS]"
+reset; scenario default=ok
+wine winecfg /v win7 >/dev/null 2>&1
+start /x/setup.exe
+wait_win 'Veraldar Setup'; shot w-os 'Veraldar Setup'
+key Return; wait_exit
+[ "$(result)" = "W-OS - needs Windows 10 build 19041 or newer / Windows 11, x86_64" ] && [ ! -s "$CALLS" ] && [ ! -f "$I/wsl-bootstrap.sh" ]
+check 'Windows 7: one message, report result W-OS, nothing installed, wsl.exe never called' $?
+wine winecfg /v win10 >/dev/null 2>&1
 
-echo "[launcher]"
-FAKE_WSL=missing run_rc '\n'
-[ "$RC" = 2 ] && grep -q 'wsl --install -d Ubuntu' <<<"$OUT"
-check 'no WSL: exit 2 with the exact install command' $?
-run_rc 'https://hub.example.org\n\n'
-[ "$RC" = 0 ] && grep -q 'Hub address' <<<"$OUT"
-check 'first run: asks for the hub, exit 0' $?
-[ "$(hubtxt)" = https://hub.example.org ]
-check 'first run: hub remembered in hub.txt' $?
-[ "$(last_bash)" = "$WANT" ]
-check 'first run: wsl.exe -e bash <wslpath of the script> --hub --branch main --repo --qr-win <Desktop png>' $?
-grep -qF -- '-e | wslpath | -a | -u | C:\users\root\AppData\Local\Veraldar\wsl-bootstrap.sh' "$CALLS"
-check 'first run: wslpath got the installed script path' $?
-sleep 5
-grep -qF -- '-e | sh | -c | s=$HOME/.local/share/yggdrasil-root/bin/start; [ -x $s ] && exec $s --hold' "$CALLS"
-check 'first run: keepalive.vbs ran wsl.exe -e sh -c "...bin/start --hold"' $?
-run_rc '\n'
-[ "$RC" = 0 ] && ! grep -q 'Hub address' <<<"$OUT" && [ "$(last_bash)" = "$WANT" ]
-check 'second run: no question, the same command line from hub.txt' $?
-run_rc 'https://other.example\n\n' --change-hub
-[ "$RC" = 0 ] && last_bash | grep -qF -- '--hub | https://other.example |' && last_bash | grep -q ' | --rejoin$' && [ "$(hubtxt)" = https://other.example ]
-check '--change-hub: asks again, passes --rejoin, remembers the new hub' $?
-FAKE_RC=3 run_rc '\n'
-[ "$RC" = 3 ] && grep -q refused <<<"$OUT"
-check 'refused on the phone (3): exit 3, says so' $?
-FAKE_RC=4 run_rc '\n'
-[ "$RC" = 4 ] && grep -q expired <<<"$OUT"
-check 'expired (4): exit 4, says so' $?
-FAKE_RC=1 run_rc '\n'
-[ "$RC" = 1 ] && grep -q bootstrap.log <<<"$OUT"
-check 'other failure: exit code passed on, points at bootstrap.log' $?
-rm -f "$I/hub.txt"
-run_rc 'ftp://nope\n\n'
-[ "$RC" = 64 ] && [ ! -f "$I/hub.txt" ] && [ -z "$(last_bash)" ]
-check 'a hub that is not http(s): exit 64, nothing remembered, no join started' $?
+echo "[success: an Ubuntu already there]"
+reset; scenario default=ok join=ok prep=3 wait=4 probe_ms=1500
+start /x/setup.exe
+wait_win; sleep 1.2; shot prepare
+wait_log 'page: address' 180; shot address
+key Return
+wait_log 'page: model' 30; sleep 0.5; typein "$TESTKEY"; shot model
+key Return
+wait_log 'join: started' 60; shot connecting
+wait_log 'code is up' 60; shot code
+wait_log 'page: done' 60; shot done-ok
+[ "$(result)" = "connected as TESTPC" ]
+check 'success: last page "Connected as TESTPC", report result connected' $?
+calls | grep -qxF -- '-e | sh | -c | . /etc/os-release; echo vb:$WSL_DISTRO_NAME:$(id -un):$(id -u):$ID $ID_LIKE:$(uname -r):$PRETTY_NAME'
+check 'step 2: probes the default distribution (Debian/Ubuntu? user? WSL2 kernel?)' $?
+calls | grep -qxF -- "-d | Ubuntu | -u | root | --cd | $WI | -e | bash | ./wsl-bootstrap.sh | --setup | --out | . | --user | alice"
+check 'step 2: wsl -u root wsl-bootstrap.sh --setup --user alice (its default user; packages by apt-get, no password)' $?
+calls | grep -qxF -- "$(J Ubuntu alice)"
+check 'step 4: wsl -d Ubuntu -u alice --cd <install folder> -e bash ./wsl-bootstrap.sh --hub https://ap.veraldar.org --name TESTPC --out . (no path goes back to Windows)' $?
+cmp -s "$I/join.sh" /x/join.sh && ! grep -q $'\r' "$I/wsl-bootstrap.sh" && grep -q $'\r' "$I/launcher.bat" && ! grep -q 'git clone' "$I/wsl-bootstrap.sh"
+check 'install folder: join.sh embedded byte for byte, wsl-bootstrap.sh LF (no git clone), launcher.bat CRLF' $?
+[ -f "$I/join-qr.bmp" ] && [ "$(head -c 2 "$I/join-qr.bmp")" = BM ]
+check 'step 5: the QR BMP the window showed came from the real bootstrap (join.sh PNG -> BMP)' $?
+sleep 2
+calls | grep -qxF -- "-d | Ubuntu | -u | alice | $KEEP" && [ -f "$STARTUP/Veraldar.lnk" ]
+check 'step 6: Startup "Veraldar" entry; keepalive.vbs -> launcher.bat -> wsl -d Ubuntu -u alice ...bin/start --hold' $?
+tr -d '\r' <"$I/wsl.ini" | grep -qx 'distro=Ubuntu' && tr -d '\r' <"$I/wsl.ini" | grep -qx 'user=alice' && tr -d '\r' <"$I/wsl.ini" | grep -qx 'name=TESTPC'
+check 'wsl.ini: distro, user, name (launcher.bat and the uninstaller read it)' $?
+R=$(report)
+grep -qxF "installer:  Veraldar-Setup $VERSION" <<<"$R" && grep -q '^windows:    Windows 10 .*x86_64$' <<<"$R" && grep -q '^wsl:        WSL version: 2.3.26.0$' <<<"$R" \
+  && grep -q '^distro:     Ubuntu (Ubuntu 24.04.1 LTS), kernel 5.15.167.4-microsoft-standard-WSL2, Linux user alice$' <<<"$R" \
+  && grep -q '^  4-5 join     approved on the phone$' <<<"$R" && [ "$(sed -n '/^last 40 log lines/,$p' <<<"$R" | wc -l)" -le 41 ] \
+  && grep -q 'Code (check it matches the phone):  K7QM2XWP' <<<"$R" && [ -z "$(LC_ALL=C grep -n '[^[:print:][:space:]]' <<<"$R")" ]
+check 'step 7: install-report.txt: versions, distro, each step, the last 40 log lines, plain ASCII' $?
+wine reg query 'HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\Veraldar' /v DisplayVersion 2>/dev/null | tr -d '\r' | sed -n 's/.*REG_SZ *//p' | grep -qxF "$VERSION"
+check "Apps list: Veraldar $VERSION (per user)" $?
+U2=$(tr -d '\r' </tmp/wslhome/alice/fake-upstream 2>/dev/null)
+grep -qx 'YGG_UPSTREAM_BASE_URL=https://api.openai.com/v1' <<<"$U2" && grep -qx 'YGG_UPSTREAM_STYLE=openai' <<<"$U2" &&
+  grep -qx 'YGG_UPSTREAM_MODEL=gpt-4o-mini' <<<"$U2" && grep -qxF "YGG_UPSTREAM_API_KEY=$TESTKEY" <<<"$U2" &&
+  grep -qx -- '--upstream-env' /tmp/wslhome/alice/fake-join-args &&
+  grep -q '^  3 model      api.openai.com, openai, a key$' <<<"$R"
+check 'step 3b: the model page (L15): address, kind, model and the key reach join.sh as --upstream-env; the report names no key' $?
+[ ! -e "$I/upstream.env" ] && ! grep -rqF -- "$TESTKEY" "$I" && ! grep -rqF -- "$TESTKEY" /tmp/fakewsl 2>/dev/null &&
+  ! ls /tmp/wslhome/alice/.local/state/veraldar/upstream.* >/dev/null 2>&1
+check 'the key: in no file on the Windows side (setup.log, report, upstream.env gone), not left in WSL after the join' $?
+key Return; wait_exit
+
+echo "[a PC whose root already has its model: no model page]"
+reset; mkdir -p /home/alice/.local/share/yggdrasil-root 2>/dev/null
+printf 'YGG_UPSTREAM_BASE_URL=http://127.0.0.1:11434/v1\n' >/home/alice/.local/share/yggdrasil-root/brain.env
+chown -R alice: /home/alice/.local 2>/dev/null
+scenario default=ok join=ok wait=2; start /x/setup.exe
+wait_log 'page: address' 180 && key Return && wait_log 'page: done' 120
+rc=$?; R=$(report); key Return; wait_exit
+[ $rc = 0 ] && ! grep -q 'page: model' "$I/setup.log" && ! grep -qx -- '--upstream-env' /tmp/wslhome/alice/fake-join-args &&
+  [ "$(result)" = "connected as TESTPC" ] && grep -q '^  3 model      already set on this PC$' <<<"$R"
+check 'model already set (as join.sh on Linux): no model page, join.sh keeps it, connected' $?
+rm -f /home/alice/.local/share/yggdrasil-root/brain.env
+
+echo "[keepalive.vbs -> launcher.bat, again (as at logon)]"
+: >"$CALLS"
+wine wscript.exe //B //Nologo "C:\\users\\root\\AppData\\Local\\Veraldar\\keepalive.vbs" >/dev/null 2>&1
+for _ in $(seq 1 25); do [ -s "$CALLS" ] && break; sleep 0.2; done
+[ "$(calls)" = "-d | Ubuntu | -u | alice | $KEEP" ]
+check 'at logon: one wsl call, no window, no question: the root started and held' $?
 
 echo "[uninstall]"
-: > "$CALLS"
-wine "$I/Uninstall.exe" /S >/dev/null 2>&1 </dev/null
-sleep 4
-grep -qF -- '-e | sh | -c | s=$HOME/.local/share/yggdrasil-root/bin/stop; [ -x $s ] && $s' "$CALLS"
-check 'uninstall: stops the root inside WSL (bin/stop)' $?
-[ ! -d "$I" ] && [ "$(find "$U" -iname '*Veraldar*.lnk' | wc -l)" = 0 ]
-check 'uninstall: files, hub.txt and all shortcuts gone' $?
+: >"$CALLS"
+start "C:\\users\\root\\AppData\\Local\\Veraldar\\Uninstall.exe"
+wait_win; sleep 0.5; shot uninstall
+key Return
+for _ in $(seq 1 100); do [ ! -d "$I" ] && break; sleep 0.2; done
+sleep 1; shot uninstall-done
+key Return; sleep 1.5
+calls | grep -qxF -- "-d | Ubuntu | -u | alice | $STOP" && [ ! -d "$I" ] && [ ! -f "$STARTUP/Veraldar.lnk" ] \
+  && ! wine reg query 'HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\Veraldar' >/dev/null 2>&1
+check 'uninstall: stops the root in WSL (join.sh --stop: services disabled, the hold ended), Startup entry, files and Apps entry gone; WSL left alone' $?
+! calls | grep -q -- '--unregister\|--uninstall'
+check 'uninstall: the distribution is not touched' $?
+
+echo "[step codes from join.sh, through the real wsl-bootstrap.sh]"
+flow net done-net;            [ "$(result | cut -d' ' -f1)" = W-NET ];   check 'release unreachable -> W-NET' $?
+flow hubnet '';               [ "$(result | cut -d' ' -f1)" = W-NET ];   check 'trunk unreachable -> W-NET' $?
+flow sig done-sig;            [ "$(result | cut -d' ' -f1)" = W-SIG ] && grep -q 'NOT signed' <<<"$(result)"; check 'signature refused -> W-SIG' $?
+flow refused done-refused;    [ "$(result)" = "W-JOIN - refused on the phone" ];  check 'refused on the phone (3) -> W-JOIN' $?
+flow expired done-expired;    [ "$(result)" = "W-JOIN - the request expired before it was approved" ]; check 'expired (4) -> W-JOIN' $?
+flow other done-join;         [ "$(result | cut -d' ' -f1)" = W-JOIN ];  check 'other join failure -> W-JOIN' $?
+flow model done-model;        [ "$(result | cut -d' ' -f1)" = W-MODEL ]; check 'no model upstream -> W-MODEL' $?
+flow run done-run;            [ "$(result | cut -d' ' -f1)" = W-RUN ] && [ -f "$STARTUP/Veraldar.lnk" ]
+check 'joined, the brain does not answer -> W-RUN (start-at-login entry still installed)' $?
+flow secret ''
+R=$(report)
+[ "$(result)" = "connected as TESTPC" ] && ! grep -qE 'abcdefghijklmnop|Zx9Yw8Vu7Ts6|9f8e7d6c5b4a|hunter2|Q2xhdWRl|4f9c2e1a7b3d' <<<"$R" "$I/setup.log" \
+  && grep -q 'YGG_UPSTREAM_API_KEY=\*\*\*' <<<"$R"
+check 'report: keys and tokens join.sh printed are masked (setup.log too)' $?
+
+echo "[WSL]"
+reset; scenario default=ok setup=fail; start /x/setup.exe
+wait_log 'page: done' 120; shot done-wsl; key Return; wait_exit
+[ "$(result)" = "W-WSL - apt-get could not install curl python3" ] && ! grep -q 'page: address' "$I/setup.log"
+check 'packages cannot be installed -> W-WSL (no address asked)' $?
+reset; scenario default=none ubuntu=none install_rc=1; start /x/setup.exe
+wait_log 'page: done' 120; key Return; wait_exit
+calls | grep -qxF -- '--install | -d | Ubuntu | --no-launch' && [ "$(result)" = "W-WSL - wsl --install failed (exit 1)" ]
+check 'no WSL, its install fails -> W-WSL' $?
+reset; scenario default=other ubuntu=installed install_rc=0 join=ok; start /x/setup.exe
+wait_log 'page: address' 180; key Return; wait_log 'page: done' 120; key Return; wait_exit
+calls | grep -qxF -- '--install | -d | Ubuntu | --no-launch' && calls | grep -qxF -- "$(J Ubuntu alice)" && [ "$(result)" = "connected as TESTPC" ]
+check 'default distribution is not Debian/Ubuntu (Arch): Ubuntu installed, no restart needed, joined there' $?
+
+echo "[restart: WSL was missing]"
+reset; scenario default=none ubuntu=registered install_rc=0 join=ok; start /x/setup.exe
+wait_log 'page: restart' 180; shot restart
+RO=$(wine reg query 'HKCU\Software\Microsoft\Windows\CurrentVersion\RunOnce' /v Veraldar 2>/dev/null | tr -d '\r' | sed -n 's/.*REG_SZ *//p')
+key Escape; wait_exit
+[ "$RO" = '"C:\users\root\AppData\Local\Veraldar\Veraldar-Setup.exe" /continue' ] && [ -f "$I/Veraldar-Setup.exe" ] \
+  && calls | grep -qxF -- '--install | -d | Ubuntu | --no-launch' && [ "$(result)" = "waiting for the restart (WSL installed)" ]
+check 'elevated wsl --install, "Windows must restart", RunOnce -> the installer copy with /continue' $?
+# "after the restart": Ubuntu is an app now, not set up yet (ubuntu.exe), its default user would be root
+cp /tmp/wsl.exe "$U/AppData/Local/Microsoft/WindowsApps/ubuntu.exe" 2>/dev/null || { mkdir -p "$U/AppData/Local/Microsoft/WindowsApps"; cp /tmp/wsl.exe "$U/AppData/Local/Microsoft/WindowsApps/ubuntu.exe"; }
+wine reg delete 'HKCU\Software\Microsoft\Windows\CurrentVersion\RunOnce' /v Veraldar /f >/dev/null 2>&1
+: >"$CALLS"
+start "C:\\users\\root\\AppData\\Local\\Veraldar\\Veraldar-Setup.exe" /continue
+wait_log 'page: address' 180; key Return; wait_log 'page: done' 120; key Return; wait_exit
+calls | grep -qxF 'ubuntu.exe | install | --root' && ! calls | grep -q -- '--install' \
+  && calls | grep -qxF -- "-d | Ubuntu | -u | root | --cd | $WI | -e | bash | ./wsl-bootstrap.sh | --setup | --out | . | --win-user | root" \
+  && calls | grep -qxF -- "$(J Ubuntu veraldar)" && calls | grep -qxF 'ubuntu.exe | config | --default-user | veraldar' \
+  && [ "$(result)" = "connected as TESTPC" ] && grep -q 'continue after restart: 1' "$I/setup.log"
+check '/continue: ubuntu.exe install --root (no Linux user question), user "veraldar" made, joined; no second UAC' $?
+
+echo "[the address]"
+reset; scenario default=ok join=ok; start /x/setup.exe
+wait_log 'page: address' 180
+typein 'ftp://nope'; xdotool key Return
+wait_win 'Veraldar Setup'; sleep 0.5; shot bad-address 'Veraldar Setup'; xdotool key Return; sleep 0.5
+grep -q 'page: join' "$I/setup.log"; bad=$?
+typein ' https://other.example/ '; xdotool key Return
+wait_log 'page: done' 120; key Return; wait_exit
+[ $bad = 1 ] && calls | grep -qxF -- "$(J Ubuntu alice https://other.example)"
+check 'an address that is not https:// is refused on the page; blanks and the trailing / are dropped' $?
+
+echo "[Cancel while the code is up]"
+reset; scenario default=ok join=wait; start /x/setup.exe
+wait_log 'page: address' 180; key Return; wait_log 'page: model' 30; typein "$TESTKEY"; key Return; wait_log 'code is up' 60
+click_cancel; wait_exit; sleep 1
+calls | grep -qxF -- "-d | Ubuntu | -u | alice | --cd | $WI | -e | bash | ./wsl-bootstrap.sh | --cancel" && ! ps -eo args | grep -v grep | grep -q 'fake-join.sh' \
+  && [ "$(result)" = "W-JOIN - cancelled in Setup" ] && [ ! -f "$STARTUP/Veraldar.lnk" ] \
+  && [ ! -e "$I/upstream.env" ] && ! grep -rqF -- "$TESTKEY" "$I"
+check 'Cancel: the join inside WSL is stopped (wsl-bootstrap.sh --cancel), nothing started, report says so; no key left' $?
+
 echo; echo "$pass/$((pass + fail)) checks passed"
 [ "$fail" = 0 ]
 INNER
 )
-exec docker run --rm -v "$HERE:/w:ro" --entrypoint bash "$IMAGE" -c "$INNER"
+docker run --rm --hostname testpc -e VERSION="$VERSION" -v "$EXE:/x/setup.exe:ro" -v "$JOINSH:/x/join.sh:ro" -v "$REPO:/repo:ro" \
+  ${SHOTARGS[@]+"${SHOTARGS[@]}"} \
+  --entrypoint bash "$IMAGE" -c "$INNER"

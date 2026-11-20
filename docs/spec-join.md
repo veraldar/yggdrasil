@@ -319,7 +319,7 @@ and its dialer adds `--wg-udp 127.0.0.1:<A> --wg-node 127.0.0.1:<B>` (trunk/scri
 it installed before, the repo's build, `~/.local/bin`, `PATH`), else downloads the release on
 Linux/WSL x86_64, checked against the release's `SHA256SUMS`: the root build
 `bifrost-net-root-<ver>-linux-x86_64` when the release carries one, else the full
-`bifrost-net-<ver>-linux-x86_64`, which needs `libopus0` (wsl-bootstrap.sh installs it). Else
+`bifrost-net-<ver>-linux-x86_64`, which needs `libopus0`. Else
 (macOS, other CPUs, no release) it builds the ROOT build: `cargo build --release
 --no-default-features` in `trunk/` (into `trunk/target/root`), about a minute on 16 cores. The
 root build is the node, its keys and link-token minting only: no WebRTC, no audio, so no cmake
