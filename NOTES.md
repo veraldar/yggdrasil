@@ -46,8 +46,10 @@ never from this one — bash reads scripts as it goes, an edit here breaks a run
 - the Windows helper is gone; I finish p4-win myself. L15: the model page done in p4-win.
 - independent review of p4-win: 9 findings (2 high: non-ASCII user name / wsl notices broke the wslpath round
   trip) — all fixed in p4-win ("win + join.sh: fixes from the independent review"), incl. join.sh bin/start|stop
-  stale pid after reboot (shared file: Linux + Mac too). bootstrap-test 32/32; stale-pid test /tmp/p4-holdtest.sh ok;
-  wine test rerun pending
+  stale pid after reboot (shared file: Linux + Mac too). bootstrap-test 32/32; stale-pid test /tmp/p4-holdtest.sh ok
+- brain restart ~12:xx cut the wine rerun; leftover wine container removed by id; rerun started
+- p4-win merged into p4-release (968382f3); rehearsal 2 running from p4-run2 (detached at that merge)
+- after: Linux rig OT_DIST + Mac check + wine on the rehearsal exe → report the branch to P1
 - then: merge p4-win → p4-release, rehearsal 2 on the real merge (+ Linux rig OT_DIST, Mac check, wine on its exe),
   report the branch to P1 (P1 merges + deploys)
 - v0.9.1 DRAFT only after P1 says packages 2 and 3 are merged and live; then S11 vs the draft, Mac M4–M8 (real Mac,
