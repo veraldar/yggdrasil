@@ -162,7 +162,7 @@ KW=sk-oai-test-0123456789abcdef; KX=sk-test-other-0123456789ab
 
 say "case zai"
 mkcase zai
-typed zai "$(printf '1\n%s\nglm-5.3-flash\n' "$KZ")" zai-install.log
+typed zai "$(printf '1\n%s\nglm-5.3-flash\nEND' "$KZ")" zai-install.log
 if ! chk_menu "$STATE/log/zai-install.log"; then row zai FAIL "menu wrong in transcript"; else
 turn zai zai-turn.log
 ev=$(uplog | grep api.z.ai | grep glm-5.3-flash | head -1 | sed "s/$KZ/<key>/")
@@ -175,7 +175,7 @@ fi
 
 say "case zai-model"
 mkcase zai-model
-typed zai-model "$(printf '1\n%s\nglm-5.3\n' "$KZ")" zai-model-install.log
+typed zai-model "$(printf '1\n%s\nglm-5.3\nEND' "$KZ")" zai-model-install.log
 turn zai-model zai-model-turn.log
 ev=$(uplog | grep api.z.ai | grep '"model": "glm-5.3"' | head -1 | sed "s/$KZ/<key>/")
 ok=1
@@ -186,7 +186,7 @@ row zai-model $([ $ok = 1 ] && echo PASS || echo FAIL) "$ev"
 
 say "case openrouter"
 mkcase openrouter
-typed openrouter "$(printf '2\n%s\n\n' "$KO")" openrouter-install.log
+typed openrouter "$(printf '2\n%s\n\nEND' "$KO")" openrouter-install.log
 turn openrouter openrouter-turn.log
 ev=$(uplog | grep openrouter.ai | grep gpt-4o-mini | head -1 | sed "s/$KO/<key>/")
 ok=1
@@ -197,7 +197,7 @@ row openrouter $([ $ok = 1 ] && echo PASS || echo FAIL) "$ev"
 
 say "case anthropic"
 mkcase anthropic
-typed anthropic "$(printf '3\n%s\n\n' "$KA")" anthropic-install.log
+typed anthropic "$(printf '3\n%s\n\nEND' "$KA")" anthropic-install.log
 turn anthropic anthropic-turn.log
 ev=$(uplog | grep api.anthropic.com | grep claude-fable-5-2 | head -1 | sed "s/$KA/<key>/")
 ok=1
@@ -208,7 +208,7 @@ row anthropic $([ $ok = 1 ] && echo PASS || echo FAIL) "$ev"
 
 say "case openai"
 mkcase openai
-typed openai "$(printf '4\n%s\n\n' "$KW")" openai-install.log
+typed openai "$(printf '4\n%s\n\nEND' "$KW")" openai-install.log
 turn openai openai-turn.log
 ev=$(uplog | grep api.openai.com | grep gpt-4o-mini | head -1 | sed "s/$KW/<key>/")
 ok=1
@@ -219,7 +219,7 @@ row openai $([ $ok = 1 ] && echo PASS || echo FAIL) "$ev"
 
 say "case other-key"
 mkcase other-key
-typed other-key "$(printf '5\nhttps://other.tree.test/v1\nanthropic\nmymodel-7\n%s\n' "$KX")" other-key-install.log
+typed other-key "$(printf '5\nhttps://other.tree.test/v1\nanthropic\nmymodel-7\n%s\nEND' "$KX")" other-key-install.log
 turn other-key other-key-turn.log
 ev=$(uplog | grep other.tree.test | grep mymodel-7 | head -1 | sed "s/$KX/<key>/")
 ok=1
@@ -230,7 +230,7 @@ row other-key $([ $ok = 1 ] && echo PASS || echo FAIL) "$ev"
 
 say "case other-local (http :8080, empty key)"
 mkcase other-local
-typed other-local "$(printf '5\nhttp://msm-upstream:8080/v1\nopenai\nlocalmodel-1\n\n')" other-local-install.log
+typed other-local "$(printf '5\nhttp://msm-upstream:8080/v1\nopenai\nlocalmodel-1\n\nEND')" other-local-install.log
 turn other-local other-local-turn.log
 ev=$(uplog | grep msm-upstream | grep localmodel-1 | head -1)
 ok=1

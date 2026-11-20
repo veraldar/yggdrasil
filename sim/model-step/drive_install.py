@@ -6,6 +6,8 @@ to TRANSCRIPT (what the terminal showed — with the key, if the tty wrongly ech
 import os, pty, re, select, sys, time
 
 inputs = os.environ.get("MSM_INPUTS", "").split("\n")
+if inputs and inputs[-1] == "END":   # sentinel: keeps the trailing empty answers that
+    inputs = inputs[:-1]             # $( ) command substitution would strip
 out = open(os.environ["TRANSCRIPT"], "w", buffering=1)
 argv = sys.argv[1:] or ["bash"]
 pid, fd = pty.fork()
