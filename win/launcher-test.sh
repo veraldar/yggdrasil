@@ -255,11 +255,12 @@ check 'an address that is not https:// is refused on the page; blanks and the tr
 
 echo "[Cancel while the code is up]"
 reset; scenario default=ok join=wait; start /x/setup.exe
-wait_log 'page: address' 180; key Return; wait_log 'code is up' 60
+wait_log 'page: address' 180; key Return; wait_log 'page: model' 30; typein "$TESTKEY"; key Return; wait_log 'code is up' 60
 click_cancel; wait_exit; sleep 1
 calls | grep -qxF -- "-d | Ubuntu | -u | alice | -e | bash | $UI/wsl-bootstrap.sh | --cancel" && ! ps -eo args | grep -v grep | grep -q 'fake-join.sh' \
-  && [ "$(result)" = "W-JOIN - cancelled in Setup" ] && [ ! -f "$STARTUP/Veraldar.lnk" ]
-check 'Cancel: the join inside WSL is stopped (wsl-bootstrap.sh --cancel), nothing started, report says so' $?
+  && [ "$(result)" = "W-JOIN - cancelled in Setup" ] && [ ! -f "$STARTUP/Veraldar.lnk" ] \
+  && [ ! -e "$I/upstream.env" ] && ! grep -rqF -- "$TESTKEY" "$I"
+check 'Cancel: the join inside WSL is stopped (wsl-bootstrap.sh --cancel), nothing started, report says so; no key left' $?
 
 echo; echo "$pass/$((pass + fail)) checks passed"
 [ "$fail" = 0 ]
