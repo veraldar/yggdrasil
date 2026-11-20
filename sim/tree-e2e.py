@@ -572,7 +572,7 @@ def main():
         except urllib.error.HTTPError as e:
             check("…and only within Claude's models", e.code == 400, e.code)
         cl2 = req(HOME_PORT, "GET", "/agent/claude")
-        check("model labels for the picker", cl2["model_labels"]["claude"]["opus"].startswith("strongest"), cl2.get("model_labels", {}).get("claude"))
+        check("model labels for the picker: fable the strongest", cl2["model_labels"]["claude"]["fable"].startswith("strongest") and not cl2["model_labels"]["claude"]["opus"].startswith("strongest"), cl2.get("model_labels", {}).get("claude"))
 
         # 6c. continue a Claude Code session from the phone: the list (metadata only), attach, refusals
         cc_id, cc_cwd = "0f1e2d3c-4b5a-4968-8776-655443322110", os.path.join(tmp, "home", "work", "proj")
