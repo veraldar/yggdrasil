@@ -37,6 +37,14 @@ Build with `TMPDIR=~/.cache/p3-tmp` (/tmp is a shared 16 GB tmpfs, near full). R
   Image p3-debian-root:12 (~/.cache/p3-ct/image; egress tcp/443+dns; user ygg; restart re-runs join.sh). Bins built in
   ygg-release-build:bullseye from e64a4527 into ~/.cache/p3-ct/target (own cargo registry copy; P4's cache untouched).
 
+- 00:08:54 request 1 for the lab expired untapped (owner away). Since 00:09: WATCHER PID 2148002
+  (~/.cache/p3-ct/watch/join-watch.sh, log ~/.cache/p3-tmp/join-watch.log) renews both requests whenever one expires,
+  for 14 h (until ~14:10), and posts ONE "[watcher] … joined" message to this session per root when approved. The lab's renewals
+  run WITHOUT --no-start (data already in place) → join.sh starts yggdrasil-root-{brain,dial,wg} itself after the tap.
+  Stable tunnel keys: omarchy-lab a765-4ad6-f78e · debian-box 4467-10ae-2c1e (the codes change with each renewal).
+- Container p3-debian-root (docker, --restart unless-stopped, hostname debian-box, NET_ADMIN for its own egress rules):
+  egress checked: ap.veraldar.org:443 open, :80 and 1.1.1.1:22 refused. Debian 12.15. Supervisor nohup (no systemd inside).
+
 ## Next
 1. lab approved → start it, see it in /root on home + its MAIN + 3 sessions.
 2. container: docker run -d --name p3-debian-root --hostname debian-box --cap-add NET_ADMIN --restart unless-stopped
