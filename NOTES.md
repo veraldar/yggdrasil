@@ -17,7 +17,7 @@ This worktree (p5-site, from tree-next): films scripts (sim/films/), scripts/sit
   (refuses until the release is out, dry run, backup in ~/site-backups outside the web root, byte-for-byte live
   check, undo identical, auto-undo on a failed check, data/ untouched). NOT run against the real VPS.
 - independent review (sub-agent) → 13 findings, the confirmed ones fixed in the copy (veraldar-site 652f061)
-- scripts/check-commands.py: page commands run as written in fresh debian:12 / ubuntu:24.04 / ubuntu:22.04
+- scripts/check-commands.py: ALL PASS 11-20 (v0.9.0 stand-in): every page command as written on fresh debian:12, ubuntu:24.04, ubuntu:22.04; 15 options checked against tree-next. Re-run with no --version once v0.9.1 exists.
   containers (against v0.9.0 until v0.9.1 exists) + every option checked against the installer source
 
 ## Half done / open
