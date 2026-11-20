@@ -4,7 +4,7 @@ MSM_INPUTS. Transcript (what the terminal showed) on stdout, DRIVE-EXIT=<rc> at 
 import os, pty, select, sys, time
 
 inputs = os.environ.get("MSM_INPUTS", "").split("\n")
-argv = ["bash"] + sys.argv[1:]
+argv = sys.argv[1:] or ["bash"]
 pid, fd = pty.fork()
 if pid == 0:
     os.execvp(argv[0], argv)

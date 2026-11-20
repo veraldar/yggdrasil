@@ -30,8 +30,7 @@ printf "subjectAltName=DNS:msm-upstream,DNS:api.z.ai,DNS:openrouter.ai,DNS:api.a
 openssl x509 -req -in "$STATE/leaf.csr" -CA "$STATE/ca.pem" -CAkey "$STATE/ca.key" -CAcreateserial \
   -out "$STATE/leaf.pem" -days 2 -extfile "$STATE/san.ext" 2>>"$LOG"
 mkdir -p "$STATE/up"
-cp "$HERE/msm_upstream.py" "$STATE/up/" "$STATE/leaf.pem" "$STATE/leaf.key" 2>/dev/null
-cp "$STATE/leaf.pem" "$STATE/leaf.key" "$STATE/up/"
+cp "$HERE/msm_upstream.py" "$STATE/leaf.pem" "$STATE/leaf.key" "$STATE/up/"
 docker rmi -f msm-upstream:latest >/dev/null 2>&1
 cat >"$STATE/up/Dockerfile" <<'EOF'
 FROM python:3.12-slim
@@ -41,7 +40,8 @@ CMD python3 /up/msm_upstream.py 8080 /up/http.log & python3 /up/msm_upstream.py 
 EOF
 ( cd "$STATE/up" && nice -n 10 docker build -q -t msm-upstream:latest . ) >/dev/null 2>>"$LOG" || { echo "docker build failed"; cat "$LOG"; exit 1; }
 
-docker network create "$NET" >/dev/null 2>&1
+docker network rm "$NET" >/dev/null 2>&1
+docker network create --subnet 172.28.7.0/24 "$NET" >/dev/null
 AH=""; for n in $NAMES; do AH="$AH --add-host $n:172.28.7.9"; done
 docker rm -f "$UP" >/dev/null 2>&1
 docker run -d --name "$UP" --hostname msm-upstream --network "$NET" --ip 172.28.7.9 \
@@ -52,25 +52,28 @@ say "upstream up on msm-net (https 443 for the five names, http 8080)"
 uplog() { docker exec "$UP" cat /up/https.log /up/http.log 2>/dev/null; }
 
 # ---------------------------------------------------------------- a fresh container per case
+say "prebaking the case image (debian:12 + what install.sh asks for)"
+docker rmi -f msm-case:latest >/dev/null 2>&1
+nice -n 10 docker build -q -t msm-case:latest - >/dev/null <<'EOF'
+FROM debian:12
+RUN apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
+    curl ca-certificates openssh-client procps python3 && rm -rf /var/lib/apt/lists/* && useradd -m -s /bin/bash lay
+EOF
 mkcase() { # NAME — debian:12, the CA trusted, a normal user, the release unpacked in ~lay
   local c=msm-$1
   docker rm -f "$c" >/dev/null 2>&1
-  docker run -d --name "$c" --hostname "$c" --network "$NET" $AH \
-    -v "$STATE/up":/up:ro debian:12 sleep infinity >/dev/null
-  docker exec "$c" bash -c "apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
-      curl ca-certificates openssh-client procps python3 >/dev/null" >>"$LOG" 2>&1
+  docker run -d --name "$c" --hostname "$c" --network "$NET" $AH msm-case:latest sleep infinity >/dev/null
   docker cp "$STATE/ca.pem" "$c":/usr/local/share/ca-certificates/msm-test-ca.crt >/dev/null
   docker exec "$c" update-ca-certificates >>"$LOG" 2>&1
-  docker exec "$c" useradd -m -s /bin/bash "$HU" >>"$LOG" 2>&1
   docker exec "$c" mkdir -p /rel && docker cp "$DIST/yggdrasil-$VER-linux-x86_64.tar.gz" "$c":/rel/ >/dev/null
-  docker exec -u "$HU" "$c" bash -c "cd ~ && tar -xzf /rel/yggdrasil-$VER-linux-x86_64.tar.gz && chmod -R u+rwX yggdrasil-$VER-linux-x86_64"
+  docker exec -u "$HU" -w "$HH" "$c" bash -c "tar -xzf /rel/yggdrasil-$VER-linux-x86_64.tar.gz --no-same-owner"
 }
 
 # drive the terminal install on a pty, as the user, inside the container
 typed() { # NAME ENVSTRING LOGOUT — runs install.sh --brain-only --now via drive_install.py
   docker cp "$HERE/drive_install.py" msm-"$1":/tmp/drive_install.py >/dev/null
   docker exec -i -u "$HU" -e HOME=$HH -e MSM_INPUTS="$2" msm-"$1" \
-    python3 /tmp/drive_install.py bash -lc "cd ~/yggdrasil-$VER-linux-x86_64/root/install && bash install.sh --brain-only --now" \
+    python3 /tmp/drive_install.py bash -lc "cd ~/yggdrasil-$VER/root/install && bash install.sh --brain-only --now" \
     >"$STATE/log/$3" 2>&1
 }
 
@@ -79,7 +82,7 @@ turn() { # NAME LOGOUT
   docker exec -u "$HU" msm-"$1" bash -c '
     set -e
     cd ~
-    (setsid nohup env $(grep -v "^#" ~/.config/yggdrasil/yggdrasil.env | xargs) \
+    (setsid nohup env $(sed -n 's/^\([A-Z_]*\)=\(.*\)$/\1=\2/p' ~/.config/yggdrasil/yggdrasil.env | xargs) \
        ~/.local/bin/yggdrasil >brain.log 2>&1 &)
     for i in $(seq 60); do curl -sf http://127.0.0.1:4096/session >/dev/null 2>&1 && break; sleep 0.5; done
     S=$(curl -sf -X POST http://127.0.0.1:4096/session -H "content-type: application/json" -d "{\"title\":\"msm\"}" | python3 -c "import sys,json;print(json.load(sys.stdin)[\"id\"])")
@@ -216,7 +219,7 @@ row other-local $([ $ok = 1 ] && echo PASS || echo FAIL) "arrived over http 8080
 say "case flag-zai (no terminal)"
 mkcase flag-zai
 docker exec -u "$HU" -e HOME=$HH -e YGG_UPSTREAM_API_KEY=$KZ msm-flag-zai \
-  bash -c "cd ~/yggdrasil-$VER-linux-x86_64/root/install && YGG_UPSTREAM_API_KEY=$KZ bash install.sh --brain-only --now </dev/null" \
+  bash -c "cd ~/yggdrasil-$VER/root/install && YGG_UPSTREAM_API_KEY=$KZ bash install.sh --brain-only --now </dev/null" \
   >"$STATE/log/flag-zai-install.log" 2>&1
 turn flag-zai flag-zai-turn.log
 ev=$(uplog | tail -5 | grep api.z.ai | grep glm-5.3-flash | head -1 | sed "s/$KZ/<key>/")
@@ -230,7 +233,7 @@ say "case flag-model (--model-provider anthropic --model claude-haiku-5-5)"
 mkcase flag-model
 docker exec -u "$HU" -e HOME=$HH bash -c "cd ~" >/dev/null 2>&1
 docker exec -u "$HU" -e HOME=$HH -e YGG_UPSTREAM_API_KEY=$KA msm-flag-model \
-  bash -c "cd ~/yggdrasil-$VER-linux-x86_64/root/install && YGG_UPSTREAM_API_KEY=$KA bash install.sh --brain-only --now --model-provider anthropic --model claude-haiku-5-5 </dev/null" \
+  bash -c "cd ~/yggdrasil-$VER/root/install && YGG_UPSTREAM_API_KEY=$KA bash install.sh --brain-only --now --model-provider anthropic --model claude-haiku-5-5 </dev/null" \
   >"$STATE/log/flag-model-install.log" 2>&1
 turn flag-model flag-model-turn.log
 ev=$(uplog | tail -5 | grep api.anthropic.com | grep claude-haiku-5-5 | head -1 | sed "s/$KA/<key>/")
@@ -243,7 +246,7 @@ row flag-model $([ $ok = 1 ] && echo PASS || echo FAIL) "$ev"
 say "case flag-nokey (openai, no key in the environment: refuse, nothing written)"
 mkcase flag-nokey
 docker exec -u "$HU" -e HOME=$HH msm-flag-nokey \
-  bash -c "cd ~/yggdrasil-$VER-linux-x86_64/root/install && bash install.sh --brain-only --now --model-provider openai </dev/null; echo RC=\$?" \
+  bash -c "cd ~/yggdrasil-$VER/root/install && bash install.sh --brain-only --now --model-provider openai </dev/null; echo RC=\$?" \
   >"$STATE/log/flag-nokey-install.log" 2>&1
 n=$(uplog | grep -c api.openai.com || true)
 ev=$(grep -o 'YGG_UPSTREAM_API_KEY[^;]*' "$STATE/log/flag-nokey-install.log" | head -1)
