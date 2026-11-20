@@ -19,6 +19,8 @@ own address (--from):
      An approval without `wg` (a hub without a node) falls back to the old peer port.
 
 Then it stays up, supervising both, until SIGTERM. Every file lands in --state.
+--brain-env KEY=VAL (repeatable) adds to the brain's environment (S17: its Claude Code harness
+points at sim/reach/cc_model.py — the namespace has no model upstream).
 
     trunk-full-joiner.py --state DIR --hub https://ap.tree.test --cafile cert.pem --from 203.0.113.9
         --name mac --brain-bin yggdrasil --mock-url http://127.0.0.1:P --brain-port P --peer-port P
@@ -78,6 +80,7 @@ def main():
     ap.add_argument("--wg-port", type=int, required=True, help="the node's front door")
     ap.add_argument("--wg-udp", type=int, required=True, help="the node's udp")
     ap.add_argument("--wg-pipe", type=int, required=True, help="the dialer's udp for the node")
+    ap.add_argument("--brain-env", action="append", default=[], help="KEY=VAL for the brain (repeatable)")
     o = ap.parse_args()
     os.makedirs(o.state, exist_ok=True)
     kids = []
@@ -166,7 +169,8 @@ def main():
            # the other roots of the tree, from this root's node (the hub's directory)
            **({"YGG_PEERS_FROM": f"http://127.0.0.1:{o.wg_port}/_wg/_roots",
                "YGG_PEERS_VIA": f"http://127.0.0.1:{o.wg_port}/_wg/{{id}}"} if g else {}),
-           "YGG_PEER_TOKEN": root["peer_token"] or ""}
+           "YGG_PEER_TOKEN": root["peer_token"] or "",
+           **dict(kv.split("=", 1) for kv in o.brain_env)}
     kids.append(subprocess.Popen([o.brain_bin], env=env, stdout=open(os.path.join(o.state, "brain.log"), "w"),
                                  stderr=subprocess.STDOUT, cwd=data))
     u = urllib.parse.urlsplit(root["rootlink_url"])

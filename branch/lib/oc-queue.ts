@@ -10,6 +10,7 @@
 import { readFileSync } from 'fs';
 import { writeFile } from 'fs/promises';
 import path from 'path';
+import type { FileRef } from './file-ref';
 
 const FILE = path.join(process.cwd(), '.oc-queue.json');
 
@@ -17,6 +18,7 @@ export type QueueItem = {
   text: string;
   images: string[];
   files: { name: string; content: string }[];
+  refs?: FileRef[];
   at: number;
 };
 

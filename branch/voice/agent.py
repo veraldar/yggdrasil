@@ -285,14 +285,30 @@ class OpenCodeLLM(llm.LLM):
             llm=self, chat_ctx=chat_ctx, tools=tools, conn_options=conn_options
         )
 
+    class Delivered(Exception):
+        """The brain answered the POST: the turn is there. Sending it again would run it twice
+        (a session on another root, a link that dropped mid-answer)."""
+
     async def ask_stream(self, text: str, voice: bool = False) -> AsyncIterable[str]:
         """Streaming first-sound (reviewer fix 3): consume yggdrasil's SSE reply
         and yield each COMPLETED sentence as it arrives, so the TTS speaks the
         first sentence seconds before the run completes. Raises on upstream
         failure only if nothing was yielded yet."""
         sid = await self._ensure_session()
-        buf = ""
-        event = ""
+        try:
+            async for sentence in self._stream(sid, text, voice):
+                yield sentence
+        except (httpx.ConnectError, httpx.ConnectTimeout):
+            raise  # the brain was never reached: sending it again is the first time
+        except OpenCodeLLM.Delivered:
+            raise
+        except Exception as e:  # noqa: BLE001
+            # it may have reached the brain (a timeout waiting for the answer, a cut line):
+            # never send it a second time
+            why = "no answer in time; it may still be working" if isinstance(e, httpx.TimeoutException) else (str(e)[:200] or "the line was cut")
+            raise OpenCodeLLM.Delivered(why) from e
+
+    async def _stream(self, sid: str, text: str, voice: bool) -> AsyncIterable[str]:
         async with httpx.AsyncClient(timeout=300) as c:
             async with c.stream(
                 "POST",
@@ -300,36 +316,55 @@ class OpenCodeLLM(llm.LLM):
                 json=self._body(text, voice),
                 headers={"Accept": "text/event-stream"},
             ) as r:
-                r.raise_for_status()
-                async for line in r.aiter_lines():
-                    if line.startswith("event:"):
-                        event = line[6:].strip()
-                        continue
-                    if not line.startswith("data:"):
-                        continue
-                    payload = line[5:].strip()
-                    if not payload:
-                        continue
+                try:
+                    r.raise_for_status()
+                except httpx.HTTPStatusError as e:
+                    # the brain answered (a refusal, or "no answer from <root>"): never send it again
+                    await r.aread()
                     try:
-                        d = json.loads(payload)
+                        why = (r.json() or {}).get("error") or str(e)
                     except ValueError:
-                        continue
-                    if event == "error":
-                        if not buf:
-                            raise RuntimeError(str(d)[:200])
+                        why = str(e)
+                    raise OpenCodeLLM.Delivered(str(why)[:200]) from e
+                try:
+                    async for sentence in self._sse_lines(r):
+                        yield sentence
+                except Exception as e:  # noqa: BLE001
+                    raise OpenCodeLLM.Delivered(str(e)[:200]) from e
+
+    async def _sse_lines(self, r) -> AsyncIterable[str]:
+        """The sentences of one accepted SSE reply, as they complete."""
+        buf = ""
+        event = ""
+        async for line in r.aiter_lines():
+            if line.startswith("event:"):
+                event = line[6:].strip()
+                continue
+            if not line.startswith("data:"):
+                continue
+            payload = line[5:].strip()
+            if not payload:
+                continue
+            try:
+                d = json.loads(payload)
+            except ValueError:
+                continue
+            if event == "error":
+                if not buf:
+                    raise RuntimeError(str(d.get("error") if isinstance(d, dict) else d)[:200])
+                break
+            if event == "message.completed":
+                break
+            if isinstance(d, dict) and "text" in d and "info" not in d:
+                buf += d["text"]
+                while True:
+                    m = re.search(r"^(.*?[.!?])(\s|$)", buf, re.S)
+                    if not m:
                         break
-                    if event == "message.completed":
-                        break
-                    if isinstance(d, dict) and "text" in d and "info" not in d:
-                        buf += d["text"]
-                        while True:
-                            m = re.search(r"^(.*?[.!?])(\s|$)", buf, re.S)
-                            if not m:
-                                break
-                            sent = m.group(1).strip()
-                            buf = buf[m.end():]
-                            if sent:
-                                yield sent
+                    sent = m.group(1).strip()
+                    buf = buf[m.end():]
+                    if sent:
+                        yield sent
         if buf.strip():
             yield buf.strip()
 
@@ -415,12 +450,20 @@ class OpenCodeStream(LLMStream):
                     llm.ChatChunk(id="opencode", delta=llm.ChoiceDelta(content="(opencode returned no text)"))
                 )
                 return
+            except OpenCodeLLM.Delivered as e:
+                # the brain has the turn: say what went wrong, never send it a second time
+                logger.warning("reply stream failed after the brain took the turn: %s", e)
+                self._event_ch.send_nowait(
+                    llm.ChatChunk(id="opencode", delta=llm.ChoiceDelta(content=f"(connection lost: {e})" if spoke else f"({e})"))
+                )
+                return
             except Exception as e:  # noqa: BLE001
                 if spoke:
                     self._event_ch.send_nowait(
                         llm.ChatChunk(id="opencode", delta=llm.ChoiceDelta(content=f"(connection lost: {e})"))
                     )
                     return
+                # the POST never reached the brain (it was down): sending it now is the first time
                 logger.warning("opencode stream failed before first sentence, falling back: %s", e)
         try:
             reply = await self._oc.ask(send, voice)

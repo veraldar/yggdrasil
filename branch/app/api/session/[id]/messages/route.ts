@@ -3,6 +3,15 @@
  * POST /api/session/[id]/prompt   → send text/images/files to the session
  */
 import { NextResponse } from 'next/server';
+import {
+  FILES_PER_MESSAGE,
+  HASH_RE,
+  cleanRefs,
+  fileUrl,
+  isImageMime,
+  refViews,
+  urlHash,
+} from '@/lib/file-ref';
 import { ocFetch, PIN_HEADER, resolveId, sessionGone } from '@/lib/oc';
 import { bustCache } from '@/lib/oc-cache';
 import { buildParts, forward, runEnded } from '@/lib/oc-forward';
@@ -14,11 +23,34 @@ import { PENDING_TTL_MS } from '@/lib/pending-ttl';
 
 export const dynamic = 'force-dynamic';
 
-type SendBody = {
-  text?: string;
-  images?: string[];
-  files?: { name: string; content: string }[];
-};
+/** a stored file part's hash: the REF's own, or the one its `/file/<hash>` url names */
+function partHash(p: any): string {
+  return typeof p.hash === 'string' && HASH_RE.test(p.hash) ? p.hash : urlHash(String(p.url || ''));
+}
+
+/** what the phone shows for a message's file parts: images (a data URL as stored, a stored file
+ *  as its /api/file url) and the other files the brain keeps, as chips that open them */
+function fileViews(parts: any[]) {
+  const images: (string | null)[] = [];
+  const files: { name: string; mime: string; size: number; url: string }[] = [];
+  for (const p of parts) {
+    const hash = p.type === 'file' || p.type === 'image' ? partHash(p) : '';
+    const root = typeof p.root === 'string' ? p.root : undefined;
+    if (p.type === 'image' || isImageMime(p.mime)) {
+      images.push(hash ? fileUrl({ hash, root, mime: p.mime }) : p.url || p.data || null);
+    } else if (hash) {
+      const name = String(p.filename || 'file');
+      const mime = String(p.mime || 'application/octet-stream');
+      files.push({
+        name,
+        mime,
+        size: Number(p.size) || 0,
+        url: fileUrl({ hash, root, mime, name }, true),
+      });
+    }
+  }
+  return { images, files };
+}
 
 /** full log: one tool call as a line — its name, the input's telling field,
  *  the agent it started (session_start), a status unless it completed:
@@ -84,9 +116,7 @@ export async function GET(req: Request, ctx: { params: Promise<{ id: string }> }
         parent: m.info?.parentID || undefined,
         role: m.info?.role || m.role,
         text,
-        images: (m.parts || [])
-          .filter((p: any) => p.type === 'image' || p.mime?.startsWith('image/'))
-          .map((p: any) => p.url || p.data || null),
+        ...fileViews(m.parts || []),
         time: m.info?.time?.created || 0,
         modality: m.info?.modality === 'voice' ? 'voice' : undefined,
         firstDelta: m.info?.time?.first_delta,
@@ -112,7 +142,9 @@ export async function GET(req: Request, ctx: { params: Promise<{ id: string }> }
       const titles = new Map(list.map((x: any) => [x.id, x.title || '']));
       for (const m of out) if (m.from && !m.from.title) m.from.title = titles.get(m.from.session) || '';
     }
-    const all = out.filter((m: any) => m.text || m.images.length || m.log?.length || m.error);
+    const all = out.filter(
+      (m: any) => m.text || m.images.length || m.files.length || m.log?.length || m.error
+    );
     // run state for the busy indicator: opencode emits one assistant message
     // per step, so "an assistant message landed" ≠ "the run is done". The run
     // is done only when the last relevant message is an assistant message with
@@ -161,13 +193,17 @@ export async function GET(req: Request, ctx: { params: Promise<{ id: string }> }
     const body = limit > 0 ? all.slice(-limit) : all;
     // messages waiting in the proxy queue render like the transcript (with
     // queued: true) — refresh-proof, no client-side echo needed
-    const queued = queuedItems(sid).map((q) => ({
-      role: 'user',
-      text: q.text,
-      images: q.images,
-      time: q.at,
-      queued: true,
-    }));
+    const queued = queuedItems(sid).map((q) => {
+      const v = refViews(q.refs || []);
+      return {
+        role: 'user',
+        text: q.text,
+        images: [...(q.images || []), ...v.images],
+        files: v.files,
+        time: q.at,
+        queued: true,
+      };
+    });
     return NextResponse.json([...body, ...queued], {
       headers: {
         'X-Total-Count': String(all.length),
@@ -202,6 +238,20 @@ export async function POST(req: Request, ctx: { params: Promise<{ id: string }> 
     const sid = await resolveId(id, req.headers.get(PIN_HEADER));
     const body = await req.json();
     const async = body.async === true;
+    // files the brain keeps ride as REFs (uploaded first, /api/file/upload)
+    const refs = cleanRefs(body.refs);
+    if (!refs) {
+      const many = Array.isArray(body.refs) && body.refs.length > FILES_PER_MESSAGE;
+      return NextResponse.json(
+        {
+          error: many
+            ? `at most ${FILES_PER_MESSAGE} files in one message`
+            : 'a file in this message is broken',
+        },
+        { status: 400 }
+      );
+    }
+    body.refs = refs;
     const parts = buildParts(body);
     if (!parts.length) return NextResponse.json({ error: 'empty' }, { status: 400 });
 
@@ -214,6 +264,7 @@ export async function POST(req: Request, ctx: { params: Promise<{ id: string }> 
           text: String(body.text || ''),
           images: body.images || [],
           files: body.files || [],
+          ...(refs.length && { refs }),
         });
         console.log(`[queue] enqueue ${sid} (depth ${queuedItems(sid).length})`);
         bustCache();

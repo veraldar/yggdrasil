@@ -5,6 +5,7 @@ import Link from 'next/link';
 import { Streamdown } from 'streamdown';
 import { LineIcon } from '@/components/line-icon';
 import { Marked } from '@/components/marked';
+import { type FileChip, fmtSize } from '@/lib/file-ref';
 import { type RouteTarget, linkRouteTags } from '@/lib/route-tags';
 import { slugify } from '@/lib/slug';
 import { useSwipeX } from '@/lib/use-swipe-x';
@@ -13,6 +14,7 @@ export type Msg = {
   role: string;
   text: string;
   images: string[];
+  files?: FileChip[]; // files the brain keeps (not images): chips that open them
   time: number;
   queued?: boolean;
   autoReply?: boolean; // assistant: answered an auto-verdict request (quiet-assess: no auto-speak)
@@ -89,14 +91,16 @@ const VIEWER_KIND: Record<string, 'html' | 'md' | 'text' | 'pdf' | 'audio'> = {
 function artifactRefs(text: string): { src: string; kind: string }[] {
   const out: { src: string; kind: string }[] = [];
   const seen = new Set<string>();
-  const re = /\/api\/artifact\/([a-zA-Z0-9][a-zA-Z0-9._-]*)/g;
+  // the query rides along: `?root=<r>&session=<s>` names the root a session there made it on
+  const re = /\/api\/artifact\/([a-zA-Z0-9][a-zA-Z0-9._-]*)(\?[^\s)\]"'<>`]*)?/g;
   let m: RegExpExecArray | null;
   while ((m = re.exec(text))) {
     const ext = (m[1].match(/\.([a-z0-9]+)$/i)?.[1] || '').toLowerCase();
     const kind = VIEWER_KIND[ext];
-    if (kind && !seen.has(m[0])) {
-      seen.add(m[0]);
-      out.push({ src: m[0], kind });
+    const src = `/api/artifact/${m[1]}${(m[2] || '').replace(/[.,;:!]+$/, '')}`;
+    if (kind && !seen.has(src)) {
+      seen.add(src);
+      out.push({ src, kind });
     }
   }
   return out;
@@ -106,7 +110,7 @@ function artifactRefs(text: string): { src: string; kind: string }[] {
  *  (md via markdown); html/audio/pdf get native-ish embeds. Silent while the
  *  file is missing (agent may still be writing it mid-stream). */
 function ArtifactView({ src, kind }: { src: string; kind: string }) {
-  const name = src.split('/').pop() || src;
+  const name = src.split('?')[0].split('/').pop() || src;
   const [text, setText] = useState<string | null>(null);
   const needsText = kind === 'md' || kind === 'text';
   useEffect(() => {
@@ -365,6 +369,22 @@ export function SessionMessage({
           </button>
         ) : null
       )}
+
+      {/* files the brain keeps: a tap opens the file (a new tab — the pdf card's way) */}
+      {m.files?.map((f, j) => (
+        <a
+          key={`f${j}`}
+          href={f.url}
+          target="_blank"
+          rel="noreferrer"
+          data-testid="msg-file"
+          className="oz-chip mt-1 mr-1 max-w-full text-[var(--oz-info)]"
+        >
+          <LineIcon name="attach" size={13} />
+          <span className="truncate">{f.name}</span>
+          <span className="text-[var(--oz-dim)] tabular-nums">{fmtSize(f.size)}</span>
+        </a>
+      ))}
 
       {lightbox && (
         <div

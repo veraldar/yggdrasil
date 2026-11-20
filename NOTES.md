@@ -1,42 +1,44 @@
-# P1 notes (integrator) — keep current
+# P2 notes (package 2: full sessions on other roots, files) — keep current
 
-## Done
-- e4f74fbc C5 fix (cut wake rebuilt from inbox, brief resend keeps sender, queued msg behind cut, drain runs out). 117/117 cargo test, tree-e2e 95/95 (one flaky agy-models check on first run).
-- Merged tree-next 4a5f7244 into p1-hub.
-- Built: branch/.next/standalone (NEXT_OUTPUT=standalone), trunk/target/release/bifrost-net, root/target/release/yggdrasil.
+Contract: ~/.cache/p2-reach/contract.md. Worktrees: p2-reach (brain, mine), p2-reach-app (app helper),
+p2-reach-sim (sim helper). Temp files: ~/.cache/p2-reach/tmp (NOT /tmp: shared quota).
 
-## Stage A plan (facts from survey)
-- New public app: `node server.mjs` from frozen folder, PORT 4502, BIFROST_AUTH=devices, BIFROST_TRUST_PROXY=1,
-  BIFROST_DEVICES_FILE, BIFROST_PUBLIC_URL=https://ap.veraldar.org, BIFROST_BRIDGE_URL=http://127.0.0.1:4503,
-  BIFROST_ADMIN_TOKEN, OPENCODE_URL=:4101, ARTIFACTS_DIR, LIVEKIT_URL=wss://ap.veraldar.org, LIVEKIT_API_KEY/SECRET,
-  LIVEKIT_API_URL=http://127.0.0.1:7880, BIFROST_TRUNK_ICE=auto, AGENT_NAME=bifrost-preview, VOICE_ROOM_BY_ID=1, SPEACHES/TTS.
-- Bridge: copy old ST bridge.toml shape; add dtls_cert_file; [ap] livekit="127.0.0.1:7880", tcp={livekit-ice="192.168.50.2:7881"}; ice_tcp unset.
-- AP keeps ONE bridge link: stop trunk-preview-bridge (+app) before starting new bridge. Old ST files untouched = way back (hub-up.sh).
-- VPS: backup tgz (AP-3 step 1) FIRST, then vps-end-design.sh (files staged in VPS /tmp), verify / 200 HSTS, /ap 401, /rootlink 426, veraldar.org.
+## Done (brain, compiles, cargo test 120/120)
+- relay.rs: event journal + POST /event/feed (long poll); home follower per root; proxy turns
+  forwarded async with meta.key (run once), SSE / held POST / async answered like local; busy in
+  running; abort forwarded via the running handle; link lost (45 s, YGG_RELAY_LOST_S) → error
+  "no answer from <root>" + idle + card.
+- files.rs: store files/blobs/<sha256>, upload in pieces, GET piece/whole (?root= pulls), info,
+  /file/artifact (local or pulled from root), data-URL ingest, prepare() before a turn (pull, path,
+  inline text), harness lines, brain-native model text, image resolve, artifact link pointing.
+- main.rs: routes, publish → journal, post_message proxy path, key dedupe, list_messages proxy view +
+  link pointing + ?from=, abort/delete/patch/get/model/agent for proxies.
+- tree.rs/peers.rs: attach:true on session_start/send (local + remote), peers::send via relay,
+  remote.made; coordinator prompt sentence for attach.
 
-## Next
-- Assemble frozen release ~/.local/share/yggdrasil/hub/releases/<id>/
+## Proven (00:20)
+- cargo test 120/120; tree-e2e full 131/131 GREEN incl. 41 package-2 checks
+  (log ~/.cache/p2-reach/tree-full-run1.log; `python3 sim/tree-e2e.py --only reach --port-base 4270`)
+- voice agent: branch/voice/test_no_resend.py GREEN (old agent: 2 POSTs on a 502, new: 1)
 
-## 2026-11-19 ~23:50 stage A progress
-- Release ~/.local/share/yggdrasil/hub/releases/20261119-2343-1e94b361, `current` → it.
-- Config: ~/.config/yggdrasil/hub/{app-public.env,bridge-public.toml,admin-token,peer-token}; state ~/.local/share/yggdrasil/hub/state/devices.json (copy of old ST).
-- `scripts/hub-units.sh public-up` DONE: hub-app :4502 + hub-bridge active, AP channel up. Old trunk-preview-{app,bridge} stopped. Way back: `hub-units.sh public-back`.
-- NEXT: VPS backup tgz → vps-end-design.sh → verify. Then pair a test device + Playwright proof.
-- TODO C5 review (6 defects, see reviewer): (1) retire/fold/refile BEFORE any submit; (2) cut reply with finished tool parts → don't refile its reports (or don't fold); (3) `ended` must count only real run replies (parentID, not folded/inbox stub/summary); (4) retire only if created(W) > last_end, else just wake; (5) handled only if a wake really submits / non-wake autos → report via recover; wake budget; (6) boot id per placeholder (meta.boot) instead of wall clock; still report leftovers.
-- VPS 23:45 CET: backup /root/pre-end-design-2026-11-19.tgz (22:45 UTC) → vps-end-design.sh applied 23:45:43 → verified (/ 200 HSTS, /ap 401, /rootlink 426, site 200) → sni-443 enabled, turn-dispatcher disabled. Undo: `bash ~/.local/state/trunk-preview/vps-end-design.sh undo` (+ re-enable turn-dispatcher).
-- 23:56 STAGE A PROVEN: trunk-rtc-e2e GREEN on build; live-door.spec.ts PASS on real ap.veraldar.org (pair 1.6 s, pinned, typed 5.6 s, hold→talk 1.7 s, spoken STT ok, answer spoken 4.9 s after release, same turns on :8447). Screens in artifacts ap-door-*.png. Test devices removed from state/devices.json.
-- Found: voice agent refuses calls when the box is busy (cgroup load = whole login). Public door got its own agent hub-voice-agent (AGENT_NAME=bifrost-hub, AGENT_LOAD=off). :8447's rc-preview-agent still has the flaw → fix in stage B (one agent, AGENT_LOAD=off, both apps).
-- Owner's phone dev_ad128180 is in devices.json but must re-pair (new bridge DTLS key, pinned channel).
-- 23:59 :8447 checked the same way (PW_DOOR=tailnet): PASS (typed 7.4 s, hold→talk 1.1 s, spoken answer 5.3 s).
-- Owner pairing artifact: artifacts/ap-pair.html (one-use code, exp extended to 01:59). DELETE it once used (check state/devices.json codes[].used for the code created at /tmp/p1-owner-code-created) or at expiry.
+- S3 GREEN (sim/reach/s3.py, scratch brain, real upstream; MAIN attach:true; Claude Code reads path)
+- S17 real-model GREEN (sim/reach/s17_real.py: two scratch brains, real Claude Code haiku on lab)
 
-## NEXT (in order)
-1. Fix the 6 C5 review defects (see TODO above), tests for each, cargo test + tree-e2e.
-2. Twin check of the C5 fix: a deploy cuts sessions' turns; each gets its turn sent again in its own conversation (sim/acceptance/twin-up.sh).
-3. Stage B: hub-units.sh grows brain/librarian/cclive/tailnet app units; one voice agent (AGENT_LOAD=off) for both apps; YGG_ROOT_NAME=omarchy + YGG_PEERS_FROM=http://127.0.0.1:4503/_roots + YGG_PEER_TOKEN; switch script with health check + auto-rollback; linger (decided L12); deploy brain with C5 fix as part of it, when no owner turn runs.
+- app merged (5/5 Pixel-7 specs on real brains; screenshots p2-files-*.png)
+- independent review: 13 findings, all fixed (b948d5c4, +1); its 4 repros in sim/reach/regress pass;
+  after the fixes: cargo test 120/120, tree-e2e 131/131 (~/.cache/p2-reach/tree-full-run2.log)
 
-## 11-20 (after the 12 h stop)
-- ap-pair.html deleted 11:50; owner's phone had NOT paired (code unused). New link goes in the next report.
-- C5 review: 6 faults fixed (4592b809), tests per fault, cargo test 123/123.
-- sim/restart-e2e.py GREEN 22/22; HARNESS=1 GREEN 28/28 (real Claude Code haiku session cut mid-Bash: same conversation id, resent once, answered).
-- NEXT: merge tree-next(be8134ae) ← p1-hub, p2-reach(03a8b7eb), p3-tree(d13e6c66), ui-main-no-who-filter(b003241c); add `fable` to harness models (first, strongest). Then cargo test + tree-e2e + restart-e2e, deploy via preview-up.sh, S14 both doors + mic, move P1–P5 to fable, send P2 its lead-next.md message.
+- S16 (trunk-rtc --scenario s16): hands-free inside a session on lab 5/5 (words once, voice, spoken)
+- S17 (trunk-full --scenario s17): GREEN 3/3 after two app fixes found by it:
+  server.mjs httpAllowHalfOpen (bridge half-close aborted requests) and the upload piece route outside
+  the middleware (Next's body copy broke streaming bodies; gate in lib/gate.ts, run by the route)
+
+## Final suite (08:03, ~/.cache/p2-reach/final/summary.txt) — reported to MAIN
+cargo test 120/120 · tree-e2e 131/131 · trunk-full 19/19 · S17 rig GREEN · trunk-rtc 10/10 ·
+S16: hands-free 5/5, hold: words once; not voice / not spoken (app behaviour on every session) ·
+app files specs 5/5 on real brains · voice no-resend GREEN. Report: root-coord-pwa/artifacts/p2-report.md
+
+## Left / open
+- owner/lead: should a held turn on a session page be answered aloud? (left as is)
+- P3 merge points: peers::start(.., parts, ..) and peers::send(st, proxy, root, rid, parts, caller);
+  tree.rs with_files() in start/send/run_remote; AppState gains relay + files
