@@ -4,8 +4,13 @@ import { heldReply } from '../lib/held-reply';
 
 /** L16: a turn you speak is answered aloud, a turn you type in writing — which reply the
  *  session page says for a HELD turn (text mode). */
-const m = (o: Partial<Msg> & { role: string; time: number }): Msg => ({ text: 'x', images: [], ...o });
-const user = (id: string, time: number, o: Partial<Msg> = {}) => m({ role: 'user', id, time, ...o });
+const m = (o: Partial<Msg> & { role: string; time: number }): Msg => ({
+  text: 'x',
+  images: [],
+  ...o,
+});
+const user = (id: string, time: number, o: Partial<Msg> = {}) =>
+  m({ role: 'user', id, time, ...o });
 const reply = (id: string, time: number, parent: string | undefined, o: Partial<Msg> = {}) =>
   m({ role: 'assistant', id, time, parent, done: true, text: 'the answer', ...o });
 
@@ -63,7 +68,11 @@ test('an older spoken turn (before the press) is not this hold', () => {
 test('a brain that does not name the message a reply answers: the next reply, not a later turn’s', () => {
   const msgs = [user('u1', 200, { modality: 'voice' }), reply('a1', 210, undefined)];
   expect(heldReply(msgs, { before: 100 }).reply?.id).toBe('a1');
-  const later = [user('u1', 200, { modality: 'voice' }), user('u2', 205), reply('a2', 220, undefined)];
+  const later = [
+    user('u1', 200, { modality: 'voice' }),
+    user('u2', 205),
+    reply('a2', 220, undefined),
+  ];
   expect(heldReply(later, { before: 100 }).reply).toBeUndefined();
 });
 
