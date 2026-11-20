@@ -33,9 +33,12 @@ p2-reach-sim (sim helper). Temp files: ~/.cache/p2-reach/tmp (NOT /tmp: shared q
   server.mjs httpAllowHalfOpen (bridge half-close aborted requests) and the upload piece route outside
   the middleware (Next's body copy broke streaming bodies; gate in lib/gate.ts, run by the route)
 
-## In flight (08:xx)
-- final suite: ~/.cache/p2-reach/final-suite.sh → ~/.cache/p2-reach/final/summary.txt
+## Final suite (08:03, ~/.cache/p2-reach/final/summary.txt) — reported to MAIN
+cargo test 120/120 · tree-e2e 131/131 · trunk-full 19/19 · S17 rig GREEN · trunk-rtc 10/10 ·
+S16: hands-free 5/5, hold: words once; not voice / not spoken (app behaviour on every session) ·
+app files specs 5/5 on real brains · voice no-resend GREEN. Report: root-coord-pwa/artifacts/p2-report.md
 
-## Next
-1. when the suite is green: report artifact + report to MAIN for P1 (integrator)
-2. open questions for the owner/lead: hold-to-talk on a session page (voice + spoken?), photos shrunk
+## Left / open
+- owner/lead: should a held turn on a session page be answered aloud? (left as is)
+- P3 merge points: peers::start(.., parts, ..) and peers::send(st, proxy, root, rid, parts, caller);
+  tree.rs with_files() in start/send/run_remote; AppState gains relay + files
