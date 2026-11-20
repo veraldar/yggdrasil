@@ -539,7 +539,7 @@ def main():
         check("agent list exposes claude and agy, never AGI", "claude" in listed_names and "agy" in listed_names and "AGI" not in listed_names, listed_names)
         cl = req(HOME_PORT, "GET", "/agent/claude")
         check("claude agent: Claude Code on Opus", cl["harness"] == "claude" and cl["model"] == "opus" and cl["builtin"], {k: cl.get(k) for k in ("harness", "model")})
-        check("claude offers Claude Code's models", {"opus", "sonnet", "haiku"} <= set(cl["models"]), cl.get("models"))
+        check("claude offers Claude Code's models, Fable first", {"fable", "opus", "sonnet", "haiku"} <= set(cl["models"]) and cl["models"][0] == "fable", cl.get("models"))
         try:
             req(HOME_PORT, "PUT", "/agent/claude", {"model": "gpt-free-text"})
             check("a harness model must be one it offers", False, "accepted")

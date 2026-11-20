@@ -4500,7 +4500,7 @@ async fn main() {
         wakes: Arc::default(),
         harness_slots: Arc::new(tokio::sync::Semaphore::new(env_num("YGG_MAX_HARNESS", 8).max(1) as usize)),
         harness_models: Arc::new(Mutex::new(HashMap::from([
-            ("claude".to_string(), vec!["opus".to_string(), "sonnet".to_string(), "haiku".to_string()]),
+            ("claude".to_string(), vec!["fable".to_string(), "opus".to_string(), "sonnet".to_string(), "haiku".to_string()]),
             ("opencode".to_string(), vec!["default".to_string()]),
             ("codex".to_string(), vec!["default".to_string()]),
             ("antigravity".to_string(), floor_models.0),
@@ -4513,7 +4513,8 @@ async fn main() {
             (
                 "claude".to_string(),
                 HashMap::from([
-                    ("opus".to_string(), "strongest — hard, long work".to_string()),
+                    ("fable".to_string(), "strongest — the hardest, longest work".to_string()),
+                    ("opus".to_string(), "strong — hard, long work".to_string()),
                     ("sonnet".to_string(), "balanced — most coding".to_string()),
                     ("haiku".to_string(), "fastest — small, quick tasks".to_string()),
                 ]),
