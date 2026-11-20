@@ -152,7 +152,9 @@ int main(int argc, char **argv) {
                 for (int k = i + 1; k + 1 < argc; k++)
                     if (!strcmp(argv[k], "--out")) {
                         char p[MAX_PATH];
-                        snprintf(p, sizeof p, "Z:%s\\setup.ini", argv[k + 1]);
+                        const char *o = argv[k + 1];   /* --out . : the --cd folder */
+                        if (o[0] == '/') snprintf(p, sizeof p, "Z:%s\\setup.ini", o);
+                        else snprintf(p, sizeof p, "Z:%s/%s\\setup.ini", g_cwd, o);
                         for (char *c = p; *c; c++) if (*c == '/') *c = '\\';
                         WritePrivateProfileStringA("setup", "result", "fail", p);
                         WritePrivateProfileStringA("setup", "why", "apt-get could not install curl python3", p);

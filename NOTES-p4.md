@@ -42,6 +42,20 @@ never from this one — bash reads scripts as it goes, an edit here breaks a run
 - docs/release-notes-v0.9.1.md (installer part)
 - rehearsal 1 running on a TEMP merge (p4-run2 detached: p4-release + p4-win)
 
+## 11-20 12:50 — L15 REVISED (the lead, 12:36): one model step on every system + "Same as the home root"
+CONTRACT WITH P3 (the home root's route): ~/Work/root-coord-pwa/artifacts/p4-model-route.md
+  GET /root/model via the joiner's own WG node (http://127.0.0.1:<peer port>/_wg/local/root/model), x-ygg-peer;
+  200 {base_url, style, model, api_key} · 401 · 403 · 404 (older home) · 409 (home's model is on loopback);
+  join request body gains "model":"home". P3 says in its NOTES when the route is on a branch.
+State at 12:50: rehearsal 2 on the real merge 968382f3 GREEN (r1-r7 7/7; Linux rig OT_DIST 32+12; Mac check 11/11;
+  wine 32/33 = a test stand-in bug, fixed in p4-release). tree-next 5edbb05c merged (0b0d86df); notes file is now
+  NOTES-p4.md. p4-win is merged: Windows work continues in p4-release.
+TO BUILD (order): 1 root/install/model-step.sh (providers: same|zai|openrouter|anthropic|openai|other) sourced by
+  install.sh + join.sh · 2 joiner side (rootjoin.py model-fetch, run-brain waits, exit 6) · 3 Windows page with
+  the same choices · 4 tests: join-test (fake route), wine, GLM job: a container per provider path with a fake
+  HTTPS upstream · 5 agy review · 6 rehearsal 3 → report the branch to P1.
+Engines (L18): agy for reviews/self-contained code, GLM sessions for test matrices; builds under nice -n 10.
+
 ## 11-20 noon — lead's instructions (L13–L17; the owner left decisions to the lead)
 - the Windows helper is gone; I finish p4-win myself. L15: the model page done in p4-win.
 - independent review of p4-win: 9 findings (2 high: non-ASCII user name / wsl notices broke the wslpath round
