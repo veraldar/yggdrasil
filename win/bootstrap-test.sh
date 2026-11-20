@@ -36,6 +36,13 @@ cp /etc/wsl.conf /tmp/wsl.conf.1
 bash $B --setup --out $OUTS --user johnsmith >/tmp/setup.out 2>&1; rc=$?
 [ $rc = 0 ] && [ "$(ini $OUTS/setup.ini made)" = 0 ] && [ "$(ini $OUTS/setup.ini user)" = johnsmith ] && cmp -s /etc/wsl.conf /tmp/wsl.conf.1
 check 'setup again, --user johnsmith (the default user of an existing distro): kept, nothing made, wsl.conf untouched' $? "$(cat /tmp/setup.out)"
+[ "$(ini $OUTS/setup.ini model)" = 0 ]
+check 'setup: model=0 — this user has no root with a model yet (the installer asks for one)' $? "$(cat $OUTS/setup.ini)"
+mkdir -p /home/johnsmith/.local/share/yggdrasil-root && printf 'YGG_UPSTREAM_BASE_URL=http://127.0.0.1:11434/v1\n' >/home/johnsmith/.local/share/yggdrasil-root/brain.env
+bash $B --setup --out $OUTS --user johnsmith >/tmp/setup.out 2>&1
+[ "$(ini $OUTS/setup.ini model)" = 1 ]
+check 'setup: model=1 once its root has a model (the installer does not ask; join.sh keeps it)' $? "$(cat $OUTS/setup.ini)"
+rm -rf /home/johnsmith/.local/share/yggdrasil-root
 bash $B --setup --out $OUTS --win-user "root" >/tmp/setup.out 2>&1; rc=$?
 [ $rc = 0 ] && [ "$(ini $OUTS/setup.ini user)" = veraldar ]
 check 'setup: a Windows name that is a system account here (root) -> the user "veraldar"' $? "$(cat /tmp/setup.out $OUTS/setup.ini)"

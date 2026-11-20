@@ -60,6 +60,7 @@ I=$U/AppData/Local/Veraldar
 UI=$WINEPREFIX/dosdevices/c:/users/root/AppData/Local/Veraldar    # the install folder, as the fake's wslpath gives it
 STARTUP="$U/AppData/Roaming/Microsoft/Windows/Start Menu/Programs/StartUp"   # wine's spelling
 CALLS=$WINEPREFIX/drive_c/wsl-calls.txt
+TESTKEY=sk-test-K3Y-0123456789abcdefGHIJklmn   # typed on the model page; must reach join.sh and nothing else
 pass=0 fail=0
 check() { # NAME STATUS
   if [ "$2" = 0 ]; then pass=$((pass + 1)); echo "  PASS  $1"
@@ -94,7 +95,7 @@ STOP='-e | sh | -c | s=$HOME/.local/share/yggdrasil-root/bin/stop; [ -x $s ] && 
 flow() { # JOIN-MODE [SHOT] [scenario...]: a whole install through the address page to the last page
   local mode=$1 name=${2:-}; shift 2
   reset; scenario default=ok "join=$mode" wait=2 "$@"; start /x/setup.exe
-  wait_log 'page: address' 180 && key Return && wait_log 'page: done' 120
+  wait_log 'page: address' 180 && key Return && wait_log 'page: model' 30 && key Return && wait_log 'page: done' 120
   local rc=$?
   [ -n "$name" ] && shot "$name"
   key Return; wait_exit
@@ -116,6 +117,8 @@ reset; scenario default=ok join=ok prep=3 wait=4 probe_ms=1500
 start /x/setup.exe
 wait_win; sleep 1.2; shot prepare
 wait_log 'page: address' 180; shot address
+key Return
+wait_log 'page: model' 30; sleep 0.5; typein "$TESTKEY"; shot model
 key Return
 wait_log 'join: started' 60; shot connecting
 wait_log 'code is up' 60; shot code
@@ -145,7 +148,27 @@ grep -qxF "installer:  Veraldar-Setup $VERSION" <<<"$R" && grep -q '^windows:   
 check 'step 7: install-report.txt: versions, distro, each step, the last 40 log lines, plain ASCII' $?
 wine reg query 'HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\Veraldar' /v DisplayVersion 2>/dev/null | tr -d '\r' | sed -n 's/.*REG_SZ *//p' | grep -qxF "$VERSION"
 check "Apps list: Veraldar $VERSION (per user)" $?
+U2=$(tr -d '\r' </tmp/wslhome/alice/fake-upstream 2>/dev/null)
+grep -qx 'YGG_UPSTREAM_BASE_URL=https://api.openai.com/v1' <<<"$U2" && grep -qx 'YGG_UPSTREAM_STYLE=openai' <<<"$U2" &&
+  grep -qx 'YGG_UPSTREAM_MODEL=gpt-4o-mini' <<<"$U2" && grep -qxF "YGG_UPSTREAM_API_KEY=$TESTKEY" <<<"$U2" &&
+  grep -qx -- '--upstream-env' /tmp/wslhome/alice/fake-join-args &&
+  grep -q '^  3 model      https://api.openai.com/v1, openai, gpt-4o-mini, a key$' <<<"$R"
+check 'step 3b: the model page (L15): address, kind, model and the key reach join.sh as --upstream-env; the report names no key' $?
+[ ! -e "$I/upstream.env" ] && ! grep -rqF -- "$TESTKEY" "$I" && ! grep -rqF -- "$TESTKEY" /tmp/fakewsl 2>/dev/null &&
+  ! ls /tmp/wslhome/alice/.local/state/veraldar/upstream.* >/dev/null 2>&1
+check 'the key: in no file on the Windows side (setup.log, report, upstream.env gone), not left in WSL after the join' $?
 key Return; wait_exit
+
+echo "[a PC whose root already has its model: no model page]"
+reset; mkdir -p /home/alice/.local/share/yggdrasil-root 2>/dev/null
+printf 'YGG_UPSTREAM_BASE_URL=http://127.0.0.1:11434/v1\n' >/home/alice/.local/share/yggdrasil-root/brain.env
+scenario default=ok join=ok wait=2; start /x/setup.exe
+wait_log 'page: address' 180 && key Return && wait_log 'page: done' 120
+rc=$?; R=$(report); key Return; wait_exit
+[ $rc = 0 ] && ! grep -q 'page: model' "$I/setup.log" && ! grep -qx -- '--upstream-env' /tmp/wslhome/alice/fake-join-args &&
+  [ "$(result)" = "connected as TESTPC" ] && grep -q '^  3 model      already set on this PC$' <<<"$R"
+check 'model already set (as join.sh on Linux): no model page, join.sh keeps it, connected' $?
+rm -f /home/alice/.local/share/yggdrasil-root/brain.env
 
 echo "[keepalive.vbs -> launcher.bat, again (as at logon)]"
 : >"$CALLS"

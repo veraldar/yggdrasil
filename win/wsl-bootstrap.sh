@@ -244,8 +244,11 @@ if [ "$MODE" = setup ]; then
       exit 1
     fi
   fi
-  note "[setup] Linux user $user; curl, python3, openssh-client, ca-certificates present"
-  ini "$OUT/setup.ini" setup "user=$user" "made=$made" "result=ok" "why="
+  # does this user's root already have its model? (then the installer does not ask — join.sh keeps it, as on Linux)
+  model=0; home=$(getent passwd "$user" | cut -d: -f6)
+  grep -qs '^YGG_UPSTREAM_BASE_URL=.' "${home:-/nonexistent}/.local/share/yggdrasil-root/brain.env" && model=1
+  note "[setup] Linux user $user; curl, python3, openssh-client, ca-certificates present; model already set: $model"
+  ini "$OUT/setup.ini" setup "user=$user" "made=$made" "result=ok" "why=" "model=$model"
   exit 0
 fi
 
@@ -276,10 +279,10 @@ note "---- $(date '+%F %T') wsl-bootstrap: hub $HUB, name $NAME, $(. /etc/os-rel
 [ -n "$HUB" ] && [ -n "$NAME" ] || finish 64 fail W-JOIN "no trunk address or name given"
 [ -f "$JOIN" ] || finish 1 fail W-JOIN "the installer has no join.sh beside wsl-bootstrap.sh"
 
-# THE MODEL — kept in this one place. The owner decides how this PC gets its model (the home computer's, handed
-# over on approval, or a key the installer asks for). If the installer wrote OUT/upstream.env (YGG_UPSTREAM_*
-# lines), it moves inside WSL (mode 600; the Windows copy is removed) and goes to join.sh as --upstream-env.
-# Else nothing: join.sh keeps the model this root already has, or stops ("no model upstream": W-MODEL).
+# THE MODEL — kept in this one place (decision L15: asked when the PC is installed, as on Linux). The installer's
+# model page writes OUT/upstream.env (YGG_UPSTREAM_* lines) when this root has none yet (setup.ini model=0); it moves
+# inside WSL (mode 600; the Windows copy is removed at once) and goes to join.sh as --upstream-env. Else nothing:
+# join.sh keeps the model this root already has, or stops ("no model upstream": W-MODEL).
 UP_FILE=''
 upstream_args() {
   [ -f "$OUT/upstream.env" ] || return 0

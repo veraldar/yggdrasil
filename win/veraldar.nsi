@@ -118,6 +118,12 @@ Var hHint
 Var FontBig
 Var FontCode
 Var Name          ; uninstaller: the root's name
+Var HaveModel     ; 1: this PC's root already has its model (setup.ini model=1): the model page is not shown
+Var StepModel
+Var hUpUrl
+Var hUpKind
+Var hUpModel
+Var hUpKey
 
 ; ------------------------------------------------------------------------------------------------- pages
 !define MUI_CUSTOMFUNCTION_ABORT OnUserAbort
@@ -130,6 +136,7 @@ Var Name          ; uninstaller: the root's name
 !insertmacro MUI_PAGE_INSTFILES
 Page custom RestartShow RestartLeave
 Page custom AddressShow AddressLeave
+Page custom ModelShow ModelLeave
 Page custom JoinShow
 Page custom DoneShow
 
@@ -331,6 +338,11 @@ Function WriteReport ; step 7: install-report.txt - no secrets (setup.log is mas
   FileWrite $RptH "  1 windows    $StepOS$\r$\n"
   FileWrite $RptH "  2 wsl        $StepWSL$\r$\n"
   FileWrite $RptH "  3 address    $StepAddr$\r$\n"
+  ${If} $HaveModel == 1
+    FileWrite $RptH "  3 model      already set on this PC$\r$\n"
+  ${Else}
+    FileWrite $RptH "  3 model      $StepModel$\r$\n"
+  ${EndIf}
   FileWrite $RptH "  4-5 join     $StepJoin$\r$\n"
   FileWrite $RptH "  6 run        $StepRun$\r$\n"
   FileWrite $RptH "$\r$\nlast 40 log lines (setup.log; keys and tokens masked)$\r$\n"
@@ -568,6 +580,7 @@ Section "-prepare"
   ReadINIStr $0 "$INSTDIR\setup.ini" "setup" "result"
   ReadINIStr $LUser "$INSTDIR\setup.ini" "setup" "user"
   ReadINIStr $2 "$INSTDIR\setup.ini" "setup" "made"
+  ReadINIStr $HaveModel "$INSTDIR\setup.ini" "setup" "model"
   ${Log} "setup in $Distro: exit $1, result $0, user $LUser"
   ${If} $0 != "ok"
   ${OrIf} $LUser == ""
@@ -647,7 +660,11 @@ Function AddressShow
   ${NSD_SetFocus} $hAddr
   Call HideBack
   GetDlgItem $1 $HWNDPARENT 1
-  SendMessage $1 ${WM_SETTEXT} 0 "STR:Connect"
+  ${If} $HaveModel == 1
+    SendMessage $1 ${WM_SETTEXT} 0 "STR:Connect"
+  ${Else}
+    SendMessage $1 ${WM_SETTEXT} 0 "STR:Next >"
+  ${EndIf}
   nsDialogs::Show
 FunctionEnd
 
@@ -712,6 +729,112 @@ Function AddressLeave
   StrCpy $StepAddr "$Trunk"
   WriteINIStr "$INSTDIR\wsl.ini" "wsl" "trunk" "$Trunk"
   ${Log} "trunk: $Trunk"
+FunctionEnd
+
+; step 3b (decision L15): the model, asked the way join.sh asks on Linux, only when this PC's root has none yet.
+; The key is typed into a hidden field, written only to upstream.env (wsl-bootstrap.sh moves it into WSL at once and
+; removes it here), never shown again and never logged.
+Function ModelShow
+  ${If} $Result != ""
+  ${OrIf} $NeedRestart == 1
+  ${OrIf} $HaveModel == 1
+    Abort
+  ${EndIf}
+  ${Log} "page: model"
+  !insertmacro MUI_HEADER_TEXT "Model" "This computer needs a model to think with (any OpenAI- or Anthropic-compatible API)."
+  nsDialogs::Create 1018
+  Pop $0
+  ${NSD_CreateLabel} 0 2u 52u 12u "Address"
+  Pop $1
+  ${NSD_CreateText} 56u 0 100% 13u "https://api.openai.com/v1"
+  Pop $hUpUrl
+  ${NSD_CreateLabel} 0 24u 52u 12u "Kind"
+  Pop $1
+  ${NSD_CreateDropList} 56u 22u 90u 60u ""
+  Pop $hUpKind
+  ${NSD_CB_AddString} $hUpKind "openai"
+  ${NSD_CB_AddString} $hUpKind "anthropic"
+  ${NSD_CB_SelectString} $hUpKind "openai"
+  ${NSD_CreateLabel} 0 46u 52u 12u "Model"
+  Pop $1
+  ${NSD_CreateText} 56u 44u 100% 13u "gpt-4o-mini"
+  Pop $hUpModel
+  ${NSD_CreateLabel} 0 68u 52u 20u "Key"
+  Pop $1
+  ${NSD_CreatePassword} 56u 66u 100% 13u ""
+  Pop $hUpKey
+  ${NSD_CreateLabel} 56u 82u 100% 12u "Empty for a local server."
+  Pop $1
+  ${NSD_SetFocus} $hUpKey
+  Call HideBack
+  GetDlgItem $1 $HWNDPARENT 1
+  SendMessage $1 ${WM_SETTEXT} 0 "STR:Connect"
+  nsDialogs::Show
+FunctionEnd
+
+Function TrimBlanks ; $0 without blanks around it
+  trim:
+    StrCpy $1 $0 1
+    ${If} $1 == " "
+      StrCpy $0 $0 "" 1
+      Goto trim
+    ${EndIf}
+    StrCpy $1 $0 1 -1
+    ${If} $1 == " "
+      StrCpy $0 $0 -1
+      Goto trim
+    ${EndIf}
+FunctionEnd
+
+Function ModelLeave
+  ${NSD_GetText} $hUpUrl $0
+  Call TrimBlanks
+  StrCpy $5 $0
+  StrCpy $1 $5 8
+  StrCpy $2 $5 7
+  StrLen $3 $5
+  ${If} $1 != "https://"
+  ${AndIf} $2 != "http://"
+    StrCpy $3 0
+  ${EndIf}
+  ${If} $3 < 10
+    MessageBox MB_ICONEXCLAMATION|MB_OK "The address starts with https://, like https://api.openai.com/v1"
+    Abort
+  ${EndIf}
+  ${NSD_GetText} $hUpKind $6
+  ${If} $6 != "anthropic"
+    StrCpy $6 "openai"
+  ${EndIf}
+  ${NSD_GetText} $hUpModel $0
+  Call TrimBlanks
+  StrCpy $7 $0
+  ${If} $7 == ""
+    MessageBox MB_ICONEXCLAMATION|MB_OK "Which model? For example gpt-4o-mini."
+    Abort
+  ${EndIf}
+  ${NSD_GetText} $hUpKey $0
+  Call TrimBlanks
+  ClearErrors
+  FileOpen $9 "$INSTDIR\upstream.env" w
+  ${If} ${Errors}
+    StrCpy $0 ""
+    MessageBox MB_ICONEXCLAMATION|MB_OK "Setup could not write to $INSTDIR."
+    Abort
+  ${EndIf}
+  FileWrite $9 "YGG_UPSTREAM_BASE_URL=$5$\n"
+  FileWrite $9 "YGG_UPSTREAM_STYLE=$6$\n"
+  FileWrite $9 "YGG_UPSTREAM_MODEL=$7$\n"
+  FileWrite $9 "YGG_UPSTREAM_API_KEY=$0$\n"
+  FileClose $9
+  ${If} $0 == ""
+    StrCpy $8 "no key"
+  ${Else}
+    StrCpy $8 "a key"
+  ${EndIf}
+  StrCpy $0 ""
+  ${NSD_SetText} $hUpKey ""
+  StrCpy $StepModel "$5, $6, $7, $8"
+  ${Log} "model: $5 ($6), $7, $8"
 FunctionEnd
 
 Function JoinShow
@@ -893,6 +1016,7 @@ FunctionEnd
 
 Function DoneShow
   DeleteRegValue HKCU "${RUNONCE_KEY}" "Veraldar"
+  Delete "$INSTDIR\upstream.env"   ; (wsl-bootstrap.sh removes it when it takes it; never left behind)
   ${If} $NeedRestart == 1
     Abort
   ${EndIf}
@@ -953,6 +1077,7 @@ Function DoneShow
 FunctionEnd
 
 Function OnUserAbort
+  Delete "$INSTDIR\upstream.env"
   ${If} $AtEnd == 1
     Return
   ${EndIf}
@@ -1071,6 +1196,7 @@ Section "Uninstall"
   Delete "$INSTDIR\setup.log"
   Delete "$INSTDIR\setup.old.log"
   Delete "$INSTDIR\install-report.txt"
+  Delete "$INSTDIR\upstream.env"
   Delete "$INSTDIR\Uninstall.exe"
   RMDir "$INSTDIR"
   DeleteRegKey HKCU "${UNINST_KEY}"
