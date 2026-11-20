@@ -535,10 +535,11 @@ def run_tests(hub, new_env, tmp):
     env_lines = [l for l in open(os.path.join(a.dir, "brain.env")).read().splitlines() if l and not l.startswith("#")]
     want = ["YGG_UPSTREAM_BASE_URL=http://127.0.0.1:9/v1", "YGG_UPSTREAM_API_KEY=" + KEY, "YGG_UPSTREAM_MODEL=test-model",
             "YGG_LISTEN=127.0.0.1:%d" % a.brain_port, "YGG_DATA_DIR=%s/data" % a.dir, "YGG_PROJECT_DIR=%s" % a.home,
-            "YGG_ROOT_NAME=%s" % root_id, "YGG_PEERS=home-box=http://127.0.0.1:%d/_wg/local" % a.peer_port,
+            "YGG_ROOT_NAME=%s" % root_id, "YGG_ROOT_MAIN=1", "YGG_HOME_ROOT=home-box",
+            "YGG_PEERS=home-box=http://127.0.0.1:%d/_wg/local" % a.peer_port,
             "YGG_PEERS_FROM=http://127.0.0.1:%d/_wg/_roots" % a.peer_port, "YGG_PEERS_VIA=http://127.0.0.1:%d/_wg/{id}" % a.peer_port,
             "YGG_PEER_TOKEN=%s" % j["peer_token"]]
-    check("brain.env: exactly upstream + listen/data/project/root name/peers (the hub brain by its name, inside the "
+    check("brain.env: exactly upstream + listen/data/project/root name/own MAIN + home/peers (the hub brain by its name, inside the "
           "tunnel; the other roots from the node's list)/peer token", env_lines == want, "\n".join(env_lines))
     g = j["wg"]
     want_wg = ('[wg]\nkey_file = "{d}/wg.key"\nudp = "127.0.0.1:{pp}"\nrelay = "127.0.0.1:{bp}"\nhttp = "127.0.0.1:{pp}"\n'

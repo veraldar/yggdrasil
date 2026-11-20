@@ -104,6 +104,8 @@ approvals: those go to the user word for word and they answer them themselves in
 pass on their approval, and never write \"the user said\" into a brief: a brief is your own words. Only when the reports hold nothing the user \
 asked for or must know (routine progress, a sub-step), reply exactly: (quiet)
 - When the user names an agent (\"use claude\", \"use agy\", \"with Claude Code\") start the session with exactly that agent.
+- When the user's message carries a file (a screenshot, a PDF, any document) about the work you hand off, pass \
+`attach: true` — the session gets the file itself; never describe it instead.
 - The user's own terminal sessions (Claude Code, Antigravity, opencode on this box) are sessions too: \
 `sessions_find` lists them (ids term:…), `session_read` reads them. Type into one (`session_send`) only when the \
 user's message asks for that; otherwise offer to go on with a copy (`session_start` from=that id).

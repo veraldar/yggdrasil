@@ -9,7 +9,7 @@
 //!   the asking root, which cards the proxy and delivers to its parent like any local report.
 //! - Talking to a proxy (tree tools or the phone) forwards to the peer; reading it reads there.
 //! - `GET /root` describes a root (models + tiers, profiles, hardware, load, note), so the
-//!   coordinator can place work where the hardware fits; peers are polled every 60 s.
+//!   coordinator can place work where the hardware fits; peers are polled every 30 s.
 //!
 //! Env: YGG_ROOT_NAME (default: hostname) · YGG_PEERS `name=url,…` · YGG_PEER_TOKEN shared
 //! secret (sent as `x-ygg-peer`, required on `/tree/report` when set) · YGG_ROOT_NOTE free text.
@@ -19,10 +19,20 @@
 //! the trunk right now), the watch loop reads that list every few seconds and adds a peer per
 //! linked root: name = its id, url = YGG_PEERS_VIA with `{id}` replaced (default
 //! `<scheme://host:port of YGG_PEERS_FROM>/_root/{id}`, the switchboard). Static YGG_PEERS win a
-//! name clash; this root's own name is never added. A root that unlinks stays known, shown
-//! unreachable like any down peer. A call naming a root not known yet reads the list once first.
+//! name clash; this root's own name is never added. A root the list stops naming (revoked, removed)
+//! is dropped from the peers; its proxies stay. A call naming a root not known yet reads the list
+//! once first.
+//!
+//! The whole tree (p3, 11-19): every root has its own MAIN (YGG_ROOT_MAIN=1 makes it at start on a
+//! root that runs no app); `GET /root` names it, and every root keeps one proxy of each peer's MAIN
+//! (roots.rs). YGG_HOME_ROOT names the root the phone enters through: work placed between two other
+//! roots is told there. Work passed between roots carries a hop count; past MAX_HOPS it is refused.
 
-use std::{collections::HashMap, sync::Mutex, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Mutex,
+    time::Duration,
+};
 
 use serde_json::{Value, json};
 
@@ -42,7 +52,21 @@ pub struct Peers {
     pub note: String,
     /// name → (fetched ms, GET /root body)
     pub seen: Mutex<HashMap<String, (u64, Value)>>,
+    /// YGG_HOME_ROOT: the root the phone enters through (None = this one, or unknown)
+    pub home: Option<String>,
+    /// YGG_ROOT_MAIN=1: this brain makes its own `[MAIN]` at start (a joined root runs no app)
+    pub own_main: bool,
+    /// roots removed on purpose (`DELETE /root/peers/{name}`): never a peer again in this process
+    pub removed: Mutex<HashSet<String>>,
+    /// name → when a call to it last failed to reach it: off at once, not 3 minutes later
+    pub failed: Mutex<HashMap<String, u64>>,
+    /// name → lists in a row the learned root was missing from (`forget_unlisted`)
+    pub absent: Mutex<HashMap<String, u32>>,
 }
+
+/// Work passed from root to root more often than this is refused (L6): two MAINs can never hand
+/// the same job back and forth.
+pub const MAX_HOPS: u64 = 2;
 
 /// `name=url,…` → pairs (names and urls trimmed, a trailing `/` dropped, empty halves skipped).
 pub fn parse_peers(s: &str) -> Vec<(String, String)> {
@@ -71,7 +95,7 @@ pub fn linked_ids(v: &Value) -> Vec<String> {
 }
 
 /// Adds every linked root not known yet to `learned` (never `me`, never a static name); returns
-/// the names it added. Nothing is ever removed.
+/// the names it added. See `forget_unlisted` for the other half.
 pub fn merge(statics: &[(String, String)], learned: &mut Vec<(String, String)>, me: &str, via: &str, ids: &[String]) -> Vec<String> {
     let mut added = vec![];
     for id in ids {
@@ -84,12 +108,44 @@ pub fn merge(statics: &[(String, String)], learned: &mut Vec<(String, String)>, 
     added
 }
 
+/// Lists in a row a learned root may be missing from before it is forgotten (a link that blips,
+/// a trunk restarting, is not a removal).
+pub const FORGET_AFTER: u32 = 3;
+
+/// Drops the learned roots the list has stopped naming (revoked or removed on the hub: missing
+/// from FORGET_AFTER lists in a row; `absent` counts) and the ones removed here; returns their
+/// names. An empty list forgets nothing. Their proxies are kept: a root that comes back works again.
+pub fn forget_unlisted(learned: &mut Vec<(String, String)>, ids: &[String], removed: &HashSet<String>, absent: &mut HashMap<String, u32>) -> Vec<String> {
+    let mut gone = vec![];
+    learned.retain(|(n, _)| {
+        let keep = if removed.contains(n) {
+            false
+        } else if ids.is_empty() || ids.contains(n) {
+            absent.remove(n);
+            true
+        } else {
+            let k = absent.entry(n.clone()).or_insert(0);
+            *k += 1;
+            *k < FORGET_AFTER
+        };
+        if !keep {
+            absent.remove(n);
+            gone.push(n.clone());
+        }
+        keep
+    });
+    gone
+}
+
 impl Peers {
     pub fn load() -> Peers {
         let host = std::fs::read_to_string("/etc/hostname").map(|h| h.trim().to_string()).unwrap_or_else(|_| "root".into());
         let env = |k: &str| std::env::var(k).ok().filter(|v| !v.trim().is_empty());
         let me = env("YGG_ROOT_NAME").unwrap_or(host);
-        Peers::new(me, &env("YGG_PEERS").unwrap_or_default(), env("YGG_PEERS_FROM"), env("YGG_PEERS_VIA"), env("YGG_PEER_TOKEN"), env("YGG_ROOT_NOTE").unwrap_or_default())
+        let mut p = Peers::new(me, &env("YGG_PEERS").unwrap_or_default(), env("YGG_PEERS_FROM"), env("YGG_PEERS_VIA"), env("YGG_PEER_TOKEN"), env("YGG_ROOT_NOTE").unwrap_or_default());
+        p.home = env("YGG_HOME_ROOT").map(|h| h.trim().to_string()).filter(|h| valid_id(h) && *h != p.me);
+        p.own_main = env("YGG_ROOT_MAIN").is_some_and(|v| v.trim() == "1");
+        p
     }
 
     pub fn new(me: String, peers: &str, from: Option<String>, via: Option<String>, token: Option<String>, note: String) -> Peers {
@@ -109,13 +165,28 @@ impl Peers {
             }
             None => fallback,
         };
-        Peers { me, list: parse_peers(peers), learned: Mutex::new(vec![]), from, via, token, note, seen: Mutex::new(HashMap::new()) }
+        Peers {
+            me,
+            list: parse_peers(peers),
+            learned: Mutex::new(vec![]),
+            from,
+            via,
+            token,
+            note,
+            seen: Mutex::new(HashMap::new()),
+            home: None,
+            own_main: false,
+            removed: Mutex::new(HashSet::new()),
+            failed: Mutex::new(HashMap::new()),
+            absent: Mutex::new(HashMap::new()),
+        }
     }
 
-    /// Every peer: the static ones, then the learned ones.
+    /// Every peer: the static ones, then the learned ones (never one removed here).
     pub fn all(&self) -> Vec<(String, String)> {
-        let mut v = self.list.clone();
-        v.extend(self.learned.lock().unwrap().iter().cloned());
+        let removed = self.removed.lock().unwrap();
+        let mut v: Vec<(String, String)> = self.list.iter().filter(|(n, _)| !removed.contains(n)).cloned().collect();
+        v.extend(self.learned.lock().unwrap().iter().filter(|(n, _)| !removed.contains(n)).cloned());
         v
     }
 
@@ -130,9 +201,39 @@ impl Peers {
     pub fn authorized(&self, headers: &axum::http::HeaderMap) -> bool {
         match &self.token {
             None => true,
-            Some(t) => headers.get("x-ygg-peer").and_then(|v| v.to_str().ok()) == Some(t.as_str()),
+            Some(_) => self.token_ok(headers),
         }
     }
+
+    /// The call carries this root's peer token (none configured = never).
+    pub fn token_ok(&self, headers: &axum::http::HeaderMap) -> bool {
+        let (Some(t), Some(got)) = (&self.token, headers.get("x-ygg-peer").and_then(|v| v.to_str().ok())) else { return false };
+        // length first, then every byte: no early exit on the first difference
+        t.len() == got.len() && t.bytes().zip(got.bytes()).fold(0u8, |acc, (a, b)| acc | (a ^ b)) == 0
+    }
+}
+
+/// Did this call come from another root? The trunk's doors mark every call they perform
+/// (`x-ygg-via`, trunk/src/switch.rs), and a peer's own call carries `x-ygg-peer`.
+pub fn from_peer(headers: &axum::http::HeaderMap) -> bool {
+    headers.contains_key("x-ygg-via") || headers.contains_key("x-ygg-peer")
+}
+
+/// L8: a call from another root must carry this root's peer token — on every route. A call that
+/// is not from a peer (the app, a tool on this box) passes untouched.
+pub async fn gate(
+    axum::extract::State(st): axum::extract::State<AppState>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let h = req.headers();
+    if from_peer(h) && !st.config.peers.token_ok(h) {
+        let why = if st.config.peers.token.is_none() { "this root takes no calls from other roots (no peer token)" } else { "peer token" };
+        eprintln!("peers: refused {} {} from another root: {why}", req.method(), req.uri().path());
+        return (axum::http::StatusCode::UNAUTHORIZED, axum::Json(json!({ "error": why }))).into_response();
+    }
+    next.run(req).await
 }
 
 /// Reads YGG_PEERS_FROM once and learns the roots linked there; returns the names added.
@@ -144,7 +245,20 @@ pub async fn learn(st: &AppState) -> Result<Vec<String>, String> {
         return Err(format!("{from}: {}", resp.status()));
     }
     let v: Value = resp.json().await.map_err(|e| format!("{from}: {e}"))?;
-    let added = merge(&p.list, &mut p.learned.lock().unwrap(), &p.me, &p.via, &linked_ids(&v));
+    if !v.is_array() {
+        return Err(format!("{from}: not a list"));
+    }
+    // one lock at a time (all() takes removed, then learned)
+    let removed = p.removed.lock().unwrap().clone();
+    let ids: Vec<String> = linked_ids(&v).into_iter().filter(|id| !removed.contains(id)).collect();
+    let (added, gone) = {
+        let mut learned = p.learned.lock().unwrap();
+        let gone = forget_unlisted(&mut learned, &ids, &removed, &mut p.absent.lock().unwrap());
+        (merge(&p.list, &mut learned, &p.me, &p.via, &ids), gone)
+    };
+    for n in &gone {
+        eprintln!("peers: {n} is no longer listed at {from} — forgotten (its sessions here stay)");
+    }
     for n in &added {
         eprintln!("peers: learned root {n} = {} (linked at {from})", p.url(n).unwrap_or_default());
     }
@@ -182,13 +296,21 @@ pub async fn call(st: &AppState, root: &str, method: &str, path: &str, body: Opt
     if let Some(b) = body {
         req = req.json(&b);
     }
-    let resp = req.send().await.map_err(|e| format!("root {root} unreachable: {e}"))?;
+    let resp = match req.send().await {
+        Ok(r) => r,
+        Err(e) => {
+            p.failed.lock().unwrap().insert(root.to_string(), now_ms());
+            return Err(format!("root {root} unreachable: {e}"));
+        }
+    };
     let status = resp.status();
     // any answer from the peer proves the line is up: keep the [roots] view fresh between polls
     if proves_line_up(status.as_u16()) {
         if let Some(e) = p.seen.lock().unwrap().get_mut(root) {
             e.0 = now_ms();
         }
+    } else {
+        p.failed.lock().unwrap().insert(root.to_string(), now_ms());
     }
     let text = resp.text().await.map_err(|e| e.to_string())?;
     if !status.is_success() {
@@ -217,6 +339,10 @@ pub fn describe(st: &AppState) -> Value {
             "cpus": std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1), "mem_gb": mem_gb() },
         "load": { "running": running, "sessions": sessions },
         "peers": st.config.peers.names(),
+        // the whole tree (p3): this root's own MAIN, the home root, each peer's health
+        "main": crate::roots::local_main(st),
+        "home": st.config.peers.home,
+        "roots": crate::roots::health(st),
     })
 }
 
@@ -265,10 +391,10 @@ fn view(me: &str, peers: &[(String, String)], seen: &HashMap<String, (u64, Value
     out
 }
 
-/// When a peer's `/root` is read next: a minute after it answered (or once it has ever answered),
-/// 15 s while it never has.
+/// When a peer's `/root` is read next: 30 s after it answered (or once it has ever answered: the
+/// phone's roots sheet says "off" within that), 15 s while it never has.
 fn next_poll(now: u64, answered: bool, ever_seen: bool) -> u64 {
-    now + if answered || ever_seen { 60_000 } else { 15_000 }
+    now + if answered || ever_seen { 30_000 } else { 15_000 }
 }
 
 /// Polls every peer's `/root` — every 15 s until it has answered, then once a minute (the view
@@ -300,7 +426,10 @@ pub fn spawn_watch(st: &AppState) {
                 }
                 let answered = match call(&st, &name, "GET", "/root", None, 5).await {
                     Ok(v) => {
+                        let main = v["main"].as_str().map(String::from);
                         p.seen.lock().unwrap().insert(name.clone(), (now_ms(), v));
+                        // its MAIN gets one proxy here (roots.rs): MAIN can talk to it, the phone open it
+                        crate::roots::ensure_main_proxy(&st, &name, main.as_deref());
                         true
                     }
                     Err(e) => {
@@ -323,21 +452,24 @@ pub fn remote_of(st: &AppState, sid: &str) -> Option<(String, String)> {
     Some((r["root"].as_str()?.to_string(), r["id"].as_str()?.to_string()))
 }
 
-/// Posts a turn to the peer side of a proxy, asynchronously (it reports back by itself). `caller`:
-/// the session here that speaks — the peer stores it as the message's sender (`meta.from`).
-pub async fn send(st: &AppState, root: &str, rid: &str, text: &str, caller: &str) -> Result<(), String> {
+/// Posts a turn to the peer side of proxy `proxy`, asynchronously (it reports back by itself; its
+/// events come home through relay.rs, so the phone sees it live). `caller`: the session here that
+/// speaks — the peer stores it as the message's sender (`meta.from`), with `proxy` (the proxy here
+/// it spoke through: the answer comes back to it) and `hops` (how often this work has passed
+/// between roots). File parts go as references.
+pub async fn send(st: &AppState, proxy: &str, root: &str, rid: &str, parts: Vec<Value>, caller: &str, hops: u64) -> Result<(), String> {
     let title = st.sessions.lock().unwrap().get(caller).map(|s| s.info["title"].as_str().unwrap_or_default().to_string()).unwrap_or_default();
-    let from = json!({ "session": caller, "title": title, "root": st.config.peers.me });
-    let body = json!({ "parts": [{ "type": "text", "text": text }], "meta": { "from": from } });
-    call(st, root, "POST", &format!("/session/{rid}/message?async=1&origin=none"), Some(body), 20).await.map(|_| ())
+    let from = json!({ "session": caller, "title": title, "root": st.config.peers.me, "proxy": proxy, "hops": hops });
+    crate::relay::forward(st, proxy, root, rid, parts, None, json!({ "from": from }), crate::relay::Wants::Async).await.map(|_| ())
 }
 
-/// Creates the real session on `root` and the proxy here; posts the brief there.
-pub async fn start(st: &AppState, caller: &str, root: &str, title: &str, profile: &str, brief: &str, model: Option<&str>, variant: Option<&str>) -> Result<String, String> {
-    let proxy = crate::new_session(st, title, Some(caller), Some(profile), None, None);
+/// Makes the real session on `root` and its proxy here (`parent`: the asking session; None = a
+/// top-level session the owner started from the phone). Returns (proxy id here, id there).
+pub async fn open(st: &AppState, parent: Option<&str>, root: &str, title: &str, profile: Option<&str>, model: Option<&str>, variant: Option<&str>, hops: u64) -> Result<(String, String), String> {
+    let proxy = crate::new_session(st, title, parent, profile, None, None);
     let pid = proxy["id"].as_str().unwrap_or_default().to_string();
     let body = json!({ "title": title, "agent": profile, "model": model, "variant": variant,
-        "report_to": { "root": st.config.peers.me, "session": pid } });
+        "report_to": { "root": st.config.peers.me, "session": pid }, "hops": hops });
     let made = call(st, root, "POST", "/session", Some(body), 20).await;
     let rid = match made.as_ref().ok().and_then(|v| v["id"].as_str()) {
         Some(r) => r.to_string(),
@@ -347,11 +479,28 @@ pub async fn start(st: &AppState, caller: &str, root: &str, title: &str, profile
         }
     };
     crate::with_session(st, &pid, |s| {
-        s.info["remote"] = json!({ "root": root, "id": rid });
+        // made: this root started it there (removing the proxy closes it there too)
+        s.info["remote"] = json!({ "root": root, "id": rid, "made": true });
+        if hops > 0 {
+            s.info["hops"] = json!(hops);
+        }
+    });
+    Ok((pid, rid))
+}
+
+/// Creates the real session on `root` and the proxy here; posts the brief there (`parts`: the
+/// brief with its files, built by tree::with_files). `hops`: how often this work has passed
+/// between roots once it is there (1 = placed from here directly).
+pub async fn start(st: &AppState, caller: &str, root: &str, title: &str, profile: &str, brief: &str, parts: Vec<Value>, model: Option<&str>, variant: Option<&str>, hops: u64) -> Result<String, String> {
+    let (pid, rid) = open(st, Some(caller), root, title, Some(profile), model, variant, hops).await?;
+    crate::with_session(st, &pid, |s| {
         s.info["card"] = json!({ "topic": title, "brief": brief.chars().take(600).collect::<String>(), "status": "working",
             "by": caller, "root": root, "created": now_ms(), "updated": now_ms() });
     });
-    send(st, root, &rid, brief, caller).await?;
+    // placed between two roots that are not home: home is told first, so the phone lists it and
+    // no report outruns it (L6)
+    crate::roots::tell_home(st, &pid, root, &rid, title, profile, caller, hops).await;
+    send(st, &pid, root, &rid, parts, caller, hops).await?;
     Ok(pid)
 }
 
@@ -455,8 +604,8 @@ mod tests {
     #[test]
     fn polling_cadence_and_gateway_errors() {
         assert_eq!(next_poll(0, false, false), 15_000);
-        assert_eq!(next_poll(0, true, true), 60_000);
-        assert_eq!(next_poll(0, false, true), 60_000);
+        assert_eq!(next_poll(0, true, true), 30_000);
+        assert_eq!(next_poll(0, false, true), 30_000);
         assert!(proves_line_up(200) && proves_line_up(404) && proves_line_up(500));
         assert!(!proves_line_up(502) && !proves_line_up(503) && !proves_line_up(504));
     }

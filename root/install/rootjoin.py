@@ -38,7 +38,7 @@ EXIT_REFUSED, EXIT_EXPIRED = 3, 4
 SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 SAFE_TOKEN = re.compile(r"^[!-~]{8,4096}$")          # printable, no whitespace: one token per line
 MANAGED = ("YGG_LISTEN", "YGG_DATA_DIR", "YGG_PROJECT_DIR", "YGG_ROOT_NAME", "YGG_PEERS", "YGG_PEER_TOKEN",
-           "YGG_PEERS_FROM", "YGG_PEERS_VIA")
+           "YGG_PEERS_FROM", "YGG_PEERS_VIA", "YGG_ROOT_MAIN", "YGG_HOME_ROOT")
 WG_KEY = re.compile(r"^[A-Za-z0-9+/]{43}=$")
 # The yggdrasil release key (RELEASE-KEY.pub in the repo), as an allowed_signers line: a release's SHA256SUMS
 # must carry its signature (ssh-keygen -Y sign -n yggdrasil-release) before anything from it is installed.
@@ -414,8 +414,10 @@ def cmd_brain_env(o):
         hub_name = root.get("hub_name") or "hub"
         if not SAFE_ID.match(hub_name) or hub_name == root["root_id"]:
             fail("root.json: the hub's name %r is not a plain name other than this root's" % (hub_name,))
+        # every root has its own MAIN (a joined root runs no app, so its brain makes it), and knows the
+        # home root: work it places on a third root is told there, so the phone lists it
         lines += ["", "YGG_LISTEN=%s" % o.listen, "YGG_DATA_DIR=%s" % o.data, "YGG_PROJECT_DIR=%s" % o.project,
-                  "YGG_ROOT_NAME=%s" % root["root_id"]]
+                  "YGG_ROOT_NAME=%s" % root["root_id"], "YGG_ROOT_MAIN=1", "YGG_HOME_ROOT=%s" % hub_name]
         if root.get("wg"):
             # the tunnel: the peer port is this root's WireGuard node; the hub brain inside it
             # (`local`), every other root of the tree learned from the node's list

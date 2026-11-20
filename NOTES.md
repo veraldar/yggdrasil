@@ -1,86 +1,44 @@
-# P4 — installers and release v0.9.1 (branch p4-release)
+# P2 notes (package 2: full sessions on other roots, files) — keep current
 
-RULE: long runs (rigs, release builds) run from the frozen worktree ~/Work/p4-run (git -C ~/Work/p4-run checkout --detach <commit>),
-never from this one — bash reads scripts as it goes, an edit here breaks a running job.
+Contract: ~/.cache/p2-reach/contract.md. Worktrees: p2-reach (brain, mine), p2-reach-app (app helper),
+p2-reach-sim (sim helper). Temp files: ~/.cache/p2-reach/tmp (NOT /tmp: shared quota).
 
-## Done (committed)
-- release.sh: tag guard AP-30 (makes vX at HEAD; stops on a local/origin tag elsewhere), private-key guard AP-21
-  (file:line only), --mac-host (cargo on the Mac in ~/.cache/yggdrasil-release-mac, own CARGO_HOME; Mach-O check;
-  yggdrasil-VER-macos-aarch64.tar.gz), build-win.sh hook before signing, notes line for v0.9.0's tag
-- join.sh: PLAT linux-x86_64|macos-aarch64, shasum fallback, no glibc check on macOS
-- trunk.sh --adopt /etc/trunk-ap (key/pin, token hash, LE cert + webroot, port/PROXY, ICE, sni conf; stops+disables
-  trunk-ap only once ours answers; puts it back if not; folder left as is; firewall untouched)
-- sim/own-trunk-e2e.sh OT_JOINER=deb443; sim/own-trunk/adopt-test.sh
-- Mac M1/M2 looked (see below); trial build on the Mac: brain 30 s, node 14 s, both Mach-O arm64
+## Done (brain, compiles, cargo test 120/120)
+- relay.rs: event journal + POST /event/feed (long poll); home follower per root; proxy turns
+  forwarded async with meta.key (run once), SSE / held POST / async answered like local; busy in
+  running; abort forwarded via the running handle; link lost (45 s, YGG_RELAY_LOST_S) → error
+  "no answer from <root>" + idle + card.
+- files.rs: store files/blobs/<sha256>, upload in pieces, GET piece/whole (?root= pulls), info,
+  /file/artifact (local or pulled from root), data-URL ingest, prepare() before a turn (pull, path,
+  inline text), harness lines, brain-native model text, image resolve, artifact link pointing.
+- main.rs: routes, publish → journal, post_message proxy path, key dedupe, list_messages proxy view +
+  link pointing + ?from=, abort/delete/patch/get/model/agent for proxies.
+- tree.rs/peers.rs: attach:true on session_start/send (local + remote), peers::send via relay,
+  remote.made; coordinator prompt sentence for attach.
 
-## Mac facts (23:45, read-only)
-- macOS 26.6.2 arm64, Xcode CLT, rustc 1.99, python3 3.9.6 (/usr/bin), shasum, no sha256sum, 58 GB free
-- 4180/4181 free; no org.veraldar.* agents; listeners noted in the turn log
-- COLLISION: ~/.local/share/yggdrasil-root EXISTS (Nov 14, a stalled join.sh run: NAME=mac, hub ap.veraldar.org,
-  brain.env with a model upstream, bin/yggdrasil, never joined: no root.json, no bifrost-net, no agents).
-  join.sh's default --dir. Not touched. Reported; M4 waits for a decision.
+## Proven (00:20)
+- cargo test 120/120; tree-e2e full 131/131 GREEN incl. 41 package-2 checks
+  (log ~/.cache/p2-reach/tree-full-run1.log; `python3 sim/tree-e2e.py --only reach --port-base 4270`)
+- voice agent: branch/voice/test_no_resend.py GREEN (old agent: 2 POSTs on a 502, new: 1)
 
-## Proven 11-20 ~00:30 (artifact p4-proofs-1120.md)
-- S11 Linux in the rig: deb443 joiner, rc release, OWN-TRUNK GREEN 32/0 (state ~/.cache/p4-rig/s11-linux)
-- adopt-test.sh 10/10 (found + fixed trunk.sh behind-proxy probe bug: -w took --haproxy-protocol)
-- Mac pre-test: join.sh bootstrap on the real Mac with a test release incl. macos archive — up to the hub ask
-- tree-next 4060a9fb merged
+- S3 GREEN (sim/reach/s3.py, scratch brain, real upstream; MAIN attach:true; Claude Code reads path)
+- S17 real-model GREEN (sim/reach/s17_real.py: two scratch brains, real Claude Code haiku on lab)
 
-## Review (independent sub-agent, 01:00): 5 real bugs + 4 small — all fixed, commit "p4: fixes from the independent review"
-- retested: adopt-test 11/11 (+ PROXY mismatch refused, backup timer left alone); key guard unit test; tag guard
-  (local tag elsewhere, origin tag elsewhere) stops before any build, in a scratch clone with a stand-in key
-- not yet re-run after the fixes: the full S11 rig (join.sh change is macOS/Rosetta + one message only)
-- make_tag (after signing) is exercised only by a full real-path run: do the dress rehearsal (scratch clone, stand-in
-  key, --mac-host, Windows exe) once p4-win is merged
+- app merged (5/5 Pixel-7 specs on real brains; screenshots p2-files-*.png)
+- independent review: 13 findings, all fixed (b948d5c4, +1); its 4 repros in sim/reach/regress pass;
+  after the fixes: cargo test 120/120, tree-e2e 131/131 (~/.cache/p2-reach/tree-full-run2.log)
 
-## Morning 11-20 (after the usage limit)
-- p4-win: installer + build-win.sh + tests done (bootstrap-test 30/30, launcher-test 30/30 under wine, screenshots in
-  /tmp/p4win-shots); agent resumed for: join-test rerun, review, merge of p4-release, copy screenshots to artifacts
-- rig: OT_DIST=DIR [OT_DIST_KEY] runs against a finished release (draft/rehearsal); SKIP rows for re-signed steps
-- sim/release-rehearsal.sh (real path, stand-in key, version 0.8.99 because the rig serves 0.9.1-test as "newer")
-- sim/mac-bootstrap-check.sh HOST DIST (the Mac pre-check, reusable for the draft)
-- docs/release-notes-v0.9.1.md (installer part)
-- rehearsal 1 running on a TEMP merge (p4-run2 detached: p4-release + p4-win)
+- S16 (trunk-rtc --scenario s16): hands-free inside a session on lab 5/5 (words once, voice, spoken)
+- S17 (trunk-full --scenario s17): GREEN 3/3 after two app fixes found by it:
+  server.mjs httpAllowHalfOpen (bridge half-close aborted requests) and the upload piece route outside
+  the middleware (Next's body copy broke streaming bodies; gate in lib/gate.ts, run by the route)
 
-## 11-20 noon — lead's instructions (L13–L17; the owner left decisions to the lead)
-- the Windows helper is gone; I finish p4-win myself. L15: the model page done in p4-win.
-- independent review of p4-win: 9 findings (2 high: non-ASCII user name / wsl notices broke the wslpath round
-  trip) — all fixed in p4-win ("win + join.sh: fixes from the independent review"), incl. join.sh bin/start|stop
-  stale pid after reboot (shared file: Linux + Mac too). bootstrap-test 32/32; stale-pid test /tmp/p4-holdtest.sh ok
-- brain restart ~12:xx cut the wine rerun; leftover wine container removed by id; rerun started
-- p4-win merged into p4-release (968382f3); rehearsal 2 running from p4-run2 (detached at that merge)
-- after: Linux rig OT_DIST + Mac check + wine on the rehearsal exe → report the branch to P1
-- then: merge p4-win → p4-release, rehearsal 2 on the real merge (+ Linux rig OT_DIST, Mac check, wine on its exe),
-  report the branch to P1 (P1 merges + deploys)
-- v0.9.1 DRAFT only after P1 says packages 2 and 3 are merged and live; then S11 vs the draft, Mac M4–M8 (real Mac,
-  touch nothing there), un-draft; report the draft to P1 when it exists (P1 sends P5 on)
-- pacing L14: only P1 and me run; a usage-limit stop lasts until someone sends me on — commit every step
+## Final suite (08:03, ~/.cache/p2-reach/final/summary.txt) — reported to MAIN
+cargo test 120/120 · tree-e2e 131/131 · trunk-full 19/19 · S17 rig GREEN · trunk-rtc 10/10 ·
+S16: hands-free 5/5, hold: words once; not voice / not spoken (app behaviour on every session) ·
+app files specs 5/5 on real brains · voice no-resend GREEN. Report: root-coord-pwa/artifacts/p2-report.md
 
-## Rehearsal 1 (temp merge 78757b05 = p4-release + p4-win 80be65b2), 11-20 morning
-- sim/release-rehearsal.sh --mac-host mac 0.8.99: r1-r7 7/7 (real path, all 11 assets, signature, tag after signing,
-  local only; macOS archive Mach-O arm64; real stamps + stand-in key; exe embeds the stamped join.sh)
-- Linux rig OT_DIST=rehearsal dist + OT_DIST_KEY: GREEN 32/32 + phone 12/12 (after fixing the rig's test-signers
-  drop-in for real-stamped releases)  · state ~/.cache/p4-rig/reh-linux
-- Mac: sim/mac-bootstrap-check.sh mac <dist>: 11/11, real-stamped (embedded key, no override)
-- wine launcher-test on the rehearsal exe: 27/30 — the 3 are the test's hard-codes (0.9.1, tree join.sh); sent to
-  the Windows agent to fix
-- NEXT: Windows agent's review + merge → rehearsal 2 on the real merge → the three checks again → report + artifact
-
-## Rehearsal, then
-1. OT_DIST=~/.cache/p4-rehearsal/dist/0.8.99 OT_DIST_KEY=~/.cache/p4-rehearsal/standin OT_STAGES=a OT_JOINER=deb443
-   sim/own-trunk-e2e.sh  (from p4-run, the real tree: its RELEASE-KEY.pub is the real key)
-2. sim/mac-bootstrap-check.sh mac ~/.cache/p4-rehearsal/dist/0.8.99
-3. win/launcher-test.sh against the rehearsal's exe (if it takes an exe path)
-4. after p4-win's final merge: rehearsal 2 on the real merge
-
-## Half done
-- Windows installer: sub-agent in ~/Work/p4-win (branch p4-win)
-
-## Asked the owner (00:30)
-- model for new computers: same as omarchy (z.ai glm-5.3-flash, handed over on approval) or paste a key per installer
-- Mac: may the stale ~/.local/share/yggdrasil-root (Nov 14, never joined) be removed before M4
-
-## Next
-- Mac pre-test: test release with --mac-host, join.sh bootstrap on the Mac in an isolated XDG_DATA_HOME/--dir, --no-start
-- the model question (Windows/Mac need an upstream) — asked the owner
-- release itself: waits for the integrator
+## Left / open
+- owner/lead: should a held turn on a session page be answered aloud? (left as is)
+- P3 merge points: peers::start(.., parts, ..) and peers::send(st, proxy, root, rid, parts, caller);
+  tree.rs with_files() in start/send/run_remote; AppState gains relay + files

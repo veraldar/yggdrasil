@@ -40,6 +40,19 @@ const MAX_ROOT_FRAME: usize = 8 << 20;
 /// flood is turned away at accept instead of each holding a thread for 10 s.
 const MAX_PREAUTH: usize = 64;
 
+/// The ids roots.json marks `revoked` (no file, or not readable: none).
+pub fn revoked_roots(path: &std::path::Path) -> HashSet<String> {
+    let Ok(raw) = std::fs::read(path) else { return HashSet::new() };
+    let v: serde_json::Value = serde_json::from_slice(&raw).unwrap_or_default();
+    v["roots"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|r| r["revoked"] == true)
+        .filter_map(|r| r["id"].as_str().map(String::from))
+        .collect()
+}
+
 pub struct RootLinkPlane {
     pub secret: Vec<u8>,
     pub ping_secs: u64,
@@ -82,6 +95,17 @@ impl RootLinkPlane {
 
     /// Bind + accept loop. One thread per conn (few roots; keeps reads honest).
     pub fn spawn(self: &Arc<Self>, listener: TcpListener) {
+        // a root removed on the phone (roots.json `revoked`) loses its link within 2 s
+        let sweep = self.clone();
+        std::thread::spawn(move || loop {
+            std::thread::sleep(std::time::Duration::from_secs(2));
+            let revoked = revoked_roots(&sweep.tokens.roots_file());
+            for root in sweep.registry.linked() {
+                if revoked.contains(&root) {
+                    sweep.registry.unlink(&root, "it was removed from the tree (roots.json revoked)");
+                }
+            }
+        });
         let me = self.clone();
         std::thread::spawn(move || {
             for stream in listener.incoming() {
@@ -186,6 +210,12 @@ impl RootLinkPlane {
         if !self.tokens.knows_dev(&lt.dev) {
             eprintln!("root-link: refused dial for root '{}' — dev '{}' unknown/revoked", lt.root, lt.dev);
             Self::refuse(&mut *writer.lock().unwrap(), "device unknown or revoked");
+            return;
+        }
+        // ---- 4b. a root removed from the tree (roots.json `revoked`) dials in vain ----
+        if revoked_roots(&self.tokens.roots_file()).contains(&lt.root) {
+            eprintln!("root-link: refused dial for root '{}' — it was removed from the tree", lt.root);
+            Self::refuse(&mut *writer.lock().unwrap(), "this root was removed from the tree");
             return;
         }
         // ---- 5. SINGLE-USE (check+insert atomic under one lock) ----
@@ -469,5 +499,23 @@ fn first_frame_token(frames: &mut FrameReader, stream: &mut dyn Read) -> Result<
             Err(WsErr::Closed) => return Err("socket closed before root-link op".into()),
             Err(WsErr::Protocol(e)) => return Err(e.into()),
         }
+    }
+}
+
+#[cfg(test)]
+mod removed_root_tests {
+    use super::*;
+
+    #[test]
+    fn revoked_roots_reads_the_tree_registry() {
+        let dir = std::env::temp_dir().join(format!("rl-revoked-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("roots.json");
+        assert!(revoked_roots(&f).is_empty(), "no file: none");
+        std::fs::write(&f, r#"{"version":1,"roots":[{"id":"mac"},{"id":"lab","revoked":true},{"id":"x","revoked":"yes"}]}"#).unwrap();
+        assert_eq!(revoked_roots(&f), HashSet::from(["lab".to_string()]));
+        std::fs::write(&f, "not json").unwrap();
+        assert!(revoked_roots(&f).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

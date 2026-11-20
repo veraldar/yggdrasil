@@ -1,0 +1,9 @@
+# Switch on (the owner, once):
+#   cp ~/Work/tree-next/scripts/rc-preview-limit-resume.service ~/Work/tree-next/scripts/rc-preview-limit-resume.timer ~/.config/systemd/user/ && systemctl --user daemon-reload && systemctl --user enable --now rc-preview-limit-resume.timer
+# Switch off:  systemctl --user disable --now rc-preview-limit-resume.timer
+[Unit]
+Description=preview brain: send a session on after the usage limit has reset
+
+[Service]
+Type=oneshot
+ExecStart=%h/Work/tree-next/scripts/limit-resume.py http://127.0.0.1:4101

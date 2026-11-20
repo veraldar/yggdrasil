@@ -46,7 +46,7 @@ const app = next({ dev: false, hostname, port });
 const handle = app.getRequestHandler();
 await app.prepare();
 
-createServer((req, res) => {
+const server = createServer((req, res) => {
   const forwarded = trustProxy
     ? String(req.headers['x-forwarded-for'] || '')
         .split(',')[0]
@@ -56,6 +56,13 @@ createServer((req, res) => {
   if (!trustProxy) delete req.headers['x-forwarded-for'];
   req.headers['x-bifrost-peer'] = forwarded || req.socket.remoteAddress || '';
   handle(req, res);
-}).listen(port, hostname, () => {
+});
+// The trunk's bridge half-closes its side of the connection once a request is sent (one request
+// per stream). Node's default then aborts the request still in flight, so a route found its body
+// destroyed ("Response body object should not be disturbed or locked") or nothing answered at all —
+// one upload piece in a few failed over the pinned channel. Keep a half-closed request alive; the
+// connection still ends after the answer.
+server.httpAllowHalfOpen = true;
+server.listen(port, hostname, () => {
   console.log(`bifrost pwa on http://${hostname}:${port} (peer-stamped, trustProxy=${trustProxy})`);
 });

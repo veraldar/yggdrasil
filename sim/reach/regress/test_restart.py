@@ -1,0 +1,26 @@
+import sys, threading, time, json
+sys.path.insert(0, __import__("os").path.dirname(__import__("os").path.abspath(__file__)))
+from rig import *
+start()
+try:
+    p1 = make_proxy("reach")
+    print("proxy", p1)
+    a = req(HOME, "POST", f"/session/{p1}/message?async=1", {"parts": [{"type": "text", "text": "sleep 8 Reply with exactly: ONE"}]})
+    b = req(HOME, "POST", f"/session/{p1}/message?async=1", {"parts": [{"type": "text", "text": "Reply with exactly: TWO"}]})
+    print("forwarded", a["turn_id"], b["turn_id"])
+    time.sleep(2)
+    print("home status before lab restart:", req(HOME, "GET", "/session/status"))
+    restart_lab()
+    print("lab restarted")
+    time.sleep(40)
+    lab_rid = req(HOME, "GET", f"/session/{p1}").get("remote", {}).get("id")
+    msgs = req(LAB, "GET", f"/session/{lab_rid}/message")
+    print("lab transcript:", [(m["info"]["role"], "".join(p.get("text","") for p in m["parts"] if p.get("type")=="text")[:50], (m["info"].get("error") or {}).get("data")) for m in msgs])
+    print("lab /session/status:", req(LAB, "GET", "/session/status"))
+    print("home /session/status 40 s after:", req(HOME, "GET", "/session/status"))
+    print("home abort:", req(HOME, "POST", f"/session/{p1}/abort"))
+    time.sleep(25)
+    print("home /session/status 25 s after abort:", req(HOME, "GET", "/session/status"))
+    print("home tree busy:", {r["title"]: r["busy"] for r in req(HOME, "GET", "/tree")})
+finally:
+    stop()

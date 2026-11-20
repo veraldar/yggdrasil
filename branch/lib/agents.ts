@@ -57,7 +57,7 @@ export const TOOLS = ['read', 'glob', 'grep', 'bash', 'write', 'edit', 'webfetch
 
 /** a model hint per harness (free text there — the harness knows its own) */
 export const MODEL_HINT: Record<string, string> = {
-  claude: 'opus · sonnet · haiku',
+  claude: 'fable · opus · sonnet · haiku',
   opencode: 'provider/model — empty = its default',
   codex: 'empty = its default',
   antigravity: 'empty = its own pick',

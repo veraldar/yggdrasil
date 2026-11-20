@@ -70,6 +70,8 @@ def test_all():
     assert [t["name"] for t in man["tools"]] == ["search", "recent", "remember", "recall"]
     assert all(t["scope"] == "self" for t in man["tools"])
     assert "librarian_search" in man["prompt"], "tells agents when to reach for it"
+    roots = man["tools"][0]["parameters"]["properties"]["roots"]
+    assert roots["type"] == "string" and '"all"' in roots["description"], "the brain fans roots=all out"
 
     out = call(base, "search", query="teal inventory")["output"]
     assert '"Inventory storage research"' in out and "[teal]" in out, out
