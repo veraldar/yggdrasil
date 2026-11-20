@@ -58,3 +58,13 @@ export function heldReply(
   if (a.stopped || !a.text.trim()) return { user: u.id, over: true };
   return { user: u.id, reply: a };
 }
+
+/** L16, strict (lead 11-20, the default while the owner has not said otherwise): a turn you TYPE
+ *  is answered in writing — also while hands-free is on. True when `a` answers a user turn on
+ *  screen that was typed (not spoken, not another session's, not the brain's own). A reply whose
+ *  question is not on screen (MAIN coming back from its sessions) is not a typed turn's answer. */
+export function answersTyped(msgs: Msg[], a: Msg): boolean {
+  if (!a.parent) return false;
+  const asked = msgs.find((m) => m.id === a.parent);
+  return !!asked && asked.role === 'user' && !asked.from && !asked.auto && asked.modality !== 'voice';
+}

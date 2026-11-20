@@ -51,7 +51,7 @@ import { clearAsked, ensureNotifyPermission, markAsked, notifyReply } from '@/li
 import { PENDING_TTL_MS } from '@/lib/pending-ttl';
 import { markRead } from '@/lib/read';
 import { lastHeard, markHeard } from '@/lib/heard';
-import { type Held, heldReply } from '@/lib/held-reply';
+import { type Held, answersTyped, heldReply } from '@/lib/held-reply';
 import {
   DOOR_KEY,
   FIRST_TURN_KEY,
@@ -1978,6 +1978,13 @@ export default function SessionView({
       ai > 0 ? [...msgs.slice(0, ai)].reverse().find((m) => m.role === 'user') : undefined;
     if (pre && pre.time === echoDiscardedAtRef.current) {
       diagEvent('voice', 'echo discard: the echo answer stays unspoken');
+      freeMicGiveBack();
+      return;
+    }
+    // L16, strict: a typed turn is answered in writing, hands-free or not (lib/held-reply.ts)
+    if (answersTyped(msgs, a)) {
+      diagEvent('voice', 'typed turn — answered in writing');
+      markHeard(slug, a.time);
       freeMicGiveBack();
       return;
     }
