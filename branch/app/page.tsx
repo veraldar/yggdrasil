@@ -6,7 +6,8 @@ import { useRouter } from 'next/navigation';
 import { LineIcon } from '@/components/line-icon';
 import { BAND_VIEWBOX, YggTree } from '@/components/ygg';
 import { Door } from '@/components/tree-door';
-import { Roots } from '@/components/roots';
+import { MainBar } from '@/components/main-bar';
+import { HOME_ROOT_KEY, RootsSheet, type Tree } from '@/components/roots-sheet';
 import { Marked } from '@/components/marked';
 import { ContinueTerminal } from '@/components/app/continue-claude';
 import { sessionTag } from '@/lib/agents';
@@ -207,6 +208,10 @@ export default function SessionsPage() {
   const [name, setName] = useState('');
   // the terminal's sessions (Claude Code, Antigravity, opencode): watch live, continue here
   const [continuing, setContinuing] = useState(false);
+  // the roots sheet (every computer of the tree) and this computer's name — a row of another
+  // computer carries its name as a tag; unknown ('') = every row with a computer carries it
+  const [rootsOpen, setRootsOpen] = useState(false);
+  const [homeRoot, setHomeRoot] = useState('');
   const [loading, setLoading] = useState(true);
   const loadInFlightRef = useRef(false);
   // undo window: row (and its sub-tree) vanishes instantly, but the DELETE
@@ -367,7 +372,10 @@ export default function SessionsPage() {
       // whole family until the toast expires
       const p = pendingRef.current;
       const hideIds = p ? new Set([p.s.id, ...p.fam.map((x) => x.id)]) : null;
-      const visible = list.filter((x) => !hideIds || !hideIds.has(x.id));
+      // another computer's MAIN lives in the roots sheet, not on the list
+      const visible = list.filter(
+        (x) => (!hideIds || !hideIds.has(x.id)) && x.card?.kind !== 'root-main'
+      );
       setSessions(visible);
       try {
         sessionStorage.setItem('oz-sessions', JSON.stringify(visible));
@@ -406,6 +414,28 @@ export default function SessionsPage() {
       setUnseenArts(countUnseen(arts));
     }
   }, []);
+
+  const onTree = useCallback((t: Tree) => {
+    const n = t.home?.name || '';
+    if (!n) return;
+    setHomeRoot(n);
+    try {
+      localStorage.setItem(HOME_ROOT_KEY, n);
+    } catch {
+      /* private mode — known for this visit */
+    }
+  }, []);
+  useEffect(() => {
+    try {
+      setHomeRoot(localStorage.getItem(HOME_ROOT_KEY) || '');
+    } catch {
+      /* private mode */
+    }
+    fetch('/api/roots', { cache: 'no-store', signal: AbortSignal.timeout(10_000) })
+      .then((r) => (r.ok ? (r.json() as Promise<Tree>) : null))
+      .then((t) => t && onTree(t))
+      .catch(() => {});
+  }, [onTree]);
 
   useEffect(() => {
     load();
@@ -606,6 +636,12 @@ export default function SessionsPage() {
               <span className="mr-1 opacity-60" aria-hidden="true" title={s.harness || s.agent || ''}>
                 [{sessionTag(s, isMainSlug(slugify(s.title || '')))}]
               </span>
+              {/* it runs on another computer: that computer's name */}
+              {s.card?.root && s.card.root !== homeRoot && (
+                <span className="mr-1 opacity-60" data-testid="root-tag">
+                  [{s.card.root}]
+                </span>
+              )}
               {s.title || s.id}
             </span>
             {kids.length > 0 && (
@@ -664,6 +700,14 @@ export default function SessionsPage() {
             <h1 className="oz-brand">BIFROST</h1>
           </Link>
           <div className="flex items-center gap-1.5">
+            <button
+              onClick={() => setRootsOpen(true)}
+              aria-label="roots"
+              className="oz-k sm"
+              data-testid="roots-key"
+            >
+              <LineIcon name="roots" size={15} />
+            </button>
             <Link
               href="/artifacts"
               aria-label={`artifacts — ${unseenArts} unseen`}
@@ -830,12 +874,14 @@ export default function SessionsPage() {
 
       {/* the tree's roots, the ground of the page: MAIN — tap to open it,
           hold to talk to it from here */}
-      <Roots
+      <MainBar
         main={mainRow}
         branchWorking={branchWorking}
         onSettled={load}
         onWorking={setRootsWorking}
       />
+
+      {rootsOpen && <RootsSheet onClose={() => setRootsOpen(false)} onTree={onTree} />}
 
       {/* undo toast — the bar is the mercy window; tap undo to restore the row */}
       {toast && (

@@ -31,20 +31,36 @@
 # → refused, and the root it approved loses its tunnel.
 #
 #   sim/trunk-full-e2e.sh            exit 0 = every step PASS; prints the PASS/FAIL table
+#   sim/trunk-full-e2e.sh --scenario s17
+#       S17 (package 2): root "lab" joins over WireGuard as in step 4e; its brain's Claude Code (the
+#       real `claude` binary — no model upstream in the namespace, so sim/reach/cc_model.py scripts
+#       the model) gets a 6.4 MB PDF the phone attached in the composer, names its marker word, writes
+#       marker.html; the phone taps the link. Driver: sim/reach/s17.mjs (instead of
+#       e2e/trunk-full.spec.ts). Same world, same table.
+#   APP_DIR=<a built app>            the app to run; default: this tree's branch/
 #
 # Needs: root/target/release/yggdrasil, trunk/target/release/bifrost-net (cargo build --release;
 # or YGG_BIN / BIFROST_NET_BIN), branch built (npm run build), zbarimg + qrencode, playwright's
 # chromium. State + logs: TRUNK_FULL_STATE (default: a fresh mktemp dir, printed at the end).
 set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
+SCENARIO=${TRUNK_FULL_SCENARIO:-full}
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --scenario) SCENARIO=${2:?--scenario full|s17}; shift 2 ;;
+    --scenario=*) SCENARIO=${1#*=}; shift ;;
+    *) echo "usage: $0 [--scenario full|s17]"; exit 2 ;;
+  esac
+done
+case "$SCENARIO" in full | s17) ;; *) echo "unknown scenario $SCENARIO (full|s17)"; exit 2 ;; esac
 if [ -z "${TRUNK_FULL_NS:-}" ]; then
   exec unshare --user --map-root-user --net --mount --pid --fork --mount-proc \
-    env TRUNK_FULL_NS=1 "$0" "$@"
+    env TRUNK_FULL_NS=1 TRUNK_FULL_SCENARIO="$SCENARIO" "$0"
 fi
 
 BIN=${BIFROST_NET_BIN:-$ROOT/trunk/target/release/bifrost-net}
 YGG_BIN=${YGG_BIN:-$ROOT/root/target/release/yggdrasil}
-B=$ROOT/branch
+B=${APP_DIR:-$ROOT/branch}
 [ -x "$BIN" ] || { echo "build the trunk first: (cd trunk && cargo build --release)"; exit 2; }
 [ -x "$YGG_BIN" ] || { echo "build the brain first: (cd root && cargo build --release)"; exit 2; }
 [ -f "$B/.next/BUILD_ID" ] || { echo "build the app first: (cd branch && npm run build)"; exit 2; }
@@ -70,7 +86,9 @@ APP=18395 HOMEP=18396 MOCK=18397 BR=18398 MEDIA=18399 RL=18400 MACP=18401 PEERP=
 # the root <-> root leg: the hub's node (front door, its udp, the bridge's relay socket) and mac's
 HUBWG=18403 HUBUDP=18404 RELAYUDP=18405 MACWG=18406 MACUDP=18407 MACPIPE=18408
 # the third root (lab), and the tap on the root links (between the ap's /rootlink and the bridge)
-LABP=18409 LABWG=18410 LABUDP=18411 LABPIPE=18412 LABPEER=18413 TAP=18414
+LABP=18409 LABWG=18410 LABUDP=18411 LABPIPE=18412 LABPEER=18413 TAP=18414 CCM=18415
+# the home root's librarian (S10: MAIN searches every root — the joined roots run none: their brain answers)
+LIBP=18416
 RLSECRET=$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')
 PEER="peer-$(head -c 12 /dev/urandom | od -An -tx1 | tr -d ' \n')"
 
@@ -85,6 +103,15 @@ trap cleanup EXIT
 
 python3 "$ROOT/root/mock/mock_upstream.py" "$MOCK" >"$STATE/mock.log" 2>&1 &
 pids+=($!)
+if [ "$SCENARIO" = s17 ]; then
+  # the model a Claude Code on lab talks to (the namespace has no route to Anthropic)
+  rm -f "$STATE/cc-model.log"
+  python3 "$ROOT/sim/reach/cc_model.py" --port "$CCM" --log "$STATE/cc-model.log" >"$STATE/cc-model.err" 2>&1 &
+  pids+=($!)
+fi
+python3 "$ROOT/root/extensions/librarian/librarian.py" --root "http://127.0.0.1:$HOMEP" --port "$LIBP" \
+  --db "$STATE/librarian.db" --poll 1 >"$STATE/librarian.log" 2>&1 &
+pids+=($!)
 
 # the hub brain "home": no static YGG_PEERS — it learns every root whose key the phone pinned from
 # the hub's WireGuard node (YGG_PEERS_FROM → GET /_wg; reached through /_wg/<id>, inside the
@@ -95,6 +122,7 @@ env -i PATH="$PATH" HOME="$STATE/home" YGG_UPSTREAM_BASE_URL="http://127.0.0.1:$
   YGG_ARTIFACTS_DIR="$STATE/home/artifacts" YGG_DATA_DIR="$STATE/home/data" \
   YGG_PROFILES="$STATE/home/agents.json" YGG_PROJECT_DIR="$STATE/home/work" \
   YGG_LISTEN="127.0.0.1:$HOMEP" YGG_ROOT_NAME=home YGG_PEER_TOKEN="$PEER" \
+  YGG_EXTENSIONS="librarian=http://127.0.0.1:$LIBP" \
   YGG_PEERS_FROM="http://127.0.0.1:$HUBWG/_wg/_roots" YGG_PEERS_VIA="http://127.0.0.1:$HUBWG/_wg/{id}" \
   "$YGG_BIN" >>"$STATE/home.log" 2>&1 &
 pids+=($!)
@@ -207,6 +235,15 @@ echo "box up: phone → $AP_URL (ap $AP_IP:443) → bridge (dial-out) → app :$
 
 cd "$B"
 set +e
+if [ "$SCENARIO" = s17 ]; then
+  PW_AP_URL="$AP_URL" PW_AP_IP="$AP_IP" PW_BASE_URL="http://127.0.0.1:$APP" PW_STATE="$STATE" \
+    PW_HOME="http://127.0.0.1:$HOMEP" PW_MOCK="http://127.0.0.1:$MOCK" PW_YGG_BIN="$YGG_BIN" \
+    PW_CAFILE="$STATE/tls/cert.pem" PW_NET_BIN="$BIN" PW_FAR2=203.0.113.10 PW_LAB_PORT="$LABP" \
+    PW_LAB_WG="$LABWG" PW_LAB_WG_UDP="$LABUDP" PW_LAB_PIPE="$LABPIPE" PW_LAB_PEER="$LABPEER" \
+    PW_CC_MODEL="http://127.0.0.1:$CCM" PW_CC_LOG="$STATE/cc-model.log" APP_DIR="$B" PW_PEER="$PEER" \
+    node "$ROOT/sim/reach/s17.mjs" 2>&1 | tee "$STATE/e2e.log"
+  rc=${PIPESTATUS[0]}
+else
 PW_AP_URL="$AP_URL" PW_AP_IP="$AP_IP" PW_BASE_URL="http://127.0.0.1:$APP" PW_STATE="$STATE" \
   PW_BRIDGE="http://127.0.0.1:$BR" PW_HOME="http://127.0.0.1:$HOMEP" PW_MAC_PORT="$MACP" \
   PW_PEER_PORT="$PEERP" PW_MOCK="http://127.0.0.1:$MOCK" PW_FAR="$FAR" PW_YGG_BIN="$YGG_BIN" \
@@ -216,6 +253,7 @@ PW_AP_URL="$AP_URL" PW_AP_IP="$AP_IP" PW_BASE_URL="http://127.0.0.1:$APP" PW_STA
   PW_LAB_PIPE="$LABPIPE" PW_LAB_PEER="$LABPEER" PW_TAP="$STATE/tap" \
   npx playwright test e2e/trunk-full.spec.ts --reporter=list 2>&1 | tee "$STATE/e2e.log"
 rc=${PIPESTATUS[0]}
+fi
 set -e
 
 # ---- the table ----
@@ -234,7 +272,7 @@ fi
 echo "invariant 5: raw credentials in devices.json: $(grep -cE '"bfn[dpr]-' "$STATE/devices.json" 2>/dev/null || true) · roots.json mode $(stat -c %a "$STATE/roots.json" 2>/dev/null || echo -)"
 echo "state + logs: $STATE"
 if [ "$rc" != 0 ] || [ "$fails" != 0 ]; then
-  echo "TRUNK-FULL: RED ($fails failed step(s), playwright exit $rc)"
+  echo "TRUNK-FULL[$SCENARIO]: RED ($fails failed step(s), driver exit $rc)"
   exit 1
 fi
-echo "TRUNK-FULL: GREEN"
+echo "TRUNK-FULL[$SCENARIO]: GREEN"

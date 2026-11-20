@@ -1,42 +1,44 @@
-# P5 · veraldar.org — notes (keep current: done / half done / next)
+# P2 notes (package 2: full sessions on other roots, files) — keep current
 
-Site source: ~/Work/veraldar-site (git). `main` = live veraldar.org as of 2026-11-19 23:55 (523e27c).
-Old uncommitted local work kept on branch `local-wip-1110` (not live). New pages: branch `site-v091`.
-Build: `python3 -I scripts/build.py [--preview OUT]` — src/*.html → pages at the repo root; RELEASE holds the version.
-This worktree (p5-site, from tree-next): films scripts (sim/films/), scripts/site-deploy.sh, NOTES.
+Contract: ~/.cache/p2-reach/contract.md. Worktrees: p2-reach (brain, mine), p2-reach-app (app helper),
+p2-reach-sim (sim helper). Temp files: ~/.cache/p2-reach/tmp (NOT /tmp: shared quota).
 
-## Done
-- live pulled into veraldar-site main, byte-identical (data/ left on VPS: made by the pipeline)
-- milestone 1: 11 pages (index, start, trunk, home, pair, add-linux/mac/windows, phone, server, keys),
-  site.css (worlds copied from the 11-14 index), site.js (theme, copy, world-tree lead). Claims → scenarios in
-  a comment at the top of each src page. Checked: Pixel 7 + 1280 desktop, no overflow, no console errors.
-- preview artifact: /api/artifact/site-preview.html (one file, no scripts, :target pages; nav checked in a
-  sandbox="" iframe). Screenshot: site-preview-first-screen.png
+## Done (brain, compiles, cargo test 120/120)
+- relay.rs: event journal + POST /event/feed (long poll); home follower per root; proxy turns
+  forwarded async with meta.key (run once), SSE / held POST / async answered like local; busy in
+  running; abort forwarded via the running handle; link lost (45 s, YGG_RELAY_LOST_S) → error
+  "no answer from <root>" + idle + card.
+- files.rs: store files/blobs/<sha256>, upload in pieces, GET piece/whole (?root= pulls), info,
+  /file/artifact (local or pulled from root), data-URL ingest, prepare() before a turn (pull, path,
+  inline text), harness lines, brain-native model text, image resolve, artifact link pointing.
+- main.rs: routes, publish → journal, post_message proxy path, key dedupe, list_messages proxy view +
+  link pointing + ?from=, abort/delete/patch/get/model/agent for proxies.
+- tree.rs/peers.rs: attach:true on session_start/send (local + remote), peers::send via relay,
+  remote.made; coordinator prompt sentence for attach.
 
-- 11-20 morning: scripts/site-deploy.sh (AP-20) + site-deploy-test.sh: 9/9 against a stand-in container
-  (refuses until the release is out, dry run, backup in ~/site-backups outside the web root, byte-for-byte live
-  check, undo identical, auto-undo on a failed check, data/ untouched). NOT run against the real VPS.
-- independent review (sub-agent) → 13 findings, the confirmed ones fixed in the copy (veraldar-site 652f061)
-- scripts/check-commands.py: ALL PASS 11-20 (v0.9.0 stand-in): every page command as written on fresh debian:12, ubuntu:24.04, ubuntu:22.04; 15 options checked against tree-next. Re-run with no --version once v0.9.1 exists.
-  containers (against v0.9.0 until v0.9.1 exists) + every option checked against the installer source
+## Proven (00:20)
+- cargo test 120/120; tree-e2e full 131/131 GREEN incl. 41 package-2 checks
+  (log ~/.cache/p2-reach/tree-full-run1.log; `python3 sim/tree-e2e.py --only reach --port-base 4270`)
+- voice agent: branch/voice/test_no_resend.py GREEN (old agent: 2 POSTs on a 502, new: 1)
 
-## Half done / open
-- films section: 3 slots with placeholder posters; old October films linked under them (swap only after
-  the owner has seen both)
-- dropped from the first page: the old voice door ("hold to start", ends in the docker install), the
-  "products" card (bifrost v0.6.1, git clone, docker), the funding box (accounts pending). In git history.
-- phone.html describes packages 2+3 (roots sheet, files): publish only after they merge; stills from twin
-- for P4: Setup.exe pre-fills https://ap.veraldar.org (W4) — right for the owner only; a new user types
-  their own trunk. Site says so. Asset names assumed: Veraldar-Setup-0.9.1.exe, join.sh, install.sh, trunk.sh
-- sw.js: bump CACHE to v12, add site.css/site.js to CORE, drop door mp3 from CORE — at publish
-- FOR THE LEAD: Windows cannot finish today: no way to give the PC a model (p4-win NOTES: every real run
-  ends at W-MODEL). The page carries a GATE comment; it is not published until that is decided.
-- add-mac waits for p4-release (tree-next join.sh:156 refuses macOS); "hold to remove" waits for package 3
-- MAIN asked twice to "verify on the VPS preview": not done — no such preview exists and anything on
-  veraldar.org is public; my orders publish only after the release + the integrator's word.
+- S3 GREEN (sim/reach/s3.py, scratch brain, real upstream; MAIN attach:true; Claude Code reads path)
+- S17 real-model GREEN (sim/reach/s17_real.py: two scratch brains, real Claude Code haiku on lab)
 
-## Next
-1. scripts/check-commands.sh: every command on the pages run as written in a clean container (needs the
-   v0.9.1 assets: a local mirror via YGG_RELEASES until the draft exists)
-2. sim/films/: Playwright film scripts on a twin (talk first: real voice via sim/voice rigs)
-3. scripts/site-deploy.sh (AP-20): back up on VPS, copy, curl+grep, undo. Publish only on the integrator's word.
+- app merged (5/5 Pixel-7 specs on real brains; screenshots p2-files-*.png)
+- independent review: 13 findings, all fixed (b948d5c4, +1); its 4 repros in sim/reach/regress pass;
+  after the fixes: cargo test 120/120, tree-e2e 131/131 (~/.cache/p2-reach/tree-full-run2.log)
+
+- S16 (trunk-rtc --scenario s16): hands-free inside a session on lab 5/5 (words once, voice, spoken)
+- S17 (trunk-full --scenario s17): GREEN 3/3 after two app fixes found by it:
+  server.mjs httpAllowHalfOpen (bridge half-close aborted requests) and the upload piece route outside
+  the middleware (Next's body copy broke streaming bodies; gate in lib/gate.ts, run by the route)
+
+## Final suite (08:03, ~/.cache/p2-reach/final/summary.txt) — reported to MAIN
+cargo test 120/120 · tree-e2e 131/131 · trunk-full 19/19 · S17 rig GREEN · trunk-rtc 10/10 ·
+S16: hands-free 5/5, hold: words once; not voice / not spoken (app behaviour on every session) ·
+app files specs 5/5 on real brains · voice no-resend GREEN. Report: root-coord-pwa/artifacts/p2-report.md
+
+## Left / open
+- owner/lead: should a held turn on a session page be answered aloud? (left as is)
+- P3 merge points: peers::start(.., parts, ..) and peers::send(st, proxy, root, rid, parts, caller);
+  tree.rs with_files() in start/send/run_remote; AppState gains relay + files

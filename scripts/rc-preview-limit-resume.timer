@@ -1,0 +1,10 @@
+# See rc-preview-limit-resume.service for the one command that switches it on.
+[Unit]
+Description=preview brain: look every five minutes for sessions stopped by the usage limit
+
+[Timer]
+OnCalendar=*:0/5
+AccuracySec=20s
+
+[Install]
+WantedBy=timers.target

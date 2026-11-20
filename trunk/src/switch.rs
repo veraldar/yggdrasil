@@ -48,6 +48,8 @@ pub const MAX_BODY: usize = 4 << 20;
 const MAX_LOCAL: usize = 32;
 /// The only headers that cross the switchboard (lowercase).
 pub const PASS_HEADERS: [&str; 2] = ["content-type", "x-ygg-peer"];
+/// Set on every call a door performs against its own brain (`perform`): "this came from another root".
+pub const VIA_HEADER: &str = "x-ygg-via";
 const METHODS: [&str; 5] = ["GET", "POST", "PUT", "PATCH", "DELETE"];
 
 const B64: base64::engine::GeneralPurpose = base64::engine::general_purpose::STANDARD;
@@ -385,6 +387,10 @@ pub fn perform(http: &ureq::Agent, base: &str, req: &HttpReq) -> HttpReply {
             r = r.set(k, s);
         }
     }
+    // every exchange performed here came from another root: the brain checks its peer token on
+    // such a call, whatever route it names (L8). Set here, after the header law, so a caller can
+    // neither forge nor drop it.
+    r = r.set(VIA_HEADER, "trunk");
     let resp = match if req.body.is_empty() && req.method == "GET" { r.call() } else { r.send_bytes(&req.body) } {
         Ok(resp) => resp,
         Err(ureq::Error::Status(_, resp)) => resp,

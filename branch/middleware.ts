@@ -20,78 +20,16 @@
  * Revocation and the kill-switch land on the next call: devices.ts re-reads
  * the registry per request (no cache).
  */
-import { type NextRequest, NextResponse } from 'next/server';
-import { adminOk } from '@/lib/admin';
-import { type Deny, checkAccess } from '@/lib/devices';
-import { rateTake } from '@/lib/ratelimit';
-import { peerOf, regionOfReq } from '@/lib/region';
+import type { NextRequest } from 'next/server';
+import { deviceGate } from '@/lib/gate';
 
 export const config = {
-  matcher: '/api/:path*',
+  // every /api route but an upload piece (it runs the same gate itself: lib/gate.ts)
+  matcher: '/api/((?!file/upload/[^/]+$).*)',
   // devices.ts uses node:crypto + fs — the registry check needs the node runtime
   runtime: 'nodejs',
 };
 
-const REAUTH: Record<Deny, 'refresh' | 'pair'> = {
-  expired: 'refresh',
-  region: 'refresh',
-  missing: 'pair',
-  invalid: 'pair',
-  revoked: 'pair',
-  used: 'pair',
-  reuse: 'pair',
-};
-
-const PAIR_BURST = Number(process.env.BIFROST_PAIR_BURST) || 60;
-
-// a joining machine holds no device token: these carry their own credential
-// (or, for the join itself, none — rate-limited per address in the route)
-const JOIN_OPEN: Array<[string, RegExp]> = [
-  ['POST', /^\/api\/roots\/join$/],
-  ['GET', /^\/api\/roots\/join\/[A-Za-z0-9_-]{8,64}$/],
-  ['POST', /^\/api\/roots\/[a-z0-9][a-z0-9-]{0,40}\/tokens$/],
-];
-
-const tooMany = (retryAfter: number) =>
-  NextResponse.json(
-    { error: 'rate limited' },
-    { status: 429, headers: { 'Retry-After': String(retryAfter) } }
-  );
-
 export async function middleware(req: NextRequest) {
-  if (process.env.BIFROST_AUTH !== 'devices') {
-    return NextResponse.next();
-  }
-
-  const path = req.nextUrl.pathname;
-  if (path.startsWith('/api/pair')) {
-    const rl = rateTake(`peer:${peerOf(req) || 'unknown'}`, PAIR_BURST, 1);
-    return rl.ok ? NextResponse.next() : tooMany(rl.retryAfter);
-  }
-
-  if (JOIN_OPEN.some(([m, re]) => req.method === m && re.test(path))) {
-    const rl = rateTake(`join-peer:${peerOf(req) || 'unknown'}`, PAIR_BURST, 1);
-    return rl.ok ? NextResponse.next() : tooMany(rl.retryAfter);
-  }
-
-  // the box's own console (loopback behind server.mjs) or the admin token
-  // presents no device credential and needs none — the /api/pair rule. It
-  // grants nothing new: opencode itself is unauthenticated on loopback.
-  if (!req.cookies.get('bifrost_device')?.value && adminOk(req)) {
-    return NextResponse.next();
-  }
-
-  const raw =
-    req.headers.get('authorization')?.replace(/^Bearer\s+/i, '') ||
-    req.cookies.get('bifrost_device')?.value ||
-    '';
-  const gate = await checkAccess(raw, regionOfReq(req));
-  if (!gate.ok) {
-    return NextResponse.json(
-      { error: 'device token required', why: gate.why, reauth: REAUTH[gate.why] },
-      { status: 401 }
-    );
-  }
-  const rl = rateTake(`dev:${gate.device.id}`);
-  return rl.ok ? NextResponse.next() : tooMany(rl.retryAfter);
+  return deviceGate(req);
 }
