@@ -3,6 +3,12 @@
 #
 #   scripts/release.sh 0.9.0             build from HEAD (the tree must be clean), stage, sign
 #   scripts/release.sh 0.9.0 --no-build  re-stage + re-sign from the last build of this very HEAD
+#   scripts/release.sh 0.9.1 --mac-host mac   also build the macOS arm64 brain + node ON that Mac (ssh), pull
+#                                        them back, and sign them with the rest (the key never leaves here)
+#
+# A real release is tagged here: v<VERSION> is created at HEAD (annotated, local: push it with the release),
+# and an existing v<VERSION> that points at another commit stops it — a published tag is never moved.
+# It also stops when the tree holds anything that looks like a private key (private_key = <40+ base64>).
 #
 # TEST releases: YGG_RELEASE_KEY=<a throwaway key> (any key that is not RELEASE-KEY.pub's). Only then are
 # --dirty (the working tree as it is), --no-build of another tree and X.Y.Z-tag versions allowed, and the
@@ -20,6 +26,9 @@
 #   bifrost-net-VERSION-linux-x86_64        the trunk's binary (trunk.sh on the VPS fetches only this)
 #   bifrost-net-root-VERSION-linux-x86_64   the root build (older join.sh fetch it alone)
 #   sni-443.py                              the :443 router trunk.sh --behind-proxy installs
+#   yggdrasil-VERSION-macos-aarch64.tar.gz  (--mac-host) a joined root on an Apple-silicon Mac: bin/ yggdrasil ·
+#       bifrost-net-root, root/install/, trunk/scripts/root-dial.py, RELEASE, RELEASE-KEY.pub, allowed_signers
+#   Veraldar-Setup-VERSION.exe              the Windows installer (scripts/build-win.sh; embeds this join.sh)
 #   SHA256SUMS · SHA256SUMS.sig             an OpenSSH signature (ssh-keygen -Y sign -n yggdrasil-release)
 #
 # Every installer embeds the release key's allowed_signers line (YGG_SIGNER=…) and refuses a release whose
@@ -37,13 +46,15 @@ set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 say()  { printf '\033[1m==>\033[0m %s\n' "$*"; }
 die()  { printf '\033[1;31mxx\033[0m  %s\n' "$*" >&2; exit 1; }
+warn() { printf '\033[1;33m!!\033[0m  %s\n' "$*" >&2; }
 
-VERSION='' DIRTY=0 BUILD=1
+VERSION='' DIRTY=0 BUILD=1 MAC_HOST=''
 while [ $# -gt 0 ]; do
   case $1 in
     --dirty) DIRTY=1 ;;
+    --mac-host) [ -n "${2:-}" ] || die "--mac-host needs an ssh host"; MAC_HOST=$2; shift ;;
     --no-build) BUILD=0 ;;
-    -h|--help) sed -n '2,39p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,48p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     -*) die "unknown option $1 (see --help)" ;;
     *) VERSION=${1#v} ;;
   esac
@@ -95,7 +106,7 @@ if [ "$(cut -d' ' -f1-2 "$ROOT/RELEASE-KEY.pub")" = "$PUB" ]; then
   [ $DIRTY = 0 ] || die "--dirty is for TEST releases: the release key never signs one (YGG_RELEASE_KEY=<a throwaway key>)"
   case $VERSION in *-*) die "$VERSION is a pre-release/test version: the release key never signs one (YGG_RELEASE_KEY=<a throwaway key>)" ;; esac
   [ -z "$(git -C "$ROOT" status --porcelain)" ] || die "the tree has changes: the release key signs a clean HEAD only (commit them)"
-  if [ $BUILD = 0 ] && [ "$(cat "$CACHE/describe" 2>/dev/null)" != "$(git -C "$ROOT" describe --tags --always)" ]; then
+  if [ $BUILD = 0 ] && [ "$(cat "$CACHE/commit" 2>/dev/null)" != "$(git -C "$ROOT" rev-parse HEAD)" ]; then
     die "--no-build: the last build ($(cat "$CACHE/describe" 2>/dev/null || echo none)) is not this HEAD — build it (no --no-build)"
   fi
 else
@@ -113,6 +124,42 @@ sign() { # FILE → FILE.sig: through ssh-agent when it holds the key (a passphr
   fi
 }
 
+# ------------------------------------------------------------------------------------- guards
+# AP-21: no private key in what is built (the all-A / all-0 placeholders of the tests are not keys). Only the
+# place is printed, never the line.
+if [ $DIRTY = 1 ]; then GREP_IN=(--untracked); else GREP_IN=(HEAD); fi
+KEYRE="private_key[[:space:]]*[:=][[:space:]]*[\"']?"
+leaks=$(git -C "$ROOT" grep -nE "${KEYRE}[A-Za-z0-9+/]{40,}" "${GREP_IN[@]}" -- . 2>/dev/null |
+  grep -vE "${KEYRE}(A{40,}|0{40,})=*[\"']?[[:space:]]*\$" |
+  sed -nE 's/^(HEAD:)?(.*):([0-9]+):[^:]*private_key.*/\2:\3/p' || true)
+[ -z "$leaks" ] || die "a private key is in the tree — remove it (and rotate it) before any release: $(echo $leaks)"
+# AP-30: a real release's tag is made here, at the commit it is built from; one that points elsewhere stops it
+TAG=v$VERSION
+if [ $TEST = 0 ]; then
+  HEAD_COMMIT=$(git -C "$ROOT" rev-parse HEAD)
+  if t=$(git -C "$ROOT" rev-parse -q --verify "refs/tags/$TAG^{commit}"); then
+    [ "$t" = "$HEAD_COMMIT" ] || die "tag $TAG already points at ${t:0:12}, not at HEAD ${HEAD_COMMIT:0:12} — a tag is never moved: release another version"
+  fi
+  if r=$(git -C "$ROOT" ls-remote --tags origin "refs/tags/$TAG^{}" "refs/tags/$TAG" 2>/dev/null); then
+    rt=$(printf '%s\n' "$r" | awk -v t="refs/tags/$TAG^{}" '$2==t {print $1}'); [ -n "$rt" ] || rt=$(printf '%s\n' "$r" | awk '{print $1; exit}')
+    [ -z "$rt" ] || [ "$rt" = "$HEAD_COMMIT" ] || die "origin's tag $TAG points at ${rt:0:12}, not at HEAD ${HEAD_COMMIT:0:12} — release another version"
+  else
+    warn "could not ask origin about tag $TAG (offline?): checked the local tag only"
+  fi
+fi
+make_tag() { # the real release's tag, at the commit it was built from — made once the release is signed
+  [ $TEST = 0 ] || return 0
+  if [ -z "$(git -C "$ROOT" tag -l "$TAG")" ]; then
+    if [ -n "${rt:-}" ]; then   # origin has it (at HEAD, checked above): take that one, never a second tag object
+      git -C "$ROOT" fetch -q origin "refs/tags/$TAG:refs/tags/$TAG" || die "could not fetch origin's tag $TAG"
+    else
+      git -C "$ROOT" tag -a "$TAG" -m "yggdrasil $VERSION" HEAD || die "could not create tag $TAG"
+      say "tag $TAG made at ${HEAD_COMMIT:0:12} (local: push it with the release — git push origin $TAG)"
+    fi
+  fi
+  [ "$(git -C "$ROOT" rev-parse "$TAG^{commit}")" = "$HEAD_COMMIT" ] || die "tag $TAG is not HEAD"
+}
+
 # ------------------------------------------------------------------------------------- sources
 if [ $BUILD = 1 ]; then
   if [ $DIRTY = 0 ]; then
@@ -128,6 +175,9 @@ if [ $BUILD = 1 ]; then
     (cd "$ROOT" && git ls-files -co --exclude-standard -z | tar --null -cf - -T -) | tar -xf - -C "$SRC"
   fi
   printf '%s\n' "$DESCRIBE" >"$CACHE/describe"
+  # which build the cache holds: written only once the build below has succeeded (a failed one leaves none)
+  rm -f "$CACHE/commit"
+  if [ $DIRTY = 0 ]; then BUILD_COMMIT=$(git -C "$ROOT" rev-parse HEAD); else BUILD_COMMIT="dirty-$(date +%s)"; fi
   EPOCH=$(git -C "$ROOT" log -1 --format=%ct); printf '%s\n' "$EPOCH" >"$CACHE/epoch"
 else
   [ -d "$SRC" ] && [ -x "$CACHE/target-bullseye/root/release/yggdrasil" ] && [ -d "$CACHE/app/standalone" ] || die "--no-build: nothing built yet"
@@ -160,7 +210,40 @@ if [ $BUILD = 1 ]; then
         cp -a .next/standalone /out/standalone && cp -a .next/static /out/standalone/.next/static &&
         cp -a public artifacts-builtin server.mjs /out/standalone/; } || rc=\$?
       chown -R $UIDGID /src /root/.npm /out; exit \$rc" || { tail -30 "$CACHE/app/build.log" 2>/dev/null; die "app build failed"; }
+  printf '%s\n' "$BUILD_COMMIT" >"$CACHE/commit"
 fi
+[ -s "$CACHE/commit" ] || die "--no-build: the last build did not finish — build it (no --no-build)"
+
+# macOS arm64 (AP-32): the brain and the node's root build, compiled ON the Mac from the same sources, pulled back
+# here; the signing key never leaves this machine. --no-build reuses them when they were built from this commit.
+MAC=$CACHE/mac MREM=.cache/yggdrasil-release-mac
+if [ $BUILD = 1 ]; then rm -rf "$MAC"; fi
+# --no-build --mac-host: the Mac part alone, from the same cached sources, when it is not there for this build
+if [ -n "$MAC_HOST" ] && { [ $BUILD = 1 ] || [ "$(cat "$MAC/commit" 2>/dev/null)" != "$(cat "$CACHE/commit")" ]; }; then
+  rm -rf "$MAC"
+  say "macOS arm64: yggdrasil + bifrost-net (root build), cargo on $MAC_HOST (~/$MREM)"
+  [ "$(ssh -o BatchMode=yes -o ConnectTimeout=15 "$MAC_HOST" 'uname -sm')" = "Darwin arm64" ] || die "$MAC_HOST: not an Apple-silicon Mac, or ssh does not answer"
+  tar -C "$SRC" -cf - root trunk | ssh -o BatchMode=yes "$MAC_HOST" "rm -rf ~/$MREM/src && mkdir -p ~/$MREM/src && tar -xf - -C ~/$MREM/src" ||
+    die "could not copy the sources to $MAC_HOST"
+  # its own cargo home (the Mac's ~/.cargo registry is left alone); rustup's toolchain is the Mac's own
+  ssh -o BatchMode=yes "$MAC_HOST" "set -e; B=\$HOME/$MREM; export PATH=\$HOME/.cargo/bin:/usr/bin:/bin:/usr/sbin:/sbin CARGO_HOME=\$B/cargo-home
+    (cd \$B/src/root && cargo build --release --locked -q --target-dir \$B/target/root)
+    (cd \$B/src/trunk && cargo build --release --locked -q --no-default-features --target-dir \$B/target/trunk-root)
+    sw_vers -productVersion >\$B/macos-version; rustc --version >\$B/rustc-version" || die "the macOS build failed on $MAC_HOST"
+  mkdir -p "$MAC"
+  scp -q -o BatchMode=yes "$MAC_HOST:$MREM/target/root/release/yggdrasil" "$MAC/yggdrasil" &&
+    scp -q -o BatchMode=yes "$MAC_HOST:$MREM/target/trunk-root/release/bifrost-net" "$MAC/bifrost-net-root" &&
+    scp -q -o BatchMode=yes "$MAC_HOST:$MREM/macos-version" "$MAC_HOST:$MREM/rustc-version" "$MAC/" || die "could not pull the macOS binaries back"
+  for b in yggdrasil bifrost-net-root; do
+    case $(file -b "$MAC/$b") in   # "Mach-O 64-bit executable arm64" (macOS) · "Mach-O 64-bit arm64 executable, …" (Linux)
+      Mach-O\ 64-bit*arm64*) case $(file -b "$MAC/$b") in *executable*) ;; *) die "macOS $b is not an executable: $(file -b "$MAC/$b")" ;; esac ;;
+      *) die "macOS $b is not a Mach-O arm64 executable: $(file -b "$MAC/$b")" ;;
+    esac
+  done
+  cat "$CACHE/commit" >"$MAC/commit"
+fi
+MAC_OK=0
+[ -x "$MAC/yggdrasil" ] && [ -x "$MAC/bifrost-net-root" ] && [ "$(cat "$MAC/commit" 2>/dev/null)" = "$(cat "$CACHE/commit")" ] && MAC_OK=1
 
 # node: the newest 24.x (or NODE_VERSION), checked against nodejs.org's SHASUMS256.txt
 NODE_VERSION=${NODE_VERSION:-$(curl -fsSL https://nodejs.org/dist/index.json | python3 -c \
@@ -229,7 +312,7 @@ install -m 644 "$ROOT/LICENSE" "$ROOT/RELEASE-KEY.pub" "$ROOT/allowed_signers" "
 for f in "${INSTALLERS[@]}"; do stamp "$STAGE/$f"; done
 cat >"$STAGE/RELEASE" <<EOF
 yggdrasil $VERSION
-source $DESCRIBE
+source $DESCRIBE (commit $(cat "$CACHE/commit"))
 node $NODE_VERSION (nodejs.org, sha256 checked)
 livekit-server $LIVEKIT_VERSION (github.com/livekit/livekit, sha256 checked)
 built rust:1-bullseye (glibc 2.31: Debian 11+, Ubuntu 20.04+) · node:24-bookworm (Next standalone)
@@ -253,6 +336,24 @@ fi
 for f in root/install/install.sh root/install/join.sh trunk/install/trunk.sh root/install/pair.sh; do bash -n "$STAGE/$f" || die "$f: syntax"; done
 python3 -c "import ast,sys; ast.parse(open(sys.argv[1]).read())" "$STAGE/root/install/rootjoin.py" || die "rootjoin.py: syntax"
 
+# the macOS stage: what a joined root needs and nothing else (no app, no voice: those live on the home computer)
+MSTAGE=$CACHE/stage-macos/yggdrasil-$VERSION
+rm -rf "$CACHE/stage-macos"
+if [ $MAC_OK = 1 ]; then
+  say "stage $MSTAGE (macOS arm64)"
+  mkdir -p "$MSTAGE"/{bin,root/install,trunk/scripts}
+  install -m 755 "$MAC/yggdrasil" "$MSTAGE/bin/yggdrasil"
+  install -m 755 "$MAC/bifrost-net-root" "$MSTAGE/bin/bifrost-net-root"
+  cp -a "$STAGE/root/install/." "$MSTAGE/root/install/"
+  install -m 755 "$STAGE/trunk/scripts/root-dial.py" "$MSTAGE/trunk/scripts/root-dial.py"
+  install -m 644 "$STAGE/LICENSE" "$STAGE/RELEASE-KEY.pub" "$STAGE/allowed_signers" "$MSTAGE/"
+  cat >"$MSTAGE/RELEASE" <<EOF
+yggdrasil $VERSION
+source $DESCRIBE (commit $(cat "$CACHE/commit"))
+built on macOS $(cat "$MAC/macos-version") arm64 with $(cat "$MAC/rustc-version") (cargo --release; node: --no-default-features)
+EOF
+fi
+
 # ------------------------------------------------------------------------------- dist/VERSION
 say "dist $OUT"
 rm -rf "$OUT"; mkdir -p "$OUT"
@@ -265,6 +366,19 @@ install -m 755 "$STAGE/trunk/install/trunk.sh" "$OUT/trunk.sh"
 install -m 755 "$STAGE/bin/bifrost-net" "$OUT/bifrost-net-$VERSION-linux-x86_64"
 install -m 755 "$STAGE/bin/bifrost-net-root" "$OUT/bifrost-net-root-$VERSION-linux-x86_64"
 install -m 644 "$STAGE/trunk/deploy/sni-443.py" "$OUT/sni-443.py"
+if [ $MAC_OK = 1 ]; then
+  tar --sort=name --owner=0 --group=0 --numeric-owner --mtime="@$EPOCH" -C "$(dirname "$MSTAGE")" -cf - "yggdrasil-$VERSION" |
+    gzip -n -6 >"$OUT/yggdrasil-$VERSION-macos-aarch64.tar.gz"
+else
+  warn "no macOS asset in this release (build it with --mac-host <ssh host of an Apple-silicon Mac>)"
+fi
+# Windows: the installer embeds this release's stamped join.sh, so it is built here, before SHA256SUMS is signed
+if [ -x "$ROOT/scripts/build-win.sh" ]; then
+  "$ROOT/scripts/build-win.sh" "$VERSION" "$STAGE/root/install/join.sh" "$OUT" || die "the Windows installer did not build"
+  [ -s "$OUT/Veraldar-Setup-$VERSION.exe" ] || die "scripts/build-win.sh made no $OUT/Veraldar-Setup-$VERSION.exe"
+else
+  warn "no Windows installer in this release (scripts/build-win.sh is missing)"
+fi
 (cd "$OUT" && sha256sum -- * | LC_ALL=C sort -k2 >SHA256SUMS)
 sign "$OUT/SHA256SUMS"   # → SHA256SUMS.sig
 VERIFY_SIGNERS=$ROOT/allowed_signers
@@ -272,6 +386,7 @@ if [ $TEST = 1 ]; then VERIFY_SIGNERS=$(mktemp); printf '%s\n' "$SIGNER" >"$VERI
 ssh-keygen -Y verify -f "$VERIFY_SIGNERS" -I release@yggdrasil -n yggdrasil-release -s "$OUT/SHA256SUMS.sig" \
   <"$OUT/SHA256SUMS" >/dev/null || die "the fresh signature does not verify (signer: $SIGNER)"
 (cd "$OUT" && sha256sum -c --quiet SHA256SUMS) || die "SHA256SUMS does not match dist"
+make_tag
 echo
 (cd "$OUT" && for f in *; do printf '    %8s  %s\n' "$(du -k "$f" | cut -f1)K" "$f"; done)
 # the lay guides name the release in their download lines: say so when they name another one
@@ -283,10 +398,14 @@ if [ $TEST = 1 ]; then
   printf '\n  dist/%s is a TEST release, signed by %s (a throwaway key). NEVER publish it.\n' "$VERSION" "$KEY"
   exit 0
 fi
+# the v0.9.0 tag predates its own release (AP-30): the notes of the next release say so
+NOTE="Tag v0.9.0 predates the v0.9.0 release: its assets were built from 0c4ede5c, not from the commit the tag names."
 cat <<EOF
 
   dist/$VERSION is signed (SHA256SUMS.sig, key $(ssh-keygen -lf "$KEY" | awk '{print $2}')).
-  Publish: create the GitHub release v$VERSION and upload EVERY file above.
+  Tag:     $TAG at $(git -C "$ROOT" rev-parse --short=12 "$TAG^{commit}") (local) — push it before the release: git push origin $TAG
+  Publish: a DRAFT first — gh release create $TAG --draft --verify-tag dist/$VERSION/* ; test it; then un-draft.
+$( [ "$VERSION" = 0.9.1 ] && printf '  Notes:   add the line: %s' "$NOTE")
   Check one:  ssh-keygen -Y verify -f allowed_signers -I release@yggdrasil -n yggdrasil-release \\
                 -s SHA256SUMS.sig < SHA256SUMS && sha256sum -c SHA256SUMS
 EOF

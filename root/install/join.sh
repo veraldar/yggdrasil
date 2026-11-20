@@ -9,7 +9,8 @@
 #
 # The join.sh you download is small: it fetches the release it belongs to and checks it — SHA256SUMS must be
 # signed by the yggdrasil release key embedded below (YGG_SIGNER, never fetched), the archive must match it —
-# then runs that release's join.sh, with prebuilt binaries: no git, Rust or compiler needed (Linux/WSL x86_64).
+# then runs that release's join.sh, with prebuilt binaries: no git, Rust or compiler needed (Linux/WSL x86_64,
+# Apple-silicon Macs).
 #
 # This machine only DIALS OUT: its brain listens on loopback, root-dial.py carries it to the trunk through
 # the hub's public access point (wss). Nothing here needs an open port, a public IP or a certificate.
@@ -26,7 +27,7 @@
 #                         PATH, else the signed release on Linux/WSL x86_64)
 #   --net-bin FILE        use this bifrost-net binary (the tunnel's node; default: DIR/bin, the release's root build,
 #                         the repo's build, ~/.local/bin, PATH, else the signed release's — checked like the rest)
-#   --build               developers, in a git checkout (macOS, other CPUs: there is no release for them yet):
+#   --build               developers, in a git checkout (Intel Macs, other CPUs: there is no release for them):
 #                         build the brain and the node with cargo (the node's root build: no cmake, no libopus)
 #   --brain-port P / --peer-port P   loopback ports (first join: 4180/4181, or the next free pair); the peer
 #                         port is the node's door (tcp) and its udp, the brain port the dialer's udp too
@@ -113,6 +114,14 @@ if [ -z "$PY" ] || ! "$PY" -c 'import ssl, json, urllib.request, zlib, fcntl' 2>
   die "python3 (with ssl) is needed — $(pkg_hint python3 ca-certificates)"
 fi
 ARCH=$(uname -m); case $ARCH in amd64) ARCH=x86_64 ;; arm64) ARCH=aarch64 ;; esac
+# a shell under Rosetta on an Apple-silicon Mac says x86_64: the machine itself is arm64
+[ $OS = macos ] && [ "$(sysctl -n hw.optional.arm64 2>/dev/null)" = 1 ] && ARCH=aarch64
+case $OS/$ARCH in   # the release archive for this machine ('' = none: build from a checkout)
+  linux/x86_64|wsl/x86_64) PLAT=linux-x86_64 ;;
+  macos/aarch64) PLAT=macos-aarch64 ;;
+  *) PLAT='' ;;
+esac
+sha256() { if command -v sha256sum >/dev/null; then sha256sum | cut -c1-64; else shasum -a 256 | cut -c1-64; fi; }   # stdin
 RELEASES=${YGG_RELEASES:-${JOIN_RELEASES:-https://github.com/veraldar/yggdrasil/releases}}
 REL_HOME=${XDG_DATA_HOME:-$HOME/.local/share}/yggdrasil/release   # unpacked releases (shared with install.sh)
 MIN_GLIBC=2.31   # the release's binaries are built on Debian 11 (bullseye): Debian 11+, Ubuntu 20.04+
@@ -153,18 +162,20 @@ unpacked() { local d; for d in "$REL_HOME"/*/.verified; do if [ -f "$d" ]; then 
 bootstrap() { # WHY — the signed release (--version, else max(this script's, the newest unpacked)), unpacked, then
   #             ITS join.sh runs with our arguments: prebuilt brain + node, nothing to compile here
   local want base tgz newest
-  [ "$OS" != macos ] && [ "$ARCH" = x86_64 ] || die "$1, and there is no prebuilt release for $OS $ARCH yet:
+  [ -n "$PLAT" ] || die "$1, and there is no prebuilt release for $OS $ARCH:
     install Rust (your package manager, or https://rustup.rs) and a C compiler ($(pkg_hint build-essential)),
     then run join.sh from a git checkout with --build" 1
   # what this computer needs, all checked before anything is downloaded
   local g need=() d free_mb
-  g=$(ldd --version 2>&1 | head -1 | grep -o '[0-9][0-9]*\.[0-9][0-9]*$' || true)
-  [ -n "$g" ] || die "$1, and this Linux has no glibc (musl? Alpine?): the release needs glibc $MIN_GLIBC or newer (Debian 11+, Ubuntu 20.04+)"
-  [ "$(printf '%s\n%s\n' "$MIN_GLIBC" "$g" | sort -V | head -1)" = "$MIN_GLIBC" ] ||
-    die "$1, and this Linux's C library is glibc $g: the release needs $MIN_GLIBC or newer (Debian 11+, Ubuntu 20.04+). Nothing was downloaded."
+  if [ $OS != macos ]; then
+    g=$(ldd --version 2>&1 | head -1 | grep -o '[0-9][0-9]*\.[0-9][0-9]*$' || true)
+    [ -n "$g" ] || die "$1, and this Linux has no glibc (musl? Alpine?): the release needs glibc $MIN_GLIBC or newer (Debian 11+, Ubuntu 20.04+)"
+    [ "$(printf '%s\n%s\n' "$MIN_GLIBC" "$g" | sort -V | head -1)" = "$MIN_GLIBC" ] ||
+      die "$1, and this Linux's C library is glibc $g: the release needs $MIN_GLIBC or newer (Debian 11+, Ubuntu 20.04+). Nothing was downloaded."
+  fi
   command -v curl >/dev/null || need+=(curl ca-certificates)
   command -v ssh-keygen >/dev/null || need+=(openssh-client)
-  command -v sha256sum >/dev/null && command -v tar >/dev/null || need+=(coreutils tar)
+  { command -v sha256sum || command -v shasum; } >/dev/null && command -v tar >/dev/null || need+=(coreutils tar)
   [ ${#need[@]} = 0 ] || die "$1; fetching and checking the release needs: ${need[*]} — first: $(pkg_hint "${need[@]}"). Nothing was downloaded."
   d=${XDG_DATA_HOME:-$HOME/.local/share}; while [ ! -d "$d" ]; do d=$(dirname "$d"); done
   free_mb=$(( $(df -Pk "$d" | awk 'NR==2 {print $4}') / 1024 ))
@@ -175,19 +186,20 @@ bootstrap() { # WHY — the signed release (--version, else max(this script's, t
   if [ -z "$want" ] || [ ! -f "$REL_HOME/$want/.verified" ]; then
     base=$(release_base "$want")
     release_sums "$base"
-    [ -n "$want" ] || want=$(sed -n 's/^[0-9a-f]\{64\}  yggdrasil-\([0-9][0-9A-Za-z.+-]*\)-linux-x86_64\.tar\.gz$/\1/p' "$REL_DIR/SHA256SUMS" | head -1)
-    tgz=yggdrasil-$want-linux-x86_64.tar.gz
-    [ -n "$want" ] && [ -n "$(sum_of "$tgz")" ] || die "the release${want:+ v$want} has no $tgz (signed SHA256SUMS)"
+    [ -n "$want" ] || want=$(sed -n "s/^[0-9a-f]\{64\}  yggdrasil-\([0-9][0-9A-Za-z.+-]*\)-$PLAT\.tar\.gz\$/\1/p" "$REL_DIR/SHA256SUMS" | head -1)
+    tgz=yggdrasil-$want-$PLAT.tar.gz
+    [ -n "$want" ] && [ -n "$(sum_of "$tgz")" ] || die "the release${want:+ v$want} has no build for $OS $ARCH ($tgz) —
+    from a git checkout, with Rust and a C compiler: bash root/install/join.sh --build …"
     # this very script, when it belongs to that release: the one the release signed, or stop here
     if [ -n "$YGG_RELEASE" ] && [ "$want" = "$YGG_RELEASE" ] && [ -f "$0" ] && [ -n "$(sum_of join.sh)" ] &&
-       [ "$(sha256sum <"$0" | cut -c1-64)" != "$(sum_of join.sh)" ]; then
+       [ "$(sha256 <"$0")" != "$(sum_of join.sh)" ]; then
       die "this join.sh is not the one release v$YGG_RELEASE signed (its sha256 is not in SHA256SUMS) — download it again: $base/join.sh"
     fi
   fi
   if [ ! -f "$REL_HOME/$want/.verified" ]; then
     say "$1: the signed release $want ($base/$tgz)"
     fetch "$base/$tgz" "$REL_DIR/$tgz" || die "cannot download $base/$tgz"
-    [ "$(sha256sum <"$REL_DIR/$tgz" | cut -c1-64)" = "$(sum_of "$tgz")" ] || die "$tgz does not match SHA256SUMS — refusing to install it"
+    [ "$(sha256 <"$REL_DIR/$tgz")" = "$(sum_of "$tgz")" ] || die "$tgz does not match SHA256SUMS — refusing to install it"
     mkdir -p "$REL_HOME"; rm -rf "$REL_HOME/.$want.new"; mkdir -p "$REL_HOME/.$want.new"
     tar -xzf "$REL_DIR/$tgz" -C "$REL_HOME/.$want.new" --strip-components=1 --no-same-owner || die "could not unpack $tgz"
     grep -qx "yggdrasil $want" "$REL_HOME/.$want.new/RELEASE" 2>/dev/null || die "$tgz holds another release than $want — refusing it"
