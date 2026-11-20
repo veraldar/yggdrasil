@@ -2,7 +2,9 @@
  *  PUT /file/upload/<upload>?offset=N: `{have}`, the last piece `{have, file: REF}`, 409 `{have}`.
  *  A piece is at most 1 MiB: nothing on the way (Next's 10 MB middleware copy, the access
  *  point's frame, the tunnel) ever cuts one short — a bigger body is refused here, not trimmed. */
+import type { NextRequest } from 'next/server';
 import { brainDown, passJson } from '@/lib/brain-files';
+import { deviceGate, passed } from '@/lib/gate';
 import { PIECE_MAX } from '@/lib/file-ref';
 import { ocRaw } from '@/lib/oc';
 
@@ -38,7 +40,10 @@ async function readCapped(req: Request): Promise<Uint8Array | null> {
   return out;
 }
 
-export async function PUT(req: Request, ctx: { params: Promise<{ upload: string }> }) {
+export async function PUT(req: NextRequest, ctx: { params: Promise<{ upload: string }> }) {
+  // the middleware does not run here (lib/gate.ts says why): the same gate, here
+  const gate = await deviceGate(req);
+  if (!passed(gate)) return gate;
   const { upload } = await ctx.params;
   const offset = new URL(req.url).searchParams.get('offset') || '';
   if (!/^[A-Za-z0-9_-]{1,128}$/.test(upload) || !/^\d{1,15}$/.test(offset)) {
