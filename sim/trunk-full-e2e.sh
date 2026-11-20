@@ -240,7 +240,7 @@ if [ "$SCENARIO" = s17 ]; then
     PW_HOME="http://127.0.0.1:$HOMEP" PW_MOCK="http://127.0.0.1:$MOCK" PW_YGG_BIN="$YGG_BIN" \
     PW_CAFILE="$STATE/tls/cert.pem" PW_NET_BIN="$BIN" PW_FAR2=203.0.113.10 PW_LAB_PORT="$LABP" \
     PW_LAB_WG="$LABWG" PW_LAB_WG_UDP="$LABUDP" PW_LAB_PIPE="$LABPIPE" PW_LAB_PEER="$LABPEER" \
-    PW_CC_MODEL="http://127.0.0.1:$CCM" PW_CC_LOG="$STATE/cc-model.log" APP_DIR="$B" \
+    PW_CC_MODEL="http://127.0.0.1:$CCM" PW_CC_LOG="$STATE/cc-model.log" APP_DIR="$B" PW_PEER="$PEER" \
     node "$ROOT/sim/reach/s17.mjs" 2>&1 | tee "$STATE/e2e.log"
   rc=${PIPESTATUS[0]}
 else

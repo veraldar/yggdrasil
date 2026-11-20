@@ -68,12 +68,12 @@ export async function poll(fn, timeout, msg, every = 500) {
 
 /** the harness reads the box's own processes — plain node:http (the switchboard refuses
  *  browser-shaped calls). → {status, body (JSON when it parses), headers} */
-export function brain(base, path, { method = 'GET', body, timeout = 60_000 } = {}) {
+export function brain(base, path, { method = 'GET', body, timeout = 60_000, headers = {} } = {}) {
   return new Promise((done, fail) => {
     const data = body === undefined ? null : Buffer.from(JSON.stringify(body));
     const req = http.request(
       `${base}${path}`,
-      { method, timeout, headers: data ? { 'content-type': 'application/json', 'content-length': data.length } : {} },
+      { method, timeout, headers: { ...(data ? { 'content-type': 'application/json', 'content-length': data.length } : {}), ...headers } },
       (res) => {
         const chunks = [];
         res.on('data', (c) => chunks.push(c));

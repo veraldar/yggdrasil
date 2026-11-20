@@ -234,9 +234,13 @@ try {
       `lab's brain never logged pulling it from home (${logOf().filter((l) => l.startsWith('files:')).slice(-2).join(' | ')})`);
     // lab's way to home is its own tunnel door: /_wg/local = the hub, inside WireGuard
     const door = `http://127.0.0.1:${env('PW_LAB_WG')}/_wg/local`;
-    const whole = await brain(door, `/file/${pdf.sha256}`, { timeout: 90_000 });
+    // a call from another root carries the peer token (L8, every route): the probe too
+    const peer = { 'x-ygg-peer': env('PW_PEER') };
+    const whole = await brain(door, `/file/${pdf.sha256}`, { timeout: 90_000, headers: peer });
     must(whole.status >= 400, `the tunnel passed the whole ${pdf.size}-byte file in one call (${whole.status}, ${whole.raw.length} bytes)`);
-    const piece = await brain(door, `/file/${pdf.sha256}?offset=1048576&len=1048576`, { timeout: 60_000 });
+    const piece = await brain(door, `/file/${pdf.sha256}?offset=1048576&len=1048576`, { timeout: 60_000, headers: peer });
+    const bare = await brain(door, `/file/${pdf.sha256}?offset=0&len=1024`, { timeout: 30_000 });
+    must(bare.status === 401, `without the peer token the tunnel's call is refused (L8): ${bare.status}`);
     must(piece.status === 200 && piece.raw.equals(pdfBytes.subarray(1048576, 2 * 1048576)), `a 1 MiB piece through the tunnel: ${piece.status}, ${piece.raw.length} bytes`);
     const hubwg = (readFileSync(join(STATE, 'wg-hub.toml'), 'utf8').match(/^http = "([^"]+)"/m) || [])[1];
     const peers = (await brain(`http://${hubwg}`, '/_wg')).body || [];
