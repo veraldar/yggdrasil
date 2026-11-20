@@ -62,3 +62,10 @@
 - AFTER (when resent): read switch.log; hub-units.sh health + status; loginctl show-user dweeb_xyz -p Linger; live-door spec both doors (mic); S14; update work/AGENTS.md rule 2 (deploy = hub-units.sh deploy); send P3 its message; report to MAIN: stage B done + reboot window question + pairing link (ap-pair.html valid until 15:20).
 - 13:0x review (agy) fixes in; tree-next at 25e1e32b. RUNNING: ~/Work/tree-next/scripts/hub-units.sh switch
 - 12:43 STAGE B SWITCHED, healthy (switch.log). Linger=yes. All 7 hub units active+enabled. NEXT: live-door both doors, S14, AGENTS.md rule 2, P3 message, report + reboot window + pairing.
+
+## 11-20 23:02 (after two more limit stops: 12:45→18:02, 18:09→23:01)
+- Stage B is DONE and verified (switch.log 12:43, health all ok at 18:02). Deploys: scripts/hub-units.sh deploy <id>.
+- FOUND 12:44 + 18:06: voice agent "mutual yield": two agent jobs in one room each wait for the other ("previous agent draining…"), both shut down after 20 s → room without agent, spoken turn lost. Seen when both doors are used back to back (same session = same room) and jobs double-dispatch. Fix idea: waiting agents mark themselves (participant attribute); among waiting ones the smallest identity serves, the others leave. In branch/voice/agent.py ~L530-566.
+- 18:06/18:08: live-door AP run FAILED twice at low load (tailnet passed) — NOT yet looked at (/tmp/ld-a).
+- ORDER NOW (owner via MAIN 23:01, I work alone): merge p2-spoken (d378eb14; strict L16 default: typed turns answered in writing only — say so in the report) → merge p5-site (bffd6ea3) → deploy → restart voice agent with P2's code → voice checks → report with commit hashes. Then P3/P4/timeline resume one at a time (MAIN does that after my report). P3's stage-B message from lead-next.md is still mine to send (or already sent? check P3's session).
+- Owner pairing link ap-pair.html expired 15:20 → check devices.json, new link in report, delete old artifact.
