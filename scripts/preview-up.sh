@@ -18,6 +18,12 @@ TREE=$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)
 BIN=${1:-$TREE/root/target/release/yggdrasil}
 [ -x "$BIN" ] || { echo "no brain binary: $BIN (build it first: (cd $TREE/root && cargo build --release))"; exit 1; }
 ART="$HOME/Work/root-coord-pwa/artifacts" # lib/artifacts.ts: the worktree's ../artifacts
+# stage B (11-20): the :8447 / ap.veraldar.org brain is the persistent unit hub-brain, from a frozen
+# release. Starting the transient rootsim-preview beside it would fight it for :4101.
+if [ "$NAME" = preview ] && systemctl --user is-enabled -q hub-brain 2>/dev/null; then
+  echo "the home root's brain is hub-brain now (a frozen release). Deploy: scripts/hub-units.sh release, then scripts/hub-units.sh deploy <id> — the integrator only."
+  exit 1
+fi
 
 # run by an agent inside this brain (its shell lives in the brain's own unit): stopping the brain
 # would kill this script half-way and leave no brain (11-19 20:26) — go on in a unit of its own
@@ -36,7 +42,7 @@ mapfile -t ENVV < <(systemctl --user show "$UNIT" -p Environment --value | pytho
 # the unit gone (11-19: an agent's `pkill -f yggdrasil` took every brain down, and a transient unit
 # keeps no environment once it is gone): the copy saved at the last start, else brain-up.sh's base
 if [ "${#ENVV[@]}" -le 10 ] && [ -s "$UI/brain.env" ]; then
-  mapfile -t ENVV < <(grep -vE '^(YGG_MODELS|YGG_VISION_MODELS|YGG_ARTIFACTS_DIR|YGG_EXTENSIONS|YGG_HARNESS_LIVE)=' "$UI/brain.env")
+  mapfile -t ENVV < <(grep -vE '^(YGG_MODELS|YGG_VISION_MODELS|YGG_ARTIFACTS_DIR|YGG_EXTENSIONS|YGG_HARNESS_LIVE|YGG_OPENCODE_XDG_DATA|YGG_OPENCODE_XDG_CONFIG|YGG_HARNESS_HELPER|YGG_HARNESS_HELPER_TOKEN|YGG_HARNESS_RUNNER)=' "$UI/brain.env")
   echo "environment: from $UI/brain.env (the unit was gone)"
 elif [ "${#ENVV[@]}" -le 10 ]; then
   case "$NAME" in preview) PORT0=4101 ;; ui) PORT0=4191 ;; *) PORT0= ;; esac
