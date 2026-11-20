@@ -16,6 +16,8 @@ type View = {
   code: string;
   /** the fingerprint of the WireGuard key approving pins (null: an older machine) */
   wg_fp: string | null;
+  /** 'home': approving shares the home root's model, key included, with this machine */
+  model?: 'home' | null;
   status: 'pending' | 'approved' | 'refused' | 'expired' | 'delivered';
   expires_at: string;
   root_id: string | null;
@@ -118,6 +120,13 @@ export default function JoinPage() {
               </span>
               <span />
             </li>
+            {view.model === 'home' && (
+              <li>
+                <span>model</span>
+                <span data-testid="join-model">{"the home root's model and key"}</span>
+                <span />
+              </li>
+            )}
           </ul>
           <p
             data-testid="join-code"
