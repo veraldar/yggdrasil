@@ -28,9 +28,14 @@ p2-reach-sim (sim helper). Temp files: ~/.cache/p2-reach/tmp (NOT /tmp: shared q
 - independent review: 13 findings, all fixed (b948d5c4, +1); its 4 repros in sim/reach/regress pass;
   after the fixes: cargo test 120/120, tree-e2e 131/131 (~/.cache/p2-reach/tree-full-run2.log)
 
-## In flight
-- sim helper (p2-reach-sim): S16 (trunk-rtc --scenario s16), S17 (trunk-full --scenario s17)
+- S16 (trunk-rtc --scenario s16): hands-free inside a session on lab 5/5 (words once, voice, spoken)
+- S17 (trunk-full --scenario s17): GREEN 3/3 after two app fixes found by it:
+  server.mjs httpAllowHalfOpen (bridge half-close aborted requests) and the upload piece route outside
+  the middleware (Next's body copy broke streaming bodies; gate in lib/gate.ts, run by the route)
 
-## Next (me)
-1. merge sim branch when S16/S17 ran; rerun S17 real once on the final build
-2. report the branch to MAIN for P1 (integrator); tell P3 about peers::start/send signatures
+## In flight (08:xx)
+- final suite: ~/.cache/p2-reach/final-suite.sh → ~/.cache/p2-reach/final/summary.txt
+
+## Next
+1. when the suite is green: report artifact + report to MAIN for P1 (integrator)
+2. open questions for the owner/lead: hold-to-talk on a session page (voice + spoken?), photos shrunk
