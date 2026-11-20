@@ -40,3 +40,23 @@
 - C5 review: 6 faults fixed (4592b809), tests per fault, cargo test 123/123.
 - sim/restart-e2e.py GREEN 22/22; HARNESS=1 GREEN 28/28 (real Claude Code haiku session cut mid-Bash: same conversation id, resent once, answered).
 - NEXT: merge tree-next(be8134ae) ← p1-hub, p2-reach(03a8b7eb), p3-tree(d13e6c66), ui-main-no-who-filter(b003241c); add `fable` to harness models (first, strongest). Then cargo test + tree-e2e + restart-e2e, deploy via preview-up.sh, S14 both doors + mic, move P1–P5 to fable, send P2 its lead-next.md message.
+- 12:20 merged into p1-hub: tree-next be8134ae, p2-reach 03a8b7eb, p3-tree d13e6c66 (conflicts peers/tree/main/sim resolved), ui-main-no-who-filter b003241c, fable first. Green: cargo 146/146, tree-e2e 131/131, restart-e2e 22/22, trunk-full full + s17 (probe now sends the peer token), trunk-rtc, who-wrote on twin p1m (Pixel 7). tree-next fast-forwarded to p1-hub.
+- NEXT: release folder from p1-hub build → preview-up.sh <binary> (cuts my turn; read ~/.cache/root-sim/preview/preview-up.log) → app :8101 + public app from new release → S14 both doors + mic → P1–P5 to fable → P2 message from lead-next.md (pacing: max 2 running).
+- 12:3x DEPLOY of tree-next 5edbb05c, release R2 = 20261120-1214-7c3eff7c (~/.local/share/yggdrasil/hub/releases/). Steps:
+  1. ~/Work/tree-next/scripts/preview-up.sh ~/.local/share/yggdrasil/hub/releases/20261120-1214-7c3eff7c/bin/yggdrasil   ← CUTS THIS TURN; log ~/.cache/root-sim/preview/preview-up.log
+  2. scripts/hub-units.sh deploy 20261120-1214-7c3eff7c   (public app, bridge, voice agent)
+  3. scripts/hub-units.sh tailnet-up   (:8101 from the release; way back: tailnet-back) — tested on :8109 OK
+  4. S14: /api/build both doors = x9449bAf62qkHlr_B9inB; MAIN context summary 200; test session smoke; live-door spec AP + PW_DOOR=tailnet (mic)
+  5. P1–P5 → fable (POST /api/session/<id>/model {"model":{"id":"fable","providerID":"claude"}})
+  6. P2 message from lead-next.md (if ≤1 other package session running)
+- 12:20 steps 1–3 done: brain R2 live (4 cut turns resent once), hub-units deploy R2, tailnet-up (:8101 = hub-app-tailnet; rc-preview-pwa gone, way back tailnet-back). Both doors build x9449bAf62qkHlr_B9inB.
+- 12:25 S14 both doors PASS (mic); P1–P5 → fable; P2 message WAITING (P1+P4 running); owner pair link ap-pair.html until 15:20 (delete when used/expired); milestone posted to MAIN inbox. NEXT: stage B.
+
+## STAGE B (11-20 12:45)
+- L14 withdrawn (owner 12:19): no run cap. Lead sent P2, P5 itself; P3's stage-B message (lead-next.md "To P3") is MINE to send after stage B.
+- scripts/hub-units.sh: units hub-brain (drain in ExecStop, Restart=always), hub-librarian, hub-cclive, + existing hub-voice-agent/app/app-tailnet/bridge; `switch` (backup → drain → stop rootsim-preview + rc-preview-{librarian,cclive,agent} → enable+start hub units → health → linger; on failure stageb_back puts the transient units back), `stageb-back`, `health`, `deploy <id>` (brain too, health-based rollback).
+- ~/.config/yggdrasil/hub/brain.env = preview brain.env + YGG_ROOT_NAME=omarchy, YGG_PEERS_FROM=http://127.0.0.1:4503/_roots, YGG_PEER_TOKEN.
+- Tested: unit shape on a scratch copy (drain → restart → resend once; kill -9 → back in 2 s). Old root name only in message text (no stored links).
+- preview-up.sh refuses once hub-brain is enabled (says: hub-units.sh deploy).
+- RUN: ~/Work/tree-next/scripts/hub-units.sh switch   ← CUTS MY TURN. Log: ~/.local/share/yggdrasil/hub/logs/switch.log
+- AFTER (when resent): read switch.log; hub-units.sh health + status; loginctl show-user dweeb_xyz -p Linger; live-door spec both doors (mic); S14; update work/AGENTS.md rule 2 (deploy = hub-units.sh deploy); send P3 its message; report to MAIN: stage B done + reboot window question + pairing link (ap-pair.html valid until 15:20).
