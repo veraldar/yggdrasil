@@ -40,3 +40,15 @@ This worktree (p5-site, from tree-next): films scripts (sim/films/), scripts/sit
    v0.9.1 assets: a local mirror via YGG_RELEASES until the draft exists)
 2. sim/films/: Playwright film scripts on a twin (talk first: real voice via sim/voice rigs)
 3. scripts/site-deploy.sh (AP-20): back up on VPS, copy, curl+grep, undo. Publish only on the integrator's word.
+
+## 11-20 afternoon (Fable 5.2) — films
+- model step (L15 revised): veraldar-site src/_model.html, included by home / add-linux / add-mac / add-windows
+  (d822a0f). ALIGN with P4's installer wording when its branch has it (grep 'Same as the home root' on p4-*).
+- films: sim/films/ = script.json (the lines), film_upstream.py (scripted model on top of the mock),
+  films.mjs (driver: talk, tree, file), cut.py (stage + captions + checks), record.sh (one command).
+  The world: sim/trunk-rtc-e2e.sh --scenario films (my edit: two more roots studio + workshop, own MAINs).
+  Builds in THIS worktree: root (done 12:39), branch/.next (done), trunk (unit p5-trunk-build → .build-trunk.log).
+  Long jobs run as systemd --user units (p5-*): they survive a brain restart; background shells do not.
+- NEXT: sim/films/record.sh → look at each <name>-sheet.jpg → fix selectors/timing → copy mp4/webm/jpg into
+  veraldar-site/films/ and replace the placeholder posters in src/index.html with <video> → preview → report to P1.
+- the first screen's words WAIT for the owner's pick (story propositions, GLM session ses_f24ba4a5…).
