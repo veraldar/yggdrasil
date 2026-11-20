@@ -193,7 +193,8 @@ try {
     must(f.hash === pdf.sha256 && Number(f.size) === pdf.size, `file part ${JSON.stringify({ hash: f.hash, size: f.size, url: String(f.url).slice(0, 40) })} ≠ sha ${pdf.sha256.slice(0, 12)} size ${pdf.size}`);
     must(!String(f.url || '').startsWith('data:'), 'the file rode as a data: URL');
     const blob = join(LABDATA, 'data', 'files', 'blobs', pdf.sha256);
-    must(existsSync(blob) && sha(readFileSync(blob)) === pdf.sha256, `lab has no files/blobs/${pdf.sha256.slice(0, 12)}…`);
+    // lab pulls it from home before the turn runs (in pieces, over the tunnel): give it the time
+    await poll(() => existsSync(blob) && sha(readFileSync(blob)) === pdf.sha256, 90_000, `lab has no files/blobs/${pdf.sha256.slice(0, 12)}…`, 1000);
     return `one message on lab: ${f.filename} ${f.mime} ${f.size} bytes, sha256 equal, ref ${f.url} (root ${f.root})`;
   });
 
