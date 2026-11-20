@@ -14,11 +14,13 @@
  *  tree  the roots key → the list of computers → studio: its MAIN, its sessions → a typed turn there
  *  file  the paperclip → a PDF → a question → the answer links a file it made → the file opens
  *
- * Each film: $FILMS_OUT/raw/<name>.webm (the phone's screen, as Playwright recorded it) and
- * $FILMS_OUT/<name>.json (the cut marks and captions, in seconds of that video). sim/films/cut.py
- * makes the films from those. FILMS_ONLY=talk,tree picks films.
+ * Each film: $FILMS_OUT/raw/<name>/f*.jpg + raw/<name>.ffconcat (the phone's screen, every frame the
+ * browser painted, at the phone's own resolution, with the browser's timestamps — Playwright's own
+ * video is a quarter of that and its clock is not ours) and $FILMS_OUT/<name>.json (the cut marks
+ * and captions, in seconds from the first frame). sim/films/cut.py makes the films from those.
+ * FILMS_ONLY=talk,tree picks films.
  */
-import { appendFileSync, copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -43,7 +45,6 @@ const ONLY = env('FILMS_ONLY').split(',').filter(Boolean);
 const wants = (f) => !ONLY.length || ONLY.includes(f);
 mkdirSync(join(OUT, 'raw'), { recursive: true });
 
-const VIDEO = { width: 824, height: 1678 }; // the Pixel 7's 412 × 839, twice over
 const LEAD = 1.2; // silence in the WAV before the sentence
 
 /** a dot where the finger is: touches are invisible on a recording */
@@ -99,14 +100,26 @@ async function phoneFor({ wav, storage, film }) {
         { name: 'oz-mode', value: 'text' },
       ] }],
     },
-    ...(film ? { recordVideo: { dir: join(OUT, 'raw', `.${film}`), size: VIDEO } } : {}),
   });
   if (film) await ctx.addInitScript(FINGER);
   ctx.on('page', (p) => p.on('console', (m) => appendFileSync(join(STATE, 'films-phone-console.log'), `${m.type()} ${m.text().slice(0, 400)}\n`)));
   const page = await ctx.newPage();
-  const t0 = Date.now(); // the recording starts with the page
   const marks = [];
-  const now = () => Math.round((Date.now() - t0) / 10) / 100;
+  const now = () => Date.now() / 1000; // epoch seconds: the clock of the frames' own timestamps
+  const frames = [];
+  let cdp = null;
+  if (film) {
+    const dir = join(OUT, 'raw', film);
+    mkdirSync(dir, { recursive: true });
+    cdp = await ctx.newCDPSession(page);
+    cdp.on('Page.screencastFrame', (ev) => {
+      const file = `f${String(frames.length).padStart(5, '0')}.jpg`;
+      writeFileSync(join(dir, file), Buffer.from(ev.data, 'base64'));
+      frames.push({ t: ev.metadata.timestamp, file });
+      cdp.send('Page.screencastFrameAck', { sessionId: ev.sessionId }).catch(() => {});
+    });
+    await cdp.send('Page.startScreencast', { format: 'jpeg', quality: 92, everyNthFrame: 1 });
+  }
   screens.length = 0;
   screens.push(['phone', page]);
   return {
@@ -117,14 +130,26 @@ async function phoneFor({ wav, storage, film }) {
     mark: (k) => marks.push({ t: now(), mark: k }),
     /** close the phone; the video and its marks land in $FILMS_OUT */
     async done(extra = {}) {
-      const video = page.video();
+      const closed = now();
+      if (cdp) await cdp.send('Page.stopScreencast').catch(() => {});
       await ctx.close();
       await browser.close();
       if (!film) return '';
-      const raw = join(OUT, 'raw', `${film}.webm`);
-      copyFileSync(await video.path(), raw);
-      writeFileSync(join(OUT, `${film}.json`), JSON.stringify({ name: film, title: SCRIPT.films[film].title, video: `raw/${film}.webm`, size: VIDEO, marks, ...extra }, null, 2));
-      return raw;
+      must(frames.length > 10, `only ${frames.length} frames of ${film} were captured`);
+      const t0 = frames[0].t;
+      const rel = (t) => Math.round((t - t0) * 1000) / 1000;
+      const lines = ['ffconcat version 1.0'];
+      frames.forEach((f, i) => {
+        const next = i + 1 < frames.length ? frames[i + 1].t : closed;
+        lines.push(`file ${film}/${f.file}`, `duration ${Math.max(0.001, next - f.t).toFixed(4)}`);
+      });
+      lines.push(`file ${film}/${frames[frames.length - 1].file}`); // the concat demuxer wants the last one named twice
+      writeFileSync(join(OUT, 'raw', `${film}.ffconcat`), lines.join('\n') + '\n');
+      writeFileSync(join(OUT, `${film}.json`), JSON.stringify({
+        name: film, title: SCRIPT.films[film].title, frames: `raw/${film}.ffconcat`, count: frames.length, length: rel(closed),
+        marks: marks.map((m) => ({ ...m, t: rel(m.t) })), ...extra,
+      }, null, 2));
+      return `${frames.length} frames`;
     },
   };
 }
@@ -280,7 +305,7 @@ if (wants('file')) {
   await step('file', `the paperclip → ${F.file} → "${F.type}" → the answer links a file it made → it opens`, async () => {
     must(paired, 'needs F0.1');
     const pdf = join(STATE, F.file);
-    execFileSync('python3', [join(HERE, '..', 'reach', 'make_pdf.py'), pdf, '--mb', '1', '--marker', 'october'], { stdio: 'pipe' });
+    execFileSync('python3', [join(HERE, '..', 'reach', 'make_pdf.py'), pdf, '--mb', '0.2', '--marker', 'october'], { stdio: 'pipe' });
     const P = await phoneFor({ storage: paired, film: 'file' });
     const phone = P.page;
     await phone.goto(`${AP}/`);
@@ -305,8 +330,8 @@ if (wants('file')) {
     await sleep(1200);
     const alert = await phone.locator('main [role="alert"]').allInnerTexts().catch(() => []);
     must(!alert.join(' ').trim(), `the composer says: ${alert.join(' ').slice(0, 200)}`);
-    await send(phone, F.type);
     P.cap('Ask about it.');
+    await send(phone, F.type);
     const link = phone.locator('[data-mi] a[href*="october-summary.html"]').last();
     await link.waitFor({ timeout: 120_000 });
     P.cap('It answers, and makes a file.');

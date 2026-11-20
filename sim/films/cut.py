@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """cut.py — from a recording to a film for the site (stdlib + ffmpeg).
 
-    cut.py DIR [name …]      DIR = $FILMS_OUT of sim/films/films.mjs: <name>.json + raw/<name>.webm
+    cut.py DIR [name …]      DIR = $FILMS_OUT of sim/films/films.mjs: <name>.json + raw/<name>.ffconcat
 
-Per film: cut from its "start" to its "end" mark, the phone's screen on a dark 720 × 1280 stage,
+Per film: cut from its "start" to its "end" mark, the phone's screen on a dark 1080 × 1920 stage,
 the captions burned in under it (no sound is needed to follow), then
     <name>.mp4 (h264) · <name>.webm (vp9) · <name>.jpg (the poster: the frame at its "poster" mark)
     <name>-sheet.jpg   one frame per second, in one picture: what a person checks by eye
@@ -13,13 +13,13 @@ Exit 0 only if every film passes. Font: FILMS_FONT (default: the site's Commit M
 """
 import json, os, pathlib, re, subprocess, sys, textwrap
 
-W, H = 720, 1280                    # the stage, 9:16
-PH = 1040                           # the phone's height on it
-PW = int(PH * 412 / 839) // 2 * 2   # 510
-PX, PY = (W - PW) // 2, 24
-BAND_Y = PY + PH + 22               # the captions' band
+W, H = 1080, 1920                   # the stage, 9:16
+PH = 1560                           # the phone's height on it
+PW = int(PH * 412 / 839) // 2 * 2   # 766
+PX, PY = (W - PW) // 2, 36
+BAND_Y = PY + PH + 34               # the captions' band
 BG, INK, DIM, EDGE = "0x080810", "0xe8e8f0", "0x8888aa", "0x2a2a3a"
-SIZE, LINE_H, WRAP = 29, 40, 36
+SIZE, LINE_H, WRAP = 43, 60, 38
 FONT = os.environ.get("FILMS_FONT") or os.path.expanduser("~/Work/veraldar-site/fonts/commit-mono-400-regular.woff")
 MAX_S = 30.0
 
@@ -55,9 +55,9 @@ def film(d, name):
     work = d / f".{name}"
     work.mkdir(exist_ok=True)
 
-    f = [f"[0:v]trim=start={start}:end={end},setpts=PTS-STARTPTS,fps=30,scale={PW}:{PH}:flags=lanczos[ph]",
+    f = [f"[0:v]fps=30,trim=start={start}:end={end},setpts=PTS-STARTPTS,scale={PW}:{PH}:flags=lanczos[ph]",
          f"color=c={BG}:s={W}x{H}:r=30:d={length:.2f}[bg]",
-         f"[bg][ph]overlay={PX}:{PY}:shortest=1,drawbox=x={PX - 2}:y={PY - 2}:w={PW + 4}:h={PH + 4}:color={EDGE}:t=2[st0]"]
+         f"[bg][ph]overlay={PX}:{PY}:shortest=1,drawbox=x={PX - 3}:y={PY - 3}:w={PW + 6}:h={PH + 6}:color={EDGE}:t=3[st0]"]
     last, n = "st0", 0
     for a, b, text in caps:
         lines = textwrap.wrap(text, WRAP)[:4]
@@ -71,15 +71,15 @@ def film(d, name):
     f.append(f"[{last}]fade=t=in:st=0:d=0.25,fade=t=out:st={max(0, length - 0.3):.2f}:d=0.3,format=yuv420p[v]")
     graph = work / "graph.txt"
     graph.write_text(";\n".join(f))
-    raw = d / meta["video"]
+    raw = d / meta["frames"]
     mp4, webm, jpg, sheet = (d / f"{name}{x}" for x in (".mp4", ".webm", ".jpg", "-sheet.jpg"))
-    base = ["ffmpeg", "-v", "error", "-y", "-i", str(raw), "-/filter_complex", str(graph), "-map", "[v]", "-an"]
-    run(base + ["-c:v", "libx264", "-preset", "slow", "-crf", "24", "-movflags", "+faststart", str(mp4)])
-    run(["ffmpeg", "-v", "error", "-y", "-i", str(mp4), "-an", "-c:v", "libvpx-vp9", "-crf", "36", "-b:v", "0", "-row-mt", "1", "-deadline", "good", "-cpu-used", "2", str(webm)])
+    base = ["ffmpeg", "-v", "error", "-y", "-f", "concat", "-safe", "0", "-i", str(raw), "-/filter_complex", str(graph), "-map", "[v]", "-an"]
+    run(base + ["-c:v", "libx264", "-preset", "slow", "-crf", "25", "-movflags", "+faststart", str(mp4)])
+    run(["ffmpeg", "-v", "error", "-y", "-i", str(mp4), "-an", "-c:v", "libvpx-vp9", "-crf", "38", "-b:v", "0", "-row-mt", "1", "-deadline", "good", "-cpu-used", "2", str(webm)])
     run(["ffmpeg", "-v", "error", "-y", "-ss", f"{min(poster_t, length - 0.2):.2f}", "-i", str(mp4), "-frames:v", "1", "-q:v", "3", str(jpg)])
-    cols = 8
+    cols = 6
     rows = -(-int(length + 1) // cols)
-    run(["ffmpeg", "-v", "error", "-y", "-i", str(mp4), "-vf", f"fps=1,scale=180:-2,tile={cols}x{rows}", "-frames:v", "1", "-q:v", "4", str(sheet)])
+    run(["ffmpeg", "-v", "error", "-y", "-i", str(mp4), "-vf", f"fps=1,scale=360:-2,tile={cols}x{rows}", "-frames:v", "1", "-q:v", "4", str(sheet)])
 
     # ---- the checks
     problems = []
