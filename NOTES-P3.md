@@ -25,9 +25,20 @@ Build with `TMPDIR=~/.cache/p3-tmp` (/tmp is a shared 16 GB tmpfs, near full). R
 - sim/trunk-full-e2e.sh TRUNK-FULL: GREEN, 31/31 steps (13 new: 7a-7i, 7s, 7z); screenshots artifacts/p3-s10-*.png
 - old public brain's data backed up: ~/.local/share/yggdrasil-backups/omarchy-lab-data-20261120-001112 (+ .sha256)
 
-## Waiting
-- omarchy-lab + a Linux container root on the REAL trunk: after P1 reports stage B (home renamed `omarchy`)
+## 11-21 00:05 — session "P3 whole tree contd" (ses_f30935…; the old P3 conversation is locked)
+- Post-merge check on tree-next e64a4527 (worktree ~/Work/p3-post-merge): cargo test 147/147, sim/tree-e2e.py GREEN 131/131
+  (--port-base 18790). Live release 20261120-2341-a8b73cbf = a8b73cbf ⊃ 67074f36 (p2-spoken) + 029232f9 (p5-site). wg-on live 23:51 (P1).
+- omarchy-lab: join.sh --hub https://ap.veraldar.org --name omarchy-lab --dir ~/.local/share/yggdrasil-root-lab
+  --upstream-env DIR/upstream.env --brain-bin/--net-bin = the live release's bins --no-start, run under env -i (no session YGG_* leak).
+  Ports 4180/4181. Old data (3 sessions) copied into DIR/data, sha256 OK. YGG_ROOT_NOTE fixed (was "the hub: omarchy").
+  Request 1: code 5C5Q-P5HP, key a765-4ad6-f78e, expires 00:08:54 — owner asked through MAIN.
+  AFTER approval: re-run the same join.sh without --no-start → systemd units yggdrasil-root-{brain,dial,wg}; check GET /root on home.
+- Linux container: Debian 12 ON OMARCHY (plan line 742: "a Debian 12 container on omarchy with only TCP 443 out"), not on the VPS.
+  Image p3-debian-root:12 (~/.cache/p3-ct/image; egress tcp/443+dns; user ygg; restart re-runs join.sh). Bins built in
+  ygg-release-build:bullseye from e64a4527 into ~/.cache/p3-ct/target (own cargo registry copy; P4's cache untouched).
 
 ## Next
-1. when P1 says stage B is done: join.sh --name omarchy-lab --dir ~/.local/share/yggdrasil-root-lab --no-start,
-   check the data path in its brain.env, copy the backup in, start; the owner approves on the phone
+1. lab approved → start it, see it in /root on home + its MAIN + 3 sessions.
+2. container: docker run -d --name p3-debian-root --hostname debian-box --cap-add NET_ADMIN --restart unless-stopped
+   -v ~/.cache/p3-ct/src:/src:ro -v <bins>:/bins:ro p3-debian-root:12 ; docker exec -u ygg … join.sh --hub https://ap.veraldar.org
+   --upstream-env … ; owner approves; S10 on the phone.
