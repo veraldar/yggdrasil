@@ -30,11 +30,11 @@
  * S16_SAY / S16_KEYWORDS: the sentence and its key words. (S16_ROOT + S16_WAYS, the older knobs,
  * still pick the walks: S16_ROOT=home S16_WAYS=hold = hold@home.)
  */
-import { appendFileSync, existsSync, readFileSync } from 'node:fs';
+import { appendFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
   STATE, brain, chromium, devices, env, failed, hydrated, must, pair, phoneFetch, poll, renderSay,
-  rowOf, screens, sleep, step, sttOf, textOf, tool, touchDown, words,
+  rowOf, screens, sleep, step, sttOf, textOf, tool, touchDown, wavOf, words,
 } from './rig-lib.mjs';
 
 const AP = env('PW_AP_URL');
@@ -214,8 +214,12 @@ async function walk(w, P) {
     }, 90_000, `${ROOT} never answered the voice turn`);
     await poll(() => roomTts.chunks.length > 0, 60_000,
       `no reply audio arrived over the room (${ROOT} answered "${textOf(reply).slice(0, 60)}"; ${way})`);
+    // kept as evidence: the phone's screen while the answer is being said, and the sound it got
+    await sleep(1500);
+    await phone.screenshot({ path: join(STATE, `s16-${x}-spoken.png`) }).catch(() => {});
     await poll(() => Date.now() - roomTts.last > 4_000, 120_000, 'the reply audio never ended', 500);
     const pcm = Buffer.concat(roomTts.chunks);
+    writeFileSync(join(STATE, `s16-${x}-reply.wav`), wavOf(pcm, roomTts.rate));
     must(pcm.length > 16_000, `${pcm.length} bytes of reply audio`);
     must(httpsTts.length === 0, `/api/tts/stream over https: ${JSON.stringify(httpsTts)}`);
     const diag = join(APP, '.diag', `tts-${new Date().toISOString().slice(0, 10)}.log`);
@@ -271,6 +275,7 @@ async function walk(w, P) {
     const head = textOf(got.a).replace(/\s+/g, ' ').trim().slice(0, 24);
     // …and silence: long enough for a spoken reply to have started (the held one's first sound came well inside this)
     await sleep(12_000);
+    await phone.screenshot({ path: join(STATE, `s16-${x}-typed.png`) }).catch(() => {});
     must(roomTts.chunks.length === 0 && httpsTts.length === 0, `the typed turn's answer was spoken: ${roomTts.chunks.length} chunk(s) over the room, https ${JSON.stringify(httpsTts)}`);
     return `typed turn stored without modality · "${head}…" on screen · 0 bytes of speech in 12 s`;
   });
