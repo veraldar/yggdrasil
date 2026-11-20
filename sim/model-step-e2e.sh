@@ -242,7 +242,7 @@ row other-local $([ $ok = 1 ] && echo PASS || echo FAIL) "arrived over http 8080
 say "case flag-zai (no terminal)"
 mkcase flag-zai
 docker exec -u "$HU" -e HOME=$HH -e YGG_UPSTREAM_API_KEY=$KZ msm-flag-zai \
-  bash -c "cd ~/yggdrasil-$VER/root/install && YGG_UPSTREAM_API_KEY=$KZ bash install.sh --brain-only --now </dev/null" \
+  bash -c "cd ~/yggdrasil-$VER/root/install && YGG_UPSTREAM_API_KEY=$KZ bash install.sh --brain-only --now --model-provider zai </dev/null" \
   >"$STATE/log/flag-zai-install.log" 2>&1
 turn flag-zai flag-zai-turn.log
 ev=$(uplog | grep api.z.ai | grep glm-5.3-flash | head -1 | sed "s/$KZ/<key>/")
@@ -266,12 +266,15 @@ sw=$(sweep flag-model "$KA"); case "$sw" in "mode=600 inenv=1 elsewhere=[]") ;; 
 [ -n "$ev" ] || { ok=0; ev="(no claude-haiku-5-5 line at the upstream)"; }
 row flag-model $([ $ok = 1 ] && echo PASS || echo FAIL) "$ev"
 
+wc -l < <(docker exec "$UP" cat /up/https.log /up/http.log 2>/dev/null) >"$STATE/log/flag-nokey-marker"
 say "case flag-nokey (openai, no key in the environment: refuse, nothing written)"
 mkcase flag-nokey
 docker exec -u "$HU" -e HOME=$HH msm-flag-nokey \
   bash -c "cd ~/yggdrasil-$VER/root/install && bash install.sh --brain-only --now --model-provider openai </dev/null; echo RC=\$?" \
   >"$STATE/log/flag-nokey-install.log" 2>&1
-n=$(uplog | grep -c api.openai.com || true)
+n_before=$(cat "$STATE/log/flag-nokey-marker" 2>/dev/null || echo 0)   # the openai case hit api.openai.com too
+n=$(( $(uplog | wc -l) - n_before ))
+
 ev=$(grep -o 'YGG_UPSTREAM_API_KEY[^;]*' "$STATE/log/flag-nokey-install.log" | head -1)
 rc=$(sed -n 's/.*RC=\([0-9]*\).*/\1/p' "$STATE/log/flag-nokey-install.log" | tail -1)
 nowritten=$(docker exec -u "$HU" msm-flag-nokey bash -c '[ ! -e ~/.config/yggdrasil/yggdrasil.env ] && echo none || grep -c "YGG_UPSTREAM_API_KEY=." ~/.config/yggdrasil/yggdrasil.env' 2>&1)
