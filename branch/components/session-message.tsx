@@ -23,6 +23,7 @@ export type Msg = {
   log?: string[]; // full log only: this message's tool calls, one line each
   id?: string;
   parent?: string; // assistant: the message it answers
+  modality?: 'voice'; // user: a turn that was spoken (held or hands-free), not typed
   from?: Sender; // user: another session wrote it, not the owner
   auto?: boolean; // user: the brain itself (a report, a wake-up)
 };

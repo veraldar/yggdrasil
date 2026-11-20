@@ -1746,6 +1746,10 @@ export default function SessionView({
       return;
     }
     if (modeRef.current !== 'free') await mic(false); // hands-free keeps listening
+    // the reply to this held turn is spoken (the walk's own held turn speaks itself)
+    if (modeRef.current !== 'free' && !['practice', 'sent'].includes(first)) {
+      heldRef.current = { before: holdBeforeRef.current };
+    }
     firstSent('hold');
     stickRef.current = true;
     setBusy(true); // cleared when the run state settles (see poller)
@@ -2364,6 +2368,50 @@ export default function SessionView({
   // the release then commits nothing — so a hold counts from its press
   const holdBeforeRef = useRef(0);
 
+  // L16 (owner rule 11-20): a turn you speak is answered aloud, a turn you type in writing.
+  // Hands-free speaks its own replies (the free cycle). A HELD turn in text mode is spoken
+  // here, once: the completed reply to the spoken user message that landed after the press
+  // (the brain marks it `voice`; a typed message never is, so it is never spoken for a hold
+  // that caught nothing). The written reply stays on screen as always.
+  const heldRef = useRef<{ before: number; user?: string } | null>(null);
+  useEffect(() => {
+    const h = heldRef.current;
+    if (!h) return;
+    if (modeRef.current === 'free') {
+      heldRef.current = null; // hands-free came on meanwhile: its cycle speaks the reply
+      return;
+    }
+    let ui = h.user ? msgs.findIndex((m) => m.id === h.user) : -1;
+    if (ui < 0) {
+      ui = msgs.findIndex(
+        (m) =>
+          m.role === 'user' &&
+          m.modality === 'voice' &&
+          m.time > h.before &&
+          !m.queued &&
+          !m.from &&
+          !m.auto
+      );
+      if (ui < 0) return;
+      h.user = msgs[ui].id;
+    }
+    const u = msgs[ui];
+    const after = msgs.slice(ui + 1).filter((m) => m.role === 'assistant' && m.text.trim());
+    // its own reply (the message it answers); a brain that does not say: the next one
+    const a = after.find((m) => m.parent && m.parent === u.id) || after.find((m) => !m.parent);
+    if (!a || a.done === false) return;
+    heldRef.current = null;
+    if (a.time <= lastHeard(slug)) return; // the first-turn walk already said it
+    diagEvent('voice', 'held turn: its reply is spoken');
+    markHeard(slug, a.time);
+    try {
+      startSpeech(a.text, slug);
+    } catch {
+      /* the deck could not start: the reply is on screen */
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [msgs, slug]);
+
   /** pttUp, a typed send, or a hands-free commit ("over" / the bars): the
    *  turn is going out, from here a message must land. A typed turn may start
    *  before the mic was ever asked for — or after it was refused: typing never
@@ -2561,6 +2609,7 @@ export default function SessionView({
       'busy',
       `abort ${slug} after ${Math.max(0, Math.round((Date.now() - busyStartRef.current) / 1000))}s (stop btn)`
     );
+    heldRef.current = null; // stopped by hand: what is left of the reply is not said aloud
     try {
       await fetch(`/api/session/${slug}/abort`, { method: 'POST', headers: pinHeaders() });
     } catch {

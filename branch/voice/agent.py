@@ -427,9 +427,11 @@ class OpenCodeStream(LLMStream):
         # mode context rides the payload (req 10-02): appended AFTER the
         # cumulative-dedup bookkeeping so last_prompt stays the raw speech
         mode = str(self._oc.mode_state.get("mode") or "text")
-        # hands-free: a root takes the turn as `modality: voice` (its own hidden note — nothing
-        # extra in the user's words); any other brain still gets the text tag
-        voice = mode == "free" and await self._oc.speaks_modality()
+        # L16 (owner rule 11-20): a turn you speak is answered aloud — held or hands-free, every
+        # turn that comes through here was spoken. A root takes it as `modality: voice` (its own
+        # hidden note — nothing extra in the user's words); any other brain still gets the text
+        # tag, hands-free only as before
+        voice = await self._oc.speaks_modality()
         if mode == "free" and not voice:
             send = send + CTX_TAG
         logger.info("turn → opencode (mode=%s)", mode)
