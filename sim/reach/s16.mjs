@@ -1,5 +1,6 @@
 #!/usr/bin/env node
-/* s16.mjs — S16: talk by mic inside a session that lives on ANOTHER root (lead-review L10).
+/* s16.mjs — S16: talk by mic inside a session — on the home root and on ANOTHER root (lead-review
+ * L10), and be answered the way you asked (L16): a spoken turn aloud, a typed turn in writing.
  *
  * Run by `sim/trunk-rtc-e2e.sh --scenario s16`, AT HOME (the box's namespace), like the rtc spec:
  * the phone is its own Chromium inside the phone's namespace (PW_PHONE_CHROME wraps nsenter); its
@@ -12,20 +13,22 @@
  * brains: home (the app's OPENCODE_URL — the voice agent only ever talks to home) and lab.
  *
  *  S16.1  the box console's QR → the phone pairs through the ap → its list
- *  S16.2  setup: home's MAIN starts two sessions on root lab → proxies on home
- *  Two ways of talking, each on its own session (a fresh one: no turn of the other in it):
+ *  S16.2  setup: home's MAIN starts one session per walk (on home, or on root lab → a proxy on home)
+ *  A walk = a way of talking @ the root its session lives on, each on a fresh session.
+ *  S16_WALKS, default hold@home,hold@lab,free@lab — step ids carry both letters (hh, hl, fl):
  *   hold (h): the mic key HELD while the sentence plays (push to talk, text mode)
  *   free (f): the mic key TAPPED (hands-free), the sentence + "over" commits the turn
- *  S16.x3 Ása taps the session on her list → its page, the mic key on it
- *  S16.x4 she talks → lab stores exactly ONE user message with those words; home keeps no copy
- *  S16.x5 …and that message is marked spoken (info.modality = "voice")
- *  S16.x6 the answer is spoken on the phone: reply audio over the voice room (never https through
- *         the VPS), the bytes the box's TTS made, its STT = lab's reply
- *  S16.x7 still once, 20 s later; reading the proxy on home shows lab's turn
+ *  S16.xr3 Ása taps the session on her list → its page, the mic key on it
+ *  S16.xr4 she talks → that root stores exactly ONE user message with those words (a proxy: home
+ *          keeps no copy)
+ *  S16.xr5 …and that message is marked spoken (info.modality = "voice")
+ *  S16.xr6 the answer is spoken on the phone: reply audio over the voice room (never https through
+ *          the VPS), the bytes the box's TTS made, its STT = that root's reply
+ *  S16.xr7 still once, 20 s later; reading the session on home shows the turn
+ *  S16.hr8 (hold walks) she then TYPES a turn there → the answer comes in writing, nothing is said
  *
- * S16_ROOT=home: the CONTROL — the same walks on sessions that live on home (no proxy), so a
- * failure can be told apart: package 2's (only with lab) or the app's (both).
- * S16_WAYS=hold,free (default both) · S16_SAY / S16_KEYWORDS: the sentence and its key words.
+ * S16_SAY / S16_KEYWORDS: the sentence and its key words. (S16_ROOT + S16_WAYS, the older knobs,
+ * still pick the walks: S16_ROOT=home S16_WAYS=hold = hold@home.)
  */
 import { appendFileSync, existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -42,18 +45,23 @@ const LAB = env('PW_LAB');
 const VOICE = env('PW_VOICE');
 const PHONE_CHROME = env('PW_PHONE_CHROME');
 const APP = env('APP_DIR');
-const ROOT = env('S16_ROOT', 'lab');
-const WAYS = env('S16_WAYS', 'hold,free').split(',').filter(Boolean);
+const OLD = env('S16_ROOT', '') || env('S16_WAYS', '');
+const WALKS = (OLD
+  ? env('S16_WAYS', 'hold,free').split(',').filter(Boolean).map((w) => `${w}@${env('S16_ROOT', 'lab')}`)
+  : env('S16_WALKS', 'hold@home,hold@lab,free@lab').split(',').filter(Boolean)
+).map((k) => ({ key: k, way: k.split('@')[0], root: k.split('@')[1] }));
 const SAY = env('S16_SAY', 'please add oat milk and eggs to the shopping list');
 const KEY = words(env('S16_KEYWORDS', 'oat milk eggs shopping list'));
 must(AP && STATE && BASE && HOME && VOICE && PHONE_CHROME && APP, 'run by sim/trunk-rtc-e2e.sh --scenario s16');
-must(ROOT === 'home' || LAB, 'S16_ROOT=lab needs PW_LAB');
-const WHERE = ROOT === 'lab' ? LAB : HOME; // the brain whose store holds the real session
-const TITLES = { hold: `${ROOT} notes`, free: `${ROOT} talk` };
+must(WALKS.length && WALKS.every((w) => ['hold', 'free'].includes(w.way) && ['home', 'lab'].includes(w.root)), `S16_WALKS ${JSON.stringify(WALKS)}`);
+must(WALKS.every((w) => w.root === 'home') || LAB, 'a walk on lab needs PW_LAB');
+const whereOf = (root) => (root === 'lab' ? LAB : HOME); // the brain whose store holds the real session
+const titleOf = (w) => `${w.root} ${w.way === 'hold' ? 'notes' : 'talk'}`;
+const TYPED = 'now what is seven times six';
 
 const hits = (text) => KEY.filter((w) => words(text).includes(w)).length;
-const userTurns = async (sid) =>
-  ((await brain(WHERE, `/session/${sid}/message`)).body || []).filter((m) => m.info.role === 'user' && hits(textOf(m)) >= 3);
+const userTurns = async (where, sid) =>
+  ((await brain(where, `/session/${sid}/message`)).body || []).filter((m) => m.info.role === 'user' && hits(textOf(m)) >= 3);
 
 const t00 = Date.now();
 const LEAD = 3.0;
@@ -61,7 +69,7 @@ const WAV = {
   hold: await renderSay(VOICE, SAY, join(STATE, 's16-hold.wav'), { lead: LEAD, tail: 45 }),
   free: await renderSay(VOICE, `${SAY}. over`, join(STATE, 's16-free.wav'), { lead: LEAD, tail: 45 }),
 };
-process.stderr.write(`s16: root ${ROOT}, ways ${WAYS}; Ása's WAVs: hold ${WAV.hold.speech.toFixed(1)} s, free ${WAV.free.speech.toFixed(1)} s of speech (+ ${LEAD} s lead, 45 s tail)\n`);
+process.stderr.write(`s16: walks ${WALKS.map((w) => w.key)}; Ása's WAVs: hold ${WAV.hold.speech.toFixed(1)} s, free ${WAV.free.speech.toFixed(1)} s of speech (+ ${LEAD} s lead, 45 s tail)\n`);
 
 const box = await chromium.launch();
 const desk = await box.newContext({ viewport: { width: 1280, height: 900 } });
@@ -126,19 +134,21 @@ async function phoneFor(wavPath, storage) {
 
 let mainId = '';
 let paired = null; // the paired phone's cookies + storage, carried into each launch
-const S = {}; // way → {proxy, real}
+const S = {}; // walk key → {proxy, real}
 
-async function walk(way, P) {
+async function walk(w, P) {
   const { page: phone, roomTts, httpsTts, tokens } = P;
+  const { way, root: ROOT } = w;
+  const WHERE = whereOf(ROOT);
   const wav = WAV[way];
-  const x = way === 'hold' ? 'h' : 'f';
-  const title = TITLES[way];
-  const s = S[way];
+  const x = `${way[0]}${ROOT[0]}`; // hh, hl, fl
+  const title = titleOf(w);
+  const s = S[w.key];
   let turn = null;
   let released = 0;
   const how = way === 'hold' ? 'holds the mic' : 'taps the mic (hands-free) and talks, "over" at the end';
 
-  await step(`S16.${x}3`, `[${way}] Ása taps "${title}" on her list → its page, the mic key on it`, async () => {
+  await step(`S16.${x}3`, `[${way}@${ROOT}] Ása taps "${title}" on her list → its page, the mic key on it`, async () => {
     must(s, 'needs S16.2');
     await phone.goto(`${AP}/`);
     const row = rowOf(phone, title);
@@ -151,7 +161,7 @@ async function walk(way, P) {
     return phone.url().replace(AP, '');
   });
 
-  await step(`S16.${x}4`, `[${way}] she ${how}: "${SAY}" → ${ROOT} stores exactly ONE user message with those words`, async () => {
+  await step(`S16.${x}4`, `[${way}@${ROOT}] she ${how}: "${SAY}" → ${ROOT} stores exactly ONE user message with those words`, async () => {
     must(s && phone.url().includes(s.proxy), `needs S16.${x}3`);
     const mic = phone.getByTestId('composer-mic');
     const t0 = Date.now();
@@ -175,7 +185,7 @@ async function walk(way, P) {
       released = Date.now(); // the turn ends with "over" — no release
     }
     const got = await poll(async () => {
-      const u = await userTurns(s.real);
+      const u = await userTurns(WHERE, s.real);
       return u.length ? u : null;
     }, 90_000, `no user message with the words on ${ROOT} (tokens ${JSON.stringify(tokens)})`);
     turn = got[got.length - 1];
@@ -189,13 +199,13 @@ async function walk(way, P) {
     return `${way === 'hold' ? 'press→mic live' : 'tap→hands-free'} ${liveMs} ms · on ${ROOT} ${Date.now() - t0} ms after the press · heard "${textOf(turn).slice(0, 90)}" (${hits(textOf(turn))}/${KEY.length} key words)`;
   });
 
-  await step(`S16.${x}5`, `[${way}] that message on ${ROOT} is marked spoken: info.modality = "voice"`, async () => {
+  await step(`S16.${x}5`, `[${way}@${ROOT}] that message on ${ROOT} is marked spoken: info.modality = "voice"`, async () => {
     must(turn, `needs S16.${x}4`);
-    must(turn.info.modality === 'voice', `info.modality = ${JSON.stringify(turn.info.modality)}${way === 'hold' ? ' (branch/voice/agent.py marks a turn voice only in hands-free: "voice = mode == \'free\' and …")' : ''}`);
+    must(turn.info.modality === 'voice', `info.modality = ${JSON.stringify(turn.info.modality)}`);
     return 'modality voice';
   });
 
-  await step(`S16.${x}6`, `[${way}] the answer is spoken on the phone: room audio, = the box's TTS bytes, its STT is ${ROOT}'s reply`, async () => {
+  await step(`S16.${x}6`, `[${way}@${ROOT}] the answer is spoken on the phone: room audio, = the box's TTS bytes, its STT is ${ROOT}'s reply`, async () => {
     must(turn, `needs S16.${x}4`);
     const reply = await poll(async () => {
       const ms = (await brain(WHERE, `/session/${s.real}/message`)).body || [];
@@ -203,7 +213,7 @@ async function walk(way, P) {
       return ms.slice(at + 1).find((m) => m.info.role === 'assistant' && m.info.time?.completed) || null;
     }, 90_000, `${ROOT} never answered the voice turn`);
     await poll(() => roomTts.chunks.length > 0, 60_000,
-      `no reply audio arrived over the room (${ROOT} answered "${textOf(reply).slice(0, 60)}"; ${way === 'hold' ? 'a text-mode hold on a session page: the page speaks only in hands-free or the first-turn walk' : 'hands-free'})`);
+      `no reply audio arrived over the room (${ROOT} answered "${textOf(reply).slice(0, 60)}"; ${way})`);
     await poll(() => Date.now() - roomTts.last > 4_000, 120_000, 'the reply audio never ended', 500);
     const pcm = Buffer.concat(roomTts.chunks);
     must(pcm.length > 16_000, `${pcm.length} bytes of reply audio`);
@@ -226,14 +236,43 @@ async function walk(way, P) {
 
   if (way === 'free') await phone.getByTestId('free-exit').tap({ timeout: 5_000 }).catch(() => {});
 
-  await step(`S16.${x}7`, `[${way}] still once, 20 s later; reading it on home shows ${ROOT}'s turn`, async () => {
+  await step(`S16.${x}7`, `[${way}@${ROOT}] still once, 20 s later; reading it on home shows ${ROOT}'s turn`, async () => {
     must(turn, `needs S16.${x}4`);
     await sleep(20_000);
-    const u = await userTurns(s.real);
+    const u = await userTurns(WHERE, s.real);
     must(u.length === 1, `${u.length} user messages with the words on ${ROOT}`);
     const seen = (await brain(HOME, `/session/${s.proxy}/message`)).body || [];
     must(seen.some((m) => m.info?.id === turn.info.id), 'reading the session on home does not show the voice turn');
     return 'one turn';
+  });
+
+  if (way !== 'hold') return;
+  // L16, the other half: a turn she TYPES is answered in writing — the page says nothing
+  await step(`S16.${x}8`, `[${way}@${ROOT}] she then types "${TYPED}" → the answer comes in writing; nothing is said aloud`, async () => {
+    must(turn, `needs S16.${x}4`);
+    roomTts.chunks = [];
+    roomTts.first = roomTts.last = 0;
+    httpsTts.length = 0;
+    const boxEl = phone.getByPlaceholder('message…');
+    await boxEl.tap({ timeout: 30_000 });
+    await boxEl.fill(TYPED, { timeout: 30_000 });
+    await phone.getByRole('button', { name: 'send', exact: true }).tap({ timeout: 30_000 });
+    const got = await poll(async () => {
+      const ms = (await brain(WHERE, `/session/${s.real}/message`)).body || [];
+      const at = ms.findIndex((m) => m.info.role === 'user' && textOf(m).includes('seven times six'));
+      const a = at < 0 ? null : ms.slice(at + 1).find((m) => m.info.role === 'assistant' && m.info.time?.completed);
+      return a ? { u: ms[at], a } : null;
+    }, 90_000, `${ROOT} never answered the typed turn`);
+    must(got.u.info.modality !== 'voice', `the typed turn is marked ${JSON.stringify(got.u.info.modality)}`);
+    // on screen, in writing
+    // (the rig's model echoes the turn: her words show twice — her own bubble and the reply)
+    must(textOf(got.a).includes('seven times six'), `the reply does not echo the typed turn: "${textOf(got.a).slice(0, 80)}"`);
+    await poll(async () => (await phone.getByText('seven times six', { exact: false }).count()) >= 2, 30_000, 'the written answer is not on the screen');
+    const head = textOf(got.a).replace(/\s+/g, ' ').trim().slice(0, 24);
+    // …and silence: long enough for a spoken reply to have started (the held one's first sound came well inside this)
+    await sleep(12_000);
+    must(roomTts.chunks.length === 0 && httpsTts.length === 0, `the typed turn's answer was spoken: ${roomTts.chunks.length} chunk(s) over the room, https ${JSON.stringify(httpsTts)}`);
+    return `typed turn stored without modality · "${head}…" on screen · 0 bytes of speech in 12 s`;
   });
 }
 
@@ -248,11 +287,13 @@ try {
     return `MAIN ${mainId}`;
   });
 
-  await step('S16.2', `setup: home's MAIN starts ${WAYS.map((w) => `"${TITLES[w]}"`).join(' and ')}${ROOT === 'lab' ? ' on root lab → proxies on home' : ' on home (control)'}`, async () => {
+  await step('S16.2', `setup: home's MAIN starts ${WALKS.map((w) => `"${titleOf(w)}"`).join(', ')} (a session on lab = a proxy on home)`, async () => {
     must(mainId, 'needs S16.1');
     const out = [];
-    for (const way of WAYS) {
-      const title = TITLES[way];
+    for (const w of WALKS) {
+      const title = titleOf(w);
+      const ROOT = w.root;
+      const WHERE = whereOf(ROOT);
       const r = await brain(HOME, `/session/${mainId}/message`, {
         method: 'POST',
         body: { parts: [{ type: 'text', text: tool([['session_start', { title, agent: 'build', brief: 'Reply with exactly: READY', ...(ROOT === 'lab' ? { root: 'lab' } : {}) }]]) }] },
@@ -264,16 +305,16 @@ try {
       const real = ROOT === 'lab' ? info?.remote?.id : row.id;
       must(real && (ROOT === 'home' || info?.remote?.root === 'lab'), `"${title}" remote ${JSON.stringify(info?.remote)}`);
       await poll(async () => ((await brain(WHERE, `/session/${real}/message`)).body || []).some((m) => m.info.role === 'assistant' && textOf(m).includes('READY')), 30_000, `the brief of "${title}" never ran on ${ROOT}`);
-      S[way] = { proxy: row.id, real };
+      S[w.key] = { proxy: row.id, real };
       out.push(`${title}: ${row.id}${ROOT === 'lab' ? ` → ${real} on lab` : ''}`);
     }
     return out.join(' · ');
   });
 
-  for (const way of WAYS) {
-    const P = await phoneFor(WAV[way].path, paired);
+  for (const w of WALKS) {
+    const P = await phoneFor(WAV[w.way].path, paired);
     try {
-      await walk(way, P);
+      await walk(w, P);
     } finally {
       await P.browser.close().catch(() => {});
     }
@@ -283,7 +324,7 @@ try {
     must(offAp.length === 0, offAp.slice(0, 3).join(' '));
   });
 } finally {
-  process.stderr.write(`s16 (root ${ROOT}): ${failed.length ? 'RED ' + failed.join(' ') : 'GREEN'} in ${Math.round((Date.now() - t00) / 1000)} s\n`);
+  process.stderr.write(`s16 (${WALKS.map((w) => w.key)}): ${failed.length ? 'RED ' + failed.join(' ') : 'GREEN'} in ${Math.round((Date.now() - t00) / 1000)} s\n`);
   await box.close().catch(() => {});
 }
 process.exit(failed.length ? 1 : 0);
