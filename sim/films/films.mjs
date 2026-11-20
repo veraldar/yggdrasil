@@ -12,7 +12,7 @@
  *  F0.2 the sessions of the invented world are made (script.json "seed"), each with one real turn
  *  talk  hold the tree on the home screen, speak (a WAV as the microphone), hear the answer
  *  tree  the roots key → the list of computers → studio: its MAIN, its sessions → a typed turn there
- *  file  the paperclip → a PDF → a question → the answer links a file it made → the file opens
+ *  file  the paperclip → a PDF → a question → the answer links a file it made, shown under it
  *
  * Each film: $FILMS_OUT/raw/<name>/f*.jpg + raw/<name>.ffconcat (the phone's screen, shot over and
  * over at twice its CSS size, each picture with its time — Playwright's own video and the browser's
@@ -261,8 +261,7 @@ if (wants('talk')) {
     await poll(async () => (await roots.getAttribute('data-phase')) === 'speaking', 120_000, 'the answer was never spoken (data-phase speaking)', 100);
     P.cap(`It answers out loud: “${answer}”`);
     P.mark('poster');
-    await poll(async () => (await roots.getAttribute('data-phase')) !== 'speaking', 120_000, 'it never stopped speaking', 200);
-    await sleep(1600);
+    await poll(async () => (await roots.getAttribute('data-phase')) !== 'speaking', 120_000, 'it never stopped speaking', 100);
     P.mark('end');
     const said = await phone.getByTestId('roots-say').innerText().catch(() => '');
     await P.done({ heard: textOf(turn).split('\n').filter(Boolean).pop(), answer });
@@ -322,7 +321,7 @@ if (wants('tree')) {
 // ------------------------------------------------------------------------------------------- file
 if (wants('file')) {
   const F = SCRIPT.films.file;
-  await step('file', `the paperclip → ${F.file} → "${F.type}" → the answer links a file it made → it opens`, async () => {
+  await step('file', `the paperclip → ${F.file} → "${F.type}" → the answer links a file it made, shown under it`, async () => {
     must(paired, 'needs F0.1');
     const pdf = join(STATE, F.file);
     execFileSync('python3', [join(HERE, '..', 'reach', 'make_pdf.py'), pdf, '--mb', '0.2', '--marker', 'october'], { stdio: 'pipe' });
@@ -355,22 +354,21 @@ if (wants('file')) {
     const link = phone.locator('[data-mi] a[href*="october-summary.html"]').last();
     await link.waitFor({ timeout: 120_000 });
     P.cap('It answers, and makes a file.');
-    P.mark('poster');
-    await sleep(2600);
-    P.cap('The file opens on your phone.');
-    const popup = P.ctx.waitForEvent('page', { timeout: 6_000 }).catch(() => null);
-    await link.tap();
-    const other = await popup;
-    const view = other || phone;
-    await view.waitForLoadState('domcontentloaded', { timeout: 30_000 }).catch(() => {});
+    // the app shows a file a session made right under the answer (an html page: in a frame of its own)
+    const made = phone.locator('[data-mi] iframe[src*="october-summary.html"]').last();
+    await made.waitFor({ timeout: 30_000 });
     await poll(async () => {
-      for (const f of view.frames()) if (/1,284/.test(await f.locator('body').innerText().catch(() => ''))) return true;
+      for (const f of phone.frames()) if (/october-summary/.test(f.url()) && /1,284/.test(await f.locator('body').innerText().catch(() => ''))) return true;
       return false;
-    }, 30_000, 'the file never showed (no "1,284" on the page)');
-    await sleep(3000);
+    }, 30_000, 'the file never showed (no "1,284" in its frame)');
+    await made.scrollIntoViewIfNeeded().catch(() => {});
+    P.mark('poster');
+    await sleep(2400);
+    P.cap('The file opens right there, on your phone.');
+    await sleep(3600);
     P.mark('end');
-    await P.done({ popup: !!other });
-    return other ? 'the link opened a new tab (its picture is not in this recording)' : 'the file opened in the app';
+    await P.done({});
+    return 'the answer, its link, and the file shown under it';
   });
 }
 
