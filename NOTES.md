@@ -33,6 +33,22 @@ never from this one — bash reads scripts as it goes, an edit here breaks a run
 - make_tag (after signing) is exercised only by a full real-path run: do the dress rehearsal (scratch clone, stand-in
   key, --mac-host, Windows exe) once p4-win is merged
 
+## Morning 11-20 (after the usage limit)
+- p4-win: installer + build-win.sh + tests done (bootstrap-test 30/30, launcher-test 30/30 under wine, screenshots in
+  /tmp/p4win-shots); agent resumed for: join-test rerun, review, merge of p4-release, copy screenshots to artifacts
+- rig: OT_DIST=DIR [OT_DIST_KEY] runs against a finished release (draft/rehearsal); SKIP rows for re-signed steps
+- sim/release-rehearsal.sh (real path, stand-in key, version 0.8.99 because the rig serves 0.9.1-test as "newer")
+- sim/mac-bootstrap-check.sh HOST DIST (the Mac pre-check, reusable for the draft)
+- docs/release-notes-v0.9.1.md (installer part)
+- rehearsal 1 running on a TEMP merge (p4-run2 detached: p4-release + p4-win)
+
+## Rehearsal, then
+1. OT_DIST=~/.cache/p4-rehearsal/dist/0.8.99 OT_DIST_KEY=~/.cache/p4-rehearsal/standin OT_STAGES=a OT_JOINER=deb443
+   sim/own-trunk-e2e.sh  (from p4-run, the real tree: its RELEASE-KEY.pub is the real key)
+2. sim/mac-bootstrap-check.sh mac ~/.cache/p4-rehearsal/dist/0.8.99
+3. win/launcher-test.sh against the rehearsal's exe (if it takes an exe path)
+4. after p4-win's final merge: rehearsal 2 on the real merge
+
 ## Half done
 - Windows installer: sub-agent in ~/Work/p4-win (branch p4-win)
 
