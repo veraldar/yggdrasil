@@ -78,9 +78,13 @@ typed() { # NAME ENVSTRING LOGOUT — runs install.sh --brain-only --now via dri
   # timeout is the safety net for the rare hang; one retry on a fresh home
   docker cp "$HERE/drive_install.py" msm-"$1":/tmp/drive_install.py >/dev/null
   for try in 1 2; do
+    docker exec -u "$HU" -w $HH msm-"$1" rm -f /tmp/transcript /tmp/drive.done
     timeout 180 docker exec -u "$HU" -e HOME=$HH -e MSM_INPUTS="$2" -e TRANSCRIPT=/tmp/transcript -e DONEFILE=/tmp/drive.done \
       msm-"$1" python3 -u /tmp/drive_install.py bash -c "cd ~/yggdrasil-$VER/root/install && bash install.sh --brain-only --now" >/dev/null 2>&1
-    docker exec -u "$HU" -w $HH msm-"$1" rm -rf .config .local   # a retry starts from a clean home
+    # done = the env file exists (install.sh writes it only after the model step); retry
+    # only when it does not, wiping the half-installed home first
+    docker exec -u "$HU" -w $HH msm-"$1" test -e .config/yggdrasil/yggdrasil.env && break
+    docker exec -u "$HU" -w $HH msm-"$1" rm -rf .config .local
   done
   docker cp msm-"$1":/tmp/transcript "$STATE/log/$3" >/dev/null 2>&1
   docker exec -u "$HU" msm-"$1" rm -f /tmp/transcript /tmp/drive.done /tmp/drive_install.py
