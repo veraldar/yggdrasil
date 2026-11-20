@@ -45,8 +45,9 @@ assert n == 1, p
 open(p, "w").write(s2)
 PY
 done
+git checkout -q -B rehearsal || exit 2   # (the source may be a detached checkout)
 git commit -qam "rehearsal: a stand-in release key" || exit 2
-git push -q origin HEAD || exit 2     # origin = the bare copy: what release.sh's tag check asks
+git push -q origin HEAD:refs/heads/rehearsal || exit 2   # origin = the bare copy: what release.sh's tag check asks
 echo "rehearsal of $SRC_COMMIT as v$VERSION in $REH/c (stand-in key $(ssh-keygen -lf "$REH/standin" | awk '{print $2}'))"
 
 # ------------------------------------------------------------------------------------- release.sh, real path
