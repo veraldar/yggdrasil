@@ -42,6 +42,15 @@ never from this one — bash reads scripts as it goes, an edit here breaks a run
 - docs/release-notes-v0.9.1.md (installer part)
 - rehearsal 1 running on a TEMP merge (p4-run2 detached: p4-release + p4-win)
 
+## 11-20 noon — lead's instructions (L13–L17; the owner left decisions to the lead)
+- the Windows helper is gone; I finish p4-win myself. L15: the model page (done: fc887457+ in p4-win,
+  bootstrap-test 32/32; wine test running; independent review running)
+- then: merge p4-win → p4-release, rehearsal 2 on the real merge (+ Linux rig OT_DIST, Mac check, wine on its exe),
+  report the branch to P1 (P1 merges + deploys)
+- v0.9.1 DRAFT only after P1 says packages 2 and 3 are merged and live; then S11 vs the draft, Mac M4–M8 (real Mac,
+  touch nothing there), un-draft; report the draft to P1 when it exists (P1 sends P5 on)
+- pacing L14: only P1 and me run; a usage-limit stop lasts until someone sends me on — commit every step
+
 ## Rehearsal 1 (temp merge 78757b05 = p4-release + p4-win 80be65b2), 11-20 morning
 - sim/release-rehearsal.sh --mac-host mac 0.8.99: r1-r7 7/7 (real path, all 11 assets, signature, tag after signing,
   local only; macOS archive Mach-O arm64; real stamps + stand-in key; exe embeds the stamped join.sh)
