@@ -113,11 +113,14 @@ python3 "$ROOT/root/extensions/librarian/librarian.py" --root "http://127.0.0.1:
   --db "$STATE/librarian.db" --poll 1 >"$STATE/librarian.log" 2>&1 &
 pids+=($!)
 
+# the home root's model key: made up for this run (the mock upstream takes any). "Same as the home root"
+# (L15) hands it to mac inside its tunnel; the spec then looks for this string in every file of the run
+UPKEY="rigkey-$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')"
 # the hub brain "home": no static YGG_PEERS — it learns every root whose key the phone pinned from
 # the hub's WireGuard node (YGG_PEERS_FROM → GET /_wg; reached through /_wg/<id>, inside the
 # tunnel). Started once: the spec checks that a join reaches it without a restart (home.pid).
 env -i PATH="$PATH" HOME="$STATE/home" YGG_UPSTREAM_BASE_URL="http://127.0.0.1:$MOCK" \
-  YGG_UPSTREAM_STYLE=anthropic YGG_UPSTREAM_API_KEY=mock YGG_UPSTREAM_MODEL=mock \
+  YGG_UPSTREAM_STYLE=anthropic YGG_UPSTREAM_API_KEY="$UPKEY" YGG_UPSTREAM_MODEL=mock \
   YGG_WAKE_DEBOUNCE_MS=400 YGG_PROVIDERS="$STATE/home/none.json" \
   YGG_ARTIFACTS_DIR="$STATE/home/artifacts" YGG_DATA_DIR="$STATE/home/data" \
   YGG_PROFILES="$STATE/home/agents.json" YGG_PROJECT_DIR="$STATE/home/work" \
@@ -247,7 +250,7 @@ else
 PW_AP_URL="$AP_URL" PW_AP_IP="$AP_IP" PW_BASE_URL="http://127.0.0.1:$APP" PW_STATE="$STATE" \
   PW_BRIDGE="http://127.0.0.1:$BR" PW_HOME="http://127.0.0.1:$HOMEP" PW_MAC_PORT="$MACP" \
   PW_PEER_PORT="$PEERP" PW_MOCK="http://127.0.0.1:$MOCK" PW_FAR="$FAR" PW_YGG_BIN="$YGG_BIN" \
-  PW_CAFILE="$STATE/tls/cert.pem" PW_PEER_TOKEN="$PEER" \
+  PW_CAFILE="$STATE/tls/cert.pem" PW_PEER_TOKEN="$PEER" PW_UPSTREAM_KEY="$UPKEY" \
   PW_HUBWG="http://127.0.0.1:$HUBWG" PW_NET_BIN="$BIN" PW_MAC_WG="$MACWG" PW_MAC_WG_UDP="$MACUDP" \
   PW_MAC_PIPE="$MACPIPE" PW_FAR2=203.0.113.10 PW_LAB_PORT="$LABP" PW_LAB_WG="$LABWG" PW_LAB_WG_UDP="$LABUDP" \
   PW_LAB_PIPE="$LABPIPE" PW_LAB_PEER="$LABPEER" PW_TAP="$STATE/tap" \
