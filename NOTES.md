@@ -13,6 +13,13 @@ This worktree (p5-site, from tree-next): films scripts (sim/films/), scripts/sit
 - preview artifact: /api/artifact/site-preview.html (one file, no scripts, :target pages; nav checked in a
   sandbox="" iframe). Screenshot: site-preview-first-screen.png
 
+- 11-20 morning: scripts/site-deploy.sh (AP-20) + site-deploy-test.sh: 9/9 against a stand-in container
+  (refuses until the release is out, dry run, backup in ~/site-backups outside the web root, byte-for-byte live
+  check, undo identical, auto-undo on a failed check, data/ untouched). NOT run against the real VPS.
+- independent review (sub-agent) → 13 findings, the confirmed ones fixed in the copy (veraldar-site 652f061)
+- scripts/check-commands.py: page commands run as written in fresh debian:12 / ubuntu:24.04 / ubuntu:22.04
+  containers (against v0.9.0 until v0.9.1 exists) + every option checked against the installer source
+
 ## Half done / open
 - films section: 3 slots with placeholder posters; old October films linked under them (swap only after
   the owner has seen both)
@@ -22,7 +29,11 @@ This worktree (p5-site, from tree-next): films scripts (sim/films/), scripts/sit
 - for P4: Setup.exe pre-fills https://ap.veraldar.org (W4) — right for the owner only; a new user types
   their own trunk. Site says so. Asset names assumed: Veraldar-Setup-0.9.1.exe, join.sh, install.sh, trunk.sh
 - sw.js: bump CACHE to v12, add site.css/site.js to CORE, drop door mp3 from CORE — at publish
-- independent review of the copy (sub-agent) before publish
+- FOR THE LEAD: Windows cannot finish today: no way to give the PC a model (p4-win NOTES: every real run
+  ends at W-MODEL). The page carries a GATE comment; it is not published until that is decided.
+- add-mac waits for p4-release (tree-next join.sh:156 refuses macOS); "hold to remove" waits for package 3
+- MAIN asked twice to "verify on the VPS preview": not done — no such preview exists and anything on
+  veraldar.org is public; my orders publish only after the release + the integrator's word.
 
 ## Next
 1. scripts/check-commands.sh: every command on the pages run as written in a clean container (needs the
