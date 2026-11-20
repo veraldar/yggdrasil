@@ -42,6 +42,16 @@ never from this one — bash reads scripts as it goes, an edit here breaks a run
 - docs/release-notes-v0.9.1.md (installer part)
 - rehearsal 1 running on a TEMP merge (p4-run2 detached: p4-release + p4-win)
 
+## Rehearsal 1 (temp merge 78757b05 = p4-release + p4-win 80be65b2), 11-20 morning
+- sim/release-rehearsal.sh --mac-host mac 0.8.99: r1-r7 7/7 (real path, all 11 assets, signature, tag after signing,
+  local only; macOS archive Mach-O arm64; real stamps + stand-in key; exe embeds the stamped join.sh)
+- Linux rig OT_DIST=rehearsal dist + OT_DIST_KEY: GREEN 32/32 + phone 12/12 (after fixing the rig's test-signers
+  drop-in for real-stamped releases)  · state ~/.cache/p4-rig/reh-linux
+- Mac: sim/mac-bootstrap-check.sh mac <dist>: 11/11, real-stamped (embedded key, no override)
+- wine launcher-test on the rehearsal exe: 27/30 — the 3 are the test's hard-codes (0.9.1, tree join.sh); sent to
+  the Windows agent to fix
+- NEXT: Windows agent's review + merge → rehearsal 2 on the real merge → the three checks again → report + artifact
+
 ## Rehearsal, then
 1. OT_DIST=~/.cache/p4-rehearsal/dist/0.8.99 OT_DIST_KEY=~/.cache/p4-rehearsal/standin OT_STAGES=a OT_JOINER=deb443
    sim/own-trunk-e2e.sh  (from p4-run, the real tree: its RELEASE-KEY.pub is the real key)
