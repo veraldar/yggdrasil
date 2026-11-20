@@ -140,7 +140,7 @@ def make_handler(hub):
                     req = "jr%d" % (len(hub.joins) + 1)
                     j = {"secret": secrets.token_hex(16), "code": "%06d" % random.randrange(10 ** 6), "status": "pending",
                          "name": b["name"], "os": b["os"], "host": b["host"], "deadline": time.time() + hub.ttl,
-                         "delivered": False, "wg_pub": wg_pub}
+                         "delivered": False, "wg_pub": wg_pub, "model": b.get("model")}
                     hub.joins[req] = j
                 if hub.auto == "approve":
                     hub.approve(req)
@@ -694,10 +694,33 @@ def run_tests(hub, new_env, tmp):
     check("bad hub name: exit 1, 'not a plain name' said, no root.json, nothing started",
           rc == 1 and "not a plain name" in g.out() and not os.path.exists(os.path.join(g.dir, "root.json"))
           and g.sup_pid() is None, "rc=%s" % rc)
+    # --- the model step (L15): no terminal and no model given = "Same as the home root". This fake hub has no
+    #     home brain behind its tunnel, so nothing answers GET /root/model: joined, exit 6, the brain waits.
     f = new_env("foxtrot")
-    rc = f.run(["--hub", hub.base, "--cacert", f.cacert, "--brain-bin", f.brain_bin, "--supervisor", "nohup"])
-    check("no upstream (non-interactive): exit 64 BEFORE any join request", rc == 64 and "no model upstream" in f.out()
-          and not any(jj["name"] == "foxtrot" for jj in hub.joins.values()), "rc=%s" % rc)
+    hub.auto = "approve"
+    fargs = f.first_args()
+    k = fargs.index("--upstream-env"); del fargs[k:k + 2]
+    rc = f.run(fargs, JOIN_MODEL_WAIT="5", JOIN_BRAIN_WAIT="4")
+    hub.auto = None
+    fj = [jj for jj in hub.joins.values() if jj["name"] == "foxtrot"]
+    check("no model given, no terminal: 'Same as the home root' — the join request says model=home",
+          len(fj) == 1 and fj[0].get("model") == "home", "joins=%s" % [(jj["name"], jj.get("model")) for jj in fj])
+    check("an explicit model (--upstream-env): the join request carries no model field",
+          all(jj.get("model") is None for jj in hub.joins.values() if jj["name"] != "foxtrot"))
+    fenv = open(os.path.join(f.dir, "brain.env")).read() if os.path.exists(os.path.join(f.dir, "brain.env")) else ""
+    check("no answer from the home root: exit 6, said plainly, the join kept (root.json), brain.env without a model",
+          rc == 6 and "joined, but this root has no model yet" in f.out() and "did not answer inside the tunnel" in f.out()
+          and os.path.exists(os.path.join(f.dir, "root.json")) and "YGG_UPSTREAM_BASE_URL" not in fenv
+          and "YGG_ROOT_NAME=foxtrot" in fenv, "rc=%s" % rc)
+    blog = os.path.join(f.dir, "log", "brain.log")
+    check("the brain waits for its model (its log says so) instead of failing",
+          wait_for(lambda: os.path.exists(blog) and "no model yet: waiting for it" in open(blog).read(), 8)
+          and brain_root(f.brain_port) is None)
+    rc = f.run(["--upstream-env", f.up, "--cacert", f.cacert, "--brain-bin", f.brain_bin, "--supervisor", "nohup"])
+    check("re-run with a model: exit 0, the same join, the waiting brain starts by itself",
+          rc == 0 and wait_for(lambda: brain_root(f.brain_port) is not None, 20)
+          and len([jj for jj in hub.joins.values() if jj["name"] == "foxtrot"]) == 1, "rc=%s" % rc)
+    f.run(["--stop"])
 
     # --- T5 systemd --user units (recording shims, never the real manager)
     print("\n[systemd] units + systemctl calls (shim)", flush=True)
