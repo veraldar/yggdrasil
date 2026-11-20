@@ -60,3 +60,4 @@
 - preview-up.sh refuses once hub-brain is enabled (says: hub-units.sh deploy).
 - RUN: ~/Work/tree-next/scripts/hub-units.sh switch   ← CUTS MY TURN. Log: ~/.local/share/yggdrasil/hub/logs/switch.log
 - AFTER (when resent): read switch.log; hub-units.sh health + status; loginctl show-user dweeb_xyz -p Linger; live-door spec both doors (mic); S14; update work/AGENTS.md rule 2 (deploy = hub-units.sh deploy); send P3 its message; report to MAIN: stage B done + reboot window question + pairing link (ap-pair.html valid until 15:20).
+- 13:0x review (agy) fixes in; tree-next at 25e1e32b. RUNNING: ~/Work/tree-next/scripts/hub-units.sh switch
