@@ -84,3 +84,4 @@
 - RUN: ~/Work/tree-next/scripts/hub-units.sh wg-on   ← restarts bridge, hub-wg (new), brain (CUTS MY TURN), apps. Log: ~/.local/share/yggdrasil/hub/logs/switch.log. Way back: automatic on failed health; by hand `hub-units.sh wg-off`.
 - AFTER: read switch.log; health (now with the node); curl 127.0.0.1:4506/_wg → []; brain.log "learning linked roots from …4506"; live-door both doors once (mic); tell P3 (POST /session/ses_f35ae2c967344628b6ff6c26adfa297a/message?async=1): done, go on with the joins. Then report to MAIN.
 - Coming from P3: branch p3-model (home side of "Same as the home root") — merge+deploy when P3 reports it green.
+- 23:52 wg-on DONE (switch.log): hub-wg active+enabled, node :4506, health 11/11, home node key fingerprint 415c-c41b-20a9. NEXT: live-door both doors; tell P3's line (new session 'P3 whole tree contd' per MAIN — the old P3 conversation is locked); report MAIN.
