@@ -10,6 +10,9 @@
 #                                   pointed at the :4101 brain; the old trunk-preview-{app,bridge} stopped
 #                                   first (the access point keeps ONE bridge link)
 #   hub-units.sh public-back        the way back: hub units stopped, the old hub-up.sh stack started
+#   hub-units.sh tailnet-up         the tailnet app (:8101) from `current` instead of rc-preview-pwa
+#   hub-units.sh tailnet-back       rc-preview-pwa again
+#   hub-units.sh deploy <id>        `current` → releases/<id>, running hub units restarted, back if an app fails
 #   hub-units.sh status
 #
 # Config (mode 600, made once by hand from the old stack's state — see NOTES.md):
@@ -104,8 +107,27 @@ StandardError=append:$LOGS/voice-agent.log
 [Install]
 WantedBy=default.target
 EOF
+  # the tailnet door (:8447 → :8101): the same release, BIFROST_AUTH=tailnet; replaces the transient
+  # rc-preview-pwa that served the git worktree itself
+  cat >"$UNITS/hub-app-tailnet.service" <<EOF
+[Unit]
+Description=yggdrasil home root: the tailnet app (:8447 → :8101) → brain :4101
+After=network-online.target
+
+[Service]
+WorkingDirectory=$HUB/current/app
+EnvironmentFile=$CONF/app-tailnet.env
+ExecStart=$NODE server.mjs
+Restart=on-failure
+RestartSec=3
+StandardOutput=append:$LOGS/app-tailnet.log
+StandardError=append:$LOGS/app-tailnet.log
+
+[Install]
+WantedBy=default.target
+EOF
   systemctl --user daemon-reload
-  echo "rendered: hub-app.service hub-bridge.service hub-voice-agent.service"
+  echo "rendered: hub-app.service hub-bridge.service hub-voice-agent.service hub-app-tailnet.service"
 }
 
 wait_http() { for _ in $(seq 1 60); do curl -sf -m 2 -o /dev/null "$1" && return 0; sleep 0.5; done; return 1; }
@@ -123,6 +145,46 @@ public_up() {
   status
 }
 
+# the tailnet app onto the release (rc-preview-pwa stopped; its way back: tailnet-back)
+tailnet_up() {
+  render
+  systemctl --user stop rc-preview-pwa 2>/dev/null || true
+  systemctl --user restart hub-app-tailnet
+  wait_http http://127.0.0.1:8101/api/build || { echo "hub-app-tailnet did not answer: back to rc-preview-pwa" >&2; tailnet_back; exit 1; }
+  status
+}
+
+# rc-preview-pwa is transient (gone once stopped): recreated exactly as it ran on 11-20
+tailnet_back() {
+  systemctl --user stop hub-app-tailnet 2>/dev/null || true
+  systemctl --user reset-failed rc-preview-pwa 2>/dev/null || true
+  systemctl --user is-active -q rc-preview-pwa || systemd-run --user --unit rc-preview-pwa --collect -q \
+    -p WorkingDirectory="$HOME/Work/tree-next/branch" -p EnvironmentFile="$HOME/.cache/root-sim/preview.env" \
+    --setenv=NODE_ENV=production --setenv=ARTIFACTS_DIR="$HOME/Work/root-coord-pwa/artifacts" \
+    "$NODE" node_modules/next/dist/bin/next start -p 8101 -H 127.0.0.1
+  wait_http http://127.0.0.1:8101/api/build && echo "rc-preview-pwa back on :8101"
+}
+
+# a new release behind every hub unit that is running: `current` moves, the units restart, and if
+# an app does not answer `current` goes back (the brain is preview-up.sh's, until stage B)
+deploy() {
+  local id=${1:?release id} prev
+  [ -d "$HUB/releases/$id" ] || die "no release $id"
+  prev=$(readlink "$HUB/current" || true)
+  ln -sfn "$HUB/releases/$id" "$HUB/current"
+  render
+  for u in hub-voice-agent hub-app hub-app-tailnet hub-bridge; do
+    systemctl --user is-active -q "$u" && systemctl --user restart "$u"
+  done
+  if ! wait_http http://127.0.0.1:4502/api/build || { systemctl --user is-active -q hub-app-tailnet && ! wait_http http://127.0.0.1:8101/api/build; }; then
+    echo "an app did not answer on $id: back to $prev" >&2
+    ln -sfn "$prev" "$HUB/current"
+    for u in hub-voice-agent hub-app hub-app-tailnet hub-bridge; do systemctl --user is-active -q "$u" && systemctl --user restart "$u"; done
+    exit 1
+  fi
+  status
+}
+
 public_back() {
   systemctl --user stop hub-bridge hub-app hub-voice-agent 2>/dev/null || true
   [ -x "$OLD/hub-up.sh" ] || die "no $OLD/hub-up.sh"
@@ -130,9 +192,10 @@ public_back() {
 }
 
 status() {
-  for u in hub-app hub-bridge hub-voice-agent; do printf '%-12s %s\n' "$u" "$(systemctl --user is-active "$u" 2>/dev/null || true)"; done
+  for u in hub-app hub-app-tailnet hub-bridge hub-voice-agent; do printf '%-12s %s\n' "$u" "$(systemctl --user is-active "$u" 2>/dev/null || true)"; done
   echo "release: $(readlink "$HUB/current" 2>/dev/null || echo none)"
   printf 'app :4502 /api/build → %s\n' "$(curl -s -m 3 http://127.0.0.1:4502/api/build || echo down)"
+  printf 'app :8101 /api/build → %s\n' "$(curl -s -m 3 http://127.0.0.1:8101/api/build || echo down)"
   tail -n 3 "$LOGS/bridge.log" 2>/dev/null | sed 's/^/bridge: /' || true
 }
 
@@ -141,6 +204,9 @@ case "${1:-status}" in
   render) render ;;
   public-up) public_up ;;
   public-back) public_back ;;
+  tailnet-up) tailnet_up ;;
+  tailnet-back) tailnet_back ;;
+  deploy) deploy "${2:-}" ;;
   status) status ;;
-  *) die "usage: hub-units.sh release|render|public-up|public-back|status" ;;
+  *) die "usage: hub-units.sh release|render|deploy <id>|public-up|public-back|tailnet-up|tailnet-back|status" ;;
 esac

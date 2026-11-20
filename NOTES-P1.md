@@ -42,3 +42,10 @@
 - NEXT: merge tree-next(be8134ae) ← p1-hub, p2-reach(03a8b7eb), p3-tree(d13e6c66), ui-main-no-who-filter(b003241c); add `fable` to harness models (first, strongest). Then cargo test + tree-e2e + restart-e2e, deploy via preview-up.sh, S14 both doors + mic, move P1–P5 to fable, send P2 its lead-next.md message.
 - 12:20 merged into p1-hub: tree-next be8134ae, p2-reach 03a8b7eb, p3-tree d13e6c66 (conflicts peers/tree/main/sim resolved), ui-main-no-who-filter b003241c, fable first. Green: cargo 146/146, tree-e2e 131/131, restart-e2e 22/22, trunk-full full + s17 (probe now sends the peer token), trunk-rtc, who-wrote on twin p1m (Pixel 7). tree-next fast-forwarded to p1-hub.
 - NEXT: release folder from p1-hub build → preview-up.sh <binary> (cuts my turn; read ~/.cache/root-sim/preview/preview-up.log) → app :8101 + public app from new release → S14 both doors + mic → P1–P5 to fable → P2 message from lead-next.md (pacing: max 2 running).
+- 12:3x DEPLOY of tree-next 5edbb05c, release R2 = 20261120-1214-7c3eff7c (~/.local/share/yggdrasil/hub/releases/). Steps:
+  1. ~/Work/tree-next/scripts/preview-up.sh ~/.local/share/yggdrasil/hub/releases/20261120-1214-7c3eff7c/bin/yggdrasil   ← CUTS THIS TURN; log ~/.cache/root-sim/preview/preview-up.log
+  2. scripts/hub-units.sh deploy 20261120-1214-7c3eff7c   (public app, bridge, voice agent)
+  3. scripts/hub-units.sh tailnet-up   (:8101 from the release; way back: tailnet-back) — tested on :8109 OK
+  4. S14: /api/build both doors = x9449bAf62qkHlr_B9inB; MAIN context summary 200; test session smoke; live-door spec AP + PW_DOOR=tailnet (mic)
+  5. P1–P5 → fable (POST /api/session/<id>/model {"model":{"id":"fable","providerID":"claude"}})
+  6. P2 message from lead-next.md (if ≤1 other package session running)
