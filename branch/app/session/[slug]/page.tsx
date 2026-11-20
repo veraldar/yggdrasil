@@ -66,13 +66,7 @@ import {
   stripMarkers,
 } from '@/lib/tree-first';
 import { say, stopLine, unlockLines, useVoiceState, warmLines } from '@/lib/onboard-voice';
-import {
-  ECHO_TAIL_MS,
-  agentInRoom,
-  releaseMicDevice,
-  tellDeckState,
-  withTimeout,
-} from '@/lib/voice-room';
+import { ECHO_TAIL_MS, agentInRoom, releaseMicDevice, tellDeckState, withTimeout, servingAgent } from '@/lib/voice-room';
 import {
   VOICE_TEST_SLUG,
   setVoiceTest,
@@ -1611,7 +1605,7 @@ export default function SessionView({
       }
       // agent holds turns manual until release — a mid-sentence pause while
       // the button is down must not flush a partial message (fire & forget)
-      const agent = Array.from(room.remoteParticipants.values())[0];
+      const agent = servingAgent(room);
       if (agent) {
         void room.localParticipant
           .performRpc({
@@ -1679,7 +1673,7 @@ export default function SessionView({
 
   function pttDiscardRpc() {
     const room = roomRef.current;
-    const agent = room && Array.from(room.remoteParticipants.values())[0];
+    const agent = room && servingAgent(room);
     if (room && agent) {
       void room.localParticipant
         .performRpc({

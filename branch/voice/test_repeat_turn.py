@@ -66,11 +66,15 @@ asyncio.run(run(ctx))
 check("a turn that grew sends only what is new (as before)", len(POSTS) == 3 and "please open it" in sent()[2] and "yes" not in sent()[2].split("please")[0], sent())
 
 V = sibling_verdict
+W, S, D, NEW = (True, False, False), (False, True, False), (False, True, True), (False, False, False)
+o = lambda ident, kind: (ident, *kind)  # noqa: E731 — (identity, waits, serves, drains)
 check("alone in the room: take it", V("agent-b", []) == "take")
-check("one serving or draining: wait", V("agent-b", [("agent-a", False)]) == "wait" and V("agent-a", [("agent-z", False), ("agent-b", True)]) == "wait")
-pair = {"agent-a": V("agent-a", [("agent-b", True)]), "agent-b": V("agent-b", [("agent-a", True)])}
+check("one serves and its person is there: leave at once", V("agent-b", [o("agent-a", S)]) == "leave" and V("agent-a", [o("agent-z", S), o("agent-b", W)]) == "leave")
+check("the one serving drains (its person is away): wait for it to go or to stay", V("agent-b", [o("agent-a", D)]) == "wait")
+check("one that says nothing yet (starting, or an older agent): wait", V("agent-b", [o("agent-a", NEW)]) == "wait")
+pair = {"agent-a": V("agent-a", [o("agent-b", W)]), "agent-b": V("agent-b", [o("agent-a", W)])}
 check("two that wait at once: exactly one takes it, the other leaves", sorted(pair.values()) == ["leave", "take"] and pair["agent-a"] == "take", pair)
-three = [V(m, [(o, True) for o in ("agent-a", "agent-b", "agent-c") if o != m]) for m in ("agent-a", "agent-b", "agent-c")]
+three = [V(m, [o(x, W) for x in ("agent-a", "agent-b", "agent-c") if x != m]) for m in ("agent-a", "agent-b", "agent-c")]
 check("three that wait: one takes, two leave — never none, never two", three.count("take") == 1 and three.count("leave") == 2, three)
 
 # 3. the person is here by CONNECTION: a new page's hello can come before the old page's goodbye

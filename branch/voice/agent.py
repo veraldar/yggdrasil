@@ -189,16 +189,24 @@ class Presence:
         return bool(self.sids) or by_name or (self.touched > 0 and time.monotonic() - self.touched < self.ALIVE_S)
 
 
-WAITING_ATTR = "bifrost.waiting"
+WAITING_ATTR = "bifrost.waiting"  # a job that waits for the room
+SERVING_ATTR = "bifrost.serving"  # the job that has the room (the phone sends its calls to it)
+DRAINING_ATTR = "bifrost.draining"  # …and its person is away: it leaves unless they come back
 
 
-def sibling_verdict(me: str, others: list[tuple[str, bool]]) -> str:
-    """One agent per room. `others`: the other agents in the room as (identity, is it waiting too).
-    "wait" while one of them serves or drains (it is not waiting); once only waiting ones are left
-    (or none): "take" when this identity sorts first, else "leave" — exactly one of them takes it."""
-    if any(not waiting for _, waiting in others):
+def sibling_verdict(me: str, others: list[tuple[str, bool, bool, bool]]) -> str:
+    """One agent per room, never none. `others`: the other agents in the room as (identity,
+    waits, serves, drains).
+    - one serves and its person is there: "leave" at once (a job dispatched by a page load or a
+      second hold is a duplicate — it used to stay 20 s, run its own speech-to-text, and take the
+      phone's calls it could not answer);
+    - one serves but drains, or says nothing yet (starting, or an older agent): "wait";
+    - only waiting ones left, or none: "take" when this identity sorts first, else "leave"."""
+    if any(serves and not drains for _, _, serves, drains in others):
+        return "leave"
+    if any(not waits for _, waits, _, _ in others):
         return "wait"
-    return "take" if all(me < ident for ident, _ in others) else "leave"
+    return "take" if all(me < ident for ident, _, _, _ in others) else "leave"
 
 
 def _is_noise_turn(text: str) -> bool:
@@ -617,20 +625,23 @@ async def entrypoint(ctx: JobContext) -> None:
     # others leave at once.
     me = ctx.room.local_participant
 
-    async def _waiting(on: bool) -> None:
+    async def _mark(**attrs: bool) -> None:
         try:
-            await me.set_attributes({WAITING_ATTR: "1" if on else ""})
+            await me.set_attributes({k: "1" if v else "" for k, v in attrs.items()})
         except Exception:  # noqa: BLE001 — an older server: the 20 s rule below still holds
             pass
 
-    await _waiting(True)
+    await _mark(**{WAITING_ATTR: True})
     for i in range(80):  # ~20s at 250ms — drain tail is commit grace + 4s
         others = [p for p in ctx.room.remote_participants.values() if p.identity != human_identity]
-        verdict = sibling_verdict(me.identity, [(p.identity, (p.attributes or {}).get(WAITING_ATTR) == "1") for p in others])
+        attr = lambda p, k: (p.attributes or {}).get(k) == "1"  # noqa: E731
+        verdict = sibling_verdict(
+            me.identity, [(p.identity, attr(p, WAITING_ATTR), attr(p, SERVING_ATTR), attr(p, DRAINING_ATTR)) for p in others]
+        )
         if verdict == "take":
             break
         if verdict == "leave":
-            logger.info("another waiting agent takes room '%s' — leaving", ctx.room.name)
+            logger.info("room '%s' has its agent — leaving", ctx.room.name)
             ctx.shutdown("duplicate agent")
             return
         if i == 0:
@@ -642,7 +653,7 @@ async def entrypoint(ctx: JobContext) -> None:
         logger.warning("another agent still in room '%s' after 20s — shutting down", ctx.room.name)
         ctx.shutdown("duplicate agent")
         return
-    await _waiting(False)
+    # (it says it SERVES further down, once it can answer the phone's calls)
 
     # ---- mode awareness (req 10-02) ----
     # The phone publishes its interaction mode ('text' | 'free') as its
@@ -692,13 +703,20 @@ async def entrypoint(ctx: JobContext) -> None:
             by_name = human_identity in {p.identity for p in ctx.room.remote_participants.values()}
             return presence.here(by_name)
 
+        away = False
         try:
             while True:
                 # a fast re-hold rejoins the same room while this tail is
                 # running — the job stays theirs until they leave for good
                 if _human_present():
+                    if away:
+                        away = False
+                        await _mark(**{DRAINING_ATTR: False})
                     await asyncio.sleep(0.5)
                     continue
+                if not away:  # a job dispatched now waits for this one to leave, or to stay
+                    away = True
+                    await _mark(**{DRAINING_ATTR: True})
                 waited = 0.0
                 while commit_in_flight and waited < 15.0:  # bounded: never pin the job
                     await asyncio.sleep(0.2)
@@ -876,6 +894,9 @@ async def entrypoint(ctx: JobContext) -> None:
     ctx.room.local_participant.register_rpc_method("ptt_begin", _ptt_begin_rpc)
     ctx.room.local_participant.register_rpc_method("ptt_abort", _ptt_abort_rpc)
     ctx.room.local_participant.register_rpc_method("commit_turn", _commit_turn_rpc)
+    # it can answer the phone now: it says so (the app sends its calls to the job that serves;
+    # a job dispatched later leaves at once)
+    await _mark(**{SERVING_ATTR: True, WAITING_ATTR: False})
 
     # ---- keyword turn-taking (radio protocol) ----
     # Speech buffers as ONE turn no matter how long the user thinks; "over"
