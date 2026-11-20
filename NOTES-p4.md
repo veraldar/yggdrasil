@@ -56,6 +56,25 @@ TO BUILD (order): 1 root/install/model-step.sh (providers: same|zai|openrouter|a
   HTTPS upstream · 5 agy review · 6 rehearsal 3 → report the branch to P1.
 Engines (L18): agy for reviews/self-contained code, GLM sessions for test matrices; builds under nice -n 10.
 
+## 11-20 18:10 — after the limit (reset 17:30)
+DONE + committed: root/install/model-step.sh; join.sh + install.sh use it; rootjoin.py model-fetch / --model home /
+  --no-upstream-ok; run-brain waits for a model; exit 6. Tests green: model-fetch-test.py 16/16; join-test.sh --docker
+  78/78 (needs trunk/ + root/ builds in the checkout: p4-run2 has copies from ~/.cache/p4-release-cache).
+  tree-next 25e1e32b merged (90c218b5).
+HANDED OFF (L18):
+  - GLM session ses_5c40c8dd82e04a848daacf6ee48a1293 "P4 · model step matrix (GLM)": worktree ~/Work/p4-msmatrix
+    (branch p4-msmatrix), brief BRIEF-msmatrix.md there; builds sim/model-step-e2e.sh (a container per provider, fake
+    HTTPS upstream); uses the TEST dist ~/.cache/p4-rig/ms-dist/0.9.1-rc.2 (key ~/.cache/p4-rig/ms-key/k). The
+    brain wakes me with its report. Then: read the report, merge p4-msmatrix if good.
+  - agy review of the model-step diff: folder ~/Work/p4-agy-review (brief.md, model-step.diff) → REVIEW.md there.
+MINE NOW: the Windows page with the same choices (win/veraldar.nsi: provider drop-down, fields per provider;
+  "Same as the home root" default → no upstream.env → join.sh's default; wsl-bootstrap: join.sh exit 6 → W-MODEL,
+  login entry still installed) + wine test + win/model-step-check.sh (words/addresses equal to model-step.sh).
+THEN: P3's route (watch ~/Work/p3-tree/NOTES.md) → rig run "same as home"; Mac check with the model step;
+  rehearsal 3 on the final merge; report the branch to P1.
+Model defaults I chose (the lead may change, one line each in model-step.sh): Anthropic claude-fable-5-2
+  (or opus/sonnet/haiku 5.5), OpenAI gpt-4o-mini, OpenRouter openai/gpt-4o-mini.
+
 ## 11-20 noon — lead's instructions (L13–L17; the owner left decisions to the lead)
 - the Windows helper is gone; I finish p4-win myself. L15: the model page done in p4-win.
 - independent review of p4-win: 9 findings (2 high: non-ASCII user name / wsl notices broke the wslpath round
