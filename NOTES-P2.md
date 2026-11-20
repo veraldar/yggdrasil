@@ -15,17 +15,24 @@ Report the branch to P1 (merges + deploys).
 - sim/reach/s16.mjs: walks hold@home, hold@lab, free@lab (S16_WALKS) + step x8: a typed turn after
   the held one is answered in writing, nothing spoken
 
-## In flight (12:50) — a brain restart at ~12:42 cut the first builds; now in their own units
-- builds: unit p2-spoken-build (~/.cache/p2-reach/spoken/build.sh → build.status; brain, cargo test,
-  trunk → ~/.cache/p2-reach/trunk-target, app)
-- agy review: unit p2-spoken-agy (~/Work/p2-spoken-agy: brief.md, L16.diff → review.md, agy.log)
+- review by agy (~/Work/p2-spoken-agy/review.md): real gaps fixed in 4bf34b57 (stopped run not said,
+  empty hold ends after 45 s, two holds each answered, old turn never taken, text→free→text keeps it,
+  walk + held path say once, agent re-asks a silent root, "over and out" stays written)
+
+## Proven (13:15) — ~/.cache/p2-reach/spoken/final.status
+- cargo test 147/147 · held-reply spec 10/10 · voice no-resend GREEN
+- S16 extended GREEN 3 runs (20/20 steps): hold@home and hold@lab marked voice + answered aloud
+  (real TTS, ~60 s of speech over the room, STT = the reply); typed turn after it: written, 0 bytes
+  of speech; hands-free on lab as before
+- trunk-rtc 10/10, trunk-full 19/19 on this build · tree-e2e 131/131 (one run had a flake in the
+  Antigravity model-picker check: `agy models` was slow; green on the rerun)
+- evidence: root-coord-pwa/artifacts/p2-spoken-{lab,home}.png, p2-spoken-lab-reply.mp3
+
+## Open (said in the report)
+- hands-free is unchanged: while it is on, a reply is said even when the turn was typed
+- "over and out" keeps its old rule: that turn's answer comes in writing
 
 ## Next
-1. S16 rig: YGG_BIN=root/target/release/yggdrasil BIFROST_NET_BIN=~/.cache/p2-reach/trunk-target/release/bifrost-net
-   TRUNK_RTC_STATE=~/.cache/p2-reach/sim-tmp/s16-spoken sim/trunk-rtc-e2e.sh --scenario s16
-   (run it in a unit too: systemd-run --user --unit p2-spoken-s16 …)
-2. read agy's review.md, fix what is real
-3. flag: hands-free still speaks replies to turns typed while it is on (unchanged on purpose)
-4. report the branch to P1 via MAIN
-Long jobs: always `systemd-run --user --unit <name> --collect --nice=10` (a brain restart kills children).
-Temp: ~/.cache/p2-reach/{tmp,sim-tmp,app-tmp}; never /tmp.
+- reported to MAIN for P1 (merge + deploy). After the deploy: the voice agent must be restarted
+  with the new branch/voice/agent.py (it marks held turns voice) — P1's deploy does that.
+Long jobs: `systemd-run --user --unit <name> --collect --nice=10` (a brain restart kills children).
