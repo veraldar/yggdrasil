@@ -52,3 +52,17 @@ This worktree (p5-site, from tree-next): films scripts (sim/films/), scripts/sit
 - NEXT: sim/films/record.sh → look at each <name>-sheet.jpg → fix selectors/timing → copy mp4/webm/jpg into
   veraldar-site/films/ and replace the placeholder posters in src/index.html with <video> → preview → report to P1.
 - the first screen's words WAIT for the owner's pick (story propositions, GLM session ses_f24ba4a5…).
+
+## 11-20 13:30 — films recorded (run 5), in the site
+- `sim/films/record.sh [OUT]` = one command: world up (voice rig, scenario films) → pair → seed → record talk,
+  tree, file → cut.py (1080x1920 stage, captions burned in, checks). Runs 2, 4, 5 green; ~4 min each.
+  Run as a unit: systemd-run --user --unit p5-films-runN … (see git log of this file's neighbours for the line).
+- lessons: Playwright's video and CDP screencast are 412 px wide → screenshot loop with clip.scale 2;
+  a shot asked for across a page load never returns → 1.2 s limit + fresh CDP session; never await the loop.
+- veraldar-site: films/ (talk/tree/file .mp4 .webm .jpg), scripts/films-in.sh RUN-DIR copies a passing run in;
+  index has real <video preload=none>; the preview embeds the mp4s (artifact route serves no video).
+  Checked: plays to the end at Pixel 7 + 1280, 0 media requests before play, plays in the sandboxed preview.
+- RE-RECORD on the release build: rebuild root + trunk + branch in this worktree after merging tree-next,
+  then record.sh, look at each *-sheet.jpg, films-in.sh, build.py --preview.
+- still open: old October films stay linked until the owner has seen both; first screen's words wait for the
+  owner's pick; model-step wording to align with P4's installers; mp4 is smaller than webm here (mp4 listed first).
