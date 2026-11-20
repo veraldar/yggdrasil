@@ -79,3 +79,8 @@
 - work/AGENTS.md rules updated for stage B (backup AGENTS.md.pre-stageb-1120.bak).
 - P3 stage-B message: sending now (lead-next.md, as written). MAIN resumes the others one at a time.
 - OPEN: reboot window (owner picks); memory file preview-brain-layout is out of date (update).
+
+## 11-20 23:55 P3 asks: root ↔ root leg (WireGuard node) is off on the home root → merged p3-wg-hub (tree-next 95a7a836), reviewed (matches sim/trunk-full-e2e.sh config), dry run ok.
+- RUN: ~/Work/tree-next/scripts/hub-units.sh wg-on   ← restarts bridge, hub-wg (new), brain (CUTS MY TURN), apps. Log: ~/.local/share/yggdrasil/hub/logs/switch.log. Way back: automatic on failed health; by hand `hub-units.sh wg-off`.
+- AFTER: read switch.log; health (now with the node); curl 127.0.0.1:4506/_wg → []; brain.log "learning linked roots from …4506"; live-door both doors once (mic); tell P3 (POST /session/ses_f35ae2c967344628b6ff6c26adfa297a/message?async=1): done, go on with the joins. Then report to MAIN.
+- Coming from P3: branch p3-model (home side of "Same as the home root") — merge+deploy when P3 reports it green.
