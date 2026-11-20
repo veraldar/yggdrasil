@@ -162,6 +162,7 @@ key Return; wait_exit
 echo "[a PC whose root already has its model: no model page]"
 reset; mkdir -p /home/alice/.local/share/yggdrasil-root 2>/dev/null
 printf 'YGG_UPSTREAM_BASE_URL=http://127.0.0.1:11434/v1\n' >/home/alice/.local/share/yggdrasil-root/brain.env
+chown -R alice: /home/alice/.local 2>/dev/null
 scenario default=ok join=ok wait=2; start /x/setup.exe
 wait_log 'page: address' 180 && key Return && wait_log 'page: done' 120
 rc=$?; R=$(report); key Return; wait_exit

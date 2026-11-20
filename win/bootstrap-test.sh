@@ -38,7 +38,7 @@ bash $B --setup --out $OUTS --user johnsmith >/tmp/setup.out 2>&1; rc=$?
 check 'setup again, --user johnsmith (the default user of an existing distro): kept, nothing made, wsl.conf untouched' $? "$(cat /tmp/setup.out)"
 [ "$(ini $OUTS/setup.ini model)" = 0 ]
 check 'setup: model=0 — this user has no root with a model yet (the installer asks for one)' $? "$(cat $OUTS/setup.ini)"
-mkdir -p /home/johnsmith/.local/share/yggdrasil-root && printf 'YGG_UPSTREAM_BASE_URL=http://127.0.0.1:11434/v1\n' >/home/johnsmith/.local/share/yggdrasil-root/brain.env
+runuser -u johnsmith -- sh -c "mkdir -p ~/.local/share/yggdrasil-root && printf 'YGG_UPSTREAM_BASE_URL=http://127.0.0.1:11434/v1\\n' >~/.local/share/yggdrasil-root/brain.env"
 bash $B --setup --out $OUTS --user johnsmith >/tmp/setup.out 2>&1
 [ "$(ini $OUTS/setup.ini model)" = 1 ]
 check 'setup: model=1 once its root has a model (the installer does not ask; join.sh keeps it)' $? "$(cat $OUTS/setup.ini)"
