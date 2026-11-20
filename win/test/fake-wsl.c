@@ -42,6 +42,8 @@ static void to_unix(const char *win, char *out, int n) { /* C:\x -> /tmp/wp/driv
     snprintf(out, n, "%s", u ? u : win);
 }
 
+static char g_cwd[MAX_PATH] = "/";   /* wsl.exe --cd DIR: where the Unix process starts */
+
 static void squote(FILE *f, const char *s) { /* 'a'\''b' */
     fputc('\'', f);
     for (; *s; s++) { if (*s == '\'') fputs("'\\''", f); else fputc(*s, f); }
@@ -64,7 +66,9 @@ static int run_unix(const char *home, int argc, char **argv, int from, int with_
         fprintf(f, "export FAKE_JOIN_MODE='%s' FAKE_WAIT=%d FAKE_PREP=%d FAKE_ROOTJOIN=/repo/root/install/rootjoin.py "
                    "VERALDAR_JOIN_SH=/repo/win/test/fake-join.sh FAKE_BRAIN_PORT=4180\n", join, wait, prep);
     }
-    fprintf(f, "cd /\nbash");
+    fprintf(f, "cd ");
+    squote(f, g_cwd);
+    fprintf(f, "\nbash");
     for (int i = from; i < argc; i++) { fputc(' ', f); squote(f, argv[i]); }
     fprintf(f, " >/tmp/fakewsl/%s.out 2>&1\necho $? >/tmp/fakewsl/%s.rc.tmp && mv /tmp/fakewsl/%s.rc.tmp /tmp/fakewsl/%s.rc\n",
             tag, tag, tag, tag);
@@ -129,6 +133,7 @@ int main(int argc, char **argv) {
     for (; i < argc; i++) {
         if (!strcmp(argv[i], "-d") && i + 1 < argc) distro = argv[++i];
         else if (!strcmp(argv[i], "-u") && i + 1 < argc) user = argv[++i];
+        else if (!strcmp(argv[i], "--cd") && i + 1 < argc) to_unix(argv[++i], g_cwd, sizeof g_cwd);
         else if (!strcmp(argv[i], "-e")) { i++; break; }
         else { fprintf(stderr, "fake wsl: unexpected %s\n", argv[i]); return 1; }
     }

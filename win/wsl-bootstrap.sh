@@ -194,12 +194,19 @@ if [ "$MODE" = cancel ]; then
   exit 0
 fi
 
+# the installer runs this IN its folder (wsl.exe --cd) with --out . : made absolute here (no path ever goes back
+# to Windows — a user name with non-ASCII letters would not survive the trip)
+if [ -n "$OUT" ] && [ -d "$OUT" ]; then OUT=$(cd "$OUT" && pwd); fi
 [ -n "$OUT" ] && [ -d "$OUT" ] || { echo "wsl-bootstrap: --out DIR (the install folder, as WSL sees it) is needed" >&2; exit 64; }
 
 # ------------------------------------------------------------------------------------- setup (root)
-ini() { # FILE SECTION KEY=VALUE... — written whole, CRLF (Windows reads it with GetPrivateProfileString)
-  local f=$1 sec=$2 kv; shift 2
-  { printf '[%s]\r\n' "$sec"; for kv in "$@"; do printf '%s\r\n' "${kv//[$'\r\n']/ }"; done; } >"$f.tmp.$$" && mv -f "$f.tmp.$$" "$f"
+ini() { # FILE SECTION KEY=VALUE... — written whole, CRLF (Windows reads it with GetPrivateProfileString). The rename
+  #       is tried a few times: Windows may hold the file open for a moment while the installer reads it
+  local f=$1 sec=$2 kv i
+  shift 2
+  { printf '[%s]\r\n' "$sec"; for kv in "$@"; do printf '%s\r\n' "${kv//[$'\r\n']/ }"; done; } >"$f.tmp.$$" || return 1
+  for i in 1 2 3 4 5 6 7 8 9 10; do mv -f "$f.tmp.$$" "$f" 2>/dev/null && return 0; sleep 0.2; done
+  rm -f "$f.tmp.$$"; return 1
 }
 if [ "$MODE" = setup ]; then
   [ "$(id -u)" = 0 ] || { echo "wsl-bootstrap --setup runs as root (wsl -u root)" >&2; exit 64; }
@@ -284,6 +291,9 @@ note "---- $(date '+%F %T') wsl-bootstrap: hub $HUB, name $NAME, $(. /etc/os-rel
 # inside WSL (mode 600; the Windows copy is removed at once) and goes to join.sh as --upstream-env. Else nothing:
 # join.sh keeps the model this root already has, or stops ("no model upstream": W-MODEL).
 UP_FILE=''
+# the model file inside WSL goes on every way out — also when the installer's Cancel or time limit kills the group
+trap 'rm -f "$STATE/join.pid" ${UP_FILE:+"$UP_FILE"}' EXIT
+trap 'exit 143' TERM HUP INT
 upstream_args() {
   [ -f "$OUT/upstream.env" ] || return 0
   UP_FILE=$(mktemp "$STATE/upstream.XXXXXX")

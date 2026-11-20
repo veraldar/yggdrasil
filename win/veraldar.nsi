@@ -81,7 +81,6 @@ Var WinUser
 Var CompName
 Var Distro       ; the WSL distribution, its Linux user, the install folder as WSL sees it
 Var LUser
-Var WslDir
 Var PDistro      ; what the last probe saw
 Var PUser
 Var PUid
@@ -510,9 +509,11 @@ Section "-prepare"
     ${Else}
       DetailPrint "Installing WSL. Windows asks for permission."
       ${Log} "installing WSL: wsl --install -d Ubuntu --no-launch (elevated)"
-      StrCpy $1 $Wsl
+      StrCpy $1 "$WINDIR\System32\wsl.exe"
       StrCpy $2 "--install -d Ubuntu --no-launch"
+      ${DisableX64FSRedirection}
       Call RunElevated
+      ${EnableX64FSRedirection}
       ${If} $4 == ""
         ${Log} "the WSL install did not start (error $5)"
         StrCpy $Result "W-WSL"
@@ -551,22 +552,6 @@ Section "-prepare"
   ${EndIf}
   Call WslVersion
 
-  ; the install folder as WSL sees it
-  nsExec::ExecToStack /TIMEOUT=120000 '"$Wsl" -d $Distro -e wslpath -a -u "$INSTDIR"'
-  Pop $1
-  Pop $0
-  Call TrimNL
-  StrCpy $WslDir $0
-  StrCpy $2 $WslDir 1
-  ${If} $1 != 0
-  ${OrIf} $2 != "/"
-    ${Log} "wslpath: exit $1"
-    StrCpy $Result "W-WSL"
-    StrCpy $Why "wslpath did not answer in $Distro"
-    StrCpy $StepWSL "failed: $Why"
-    Goto done
-  ${EndIf}
-
   ; the Linux user and the packages, as root (nothing asked)
   DetailPrint "Getting $Distro ready"
   ${If} $PUid == 0
@@ -574,7 +559,7 @@ Section "-prepare"
   ${Else}
     StrCpy $3 "--user $PUser"
   ${EndIf}
-  nsExec::ExecToStack /TIMEOUT=1800000 '"$Wsl" -d $Distro -u root -e bash "$WslDir/wsl-bootstrap.sh" --setup --out "$WslDir" $3'
+  nsExec::ExecToStack /TIMEOUT=1800000 '"$Wsl" -d $Distro -u root --cd "$INSTDIR" -e bash ./wsl-bootstrap.sh --setup --out . $3'
   Pop $1
   Pop $0
   ReadINIStr $0 "$INSTDIR\setup.ini" "setup" "result"
@@ -726,9 +711,10 @@ Function AddressLeave
     Abort
   ${EndIf}
   StrCpy $Trunk $0
-  StrCpy $StepAddr "$Trunk"
   WriteINIStr "$INSTDIR\wsl.ini" "wsl" "trunk" "$Trunk"
-  ${Log} "trunk: $Trunk"
+  Call UrlHost
+  StrCpy $StepAddr "$0"
+  ${Log} "trunk: $0"
 FunctionEnd
 
 ; step 3b (decision L15): the model, asked the way join.sh asks on Linux, only when this PC's root has none yet.
@@ -770,6 +756,37 @@ Function ModelShow
   GetDlgItem $1 $HWNDPARENT 1
   SendMessage $1 ${WM_SETTEXT} 0 "STR:Connect"
   nsDialogs::Show
+FunctionEnd
+
+Function UrlHost ; $0 an http(s):// address -> $0 its host[:port] only (what is logged: no user:pass@, no path, no ?key=)
+  StrCpy $1 $0 8
+  ${If} $1 == "https://"
+    StrCpy $0 $0 "" 8
+  ${Else}
+    StrCpy $0 $0 "" 7
+  ${EndIf}
+  StrCpy $2 0
+  ${Do}
+    StrCpy $1 $0 1 $2
+    ${If} $1 == ""
+    ${OrIf} $1 == "/"
+    ${OrIf} $1 == "?"
+    ${OrIf} $1 == "#"
+      ${ExitDo}
+    ${EndIf}
+    IntOp $2 $2 + 1
+  ${Loop}
+  StrCpy $0 $0 $2
+  StrLen $2 $0
+  ${DoWhile} $2 > 0
+    IntOp $2 $2 - 1
+    StrCpy $1 $0 1 $2
+    ${If} $1 == "@"
+      IntOp $2 $2 + 1
+      StrCpy $0 $0 "" $2
+      ${ExitDo}
+    ${EndIf}
+  ${Loop}
 FunctionEnd
 
 Function TrimBlanks ; $0 without blanks around it
@@ -833,8 +850,10 @@ Function ModelLeave
   ${EndIf}
   StrCpy $0 ""
   ${NSD_SetText} $hUpKey ""
-  StrCpy $StepModel "$5, $6, $7, $8"
-  ${Log} "model: $5 ($6), $7, $8"
+  StrCpy $0 $5
+  Call UrlHost
+  StrCpy $StepModel "$0, $6, $8"
+  ${Log} "model: $0 ($6), $8"
 FunctionEnd
 
 Function JoinShow
@@ -875,7 +894,7 @@ Function JoinShow
   Delete "$INSTDIR\join-qr.bmp"
   StrCpy $CodeShown 0
   StrCpy $Ended 0
-  StrCpy $1 '"$Wsl" -d $Distro -u $LUser -e bash "$WslDir/wsl-bootstrap.sh" --hub $Trunk --name $CompName --out "$WslDir"'
+  StrCpy $1 '"$Wsl" -d $Distro -u $LUser --cd "$INSTDIR" -e bash ./wsl-bootstrap.sh --hub $Trunk --name $CompName --out .'
   Call StartHidden
   StrCpy $JoinProc $4
   ${If} $JoinProc == 0
@@ -891,7 +910,7 @@ FunctionEnd
 
 Function CancelJoin ; stop the join inside WSL and wsl.exe here
   ${If} $JoinProc != 0
-    nsExec::ExecToStack /TIMEOUT=30000 '"$Wsl" -d $Distro -u $LUser -e bash "$WslDir/wsl-bootstrap.sh" --cancel'
+    nsExec::ExecToStack /TIMEOUT=30000 '"$Wsl" -d $Distro -u $LUser --cd "$INSTDIR" -e bash ./wsl-bootstrap.sh --cancel'
     Pop $0
     Pop $0
     System::Call 'kernel32::TerminateProcess(p $JoinProc, i 1)'
@@ -1015,11 +1034,11 @@ Function JoinEnded ; steps 5-6: what happened, and on approval the start-at-logi
 FunctionEnd
 
 Function DoneShow
-  DeleteRegValue HKCU "${RUNONCE_KEY}" "Veraldar"
   Delete "$INSTDIR\upstream.env"   ; (wsl-bootstrap.sh removes it when it takes it; never left behind)
   ${If} $NeedRestart == 1
     Abort
   ${EndIf}
+  DeleteRegValue HKCU "${RUNONCE_KEY}" "Veraldar"
   StrCpy $AtEnd 1
   ${Log} "page: done $Result"
   Call WriteReport
@@ -1112,6 +1131,7 @@ Function .onInit
     StrCpy $Continue 1
   ${EndIf}
   CreateDirectory "$INSTDIR"
+  Delete "$INSTDIR\upstream.env"   ; (a Setup that was killed between the model page and the join leaves none behind)
   ${If} $Continue != 1
     Delete "$INSTDIR\setup.old.log"
     Rename "$INSTDIR\setup.log" "$INSTDIR\setup.old.log"
@@ -1178,7 +1198,7 @@ Section "Uninstall"
   ${If} $Distro != ""
   ${AndIf} $LUser != ""
     DetailPrint "Stopping Veraldar"
-    nsExec::ExecToStack /TIMEOUT=60000 '"$Wsl" -d $Distro -u $LUser -e sh -c "s=$$HOME/.local/share/yggdrasil-root/bin/stop; [ -x $$s ] && $$s"'
+    nsExec::ExecToStack /TIMEOUT=60000 '"$Wsl" -d $Distro -u $LUser --cd "$INSTDIR" -e bash ./join.sh --stop'
     Pop $0
     Pop $0
   ${EndIf}

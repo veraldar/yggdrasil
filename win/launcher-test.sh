@@ -89,9 +89,10 @@ shot() { [ -d /shots ] || return 0; sleep 0.6; local w; w=$(win "${2:-Veraldar}"
 report() { tr -d '\r' <"$I/install-report.txt" 2>/dev/null; }
 result() { report | sed -n 's/^result: *//p'; }
 calls() { tr -d '\r' <"$CALLS" 2>/dev/null; }
-J() { printf -- '-d | %s | -u | %s | -e | bash | %s/wsl-bootstrap.sh | --hub | %s | --name | TESTPC | --out | %s' "$1" "$2" "$UI" "${3:-https://ap.veraldar.org}" "$UI"; }
+WI='C:\users\root\AppData\Local\Veraldar'   # the install folder as Windows names it: wsl.exe --cd takes it, no path comes back
+J() { printf -- '-d | %s | -u | %s | --cd | %s | -e | bash | ./wsl-bootstrap.sh | --hub | %s | --name | TESTPC | --out | .' "$1" "$2" "$WI" "${3:-https://ap.veraldar.org}"; }
 KEEP='-e | sh | -c | s=$HOME/.local/share/yggdrasil-root/bin/start; [ -x $s ] && exec $s --hold'
-STOP='-e | sh | -c | s=$HOME/.local/share/yggdrasil-root/bin/stop; [ -x $s ] && $s'
+STOP="--cd | $WI | -e | bash | ./join.sh | --stop"   # join.sh --stop: services disabled too, the hold ended
 flow() { # JOIN-MODE [SHOT] [scenario...]: a whole install through the address page to the last page
   local mode=$1 name=${2:-}; shift 2
   reset; scenario default=ok "join=$mode" wait=2 "$@"; start /x/setup.exe
@@ -127,10 +128,10 @@ wait_log 'page: done' 60; shot done-ok
 check 'success: last page "Connected as TESTPC", report result connected' $?
 calls | grep -qxF -- '-e | sh | -c | . /etc/os-release; echo vb:$WSL_DISTRO_NAME:$(id -un):$(id -u):$ID $ID_LIKE:$(uname -r):$PRETTY_NAME'
 check 'step 2: probes the default distribution (Debian/Ubuntu? user? WSL2 kernel?)' $?
-calls | grep -qxF -- "-d | Ubuntu | -u | root | -e | bash | $UI/wsl-bootstrap.sh | --setup | --out | $UI | --user | alice"
+calls | grep -qxF -- "-d | Ubuntu | -u | root | --cd | $WI | -e | bash | ./wsl-bootstrap.sh | --setup | --out | . | --user | alice"
 check 'step 2: wsl -u root wsl-bootstrap.sh --setup --user alice (its default user; packages by apt-get, no password)' $?
 calls | grep -qxF -- "$(J Ubuntu alice)"
-check 'step 4: wsl -d Ubuntu -u alice -e bash <installed wsl-bootstrap.sh> --hub https://ap.veraldar.org --name TESTPC --out <install folder>' $?
+check 'step 4: wsl -d Ubuntu -u alice --cd <install folder> -e bash ./wsl-bootstrap.sh --hub https://ap.veraldar.org --name TESTPC --out . (no path goes back to Windows)' $?
 cmp -s "$I/join.sh" /x/join.sh && ! grep -q $'\r' "$I/wsl-bootstrap.sh" && grep -q $'\r' "$I/launcher.bat" && ! grep -q 'git clone' "$I/wsl-bootstrap.sh"
 check 'install folder: join.sh embedded byte for byte, wsl-bootstrap.sh LF (no git clone), launcher.bat CRLF' $?
 [ -f "$I/join-qr.bmp" ] && [ "$(head -c 2 "$I/join-qr.bmp")" = BM ]
@@ -152,7 +153,7 @@ U2=$(tr -d '\r' </tmp/wslhome/alice/fake-upstream 2>/dev/null)
 grep -qx 'YGG_UPSTREAM_BASE_URL=https://api.openai.com/v1' <<<"$U2" && grep -qx 'YGG_UPSTREAM_STYLE=openai' <<<"$U2" &&
   grep -qx 'YGG_UPSTREAM_MODEL=gpt-4o-mini' <<<"$U2" && grep -qxF "YGG_UPSTREAM_API_KEY=$TESTKEY" <<<"$U2" &&
   grep -qx -- '--upstream-env' /tmp/wslhome/alice/fake-join-args &&
-  grep -q '^  3 model      https://api.openai.com/v1, openai, gpt-4o-mini, a key$' <<<"$R"
+  grep -q '^  3 model      api.openai.com, openai, a key$' <<<"$R"
 check 'step 3b: the model page (L15): address, kind, model and the key reach join.sh as --upstream-env; the report names no key' $?
 [ ! -e "$I/upstream.env" ] && ! grep -rqF -- "$TESTKEY" "$I" && ! grep -rqF -- "$TESTKEY" /tmp/fakewsl 2>/dev/null &&
   ! ls /tmp/wslhome/alice/.local/state/veraldar/upstream.* >/dev/null 2>&1
@@ -188,7 +189,7 @@ sleep 1; shot uninstall-done
 key Return; sleep 1.5
 calls | grep -qxF -- "-d | Ubuntu | -u | alice | $STOP" && [ ! -d "$I" ] && [ ! -f "$STARTUP/Veraldar.lnk" ] \
   && ! wine reg query 'HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\Veraldar' >/dev/null 2>&1
-check 'uninstall: stops the root in WSL (bin/stop), Startup entry, files and Apps entry gone; WSL left alone' $?
+check 'uninstall: stops the root in WSL (join.sh --stop: services disabled, the hold ended), Startup entry, files and Apps entry gone; WSL left alone' $?
 ! calls | grep -q -- '--unregister\|--uninstall'
 check 'uninstall: the distribution is not touched' $?
 
@@ -237,7 +238,7 @@ wine reg delete 'HKCU\Software\Microsoft\Windows\CurrentVersion\RunOnce' /v Vera
 start "C:\\users\\root\\AppData\\Local\\Veraldar\\Veraldar-Setup.exe" /continue
 wait_log 'page: address' 180; key Return; wait_log 'page: done' 120; key Return; wait_exit
 calls | grep -qxF 'ubuntu.exe | install | --root' && ! calls | grep -q -- '--install' \
-  && calls | grep -qxF -- "-d | Ubuntu | -u | root | -e | bash | $UI/wsl-bootstrap.sh | --setup | --out | $UI | --win-user | root" \
+  && calls | grep -qxF -- "-d | Ubuntu | -u | root | --cd | $WI | -e | bash | ./wsl-bootstrap.sh | --setup | --out | . | --win-user | root" \
   && calls | grep -qxF -- "$(J Ubuntu veraldar)" && calls | grep -qxF 'ubuntu.exe | config | --default-user | veraldar' \
   && [ "$(result)" = "connected as TESTPC" ] && grep -q 'continue after restart: 1' "$I/setup.log"
 check '/continue: ubuntu.exe install --root (no Linux user question), user "veraldar" made, joined; no second UAC' $?
@@ -257,7 +258,7 @@ echo "[Cancel while the code is up]"
 reset; scenario default=ok join=wait; start /x/setup.exe
 wait_log 'page: address' 180; key Return; wait_log 'page: model' 30; typein "$TESTKEY"; key Return; wait_log 'code is up' 60
 click_cancel; wait_exit; sleep 1
-calls | grep -qxF -- "-d | Ubuntu | -u | alice | -e | bash | $UI/wsl-bootstrap.sh | --cancel" && ! ps -eo args | grep -v grep | grep -q 'fake-join.sh' \
+calls | grep -qxF -- "-d | Ubuntu | -u | alice | --cd | $WI | -e | bash | ./wsl-bootstrap.sh | --cancel" && ! ps -eo args | grep -v grep | grep -q 'fake-join.sh' \
   && [ "$(result)" = "W-JOIN - cancelled in Setup" ] && [ ! -f "$STARTUP/Veraldar.lnk" ] \
   && [ ! -e "$I/upstream.env" ] && ! grep -rqF -- "$TESTKEY" "$I"
 check 'Cancel: the join inside WSL is stopped (wsl-bootstrap.sh --cancel), nothing started, report says so; no key left' $?
