@@ -74,3 +74,8 @@
 - AFTER: health; voice checks: live-door AP + tailnet back to back TWICE (the case that failed); remove test devices from state/devices.json; pairing link for the owner (check devices.json first; delete old ap-pair.html); work/AGENTS.md rule 2 → hub-units.sh deploy; P3's stage-B message (lead-next.md) if not sent; report to MAIN with commit hashes + strict-L16 default noted + reboot window question.
 - 23:15 DEPLOYED R3 20261120-2314-e05a27d9 (tree-next e05a27d9), health ok, build QmdTZgxcB-002AbLbBbuq. NEXT: voice checks ×2 both doors.
 - 23:41 voice fixes round 2 (presence by sid, serving/draining marks, app calls the serving agent) deployed: release 20261120-2341-a8b73cbf, units voice-agent+apps only. NEXT: live-door ×3 both doors.
+- 23:45 VOICE GREEN LIVE: live-door AP+tailnet back to back ×3 = 6/6 (same sentence each time; answers 1.8–3.9 s after release). Release 20261120-2341-a8b73cbf (agent + apps; brain from R3 e05a27d9, same source). Agent log since deploy: 1 job took the room, 6 turns sent, 17 duplicates left at once, 0 timeouts.
+- Test devices/codes removed from state/devices.json. Owner pair link: artifacts/ap-pair.html valid until 12:43 on 21 Nov (owner's phone still unpaired on ap; they use :8447 voice with MAIN).
+- work/AGENTS.md rules updated for stage B (backup AGENTS.md.pre-stageb-1120.bak).
+- P3 stage-B message: sending now (lead-next.md, as written). MAIN resumes the others one at a time.
+- OPEN: reboot window (owner picks); memory file preview-brain-layout is out of date (update).
