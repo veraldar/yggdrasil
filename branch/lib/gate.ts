@@ -8,7 +8,6 @@ import { type Deny, checkAccess } from '@/lib/devices';
 import { rateTake } from '@/lib/ratelimit';
 import { peerOf, regionOfReq } from '@/lib/region';
 
-
 const REAUTH: Record<Deny, 'refresh' | 'pair'> = {
   expired: 'refresh',
   region: 'refresh',
