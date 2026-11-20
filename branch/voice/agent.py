@@ -195,6 +195,7 @@ class OpenCodeLLM(llm.LLM):
         # holds what the agent dropped (the reply's echo, speech over a reply), so a keyword commit
         # hands its curated text here and that — not the buffer — is what reaches opencode
         self.curated: str | None = None
+        self.written_reply = False
 
     @staticmethod
     def _slugify(title: str) -> str:
@@ -243,8 +244,10 @@ class OpenCodeLLM(llm.LLM):
             try:
                 async with httpx.AsyncClient(timeout=5) as c:
                     self._modality = (await c.get(f"{self._base}/tree")).status_code == 200
-            except Exception:  # noqa: BLE001 — unknown brain: keep the text tag
-                self._modality = False
+            except Exception:  # noqa: BLE001 — no answer right now (the root restarting): this
+                # turn goes without, and the next one asks again (an answer is remembered, a
+                # silence never is — else one slow moment made every later turn unspoken)
+                return False
         return self._modality
 
     @staticmethod
@@ -392,6 +395,9 @@ class OpenCodeStream(LLMStream):
         last = messages[-1] if messages else None
         prompt = (last.text_content or "").strip() if last is not None and last.role == "user" else ""
         curated, self._oc.curated = self._oc.curated, None
+        # "over and out" (the radio exit): this turn's answer comes in writing — taken here, for
+        # this turn only, whatever happens to it below
+        written, self._oc.written_reply = getattr(self._oc, "written_reply", False), False
         if not prompt:
             logger.info("opencode bridge: empty or absent user turn, skipping")
             return
@@ -431,8 +437,9 @@ class OpenCodeStream(LLMStream):
         # turn that comes through here was spoken. A root takes it as `modality: voice` (its own
         # hidden note — nothing extra in the user's words); any other brain still gets the text
         # tag, hands-free only as before
-        voice = await self._oc.speaks_modality()
-        if mode == "free" and not voice:
+        # (an "over and out" turn is answered in writing: not a voice turn)
+        voice = (not written) and await self._oc.speaks_modality()
+        if mode == "free" and not voice and not written:
             send = send + CTX_TAG
         logger.info("turn → opencode (mode=%s)", mode)
         # Streaming first-sound (AGENT_STREAM_TTS=1 default): speak sentences as
@@ -873,6 +880,7 @@ async def entrypoint(ctx: JobContext) -> None:
         phrase = "over and out" if out else "over"
         keyword_busy = True
         oc_llm.curated = turn_text  # the words this turn is made of — never the dropped echo
+        oc_llm.written_reply = out  # "over and out": the answer comes in writing (see _run)
         turn_text = ""
         # keyword turn-taking only exists in hands-free — authoritative mode
         # even if the metadata update has not landed yet. "over and out" is

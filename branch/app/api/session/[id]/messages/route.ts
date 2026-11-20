@@ -126,6 +126,9 @@ export async function GET(req: Request, ctx: { params: Promise<{ id: string }> }
         done:
           (m.info?.role || m.role) === 'assistant' ? !!m.info?.time?.completed : undefined,
         autoReply: m.info?.meta?.autoReply === true ? true : undefined,
+        // a run that was stopped or failed: its text is what was there when it ended (L16: a
+        // held turn's partial answer is never said aloud)
+        stopped: (m.info?.role || m.role) === 'assistant' && m.info?.error ? true : undefined,
         // who wrote it when not the owner: another session (here or on another root), or the
         // brain itself (a report, a wake-up). Older messages carry only the sender's id (origin)
         ...((m.info?.role || m.role) === 'user' && senderOf(m.info?.meta)),

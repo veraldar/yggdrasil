@@ -24,6 +24,7 @@ export type Msg = {
   id?: string;
   parent?: string; // assistant: the message it answers
   modality?: 'voice'; // user: a turn that was spoken (held or hands-free), not typed
+  stopped?: boolean; // assistant: its run was stopped or failed (what is there is partial)
   from?: Sender; // user: another session wrote it, not the owner
   auto?: boolean; // user: the brain itself (a report, a wake-up)
 };
