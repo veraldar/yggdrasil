@@ -114,7 +114,7 @@ sweep() { # NAME KEY — the key is only in the env file: mode 600, once, nowher
   out=$(docker exec -u "$HU" "$c" bash -c "
     e=~/.config/yggdrasil/yggdrasil.env
     m=\$(stat -c %a \$e)
-    n=\$(grep -c \"^\$1=\" /dev/null; grep -c '$k' \$e)
+    n=\$(grep -c '$k' \$e)
     hits=\$(grep -rl -- '$k' ~ /tmp 2>/dev/null | grep -v '^\$e\$' | tr '\n' ' ')
     echo \"mode=\$m inenv=\$n elsewhere=[\$hits]\"
     " 2>&1)
@@ -158,7 +158,7 @@ mkcase zai
 typed zai "$(printf '1\n%s\n\n' "$KZ")" zai-install.log
 if ! chk_menu "$STATE/log/zai-install.log"; then row zai FAIL "menu wrong in transcript"; else
 turn zai zai-turn.log
-ev=$(uplog | tail -5 | grep api.z.ai | grep glm-5.3-flash | head -1 | sed "s/$KZ/<key>/")
+ev=$(uplog | grep api.z.ai | grep glm-5.3-flash | head -1 | sed "s/$KZ/<key>/")
 ok=1
 chk_env zai https://api.z.ai/api/anthropic anthropic glm-5.3-flash "$KZ" >/dev/null || ok=0
 sw=$(sweep zai "$KZ"); case "$sw" in "mode=600 inenv=1 elsewhere=[]") ;; *) ok=0; ev="$sw";; esac
@@ -170,7 +170,7 @@ say "case zai-model"
 mkcase zai-model
 typed zai-model "$(printf '1\n%s\nglm-5.3\n' "$KZ")" zai-model-install.log
 turn zai-model zai-model-turn.log
-ev=$(uplog | tail -5 | grep api.z.ai | grep '"model": "glm-5.3"' | head -1 | sed "s/$KZ/<key>/")
+ev=$(uplog | grep api.z.ai | grep '"model": "glm-5.3"' | head -1 | sed "s/$KZ/<key>/")
 ok=1
 chk_env zai-model https://api.z.ai/api/anthropic anthropic glm-5.3 "$KZ" >/dev/null || ok=0
 sw=$(sweep zai-model "$KZ"); case "$sw" in "mode=600 inenv=1 elsewhere=[]") ;; *) ok=0; ev="$sw";; esac
@@ -181,7 +181,7 @@ say "case openrouter"
 mkcase openrouter
 typed openrouter "$(printf '2\n%s\n\n' "$KO")" openrouter-install.log
 turn openrouter openrouter-turn.log
-ev=$(uplog | tail -5 | grep openrouter.ai | grep gpt-4o-mini | head -1 | sed "s/$KO/<key>/")
+ev=$(uplog | grep openrouter.ai | grep gpt-4o-mini | head -1 | sed "s/$KO/<key>/")
 ok=1
 chk_env openrouter https://openrouter.ai/api/v1 openai openai/gpt-4o-mini "$KO" >/dev/null || ok=0
 sw=$(sweep openrouter "$KO"); case "$sw" in "mode=600 inenv=1 elsewhere=[]") ;; *) ok=0; ev="$sw";; esac
@@ -192,7 +192,7 @@ say "case anthropic"
 mkcase anthropic
 typed anthropic "$(printf '3\n%s\n\n' "$KA")" anthropic-install.log
 turn anthropic anthropic-turn.log
-ev=$(uplog | tail -5 | grep api.anthropic.com | grep claude-fable-5-2 | head -1 | sed "s/$KA/<key>/")
+ev=$(uplog | grep api.anthropic.com | grep claude-fable-5-2 | head -1 | sed "s/$KA/<key>/")
 ok=1
 chk_env anthropic https://api.anthropic.com anthropic claude-fable-5-2 "$KA" >/dev/null || ok=0
 sw=$(sweep anthropic "$KA"); case "$sw" in "mode=600 inenv=1 elsewhere=[]") ;; *) ok=0; ev="$sw";; esac
@@ -203,7 +203,7 @@ say "case openai"
 mkcase openai
 typed openai "$(printf '4\n%s\n\n' "$KW")" openai-install.log
 turn openai openai-turn.log
-ev=$(uplog | tail -5 | grep api.openai.com | grep gpt-4o-mini | head -1 | sed "s/$KW/<key>/")
+ev=$(uplog | grep api.openai.com | grep gpt-4o-mini | head -1 | sed "s/$KW/<key>/")
 ok=1
 chk_env openai https://api.openai.com/v1 openai gpt-4o-mini "$KW" >/dev/null || ok=0
 sw=$(sweep openai "$KW"); case "$sw" in "mode=600 inenv=1 elsewhere=[]") ;; *) ok=0; ev="$sw";; esac
@@ -214,7 +214,7 @@ say "case other-key"
 mkcase other-key
 typed other-key "$(printf '5\nhttps://other.tree.test/v1\nanthropic\nmymodel-7\n%s\n' "$KX")" other-key-install.log
 turn other-key other-key-turn.log
-ev=$(uplog | tail -5 | grep other.tree.test | grep mymodel-7 | head -1 | sed "s/$KX/<key>/")
+ev=$(uplog | grep other.tree.test | grep mymodel-7 | head -1 | sed "s/$KX/<key>/")
 ok=1
 chk_env other-key https://other.tree.test/v1 anthropic mymodel-7 "$KX" >/dev/null || ok=0
 sw=$(sweep other-key "$KX"); case "$sw" in "mode=600 inenv=1 elsewhere=[]") ;; *) ok=0; ev="$sw";; esac
@@ -238,7 +238,7 @@ docker exec -u "$HU" -e HOME=$HH -e YGG_UPSTREAM_API_KEY=$KZ msm-flag-zai \
   bash -c "cd ~/yggdrasil-$VER/root/install && YGG_UPSTREAM_API_KEY=$KZ bash install.sh --brain-only --now </dev/null" \
   >"$STATE/log/flag-zai-install.log" 2>&1
 turn flag-zai flag-zai-turn.log
-ev=$(uplog | tail -5 | grep api.z.ai | grep glm-5.3-flash | head -1 | sed "s/$KZ/<key>/")
+ev=$(uplog | grep api.z.ai | grep glm-5.3-flash | head -1 | sed "s/$KZ/<key>/")
 ok=1
 chk_env flag-zai https://api.z.ai/api/anthropic anthropic glm-5.3-flash "$KZ" >/dev/null || ok=0
 sw=$(sweep flag-zai "$KZ"); case "$sw" in "mode=600 inenv=1 elsewhere=[]") ;; *) ok=0; ev="$sw";; esac
@@ -252,7 +252,7 @@ docker exec -u "$HU" -e HOME=$HH -e YGG_UPSTREAM_API_KEY=$KA msm-flag-model \
   bash -c "cd ~/yggdrasil-$VER/root/install && YGG_UPSTREAM_API_KEY=$KA bash install.sh --brain-only --now --model-provider anthropic --model claude-haiku-5-5 </dev/null" \
   >"$STATE/log/flag-model-install.log" 2>&1
 turn flag-model flag-model-turn.log
-ev=$(uplog | tail -5 | grep api.anthropic.com | grep claude-haiku-5-5 | head -1 | sed "s/$KA/<key>/")
+ev=$(uplog | grep api.anthropic.com | grep claude-haiku-5-5 | head -1 | sed "s/$KA/<key>/")
 ok=1
 chk_env flag-model https://api.anthropic.com anthropic claude-haiku-5-5 "$KA" >/dev/null || ok=0
 sw=$(sweep flag-model "$KA"); case "$sw" in "mode=600 inenv=1 elsewhere=[]") ;; *) ok=0; ev="$sw";; esac
