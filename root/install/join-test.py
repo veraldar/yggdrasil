@@ -876,95 +876,90 @@ def test_key(tmp):
 
 
 def bootstrap_test(hub, new_env, tmp):
-    """win/wsl-bootstrap.sh — what launcher.bat runs inside WSL2 — with wslpath/explorer.exe shims and a
-    local clone source, so clone (sparse), update, join with os=wsl and the Desktop QR are all exercised."""
-    print("\n[windows, inside WSL] wsl-bootstrap.sh: clone, join, QR to the Desktop via wslpath", flush=True)
+    """win/wsl-bootstrap.sh — what Veraldar-Setup.exe runs inside WSL2, hidden — with this join.sh against the fake
+    hub: the join (os=wsl, --name from Windows), status.ini for the installer's window (the hub's code, the QR as a
+    BMP that decodes to approve_url), a setup.log without the key, exit 0 once the brain answers; a re-run keeps
+    the join; a refusal gives the step code W-JOIN."""
+    print("\n[windows, inside WSL] wsl-bootstrap.sh: the join, status.ini + the QR as BMP for the installer", flush=True)
     repo = os.path.dirname(os.path.dirname(HERE))
     boot = os.path.join(repo, "win", "wsl-bootstrap.sh")
-    if not shutil.which("git"):
-        return check("bootstrap: git present (WSL's Ubuntu has it)", False)
-    src, bare = os.path.join(tmp, "src"), os.path.join(tmp, "yggdrasil.git")
-    for rel in ("root/install/join.sh", "root/install/rootjoin.py", "trunk/scripts/root-dial.py"):
-        os.makedirs(os.path.join(src, os.path.dirname(rel)), exist_ok=True)
-        shutil.copy2(os.path.join(repo, rel), os.path.join(src, rel))
-    os.makedirs(os.path.join(src, "branch"))
-    open(os.path.join(src, "branch", "big.txt"), "w").write("not needed by a root\n")
-    g = ["git", "-c", "user.name=t", "-c", "user.email=t@t", "-c", "init.defaultBranch=main"]
-    q = dict(cwd=src, check=True, capture_output=True)
-    subprocess.run(g + ["init", "-q"], **q)
-    subprocess.run(g + ["add", "-A"], **q)
-    subprocess.run(g + ["commit", "-qm", "tree"], **q)
-    subprocess.run(g + ["checkout", "-qb", "old"], **q)
-    subprocess.run(g + ["rm", "-rq", "root"], **q)
-    subprocess.run(g + ["commit", "-qm", "old layout"], **q)
-    subprocess.run(["git", "clone", "-q", "--bare", src, bare], check=True, capture_output=True)
-
     w = new_env("whiskey")
-    w.make_shims()
-    mnt = os.path.join(os.path.dirname(w.home), "mnt")
-    rec = os.path.join(w.shim, "calls.log")
-    shims = {
-        "wslpath": 'case $1 in\n  -u) p=$(printf "%%s" "$2" | tr "\\\\134" "/" | sed "s|^C:|c|"); printf "%%s\\n" "%s/$p" ;;\n'
-                   '  -w) printf "%%s\\n" "C:\\\\fake$2" ;;\nesac' % mnt,
-        "explorer.exe": ":",
-    }
-    for tool, body in shims.items():
-        with open(os.path.join(w.shim, tool), "w") as f:
-            f.write('#!/bin/sh\nprintf "%%s\\n" "%s $*" >> "%s"\n%s\n' % (tool, rec, body))
-        os.chmod(os.path.join(w.shim, tool), 0o755)
-    qr_win = "C:\\Users\\me\\Desktop\\Veraldar-Join-QR.png"
-    qr_png = os.path.join(mnt, "c", "Users", "me", "Desktop", "Veraldar-Join-QR.png")
+    out = os.path.join(os.path.dirname(w.home), "win-out")   # %LOCALAPPDATA%\Veraldar, as WSL sees it
+    os.makedirs(out)
     tail = ["--", "--upstream-env", w.up, "--cacert", w.cacert, "--brain-bin", w.brain_bin, "--supervisor", "nohup",
-            "--no-start", "--brain-port", str(w.brain_port), "--peer-port", str(w.peer_port)]
+            "--brain-port", str(w.brain_port), "--peer-port", str(w.peer_port)]
 
-    def boot_run(args, home=None):
-        # the sparse clone has no trunk/target: join.sh downloads bifrost-net from the (fake) release
-        e = w.env(WSL_DISTRO_NAME="Ubuntu", JOIN_RELEASES=hub.base + "/releases",
+    def status():
+        try:
+            with open(os.path.join(out, "status.ini"), newline="") as f:
+                raw = f.read()
+        except OSError:
+            return {}
+        return dict(l.split("=", 1) for l in raw.replace("\r\n", "\n").splitlines() if "=" in l)
+
+    def boot_popen(args):
+        e = w.env(WSL_DISTRO_NAME="Ubuntu", JOIN_RELEASES=hub.base + "/releases", VERALDAR_JOIN_SH=JOIN,
                   YGG_RELEASE_TEST_SIGNERS=os.path.join(tmp, "test-allowed-signers"))
-        if home:
-            e["HOME"] = home
         with open(w.log, "a") as f:
             f.write("\n$ wsl-bootstrap.sh %s\n" % " ".join(args))
-            f.flush()
-            return subprocess.run(["bash", boot] + args, stdout=f, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
-                                  env=e, timeout=120).returncode
+        f = open(w.log, "a")
+        p = subprocess.Popen(["bash", boot] + args, stdout=f, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+                             env=e, start_new_session=True)
+        w.procs.append(p)
+        return p
 
-    url = "file://" + bare
     joins0 = hub.counts["join"]
-    hub.auto = "approve"
-    rc = boot_run(["--hub", hub.base, "--branch", "main", "--repo", url, "--qr-win", qr_win] + tail)
-    hub.auto = None
-    co = os.path.join(w.home, "veraldar", "yggdrasil")
-    j = list(hub.joins.values())[-1]
-    check("bootstrap: exit 0; one join request, sent as os=wsl", rc == 0 and hub.counts["join"] == joins0 + 1
-          and j["os"] == "wsl", "rc=%s os=%s\n%s" % (rc, j.get("os"), w.out()[-1500:]))
-    wbin = os.path.join(w.dir, "bin", "bifrost-net")
-    check("bootstrap: bifrost-net downloaded from the release (SHA256SUMS checked), the key made, the tunnel granted",
-          "downloading bifrost-net" in w.out() and os.path.exists(wbin) and mode(wbin) == 0o755
-          and open(wbin, "rb").read() == hub.release[next(iter(hub.release))]
-          and j.get("wg_pub") and w.root().get("wg") == j.get("wg"), w.out()[-800:])
-    check("bootstrap: sparse clone into ~/veraldar/yggdrasil (root/ + trunk/scripts, not branch/)",
-          os.path.isfile(os.path.join(co, "root", "install", "join.sh")) and os.path.isfile(os.path.join(co, "trunk", "scripts", "root-dial.py"))
-          and not os.path.exists(os.path.join(co, "branch")))
-    check("bootstrap: QR PNG on the 'Windows Desktop' (wslpath -u) decodes to approve_url",
-          os.path.exists(qr_png) and decode_png(qr_png) == "%s/join/%s" % (hub.base, next(reversed(hub.joins))))
-    opened = wait_for(lambda: [l for l in open(rec).read().splitlines() if l.startswith("explorer.exe ")], 10)
-    check("bootstrap: the PNG is opened on Windows (explorer.exe <wslpath -w path>)",
-          opened and opened[0] == "explorer.exe C:\\fake" + qr_png, str(opened))
+    p = boot_popen(["--hub", hub.base, "--name", "WHISKEY-PC", "--out", out] + tail)
+    seen = wait_for(lambda: status().get("state") == "code" and hub.joins and status(), 60)
+    req = hub.last_req()
+    j = hub.joins.get(req, {}) if req else {}
+    bmp = os.path.join(out, "join-qr.bmp")
+    check("bootstrap: while it waits, status.ini has state=code, the hub's code, qr=join-qr.bmp, name=WHISKEY-PC",
+          bool(seen) and seen.get("code") == j.get("code") and seen.get("qr") == "join-qr.bmp"
+          and seen.get("name") == "WHISKEY-PC", "%s %s" % (seen, w.out()[-800:]))
+    check("bootstrap: the BMP (what the installer window shows) decodes to approve_url",
+          os.path.exists(bmp) and decode_png(bmp) == "%s/join/%s" % (hub.base, req), bmp)
+    if req:
+        hub.approve(req)
+    try:
+        rc = p.wait(120)
+    except subprocess.TimeoutExpired:
+        os.killpg(p.pid, signal.SIGKILL)
+        rc = "timeout"
+    st = status()
+    check("bootstrap: approved -> exit 0, state=done, no step code (the brain answers)",
+          rc == 0 and st.get("state") == "done" and st.get("step") == "" and brain_root(w.brain_port) is not None,
+          "rc=%s %s\n%s" % (rc, st, w.out()[-1500:]))
+    check("bootstrap: one join request, sent as os=wsl with the Windows computer name",
+          hub.counts["join"] == joins0 + 1 and j.get("os") == "wsl" and j.get("name") == "WHISKEY-PC", str(j))
+    check("bootstrap: the WireGuard key made, the tunnel granted", bool(j.get("wg_pub")) and w.root().get("wg") == j.get("wg"),
+          w.out()[-800:])
+    slog = open(os.path.join(out, "setup.log"), newline="").read()
+    check("bootstrap: setup.log (the installer's report quotes it) has the run, CRLF, plain ASCII, never the key",
+          "Code (check it matches the phone)" in slog and "\r\n" in slog and KEY not in slog
+          and all(ord(c) < 128 for c in slog), slog[-600:])
     blog = os.path.join(w.home, ".local", "state", "veraldar", "bootstrap.log")
-    check("bootstrap: everything also lands in ~/.local/state/veraldar/bootstrap.log",
-          os.path.exists(blog) and "downloading" in open(blog).read() and "approved" in open(blog).read())
+    check("bootstrap: everything also lands in ~/.local/state/veraldar/bootstrap.log (inside WSL)",
+          os.path.exists(blog) and "approved" in open(blog).read())
     joins0 = hub.counts["join"]
-    rc = boot_run(["--hub", hub.base + "\r\n", "--branch", "main", "--repo", url, "--qr-win", qr_win] + tail)
-    check("bootstrap: second double-click (hub arriving with a stray CR/LF from cmd) -> updates the clone, "
-          "keeps the join (no new request)",
-          rc == 0 and hub.counts["join"] == joins0 and "updating" in open(blog).read()
-          and "already joined" in w.out().rsplit("$ wsl-bootstrap.sh", 1)[1], "rc=%s" % rc)
-    home2 = os.path.join(os.path.dirname(w.home), "home2")
-    os.makedirs(home2)
-    rc = boot_run(["--hub", hub.base, "--branch", "old", "--repo", url] + tail, home=home2)
-    check("bootstrap: a branch without root/install/join.sh fails clearly (set BRANCH in launcher.bat)",
-          rc == 1 and "has no root/install/join.sh" in w.out(), "rc=%s" % rc)
+    rc = boot_popen(["--hub", hub.base + "\r\n", "--name", "WHISKEY-PC", "--out", out] + tail).wait(120)
+    check("bootstrap: Setup again (the hub arriving with a stray CR/LF) keeps the join: no new request, exit 0",
+          rc == 0 and hub.counts["join"] == joins0 and status().get("state") == "done"
+          and "already joined" in open(os.path.join(out, "setup.log")).read().rsplit("wsl-bootstrap: hub", 1)[1],
+          "rc=%s %s %s" % (rc, hub.counts["join"] - joins0, status()))
+    v = new_env("victor")
+    w = v
+    out = os.path.join(os.path.dirname(v.home), "win-out")
+    os.makedirs(out)
+    tail = ["--", "--upstream-env", v.up, "--cacert", v.cacert, "--brain-bin", v.brain_bin, "--supervisor", "nohup",
+            "--brain-port", str(v.brain_port), "--peer-port", str(v.peer_port)]
+    hub.auto = "refuse"
+    rc = boot_popen(["--hub", hub.base, "--name", "VICTOR-PC", "--out", out] + tail).wait(120)
+    hub.auto = None
+    st = status()
+    check("bootstrap: refused on the phone -> exit 3, state=fail step=W-JOIN, nothing started",
+          rc == 3 and st.get("state") == "fail" and st.get("step") == "W-JOIN" and st.get("rc") == "3"
+          and brain_root(v.brain_port) is None, "rc=%s %s" % (rc, st))
 
 
 if __name__ == "__main__":
