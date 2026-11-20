@@ -122,15 +122,19 @@ async function phoneFor({ wav, storage, film }) {
       while (filming) {
         const a = now();
         try {
-          const r = await cdp.send('Page.captureScreenshot', shot);
+          // a shot asked for while the page loads never comes back: give it 1.2 s, then a new session
+          const r = await Promise.race([cdp.send('Page.captureScreenshot', shot), sleep(1200).then(() => { throw new Error('stuck'); })]);
           if (r.data !== last) { // a picture that did not change is the one before, held longer
             const file = `f${String(frames.length).padStart(5, '0')}.jpg`;
             writeFileSync(join(dir, file), Buffer.from(r.data, 'base64'));
             frames.push({ t: (a + now()) / 2, file });
             last = r.data;
           }
-        } catch {
-          await sleep(40); // a navigation in flight: the next shot works
+        } catch (e) {
+          if (/stuck/.test(String(e))) {
+            cdp.detach().catch(() => {});
+            cdp = await ctx.newCDPSession(page).catch(() => cdp);
+          } else await sleep(40);
         }
       }
     })();
@@ -147,7 +151,7 @@ async function phoneFor({ wav, storage, film }) {
     async done(extra = {}) {
       const closed = now();
       filming = false;
-      if (loop) await loop;
+      if (loop) await Promise.race([loop, sleep(2000)]);
       await ctx.close();
       await browser.close();
       if (!film) return '';
