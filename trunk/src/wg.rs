@@ -1232,7 +1232,7 @@ impl Engine {
         let dir = (self.source.follows_hub && peer == "local").then(|| (self.source.directory.clone(), self.source.me));
         let _ = std::thread::Builder::new()
             .name("wg-in".into())
-            .spawn(move || serve_inbound(id, rx, ctl, brain, agent, dir));
+            .spawn(move || serve_inbound(id, rx, ctl, brain, agent, dir, peer));
     }
 
     fn pump(&mut self) {
@@ -1429,7 +1429,9 @@ fn encode_request(peer: &str, req: &HttpReq) -> Vec<u8> {
 }
 
 /// The in-tunnel door: one exchange from a peer, performed against this root's brain.
-fn serve_inbound(id: u64, rx: mpsc::Receiver<Ev>, ctl: Ctl, brain: Option<String>, agent: ureq::Agent, dir: Option<(Dir, [u8; 32])>) {
+/// `peer`: whose tunnel the exchange arrived in (its pinned key, its own tunnel address) — handed
+/// to the brain as `x-ygg-from`, with `x-ygg-via: wg`.
+fn serve_inbound(id: u64, rx: mpsc::Receiver<Ev>, ctl: Ctl, brain: Option<String>, agent: ureq::Agent, dir: Option<(Dir, [u8; 32])>, peer: String) {
     let deadline = Instant::now() + Duration::from_secs(30);
     let got = read_request(|buf| loop {
         let left = deadline.saturating_duration_since(Instant::now());
@@ -1474,7 +1476,7 @@ fn serve_inbound(id: u64, rx: mpsc::Receiver<Ev>, ctl: Ctl, brain: Option<String
         Ok(r) => match (HttpReq::new(&r.method, &r.target, r.headers, r.body), &brain) {
             (Err(e), _) => HttpReply::error(400, &e),
             (Ok(_), None) => HttpReply::error(501, "this root runs no brain behind its tunnel"),
-            (Ok(req), Some(b)) => switch::perform(&agent, b, &req),
+            (Ok(req), Some(b)) => switch::perform(&agent, b, &req, ("wg", &peer)),
         },
     };
     ctl.send(Cmd::Write { id, data: encode_reply(&reply) });
@@ -1932,9 +1934,10 @@ mod tests {
                 let _ = rq.as_reader().read_to_end(&mut body);
                 let peer_hdr = rq.headers().iter().find(|h| h.field.equiv("x-ygg-peer")).map(|h| h.value.to_string());
                 let via = rq.headers().iter().find(|h| h.field.equiv("x-ygg-via")).map(|h| h.value.to_string());
+                let from = rq.headers().iter().find(|h| h.field.equiv("x-ygg-from")).map(|h| h.value.to_string());
                 let leaked = rq.headers().iter().any(|h| h.field.equiv("authorization") || h.field.equiv("x-evil"));
                 let out = match rq.url() {
-                    "/root" => json!({ "name": name, "peer": peer_hdr, "via": via, "leaked": leaked }).to_string().into_bytes(),
+                    "/root" => json!({ "name": name, "peer": peer_hdr, "via": via, "from": from, "leaked": leaked }).to_string().into_bytes(),
                     "/echo" => body,
                     _ => b"{\"error\":\"no route\"}".to_vec(),
                 };
@@ -2067,13 +2070,15 @@ mod tests {
         let relay = fake_relay(a.udp, vec![("b", rb, b.udp), ("c", rc, c.udp), ("d", rd, d.udp)], ra);
 
         // B -> the hub's brain, and the hub -> B's brain, inside the tunnel
-        let (st, body) = http(b.http, "GET", "/_wg/local/root", b"", "x-ygg-peer: tok\r\nauthorization: Bearer no\r\nx-evil: 1\r\nx-ygg-via: forged\r\n");
+        let (st, body) = http(b.http, "GET", "/_wg/local/root", b"", "x-ygg-peer: tok\r\nauthorization: Bearer no\r\nx-evil: 1\r\nx-ygg-via: forged\r\nx-ygg-from: local\r\n");
         let v: Value = serde_json::from_slice(&body).unwrap();
         assert_eq!((st, v["name"].as_str(), v["peer"].as_str(), v["leaked"].as_bool()), (200, Some("A"), Some("tok"), Some(false)), "{v}");
-        // the door marks every call it performs as another root's (L8), and a caller cannot forge the mark
-        assert_eq!(v["via"].as_str(), Some("trunk"), "{v}");
+        // the door marks every call it performs as another root's (L8): by which door, and whose
+        // tunnel it came in — the pinned peer, never what the caller claimed
+        assert_eq!((v["via"].as_str(), v["from"].as_str()), (Some("wg"), Some("b")), "{v}");
         let (st, body) = http(a.http, "GET", "/_wg/b/root", b"", "");
-        assert_eq!((st, serde_json::from_slice::<Value>(&body).unwrap()["name"].as_str()), (200, Some("B")));
+        let v: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!((st, v["name"].as_str(), v["via"].as_str(), v["from"].as_str()), (200, Some("B"), Some("wg"), Some("local")), "{v}");
         let big: Vec<u8> = (0..300_000u32).map(|i| b"0123456789abcdef"[(i % 16) as usize]).collect();
         let (st, body) = http(a.http, "POST", "/_wg/b/echo", &big, "");
         assert!(st == 200 && body == big, "300 KB echo through the tunnel: {st} {}", body.len());

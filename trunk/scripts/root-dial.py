@@ -138,11 +138,15 @@ class Brain:
         self.lock = threading.Lock()
 
     def request(self, method, path, body=b"", headers=None, timeout=HTTP_WAIT, peer=False):
-        """(status, pass-headers, body bytes) — HTTP errors are answers too. peer=True: another root's
-        call, marked x-ygg-via (set after the header law: the brain checks its peer token on it)."""
+        """(status, pass-headers, body bytes) — HTTP errors are answers too. peer=True or a root id:
+        another root's call, marked x-ygg-via (set after the header law: the brain checks its peer
+        token on it) and x-ygg-from (the root the trunk says it came from; this is the old plaintext
+        path — `trunk`, never `wg`)."""
         hdrs = pass_headers(headers)
         if peer:
             hdrs["x-ygg-via"] = "trunk"
+            if isinstance(peer, str):
+                hdrs["x-ygg-from"] = peer
         req = urllib.request.Request(self.url + path, data=body if (body or method not in ("GET", "DELETE")) else None,
                                      method=method, headers=hdrs)
         try:
@@ -552,7 +556,7 @@ def run_ws(s, token, exec_cmd, probe_cmd, brain, link, leftover=b"", wg=None):
                 try:
                     raw_body = base64.b64decode(v.get("body_b64") or "")
                     st, hdrs, body = brain.request(str(v.get("method") or "GET").upper(), str(v.get("path") or "/"),
-                                                   raw_body, v.get("headers"), peer=True)
+                                                   raw_body, v.get("headers"), peer=str(v.get("from") or "") or True)
                 except Exception as e:
                     st, hdrs, body = 502, {"content-type": "application/json"}, json.dumps({"error": f"brain: {e}"}).encode()
             try:
