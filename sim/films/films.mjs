@@ -14,10 +14,10 @@
  *  tree  the roots key → the list of computers → studio: its MAIN, its sessions → a typed turn there
  *  file  the paperclip → a PDF → a question → the answer links a file it made → the file opens
  *
- * Each film: $FILMS_OUT/raw/<name>/f*.jpg + raw/<name>.ffconcat (the phone's screen, every frame the
- * browser painted, at the phone's own resolution, with the browser's timestamps — Playwright's own
- * video is a quarter of that and its clock is not ours) and $FILMS_OUT/<name>.json (the cut marks
- * and captions, in seconds from the first frame). sim/films/cut.py makes the films from those.
+ * Each film: $FILMS_OUT/raw/<name>/f*.jpg + raw/<name>.ffconcat (the phone's screen, shot over and
+ * over at twice its CSS size, each picture with its time — Playwright's own video and the browser's
+ * screencast are both 412 pixels wide, too soft for text) and $FILMS_OUT/<name>.json (the cut marks
+ * and captions, in seconds from the first picture). sim/films/cut.py makes the films from those.
  * FILMS_ONLY=talk,tree picks films.
  */
 import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
@@ -108,17 +108,32 @@ async function phoneFor({ wav, storage, film }) {
   const now = () => Date.now() / 1000; // epoch seconds: the clock of the frames' own timestamps
   const frames = [];
   let cdp = null;
+  let filming = false;
+  let loop = null;
   if (film) {
     const dir = join(OUT, 'raw', film);
     mkdirSync(dir, { recursive: true });
     cdp = await ctx.newCDPSession(page);
-    cdp.on('Page.screencastFrame', (ev) => {
-      const file = `f${String(frames.length).padStart(5, '0')}.jpg`;
-      writeFileSync(join(dir, file), Buffer.from(ev.data, 'base64'));
-      frames.push({ t: ev.metadata.timestamp, file });
-      cdp.send('Page.screencastFrameAck', { sessionId: ev.sessionId }).catch(() => {});
-    });
-    await cdp.send('Page.startScreencast', { format: 'jpeg', quality: 92, everyNthFrame: 1 });
+    const vp = page.viewportSize();
+    const shot = { format: 'jpeg', quality: 90, captureBeyondViewport: false, clip: { x: 0, y: 0, width: vp.width, height: vp.height, scale: 2 } };
+    filming = true;
+    loop = (async () => {
+      let last = '';
+      while (filming) {
+        const a = now();
+        try {
+          const r = await cdp.send('Page.captureScreenshot', shot);
+          if (r.data !== last) { // a picture that did not change is the one before, held longer
+            const file = `f${String(frames.length).padStart(5, '0')}.jpg`;
+            writeFileSync(join(dir, file), Buffer.from(r.data, 'base64'));
+            frames.push({ t: (a + now()) / 2, file });
+            last = r.data;
+          }
+        } catch {
+          await sleep(40); // a navigation in flight: the next shot works
+        }
+      }
+    })();
   }
   screens.length = 0;
   screens.push(['phone', page]);
@@ -131,7 +146,8 @@ async function phoneFor({ wav, storage, film }) {
     /** close the phone; the video and its marks land in $FILMS_OUT */
     async done(extra = {}) {
       const closed = now();
-      if (cdp) await cdp.send('Page.stopScreencast').catch(() => {});
+      filming = false;
+      if (loop) await loop;
       await ctx.close();
       await browser.close();
       if (!film) return '';
@@ -289,9 +305,9 @@ if (wants('tree')) {
     P.cap('Talk or type to it, like the one at home.');
     await sleep(900);
     await send(phone, F.type);
-    await phone.getByText('1,800 frames', { exact: false }).first().waitFor({ timeout: 90_000 });
     P.cap('It answers from that computer, live.');
-    await sleep(3200);
+    await phone.getByText('1,800 frames', { exact: false }).first().waitFor({ timeout: 90_000 });
+    await sleep(3400);
     P.mark('end');
     const url = phone.url().replace(AP, '');
     await P.done({ answer });

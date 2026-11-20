@@ -1,33 +1,150 @@
 {
   "_": "The films' lines: what is said or typed, and what the scripted model answers (film_upstream.py). One source for the model, the driver (films.mjs) and the captions (cut.py). No real names, no real sessions: this world is invented.",
   "lines": [
-    {"id": "backup", "match": "back ?up",
-     "answer": "It finished at ten past three. Everything was copied, and there were no errors."},
-    {"id": "render", "match": "render",
-     "answer": "Yes. The render finished four minutes ago: 1,800 frames, all clean. The film is in your files."},
-    {"id": "receipts", "match": "add up|receipts",
-     "tools": [["bash", {"command": "mkdir -p \"$FILMS_ART\" && cat > \"$FILMS_ART/october-summary.html\" <<'HTML'\n<!doctype html><meta charset=utf-8><meta name=viewport content=\"width=device-width,initial-scale=1\"><title>October, in one page</title>\n<style>body{font:16px/1.5 ui-monospace,monospace;background:#080810;color:#e8e8f0;padding:28px 20px;max-width:560px;margin:auto}h1{font-size:20px}table{width:100%;border-collapse:collapse;margin-top:16px}td{padding:10px 0;border-bottom:1px solid #2a2a3a}td:last-child{text-align:right}tr:last-child td{border:0;font-weight:700;color:#4ade80}</style>\n<h1>October, in one page</h1><p>23 receipts.</p>\n<table><tr><td>Groceries</td><td>612 €</td></tr><tr><td>Train</td><td>248 €</td></tr><tr><td>Tools</td><td>301 €</td></tr><tr><td>Other</td><td>123 €</td></tr><tr><td>Total</td><td>1,284 €</td></tr></table>\nHTML\necho written"}]],
-     "answer": "They add up to 1,284 euros, across 23 receipts. I made a one-page summary: [october-summary.html](/api/artifact/october-summary.html)"},
-
-    {"id": "seed-photos", "match": "holiday photos", "answer": "Done. 412 photos sorted into 9 days. Three were blurred; I left them in a folder called maybe."},
-    {"id": "seed-garden", "match": "garden camera", "answer": "The camera is back online. It dropped off the Wi-Fi at 2 this morning and came back by itself."},
-    {"id": "seed-cut", "match": "rough cut", "answer": "The rough cut is 4 minutes 20. I trimmed the opening and kept your two takes of the bridge."},
-    {"id": "seed-sound", "match": "sound mix", "answer": "The mix is level now. The voice sits 3 dB above the music all the way through."},
-    {"id": "seed-printer", "match": "printer", "answer": "The printer finished the bracket. 2 hours 10, no warping."},
-    {"id": "seed-parts", "match": "parts list", "answer": "Here is the list: 12 screws, 4 brackets, 1 hinge. All of it is in the second drawer."}
+    {
+      "id": "backup",
+      "match": "back ?up",
+      "answer": "It finished at ten past three. Everything was copied, and there were no errors."
+    },
+    {
+      "id": "render",
+      "match": "render",
+      "answer": "Yes. The render finished four minutes ago: 1,800 frames, all clean. The film is in your files."
+    },
+    {
+      "id": "receipts",
+      "match": "add up|receipts",
+      "tools": [
+        [
+          "bash",
+          {
+            "command": "mkdir -p \"$FILMS_ART\" && cat > \"$FILMS_ART/october-summary.html\" <<'HTML'\n<!doctype html><meta charset=utf-8><meta name=viewport content=\"width=device-width,initial-scale=1\"><title>October, in one page</title>\n<style>body{font:16px/1.5 ui-monospace,monospace;background:#080810;color:#e8e8f0;padding:28px 20px;max-width:560px;margin:auto}h1{font-size:20px}table{width:100%;border-collapse:collapse;margin-top:16px}td{padding:10px 0;border-bottom:1px solid #2a2a3a}td:last-child{text-align:right}tr:last-child td{border:0;font-weight:700;color:#4ade80}</style>\n<h1>October, in one page</h1><p>23 receipts.</p>\n<table><tr><td>Groceries</td><td>612 €</td></tr><tr><td>Train</td><td>248 €</td></tr><tr><td>Tools</td><td>301 €</td></tr><tr><td>Other</td><td>123 €</td></tr><tr><td>Total</td><td>1,284 €</td></tr></table>\nHTML\necho written"
+          }
+        ]
+      ],
+      "answer": "They add up to 1,284 euros, across 23 receipts. I made a one-page summary: [october-summary.html](/api/artifact/october-summary.html)"
+    },
+    {
+      "id": "seed-photos",
+      "match": "holiday photos",
+      "answer": "Done. 412 photos sorted into 9 days. Three were blurred; I left them in a folder called maybe."
+    },
+    {
+      "id": "seed-garden",
+      "match": "garden camera",
+      "answer": "The camera is back online. It dropped off the Wi-Fi at 2 this morning and came back by itself."
+    },
+    {
+      "id": "seed-cut",
+      "match": "rough cut",
+      "answer": "The rough cut is 4 minutes 20. I trimmed the opening and kept your two takes of the bridge."
+    },
+    {
+      "id": "seed-sound",
+      "match": "sound mix",
+      "answer": "The mix is level now. The voice sits 3 dB above the music all the way through."
+    },
+    {
+      "id": "seed-printer",
+      "match": "printer",
+      "answer": "The printer finished the bracket. 2 hours 10, no warping."
+    },
+    {
+      "id": "seed-parts",
+      "match": "parts list",
+      "answer": "Here is the list: 12 screws, 4 brackets, 1 hinge. All of it is in the second drawer."
+    },
+    {
+      "id": "seed-receipts",
+      "match": "keep my october",
+      "answer": "Ready. Send them when you have them."
+    },
+    {
+      "id": "seed-shopping",
+      "match": "shopping list",
+      "answer": "Added oat milk and eggs. The list has 9 things on it now."
+    },
+    {
+      "id": "seed-spanish",
+      "match": "spanish",
+      "answer": "Ten new words today, and you got eight of yesterday's right."
+    },
+    {
+      "id": "seed-bike",
+      "match": "bike route",
+      "answer": "42 kilometres along the river, mostly flat. Dry until four."
+    }
   ],
   "seed": [
-    {"root": "home", "title": "holiday photos", "say": "sort the holiday photos by day"},
-    {"root": "home", "title": "garden camera", "say": "why did the garden camera go offline"},
-    {"root": "home", "title": "october receipts", "say": ""},
-    {"root": "studio", "title": "rough cut", "say": "how long is the rough cut now"},
-    {"root": "studio", "title": "sound mix", "say": "level the sound mix"},
-    {"root": "workshop", "title": "printer", "say": "tell me when the printer is done"},
-    {"root": "workshop", "title": "parts list", "say": "make me a parts list for the shelf"}
+    {
+      "root": "home",
+      "title": "bike route sunday",
+      "say": "plan a bike route for sunday"
+    },
+    {
+      "root": "home",
+      "title": "spanish practice",
+      "say": "how is my spanish going"
+    },
+    {
+      "root": "home",
+      "title": "shopping list",
+      "say": "add oat milk and eggs to the shopping list"
+    },
+    {
+      "root": "home",
+      "title": "holiday photos",
+      "say": "sort the holiday photos by day"
+    },
+    {
+      "root": "home",
+      "title": "garden camera",
+      "say": "why did the garden camera go offline"
+    },
+    {
+      "root": "home",
+      "title": "october receipts",
+      "say": "keep my october receipts here"
+    },
+    {
+      "root": "studio",
+      "title": "rough cut",
+      "say": "how long is the rough cut now"
+    },
+    {
+      "root": "studio",
+      "title": "sound mix",
+      "say": "level the sound mix"
+    },
+    {
+      "root": "workshop",
+      "title": "printer",
+      "say": "tell me when the printer is done"
+    },
+    {
+      "root": "workshop",
+      "title": "parts list",
+      "say": "make me a parts list for the shelf"
+    }
   ],
   "films": {
-    "talk": {"title": "talk to your computer", "say": "How did the backup go last night?", "line": "backup"},
-    "tree": {"title": "all your computers", "root": "studio", "type": "is the render done?", "line": "render"},
-    "file": {"title": "send it a file", "session": "october receipts", "file": "receipts-october.pdf", "type": "what do these add up to?", "line": "receipts"}
+    "talk": {
+      "title": "talk to your computer",
+      "say": "How did the backup go last night?",
+      "line": "backup"
+    },
+    "tree": {
+      "title": "all your computers",
+      "root": "studio",
+      "type": "is the render done?",
+      "line": "render"
+    },
+    "file": {
+      "title": "send it a file",
+      "session": "october receipts",
+      "file": "receipts-october.pdf",
+      "type": "what do these add up to?",
+      "line": "receipts"
+    }
   }
 }
