@@ -66,3 +66,12 @@ This worktree (p5-site, from tree-next): films scripts (sim/films/), scripts/sit
   then record.sh, look at each *-sheet.jpg, films-in.sh, build.py --preview.
 - still open: old October films stay linked until the owner has seen both; first screen's words wait for the
   owner's pick; model-step wording to align with P4's installers; mp4 is smaller than webm here (mp4 listed first).
+
+## 11-20 15:40 — the owner approved the preview
+- owner's words (via MAIN, verbatim): "I guess …/api/artifact/site-preview.html is good is there an other
+  design desision I have to make?" → the design, the first screen's words and the three films stand.
+- decided by me after that: the first-screen words stay as approved; one identity line added above the tree
+  map ("Yggdrasil is your own AI …", the gap the story propositions found); the tree map wraps on phones;
+  the October films stay as one small line of links; the voice door, products card and funding box stay out.
+- nothing left for the owner on design. Theirs only: funding accounts (if a support box is wanted back),
+  their Windows run, and nothing else — publishing follows the plan (v0.9.1 public + the integrator's word).
