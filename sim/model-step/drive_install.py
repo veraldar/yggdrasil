@@ -13,6 +13,7 @@ if pid == 0:
     os.execvp(argv[0], argv)
 buf = ""
 sent = 0
+prev_prompt = ""
 deadline = time.time() + 240
 status = None
 
@@ -40,13 +41,17 @@ while time.time() < deadline:
         s = chunk.decode("utf-8", "replace")
         buf += s
         out.write(s)
-    elif reap():
-        break
-    if sent < len(inputs) and re.search(r":[ \t]\Z", buf):
+    # a prompt: a colon then optional space/tab at the very end of the buffer (bash read
+    # -p prints "Question: " — but the trailing space can land in an earlier chunk)
+    if sent < len(inputs) and buf.rstrip() != prev_prompt and re.search(r":[ \t]?\Z", buf):
         time.sleep(0.4)
         os.write(fd, (inputs[sent] + "\r").encode())
         sent += 1
+        prev_prompt = buf.rstrip()
         buf = ""
+        continue
+    if not r and reap():
+        break
 if status is None:
     if not reap():
         try:

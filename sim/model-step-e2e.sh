@@ -160,7 +160,7 @@ KW=sk-oai-test-0123456789abcdef; KX=sk-test-other-0123456789ab
 
 say "case zai"
 mkcase zai
-typed zai "$(printf '1\n%s\n\n' "$KZ")" zai-install.log
+typed zai "$(printf '1\n%s\nglm-5.3-flash\n' "$KZ")" zai-install.log
 if ! chk_menu "$STATE/log/zai-install.log"; then row zai FAIL "menu wrong in transcript"; else
 turn zai zai-turn.log
 ev=$(uplog | grep api.z.ai | grep glm-5.3-flash | head -1 | sed "s/$KZ/<key>/")
