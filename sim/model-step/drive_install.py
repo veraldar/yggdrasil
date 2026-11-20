@@ -3,7 +3,7 @@ far ends with ': ' (a prompt), type the next answer from MSM_INPUTS. The transcr
 to TRANSCRIPT (what the terminal showed — with the key, if the tty wrongly echoed it) and
 'msm-done <rc>' is touched at the end, so the caller never depends on streaming stdout.
 """
-import os, pty, select, sys, time
+import os, pty, re, select, sys, time
 
 inputs = os.environ.get("MSM_INPUTS", "").split("\n")
 out = open(os.environ["TRANSCRIPT"], "w", buffering=1)
@@ -42,8 +42,8 @@ while time.time() < deadline:
         out.write(s)
     elif reap():
         break
-    if sent < len(inputs) and buf.endswith(": "):
-        time.sleep(0.25)
+    if sent < len(inputs) and re.search(r":[ \t]\Z", buf):
+        time.sleep(0.4)
         os.write(fd, (inputs[sent] + "\r").encode())
         sent += 1
         buf = ""
