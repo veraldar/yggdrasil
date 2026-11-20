@@ -82,10 +82,24 @@ typed() { # NAME ENVSTRING LOGOUT — runs install.sh --brain-only --now via dri
 }
 
 # one model turn: start the brain with its env file, create a session, post a message
-turn() { # NAME LOGOUT
-  docker exec -u "$HU" msm-"$1" bash -c '
-    set -e
-    cd ~
+turn() { # NAME LOGOUT — one model turn: the brain on its env file's port, a session, a message
+  cat >"$STATE/turn.sh" <<'T'
+set -e
+cd "$HOME"
+PORT=$(sed -n 's/^YGG_LISTEN=//p' ~/.config/yggdrasil/yggdrasil.env | tail -1); PORT=${PORT:-127.0.0.1:4100}
+(setsid nohup env $(sed -n 's/^\([A-Z_]*\)=\(.*\)$/\1=\2/p' ~/.config/yggdrasil/yggdrasil.env | xargs) \
+   ~/.local/bin/yggdrasil >brain.log 2>&1 </dev/null &)
+for i in $(seq 60); do curl -sf http://$PORT/session >/dev/null 2>&1 && break; sleep 0.5; done
+S=$(curl -sf -X POST http://$PORT/session -H 'content-type: application/json' -d '{"title":"msm"}' | python3 -c 'import sys,json;print(json.load(sys.stdin)["id"])')
+curl -s -X POST http://$PORT/session/$S/message -H 'content-type: application/json' \
+  -d '{"parts":[{"type":"text","text":"say one word"}]}' >reply.json
+for i in $(seq 120); do python3 -c 'import json;d=json.load(open("reply.json"));exit(0 if d.get("parts") else 1)' 2>/dev/null && break; sleep 0.3; done
+sleep 1
+echo TURN-DONE
+T
+  docker cp "$STATE/turn.sh" msm-"$1":/tmp/turn.sh >/dev/null
+  docker exec -u "$HU" -e HOME=$HH -w $HH msm-"$1" bash /tmp/turn.sh >"$STATE/log/$2" 2>&1
+}
     (setsid nohup env $(sed -n 's/^\([A-Z_]*\)=\(.*\)$/\1=\2/p' ~/.config/yggdrasil/yggdrasil.env | xargs) \
        ~/.local/bin/yggdrasil >brain.log 2>&1 </dev/null &)
     for i in $(seq 60); do curl -sf http://127.0.0.1:4096/session >/dev/null 2>&1 && break; sleep 0.5; done
@@ -93,8 +107,6 @@ turn() { # NAME LOGOUT
     curl -s -X POST http://127.0.0.1:4096/session/$S/message -H "content-type: application/json" \
       -d "{\"parts\":[{\"type\":\"text\",\"text\":\"say one word\"}]}" >reply.json
     for i in $(seq 100); do python3 -c "import json;d=json.load(open(\"reply.json\"));exit(0 if d.get(\"parts\") else 1)" 2>/dev/null && break; sleep 0.3; done
-    echo TURN-DONE' >"$STATE/log/$2" 2>&1
-}
 
 # the checks every keyed case runs
 sweep() { # NAME KEY — the key is only in the env file: mode 600, once, nowhere else
