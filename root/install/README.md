@@ -8,19 +8,23 @@ have. You talk to it from your phone over your own Wi-Fi, or from anywhere throu
 ## One command
 
 ```sh
-curl -fsSLO https://github.com/veraldar/yggdrasil/releases/download/v0.9.0/install.sh
+curl -fsSLO https://github.com/veraldar/yggdrasil/releases/download/v0.9.1/install.sh
 bash install.sh
 ```
 
-The first time, it asks for your model: its address (any OpenAI-compatible `/v1` endpoint:
-OpenAI, OpenRouter, a local Ollama at `http://127.0.0.1:11434/v1`, llama.cpp, vLLM; or an
-Anthropic-shaped one), its name and your API key. The key is read without showing it and written
-only to `~/.config/yggdrasil/yggdrasil.env` (mode 600), never to a command line or your shell's
-history. Not at a terminal? Pass `--upstream-env FILE` with lines like
-`YGG_UPSTREAM_BASE_URL=https://api.openai.com/v1`, `YGG_UPSTREAM_API_KEY=…`,
-`YGG_UPSTREAM_MODEL=gpt-4o-mini` (and `YGG_UPSTREAM_STYLE=anthropic` for an Anthropic-shaped API).
+The first time, it asks for your **model provider**: Z AI, OpenRouter, Anthropic, OpenAI or Other. A
+provider asks only for its API key: its address is filled in and its default model is shown (press
+Enter, or type another). *Other* asks for the address (any OpenAI-compatible `/v1` endpoint or an
+Anthropic-shaped one: a local Ollama at `http://127.0.0.1:11434/v1`, llama.cpp, vLLM), its kind, the
+model and the key (none for a model on your own network). The key is read without showing it and
+written only to `~/.config/yggdrasil/yggdrasil.env` (mode 600), never to a command line or your
+shell's history. Not at a terminal? `--model-provider zai` (or `openrouter`, `anthropic`, `openai`)
+with the key in the environment variable `YGG_UPSTREAM_API_KEY`, and `--model NAME` for another model;
+or `--upstream-env FILE` with lines like `YGG_UPSTREAM_BASE_URL=https://api.openai.com/v1`,
+`YGG_UPSTREAM_API_KEY=…`, `YGG_UPSTREAM_MODEL=gpt-4o-mini` (and `YGG_UPSTREAM_STYLE=anthropic` for an
+Anthropic-shaped API).
 
-**What it downloads, and how it checks it.** `install.sh` belongs to one release (here `v0.9.0`).
+**What it downloads, and how it checks it.** `install.sh` belongs to one release (here `v0.9.1`).
 It fetches that release's list of checksums (`SHA256SUMS`) and its signature, and checks the
 signature against the yggdrasil release key written into the script itself (`ssh-keygen -Y verify`).
 Then it downloads the release archive and checks it against the list. Anything that does not match
@@ -189,14 +193,19 @@ to the hub's public access point (`wss://<hub>/rootlink`). It needs no open port
 and no certificate, and the phone doesn't have to be on the same Wi-Fi. No sudo.
 
 ```sh
-curl -fsSLO https://github.com/veraldar/yggdrasil/releases/download/v0.9.0/join.sh
+curl -fsSLO https://github.com/veraldar/yggdrasil/releases/download/v0.9.1/join.sh
 bash join.sh --hub https://tree.example.org
 ```
 
-In a terminal it asks for this root's model, and the key is read without echo. Or pass
-`--upstream-env FILE`, in the same format as `yggdrasil.env`: `YGG_UPSTREAM_BASE_URL=…`,
-`YGG_UPSTREAM_API_KEY=…`, `YGG_UPSTREAM_MODEL=…` (plus `YGG_UPSTREAM_STYLE=anthropic` for an
-Anthropic-shaped API). The key is written only to `brain.env` (mode 600) and is never printed.
+In a terminal it asks for this computer's **model provider**, the same step as on the home computer
+with one more choice, the first: **Same as the home root**. With it nothing is typed: when you
+approve the computer on your phone, your home computer hands it its model settings inside the root
+link (WireGuard, end to end; the trunk carries ciphertext), and the new computer then calls the
+provider itself. It is also what a join without a terminal does when no model is given. Removing a
+computer later does not take back a key it was given: change the key at the provider for that.
+Otherwise pick a provider and type its key (read without echo), or pass `--model-provider NAME` with
+`YGG_UPSTREAM_API_KEY` in the environment, or `--upstream-env FILE` in the same format as
+`yggdrasil.env`. The key is written only to `brain.env` (mode 600) and is never printed.
 Like `install.sh`, the `join.sh` you download fetches its release, checks the signature and the
 checksum, unpacks it and runs that release's `join.sh`: the brain and the node come prebuilt.
 
