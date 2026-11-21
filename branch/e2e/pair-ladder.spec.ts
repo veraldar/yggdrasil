@@ -69,8 +69,12 @@ test('v0.9 ladder: QR pair → P2P round-trip → revoke → kill-switch → re-
   const phone = await phoneCtx.newPage();
   const pixelCtx = await browser.newContext({ ...devices['Pixel 7'] });
   const pixel = await pixelCtx.newPage();
+  const probeCtx = await browser.newContext({ ...devices['Pixel 7'] }); // step 5b
+  let probeAt = 0;
 
   let firstQr = '';
+  // the code of the app's home page: the HTML of a page names the code the browser is to run for it
+  const appMark = 'chunks/app/page-';
   let mainId = '';
   await test.step('1 the box console renders a QR; it decodes to the pairing URL', async () => {
     firstQr = await scanQr(box);
@@ -84,9 +88,60 @@ test('v0.9 ladder: QR pair → P2P round-trip → revoke → kill-switch → re-
 
   await test.step('1b a phone that is not paired sees one quiet line and nothing of the console', async () => {
     // the owner's rule (11-21): "if there is nothing I should be seeing then I should see nothing"
+    // not one byte of the app first (11-21: no glimpse of it): whatever page an unpaired visitor asks for,
+    // the server answers with the /pair page (served in place: no redirect, so no public name is needed)
+    const appHome = await (await desk.request.get(`${BASE}/`)).text(); // what the box's own console is served
+    expect(appHome, 'the console is served the app').toContain(appMark);
+    for (const path of ['/', '/session/main?id=ses_x', '/devices', '/p2p', '/join?r=abcdefgh']) {
+      const r = await pixelCtx.request.get(`${LAN}${path}`, { maxRedirects: 0 });
+      expect(r.status(), path).toBe(200);
+      expect(r.headers()['cache-control'], path).toContain('no-store');
+      const html = await r.text();
+      expect(html, `${path}: the /pair page's code`).toContain('chunks/app/pair/page-');
+      for (const m of [appMark, 'chunks/app/session/', 'chunks/app/devices/', 'chunks/app/p2p/', 'chunks/app/join/']) {
+        expect(html, `${path}: ${m}`).not.toContain(m);
+      }
+    }
+    // in the browser: the only page it is ever given is /pair, and nothing of the app is ever in its DOM
+    const docs: string[] = [];
+    pixel.on('response', async (r) => {
+      if (r.request().resourceType() !== 'document') return;
+      const html = await r.text().catch(() => '');
+      docs.push(`${r.status()} ${new URL(r.url()).pathname} ${html.includes(appMark) ? 'THE APP' : html.includes('chunks/app/pair/page-') ? 'the pair page' : '?'}`);
+    });
+    await pixel.addInitScript(() => {
+      const w = window as unknown as { __app?: string };
+      const look = () => {
+        const el = document.querySelector('[data-testid="roots"], [data-testid="tree-first"], .oz-head, .oz-row');
+        if (el && !w.__app) w.__app = el.outerHTML.slice(0, 120);
+      };
+      new MutationObserver(look).observe(document, { childList: true, subtree: true });
+    });
+    // PW_SHOTS: what the screen showed on the way — every picture the browser painted (its own frame stream:
+    // a screenshot asked for while a page loads can hang, the stream cannot)
+    let frames = 0;
+    const cdp = process.env.PW_SHOTS ? await pixelCtx.newCDPSession(pixel) : null;
+    if (cdp) {
+      cdp.on('Page.screencastFrame', (ev) => {
+        writeFileSync(join(process.env.PW_SHOTS!, `noflash-${String(++frames).padStart(3, '0')}.png`), Buffer.from(ev.data, 'base64'));
+        void cdp.send('Page.screencastFrameAck', { sessionId: ev.sessionId }).catch(() => {});
+      });
+      await cdp.send('Page.startScreencast', { format: 'png', everyNthFrame: 1 });
+    }
     await pixel.goto(`${LAN}/`);
     await pixel.waitForURL(/\/pair\?unpaired=1/, { timeout: 20_000 });
     await expect(pixel.getByTestId('pair-quiet')).toHaveText('not paired');
+    if (cdp) {
+      await pixel.waitForTimeout(700);
+      await cdp.send('Page.stopScreencast').catch(() => {});
+      await cdp.detach().catch(() => {});
+    }
+    // two pages, both the /pair page: in place of `/`, then at its own address
+    expect(docs).toEqual(['200 / the pair page', '200 /pair the pair page']);
+    expect(await pixel.evaluate(() => (window as unknown as { __app?: string }).__app || '')).toBe('');
+    await expect(pixel.getByTestId('pin-state')).toBeHidden();
+    // the box's own console is still served the app
+    expect((await desk.request.get(`${BASE}/`, { maxRedirects: 0 })).status()).toBe(200);
     expect((await pixel.locator('body').innerText()).trim()).toBe('not paired');
     await expect(pixel.getByTestId('pair-qr')).toHaveCount(0);
     await expect(pixel.getByTestId('pair-status')).toHaveCount(0);
@@ -102,6 +157,7 @@ test('v0.9 ladder: QR pair → P2P round-trip → revoke → kill-switch → re-
   });
 
   await test.step('2 phone scans: pairs, mints its token, lands on home — the door (fresh)', async () => {
+    // (steps 2b and 5b are the page gate's other side: a PAIRED phone is never sent away)
     await phone.goto(firstQr);
     // never straight into MAIN: a phone that never walked the door gets the door first
     await phone.waitForURL(`${LAN}/`, { timeout: 30_000 });
@@ -116,6 +172,27 @@ test('v0.9 ladder: QR pair → P2P round-trip → revoke → kill-switch → re-
     const pin = await pinOf(phone);
     expect(pin.fp).toBe(new URLSearchParams(firstQr.split('#')[1]).get('fp'));
     expect(await apiStatus(phoneCtx, '/api/ping')).toBe(200);
+  });
+
+  await test.step('2b a paired phone whose cookie did not ride the page request is sent on, not told "not paired"', async () => {
+    // what a link followed from another site does (the cookie is SameSite=Strict): the page gate sees no
+    // device and serves /pair in place; /pair asks again from inside the site and loads the page again
+    const jar = await phoneCtx.cookies();
+    await phoneCtx.clearCookies({ name: 'bifrost_device' });
+    expect(await (await phoneCtx.request.get(`${LAN}/`)).text()).not.toContain(appMark);
+    await phone.goto(`${LAN}/p2p?session=${MAIN_SLUG}`);
+    await expect(phone.getByTestId('p2p-phase')).toBeVisible({ timeout: 30_000 }); // the page it asked for
+    expect(phone.url()).toBe(`${LAN}/p2p?session=${MAIN_SLUG}`);
+    await expect(phone.getByTestId('pair-quiet')).toHaveCount(0);
+    expect((await phoneCtx.cookies()).find((c) => c.name === 'bifrost_device')?.value).toMatch(/^bfnd-/);
+    expect(await apiStatus(phoneCtx, '/api/ping')).toBe(200);
+    expect(jar.length).toBeGreaterThan(0);
+    // for step 5b: a device paired now and left alone, so its access token really runs out
+    const minted = await (await desk.request.post(`${BASE}/api/pair/code`, { data: { name: 'gate-probe' } })).json();
+    const code = new URLSearchParams(String(minted.url).split('#')[1]).get('code');
+    const claimed = await probeCtx.request.post(`${LAN}/api/pair/claim`, { data: { code, name: 'gate-probe' } });
+    expect(claimed.status()).toBe(200);
+    probeAt = Date.now();
   });
 
   await test.step('3 the spent QR replays as used (one-time code)', async () => {
@@ -142,6 +219,23 @@ test('v0.9 ladder: QR pair → P2P round-trip → revoke → kill-switch → re-
     expect(await tr.text()).toContain(marker);
   });
 
+  await test.step('5b a paired device whose access token has run out still opens the app, never "not paired"', async () => {
+    const ttl = Number(process.env.PW_ACCESS_TTL_S || 30);
+    await phone.waitForTimeout(Math.max(0, probeAt + (ttl + 2) * 1000 - Date.now()));
+    // run out, and by now cleaned out of the registry by the other devices' refreshes: the box answers
+    // "pair" for it (or "refresh" if it is still listed) — either way the device IS paired
+    const ping = await probeCtx.request.get(`${LAN}/api/ping`);
+    expect(ping.status(), 'the access token has run out').toBe(401);
+    expect(['pair', 'refresh']).toContain((await ping.json()).reauth);
+    const probe = await probeCtx.newPage();
+    await probe.goto(`${LAN}/`);
+    await expect(probe.getByTestId('tree-first')).toBeVisible({ timeout: 30_000 }); // the app: a fresh device's door
+    expect(new URL(probe.url()).pathname).toBe('/');
+    await expect(probe.getByTestId('pair-quiet')).toHaveCount(0);
+    expect((await probeCtx.request.get(`${LAN}/api/ping`)).status()).toBe(200);
+    await probeCtx.close();
+  });
+
   await test.step('6 revoke from the device list → the phone is severed mid-session', async () => {
     const { deviceId } = await pinOf(phone);
     await box.goto(`${BASE}/devices`);
@@ -150,6 +244,19 @@ test('v0.9 ladder: QR pair → P2P round-trip → revoke → kill-switch → re-
     await expect(phone.getByTestId('p2p-why')).toHaveText('revoked');
     expect(await apiStatus(phoneCtx, '/api/ping')).toBe(401);
     await expect(box.getByTestId(`revoked-${deviceId}`)).toBeVisible();
+  });
+
+  await test.step('6b a phone that WAS paired (it still holds its pin) and no longer is: one quiet line, no road line, no app', async () => {
+    // the owner's own case (11-21, 20:06): the page said "not paired" and, under it, "via the trunk's TLS"
+    expect(await pinOf(phone)).toBeTruthy();
+    expect(await (await phoneCtx.request.get(`${LAN}/`)).text()).not.toContain(appMark);
+    await phone.goto(`${LAN}/`);
+    await phone.waitForURL(/\/pair\?unpaired=1/, { timeout: 20_000 });
+    await expect(phone.getByTestId('pair-quiet')).toHaveText('not paired');
+    await phone.waitForTimeout(4_000); // the old pin has had its time to try the channel and name a road
+    await expect(phone.getByTestId('pin-state')).toBeHidden();
+    expect((await phone.locator('body').innerText()).trim()).toBe('not paired');
+    if (process.env.PW_SHOTS) await phone.screenshot({ path: join(process.env.PW_SHOTS, 'pair-once-paired-phone.png') });
   });
 
   await test.step('7 two live devices; the kill-switch severs everything', async () => {

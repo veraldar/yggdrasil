@@ -19,17 +19,25 @@
  * or region changed — present the refresh credential) or `pair` (scan again).
  * Revocation and the kill-switch land on the next call: devices.ts re-reads
  * the registry per request (no cache).
+ *
+ * Pages too (11-21): in devices mode a visitor who is not paired is served the /pair page in place of
+ * any page of the app — lib/gate.ts pageGate. Tailnet mode: untouched.
  */
 import type { NextRequest } from 'next/server';
-import { deviceGate } from '@/lib/gate';
+import { deviceGate, pageGate } from '@/lib/gate';
 
 export const config = {
-  // every /api route but an upload piece (it runs the same gate itself: lib/gate.ts)
-  matcher: '/api/((?!file/upload/[^/]+$).*)',
+  matcher: [
+    // every /api route but an upload piece (it runs the same gate itself: lib/gate.ts)
+    '/api/((?!file/upload/[^/]+$).*)',
+    // every PAGE but /pair (where an unpaired visitor lands), Next's own files and anything with a
+    // file ending (icons, the manifest, sw.js): lib/gate.ts pageGate
+    '/((?!api/|_next/|pair$|pair/|.*\\.[A-Za-z0-9]+$).*)',
+  ],
   // devices.ts uses node:crypto + fs — the registry check needs the node runtime
   runtime: 'nodejs',
 };
 
 export async function middleware(req: NextRequest) {
-  return deviceGate(req);
+  return req.nextUrl.pathname.startsWith('/api/') ? deviceGate(req) : pageGate(req);
 }

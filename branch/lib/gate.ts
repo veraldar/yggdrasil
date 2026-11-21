@@ -85,6 +85,34 @@ export function routeClass(p: string): string {
   if (seg[0] !== 'api') return 'page';
   if (seg[1] === 'session') return seg.length === 2 ? 'api.session' : seg[3] === 'messages' ? 'api.session.messages' : 'api.session.one';
   return seg[1] ? `api.${seg[1].replace(/[^a-z0-9-]/gi, '').slice(0, 24)}` : 'api';
+/**
+ * The same question for a PAGE (the owner, 11-21: an unpaired phone must never get a glimpse of the app).
+ * In devices mode a visitor who is neither a paired device nor the box's console is served the /pair
+ * page IN PLACE of the page it asked for: not one byte of the app's HTML is sent. Until now every page
+ * was served to anyone and the app found out on its first /api call, a moment after it had drawn itself.
+ * In place (a rewrite), not a redirect: a redirect from here must name the full address, and behind the
+ * trunk this server does not know its public name. /pair then writes its own address into the bar.
+ *   paired (token good)            → the page
+ *   paired, token expired/region   → the page: the app refreshes on its first call, as before
+ *                                    (the access COOKIE lives as long as the refresh token: lib/pairing.ts)
+ *   the box's console, admin token → the page
+ *   anyone else                    → the /pair page, at the address they asked for
+ * A paired phone can land there too: its cookie is withheld on a link followed from another site
+ * (SameSite=Strict). /pair asks the box again from inside the site, where the cookie rides, and loads
+ * the address again.
+ * Not gated (middleware.ts matcher): /pair itself, /_next, files with an ending, /api (deviceGate).
+ */
+export async function pageGate(req: NextRequest): Promise<NextResponse> {
+  if (process.env.BIFROST_AUTH !== 'devices') return NextResponse.next();
+  const cookie = req.cookies.get('bifrost_device')?.value || '';
+  if (!cookie && adminOk(req)) return NextResponse.next();
+  const raw = req.headers.get('authorization')?.replace(/^Bearer\s+/i, '') || cookie;
+  const gate = await checkAccess(raw, regionOfReq(req));
+  if (gate.ok || REAUTH[gate.why] === 'refresh') return NextResponse.next();
+  const pair = req.nextUrl.clone();
+  pair.pathname = '/pair';
+  pair.search = '?unpaired=1';
+  return NextResponse.rewrite(pair, { headers: { 'Cache-Control': 'no-store', Vary: 'Cookie' } });
 }
 
 /** true when the gate lets the request through */
