@@ -101,3 +101,18 @@ This worktree (p5-site, from tree-next): films scripts (sim/films/), scripts/sit
 - NEXT, only on P1's word: scripts/site-deploy.sh (no flags) → it backs up, copies, checks live byte for byte;
   then curl+grep the live pages and report. Undo: scripts/site-deploy.sh --undo.
 - still beta on all three add-a-computer pages until P4 reports each PROVEN (one-word edit per page + deploy).
+
+## 11-21 14:40 — PUBLISHED: veraldar.org is the v0.9.1 site
+- the go: P1's own session, 10:39 ("I gave P5 the word to publish the v0.9.1 site"; its message to me was queued
+  and never arrived — read from P1's transcript on the brain, not taken from MAIN's relay).
+- deploy 1: 4f15e55, 23 files (3 changed, 20 new), backup ~/site-backups/20261121T095137Z-4f15e55 on the VPS.
+- deploy 2: 27ff703, 13 files (desktop film layout: 215 px → 349 px wide), backup …T133543Z-27ff703.
+  Undo of the last deploy: scripts/site-deploy.sh --undo (twice = back to the 11-14 site).
+- marking (P4's report to P1, 10:39): Linux no beta tag, "tested end to end on a clean Debian 12"; Mac beta,
+  "tested on a real Mac up to the point of joining"; Windows beta, "passed its checks on a stand-in for Windows".
+- verified as a stranger (no cache, clean profile, service worker blocked): 23/23 fetch 200; every page walked
+  by taps at Pixel 7 and 1280; 3 films play after one tap on play at both; 0 console errors, 0 failed requests;
+  the signature check from the live trunk page's own key line: Good signature, trunk.sh OK.
+- NEXT: flip Mac to tested when the Mac Studio's full join passes (M5–M8); Windows when the owner's PC run
+  passes; Linux line when a join over the real trunk passes. Each = one line in src/add-*.html + deploy.
+  The container plan for the VPS (vps-containers-decision.md) waits on the owner's three answers.
