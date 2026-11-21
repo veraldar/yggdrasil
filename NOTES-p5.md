@@ -116,3 +116,16 @@ This worktree (p5-site, from tree-next): films scripts (sim/films/), scripts/sit
 - NEXT: flip Mac to tested when the Mac Studio's full join passes (M5–M8); Windows when the owner's PC run
   passes; Linux line when a join over the real trunk passes. Each = one line in src/add-*.html + deploy.
   The container plan for the VPS (vps-containers-decision.md) waits on the owner's three answers.
+
+## 11-21 15:25 — the films redone (the owner: "redo movies on veraldar org with full freedom")
+- the owner's words read in MAIN's session (11-20 12:12, 13:11; 11-21 14:36), not taken from MAIN's paraphrase.
+- NEW: sim/films/movie/ = movie.html (a scripted 1080x1920 stage: window.renderAt(t) draws second t),
+  render.mjs (frames to DIR/frames, 8 s limit per step, a new browser after a stalled capture, resumes),
+  make.sh RUN (cuts the footage from a record.sh run, renders, encodes, checks). ~4 min after a recording.
+  The film: "what yggdrasil is", 73 s, silent, real footage inside the phone. Words and timings: HEAD / SUB in movie.html.
+- gotchas: Page.captureScreenshot stalls or fails about every 90 frames while the footage <img> is swapped
+  (recovered by reopening the browser); PNG frames are ~10x slower than JPEG 96; one piper voice only, so no sound.
+- site (dbfd45b, live 15:20): #films = the main film first, "up close, from the real app" = talk / tree / file.
+  The October films are no longer linked (still at /onboarding/far-vision.html and /onboarding/tree.html).
+  Backup of this deploy on the VPS: ~/site-backups/20261121T142002Z-dbfd45b. Undo: scripts/site-deploy.sh --undo.
+- to remake at a release: record.sh OUT → movie/make.sh OUT → veraldar-site scripts/films-in.sh OUT → build → deploy.
