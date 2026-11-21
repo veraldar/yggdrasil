@@ -16,5 +16,9 @@ FILMS_OUT="$OUT" TRUNK_RTC_STATE="$OUT/state" nice -n 10 "$ROOT/sim/trunk-rtc-e2
 grep -E '^(PASS|FAIL|F0|talk|tree|file|TRUNK-RTC|STEP)|↳|·' "$OUT/rig.log" | tail -30 || true
 ls "$OUT"/*.json >/dev/null 2>&1 || { echo "nothing was recorded — $OUT/rig.log"; exit 1; }
 nice -n 10 python3 -I "$ROOT/sim/films/cut.py" "$OUT" || rc=1
+# the voice for the three short films (sim/films/voice: needs its TTS folder, see sound.py); the main film: movie/make.sh
+if [ $rc = 0 ] && [ -x "${FILMS_TTS:-$HOME/.cache/p5-films/tts}/venv/bin/python" ]; then
+  nice -n 10 python3 -I "$ROOT/sim/films/voice/clips.py" "$OUT" || rc=1
+fi
 echo "rig+cut exit $rc — films in $OUT"
 exit $rc
