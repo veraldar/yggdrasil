@@ -56,6 +56,12 @@ TO BUILD (order): 1 root/install/model-step.sh (providers: same|zai|openrouter|a
   HTTPS upstream · 5 agy review · 6 rehearsal 3 → report the branch to P1.
 Engines (L18): agy for reviews/self-contained code, GLM sessions for test matrices; builds under nice -n 10.
 
+## 11-21 10:40 UTC — v0.9.1 IS PUBLIC (https://github.com/veraldar/yggdrasil/releases/tag/v0.9.1, latest)
+Draft proofs green (chain-draft.out), tag pushed (8fc5d3b2), un-drafted, verified as a stranger; v0.9.0 note added;
+P1 told. NEXT: Mac M4–M8 on the real Mac — install in ~/.cache/yggdrasil-release-mac/m4 (log m4.log there), default
+"Same as the home root"; relay the 8-letter code to the owner; baseline in ~/.cache/p4-rig/mac/*-before.txt.
+Then: real-trunk Linux (Debian 12 container, 443 only, owner approves), Windows checklist for the owner.
+
 ## 11-21 ~11:20 — v0.9.1 DRAFT EXISTS (not public)
 - P1 merged p3-model + p4-release (tree-next 8fc5d3b2) and deployed it: live release 20261121-0927-8fc5d3b2, all 8
   hub-* units active, GET :4101/root/model → 403 (verified by me; P1's turn was cut by its deploy before telling me).
