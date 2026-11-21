@@ -56,6 +56,19 @@ TO BUILD (order): 1 root/install/model-step.sh (providers: same|zai|openrouter|a
   HTTPS upstream · 5 agy review · 6 rehearsal 3 → report the branch to P1.
 Engines (L18): agy for reviews/self-contained code, GLM sessions for test matrices; builds under nice -n 10.
 
+## 11-21 ~11:00 UTC — Mac M4 started, join request EXPIRED (owner not at the phone)
+- M4 as a new person: ssh mac, in ~/.cache/yggdrasil-release-mac/m4: curl …/v0.9.1/join.sh && nohup bash join.sh
+  --hub https://ap.veraldar.org --name mac-studio > m4.log (pid in m4.pid). Signature OK, macOS archive unpacked to
+  ~/.local/share/yggdrasil/release/0.9.1, join request made (model: home). Expired after 10 min (exit 4).
+- State on the Mac now: ~/.local/share/yggdrasil-root (root.conf, wg.key, no root.json, no model), no agents, no
+  processes of ours. RESUME: the same command again → a new code → relay code + tunnel key + link to the owner.
+  After approval: M6 (launchctl print gui/501 | grep org.veraldar; hub GET /root lists mac-studio os macos, main set),
+  M7 (session placed on mac-studio runs sw_vers; kill the brain once → launchd restarts it <30 s),
+  M8 (compare with ~/.cache/p4-rig/mac/{listen,agents,plists}-before.txt).
+- Windows checklist for the owner: artifacts/p4-windows-checklist.md
+- STILL OPEN: real-trunk Linux proof (Debian 12 container, 443 only, public join.sh, owner approves) — do it together
+  with the Mac when the owner is at the phone.
+
 ## 11-21 10:40 UTC — v0.9.1 IS PUBLIC (https://github.com/veraldar/yggdrasil/releases/tag/v0.9.1, latest)
 Draft proofs green (chain-draft.out), tag pushed (8fc5d3b2), un-drafted, verified as a stranger; v0.9.0 note added;
 P1 told. NEXT: Mac M4–M8 on the real Mac — install in ~/.cache/yggdrasil-release-mac/m4 (log m4.log there), default
