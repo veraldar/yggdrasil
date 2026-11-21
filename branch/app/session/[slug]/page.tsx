@@ -51,6 +51,7 @@ import { clearAsked, ensureNotifyPermission, markAsked, notifyReply } from '@/li
 import { PENDING_TTL_MS } from '@/lib/pending-ttl';
 import { markRead } from '@/lib/read';
 import { lastHeard, markHeard } from '@/lib/heard';
+import { type Held, answersTyped, heldReply } from '@/lib/held-reply';
 import {
   DOOR_KEY,
   FIRST_TURN_KEY,
@@ -65,13 +66,7 @@ import {
   stripMarkers,
 } from '@/lib/tree-first';
 import { say, stopLine, unlockLines, useVoiceState, warmLines } from '@/lib/onboard-voice';
-import {
-  ECHO_TAIL_MS,
-  agentInRoom,
-  releaseMicDevice,
-  tellDeckState,
-  withTimeout,
-} from '@/lib/voice-room';
+import { ECHO_TAIL_MS, agentInRoom, releaseMicDevice, tellDeckState, withTimeout, servingAgent } from '@/lib/voice-room';
 import {
   VOICE_TEST_SLUG,
   setVoiceTest,
@@ -1572,6 +1567,15 @@ export default function SessionView({
     // the turn (opencode serializes per session); stop is the only cancel
     pttWantRef.current = true;
     holdBeforeRef.current = lastUserTime(); // the walk: a hold's turn is newer than its press
+    // L16: the same for the held reply — server times only (a typed turn's quick local copy
+    // carries the phone's clock), from the list as it is NOW (this runs 250 ms after the press)
+    heldPressRef.current = {
+      before:
+        [...msgsRef.current]
+          .reverse()
+          .find((m) => m.role === 'user' && !m.queued && !echoesRef.current.includes(m))?.time || 0,
+      at: Date.now(),
+    };
     pttCancelArmRef.current = false;
     setPttCancelArm(false);
     setMicLive(false);
@@ -1601,7 +1605,7 @@ export default function SessionView({
       }
       // agent holds turns manual until release — a mid-sentence pause while
       // the button is down must not flush a partial message (fire & forget)
-      const agent = Array.from(room.remoteParticipants.values())[0];
+      const agent = servingAgent(room);
       if (agent) {
         void room.localParticipant
           .performRpc({
@@ -1669,7 +1673,7 @@ export default function SessionView({
 
   function pttDiscardRpc() {
     const room = roomRef.current;
-    const agent = room && Array.from(room.remoteParticipants.values())[0];
+    const agent = room && servingAgent(room);
     if (room && agent) {
       void room.localParticipant
         .performRpc({
@@ -1746,6 +1750,11 @@ export default function SessionView({
       return;
     }
     if (modeRef.current !== 'free') await mic(false); // hands-free keeps listening
+    // L16: the reply to this held turn is spoken (hands-free speaks its own)
+    if (modeRef.current !== 'free') {
+      heldRef.current = [...heldRef.current, { ...heldPressRef.current }];
+      setHeldTick((t) => t + 1);
+    }
     firstSent('hold');
     stickRef.current = true;
     setBusy(true); // cleared when the run state settles (see poller)
@@ -1963,6 +1972,13 @@ export default function SessionView({
       ai > 0 ? [...msgs.slice(0, ai)].reverse().find((m) => m.role === 'user') : undefined;
     if (pre && pre.time === echoDiscardedAtRef.current) {
       diagEvent('voice', 'echo discard: the echo answer stays unspoken');
+      freeMicGiveBack();
+      return;
+    }
+    // L16, strict: a typed turn is answered in writing, hands-free or not (lib/held-reply.ts)
+    if (answersTyped(msgs, a)) {
+      diagEvent('voice', 'typed turn — answered in writing');
+      markHeard(slug, a.time);
       freeMicGiveBack();
       return;
     }
@@ -2364,6 +2380,50 @@ export default function SessionView({
   // the release then commits nothing — so a hold counts from its press
   const holdBeforeRef = useRef(0);
 
+  // L16 (owner rule 11-20): a turn you speak is answered aloud, a turn you type in writing.
+  // Hands-free speaks its own replies (the free cycle). A HELD turn in text mode is spoken
+  // here, once: the completed reply to the spoken user message that landed after the press
+  // (lib/held-reply.ts: the brain marks it `voice`; a typed message never is, so it is never
+  // spoken for a hold that caught nothing). The written reply stays on screen as always.
+  // A list: two holds in a row each get their own answer.
+  const heldRef = useRef<Held[]>([]);
+  const heldPressRef = useRef({ before: 0, at: 0 });
+  const [heldTick, setHeldTick] = useState(0); // a hold was armed: look now, not at the next poll
+  useEffect(() => {
+    heldRef.current = []; // another session: its holds are its own
+  }, [slug]);
+  useEffect(() => {
+    const list = heldRef.current;
+    if (!list.length) return;
+    const now = Date.now();
+    const keep: Held[] = [];
+    let say: Msg | undefined;
+    for (const h of list) {
+      const others = list.filter((x) => x !== h && x.user).map((x) => x.user as string);
+      const r = heldReply(msgs, h, others);
+      if (r.user) h.user = r.user;
+      if (r.over) continue; // stopped or failed: what is left of it is not said
+      if (!r.reply) {
+        // still coming — but a hold that caught nothing (no turn 45 s after the release) is over,
+        // so no later spoken turn is ever taken for it
+        if (h.user ? now - h.at < 30 * 60_000 : now - h.at < 45_000) keep.push(h);
+        continue;
+      }
+      if (modeRef.current === 'free') continue; // hands-free came on: its cycle says it
+      if (r.reply.time > lastHeard(slug)) say = r.reply;
+    }
+    heldRef.current = keep;
+    if (!say) return;
+    diagEvent('voice', 'held turn: its reply is spoken');
+    markHeard(slug, say.time);
+    try {
+      startSpeech(say.text, slug);
+    } catch {
+      /* the deck could not start: the reply is on screen */
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [msgs, slug, mode, heldTick]);
+
   /** pttUp, a typed send, or a hands-free commit ("over" / the bars): the
    *  turn is going out, from here a message must land. A typed turn may start
    *  before the mic was ever asked for — or after it was refused: typing never
@@ -2495,8 +2555,11 @@ export default function SessionView({
       // a held turn: it talks back here. Typed: it writes back (the deck can
       // still speak it). Hands-free speaks its own replies (the free cycle)
       if (f.kind === 'hold' && modeRef.current !== 'free') {
-        markHeard(slug, a.time);
-        startSpeech(a.text, slug);
+        // (the held-reply path above may already have said it: once is enough)
+        if (a.time > lastHeard(slug)) {
+          markHeard(slug, a.time);
+          startSpeech(a.text, slug);
+        }
       } else if (f.kind === 'type') {
         markHeard(slug, a.time);
       }
@@ -2561,6 +2624,7 @@ export default function SessionView({
       'busy',
       `abort ${slug} after ${Math.max(0, Math.round((Date.now() - busyStartRef.current) / 1000))}s (stop btn)`
     );
+    heldRef.current = []; // stopped by hand: what is left of the reply is not said aloud
     try {
       await fetch(`/api/session/${slug}/abort`, { method: 'POST', headers: pinHeaders() });
     } catch {

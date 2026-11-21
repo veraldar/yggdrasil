@@ -12,14 +12,22 @@
 #   hub-units.sh public-back        the way back: hub units stopped, the old hub-up.sh stack started
 #   hub-units.sh tailnet-up         the tailnet app (:8101) from `current` instead of rc-preview-pwa
 #   hub-units.sh tailnet-back       rc-preview-pwa again
-#   hub-units.sh deploy <id>        `current` → releases/<id>, running hub units restarted (the brain drains
-#                                   first), back to the previous release if the health check fails
+#   hub-units.sh deploy <id> [unit…] `current` → releases/<id>, running hub units restarted (the brain drains
+#                                   first), back to the previous release if the health check fails. With
+#                                   units named (e.g. hub-voice-agent) only those restart: no turn is cut
 #   hub-units.sh switch             STAGE B: brain, librarian, live helper, voice agent and both apps become
 #                                   these units (enabled, linger on); the transient rootsim-preview /
 #                                   rc-preview-* stop; root renamed `omarchy`. Health check after; on a
 #                                   failure the old transient units are put back by themselves
 #   hub-units.sh stageb-back        the same way back, by hand
 #   hub-units.sh health             the check switch/deploy run (exit 0 = all well)
+#   hub-units.sh wg-on              the root ↔ root leg (AP-10): the home root's own WireGuard node
+#                                   (hub-wg, a NEW key made here), the bridge relays its frames, the brain
+#                                   learns and reaches roots inside the tunnel, the app pins a joining
+#                                   machine's key. Needed before any computer joins. Restarts bridge, brain
+#                                   and both apps; health check after, the old settings back by itself on a
+#                                   failure. `wg-on --dry` shows what it would change, changes nothing
+#   hub-units.sh wg-off             the way back by hand (the newest backup of the four files)
 #   hub-units.sh status
 # switch / deploy / stageb-back restart the brain: run from inside it (a session's shell), they go on in
 # a unit of their own (log: ~/.local/share/yggdrasil/hub/logs/switch.log).
@@ -98,6 +106,22 @@ Restart=on-failure
 RestartSec=3
 StandardOutput=append:$LOGS/bridge.log
 StandardError=append:$LOGS/bridge.log
+
+[Install]
+WantedBy=default.target
+EOF
+  # the home root's WireGuard node (root ↔ root, trunk/src/wg.rs): started and enabled by `wg-on`
+  cat >"$UNITS/hub-wg.service" <<EOF
+[Unit]
+Description=yggdrasil home root: its WireGuard node (brain-to-brain calls between roots, end to end)
+After=hub-bridge.service
+
+[Service]
+ExecStart=$HUB/current/bin/bifrost-net wg -c $CONF/wg-hub.toml
+Restart=on-failure
+RestartSec=3
+StandardOutput=append:$LOGS/wg.log
+StandardError=append:$LOGS/wg.log
 
 [Install]
 WantedBy=default.target
@@ -213,6 +237,10 @@ public_up() {
 }
 
 ALL="hub-brain hub-librarian hub-cclive hub-voice-agent hub-app hub-app-tailnet hub-bridge"
+# the root ↔ root leg (AP-10), beside the bridge's ports (4503 http, 4504 root-link, 4505 media): the
+# node's front door (the brain's only way to other roots), its udp, the bridge's relay socket — loopback
+WG_HTTP=4506 WG_UDP=4507 WG_RELAY=4508
+WG_FILES="bridge-public.toml brain.env app-public.env app-tailnet.env"
 
 # run from a session inside the brain, stopping the brain would kill this script half-way: go on in
 # a unit of its own (the same rule as preview-up.sh)
@@ -255,6 +283,11 @@ health() {
   chk "ap.veraldar.org answers through the bridge ($code)" test "$code" = 200
   for _ in $(seq 1 60); do curl -sf -m 2 -o /dev/null http://127.0.0.1:18084/ && break; sleep 1; done
   chk "voice agent up (its worker answers on :18084)" curl -sf -m 5 -o /dev/null http://127.0.0.1:18084/
+  if systemctl --user is-enabled -q hub-wg 2>/dev/null; then
+    for _ in $(seq 1 20); do curl -sf -m 2 -o /dev/null "http://127.0.0.1:$WG_HTTP/_wg" && break; sleep 1; done
+    chk "WireGuard node :$WG_HTTP (root ↔ root)" curl -sf -m 5 -o /dev/null "http://127.0.0.1:$WG_HTTP/_wg"
+    chk "…and it lists the roots for the brain" curl -sf -m 5 -o /dev/null "http://127.0.0.1:$WG_HTTP/_wg/_roots"
+  fi
   return $ok
 }
 
@@ -352,34 +385,150 @@ tailnet_back() {
 # a new release behind every hub unit that is running: `current` moves, the units restart, and if
 # an app does not answer `current` goes back (the brain is preview-up.sh's, until stage B)
 deploy() {
-  local id=${1:?release id} prev u brain=0 bad=0
+  local id=${1:?release id} prev u brain=0 bad=0 only
+  shift
+  only=" $* "
   [ -d "$HUB/releases/$id" ] || die "no release $id"
   [ -x "$HUB/releases/$id/bin/yggdrasil" ] || die "release $id has no brain"
-  detach deploy "$id"
+  for u in "$@"; do case " $ALL hub-wg " in *" $u "*) ;; *) die "unknown unit $u (one of: $ALL hub-wg)" ;; esac; done
+  # only named units (e.g. `deploy <id> hub-voice-agent`): the brain keeps running, no turn is cut
+  case "$only" in "  " | *" hub-brain "*) detach deploy "$id" "$@" ;; *) echo "== $(date -Is) hub-units deploy $id $*" ;; esac
   prev=$(readlink "$HUB/current" || true)
-  systemctl --user is-active -q hub-brain && brain=1
-  if [ "$brain" = 1 ]; then "$HOME/Work/tree-next/scripts/preview-backup.sh" || echo "backup failed — going on"; fi
   local running=""
-  for u in $ALL; do systemctl --user is-active -q "$u" && running="$running $u"; done
+  for u in $ALL hub-wg; do
+    systemctl --user is-active -q "$u" || continue
+    case "$only" in "  " | *" $u "*) running="$running $u" ;; esac
+  done
+  case " $running " in *" hub-brain "*) brain=1 ;; esac
+  if [ "$brain" = 1 ]; then "$HOME/Work/tree-next/scripts/preview-backup.sh" || echo "backup failed — going on"; fi
   ln -sfn "$HUB/releases/$id" "$HUB/current"
   render
   # the brain drains in its ExecStop; the others restart at once
   for u in $running; do systemctl --user restart "$u" || bad=1; done
-  if [ "$bad" = 0 ]; then
-    if [ "$brain" = 1 ]; then health || bad=1; else
-      wait_http http://127.0.0.1:4502/api/build || bad=1
-      case " $running " in *" hub-app-tailnet "*) wait_http http://127.0.0.1:8101/api/build || bad=1 ;; esac
-    fi
-  fi
+  if [ "$bad" = 0 ]; then health || bad=1; fi
   if [ "$bad" = 1 ]; then
     echo "== deploy $id: failed — back to $prev"
     ln -sfn "$prev" "$HUB/current"
     for u in $running; do systemctl --user restart "$u" || true; done
-    [ "$brain" = 1 ] && { health || echo "!! the previous release does not pass the health check either"; }
+    health || echo "!! the previous release does not pass the health check either"
     exit 1
   fi
   echo "== deploy $id: done"
   status || true
+}
+
+# ── the root ↔ root leg (AP-10) ──────────────────────────────────────────────────────────────────
+# setenv FILE KEY VALUE — the line is replaced, or added; nothing else in the file moves
+setenv() {
+  local f=$1 k=$2 v=$3
+  if grep -q "^$k=" "$f"; then
+    grep -qxF "$k=$v" "$f" && return 0
+    grep -v "^$k=" "$f" >"$f.tmp"; echo "$k=$v" >>"$f.tmp"; chmod 600 "$f.tmp"; mv "$f.tmp" "$f"
+  else
+    echo "$k=$v" >>"$f"
+  fi
+}
+
+# what wg-on writes: the node's key and config, and its lines in the four files. Idempotent; it never
+# prints a value
+wg_files() {
+  local roots=$HUB/state/roots.json
+  umask 077 # brain.env holds the model key: its rewritten copy is never readable by others, not for a moment
+  [ -f "$CONF/wg-hub.key" ] || "$HUB/current/bin/bifrost-net" wg-key "$CONF/wg-hub.key" >/dev/null || return 1
+  chmod 600 "$CONF/wg-hub.key"
+  [ -s "$CONF/wg-hub.key.pub" ] || return 1
+  cat >"$CONF/wg-hub.toml" <<EOF
+# the home root's WireGuard node (hub-wg). Its key never leaves the file beside this one; its peers are
+# the roots a paired phone approved (roots.json: pinned key, not removed, the approving phone still paired).
+[wg]
+key_file = "$CONF/wg-hub.key"
+udp = "127.0.0.1:$WG_UDP"
+relay = "127.0.0.1:$WG_RELAY"
+http = "127.0.0.1:$WG_HTTP"
+brain = "$BRAIN"
+roots_file = "$roots"
+devices_file = "$HUB/state/devices.json"
+EOF
+  chmod 600 "$CONF/wg-hub.toml"
+  # the bridge relays the node's frames (ciphertext only) to and from the root links
+  grep -q '^wg_relay' "$CONF/bridge-public.toml" ||
+    sed -i "/^\[bridge\.root-link\]/a wg_relay = \"127.0.0.1:$WG_RELAY\"\nwg_local = \"127.0.0.1:$WG_UDP\"" "$CONF/bridge-public.toml"
+  grep -q '^wg_relay' "$CONF/bridge-public.toml" || return 1
+  # the brain learns the approved roots from the node and reaches each one inside its tunnel
+  setenv "$CONF/brain.env" YGG_PEERS_FROM "http://127.0.0.1:$WG_HTTP/_wg/_roots"
+  setenv "$CONF/brain.env" YGG_PEERS_VIA "http://127.0.0.1:$WG_HTTP/_wg/{id}"
+  # the app pins a joining machine's key at approval and hands it the home node's; both doors share one
+  # registry of roots (the roots sheet on :8447 removes from the same file)
+  setenv "$CONF/app-public.env" BIFROST_WG_PUB_FILE "$CONF/wg-hub.key.pub"
+  setenv "$CONF/app-public.env" BIFROST_ROOTS_FILE "$roots"
+  setenv "$CONF/app-tailnet.env" BIFROST_ROOTS_FILE "$roots"
+}
+
+wg_restart() {
+  local u bad=0
+  systemctl --user daemon-reload
+  # the bridge first (its relay socket), then the node, then the brain (it drains) and the apps
+  systemctl --user restart hub-bridge || bad=1
+  if [ "$1" = on ]; then
+    systemctl --user enable -q hub-wg || bad=1
+    systemctl --user restart hub-wg || bad=1
+  else
+    systemctl --user disable -q --now hub-wg 2>/dev/null || true
+  fi
+  for u in hub-brain hub-app hub-app-tailnet; do systemctl --user restart "$u" || bad=1; done
+  return $bad
+}
+
+wg_restore() {
+  local b=$1 f
+  for f in $WG_FILES; do cp -p "$b/$f" "$CONF/$f" || return 1; done
+}
+
+wg_on() {
+  local b f p bad=0
+  [ -x "$HUB/current/bin/bifrost-net" ] || die "no release in $HUB/current"
+  for f in $WG_FILES; do [ -f "$CONF/$f" ] || die "no $CONF/$f"; done
+  grep -q '^\[bridge\.root-link\]' "$CONF/bridge-public.toml" || die "bridge-public.toml has no [bridge.root-link]"
+  if ! systemctl --user is-active -q hub-wg; then
+    for p in $WG_HTTP $WG_UDP $WG_RELAY; do
+      if ss -Hltnu 2>/dev/null | awk '{print $5}' | grep -q ":$p\$"; then die "port $p is taken"; fi
+    done
+  fi
+  if [ "${1:-}" = --dry ]; then
+    echo "would: make $CONF/wg-hub.key (if missing) and wg-hub.toml (node :$WG_HTTP, udp :$WG_UDP, relay :$WG_RELAY)"
+    if grep -q '^wg_relay' "$CONF/bridge-public.toml"; then echo "bridge-public.toml: wg_relay is already there"
+    else echo "bridge-public.toml [bridge.root-link]: + wg_relay, wg_local"; fi
+    echo "brain.env: YGG_PEERS_FROM → the node's /_wg/_roots, + YGG_PEERS_VIA"
+    echo "app-public.env: + BIFROST_WG_PUB_FILE, BIFROST_ROOTS_FILE · app-tailnet.env: + BIFROST_ROOTS_FILE"
+    echo "restart: hub-bridge, hub-wg (new), hub-brain (drains), hub-app, hub-app-tailnet · then the health check"
+    return 0
+  fi
+  detach wg-on
+  b=$CONF/backup-wg-$(date +%Y%m%d-%H%M%S)
+  mkdir -p "$b" && chmod 700 "$b"
+  for f in $WG_FILES; do cp -p "$CONF/$f" "$b/$f"; done
+  "$HOME/Work/tree-next/scripts/preview-backup.sh" || echo "backup failed — going on"
+  wg_files || bad=1
+  render
+  if [ "$bad" = 0 ]; then wg_restart on || bad=1; fi
+  if [ "$bad" = 0 ]; then health || bad=1; fi
+  if [ "$bad" = 1 ]; then
+    echo "== wg-on: failed — the settings from $b go back"
+    wg_restore "$b" && wg_restart off
+    health || echo "!! the old settings do not pass the health check either"
+    exit 1
+  fi
+  echo "== wg-on: done — the home node's key: $(sed -n 's/^fingerprint = "\(.*\)"/\1/p' <<<"$("$HUB/current/bin/bifrost-net" wg-key "$CONF/wg-hub.key" 2>/dev/null)")"
+  status || true
+}
+
+wg_off() {
+  local b
+  b=$(ls -d "$CONF"/backup-wg-* 2>/dev/null | tail -n 1)
+  [ -n "$b" ] || die "no backup-wg-* in $CONF"
+  detach wg-off
+  wg_restore "$b" && wg_restart off
+  health
 }
 
 public_back() {
@@ -389,7 +538,7 @@ public_back() {
 }
 
 status() {
-  for u in $ALL; do printf '%-16s %-9s %s\n' "$u" "$(systemctl --user is-active "$u" 2>/dev/null || true)" "$(systemctl --user is-enabled "$u" 2>/dev/null || true)"; done
+  for u in $ALL hub-wg; do printf '%-16s %-9s %s\n' "$u" "$(systemctl --user is-active "$u" 2>/dev/null || true)" "$(systemctl --user is-enabled "$u" 2>/dev/null || true)"; done
   echo "release: $(readlink "$HUB/current" 2>/dev/null || echo none)"
   printf 'app :4502 /api/build → %s\n' "$(curl -s -m 3 http://127.0.0.1:4502/api/build || echo down)"
   printf 'app :8101 /api/build → %s\n' "$(curl -s -m 3 http://127.0.0.1:8101/api/build || echo down)"
@@ -403,10 +552,12 @@ case "${1:-status}" in
   public-back) public_back ;;
   tailnet-up) tailnet_up ;;
   tailnet-back) tailnet_back ;;
-  deploy) deploy "${2:-}" ;;
+  deploy) shift; deploy "$@" ;;
   switch) switch ;;
   stageb-back) detach stageb-back; stageb_back ;;
   health) health ;;
+  wg-on) shift; wg_on "$@" ;;
+  wg-off) wg_off ;;
   status) status ;;
   *) die "usage: hub-units.sh release|render|deploy <id>|switch|stageb-back|health|public-up|public-back|tailnet-up|tailnet-back|status" ;;
 esac

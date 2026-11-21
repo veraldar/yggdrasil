@@ -60,3 +60,30 @@
 - preview-up.sh refuses once hub-brain is enabled (says: hub-units.sh deploy).
 - RUN: ~/Work/tree-next/scripts/hub-units.sh switch   ← CUTS MY TURN. Log: ~/.local/share/yggdrasil/hub/logs/switch.log
 - AFTER (when resent): read switch.log; hub-units.sh health + status; loginctl show-user dweeb_xyz -p Linger; live-door spec both doors (mic); S14; update work/AGENTS.md rule 2 (deploy = hub-units.sh deploy); send P3 its message; report to MAIN: stage B done + reboot window question + pairing link (ap-pair.html valid until 15:20).
+- 13:0x review (agy) fixes in; tree-next at 25e1e32b. RUNNING: ~/Work/tree-next/scripts/hub-units.sh switch
+- 12:43 STAGE B SWITCHED, healthy (switch.log). Linger=yes. All 7 hub units active+enabled. NEXT: live-door both doors, S14, AGENTS.md rule 2, P3 message, report + reboot window + pairing.
+
+## 11-20 23:02 (after two more limit stops: 12:45→18:02, 18:09→23:01)
+- Stage B is DONE and verified (switch.log 12:43, health all ok at 18:02). Deploys: scripts/hub-units.sh deploy <id>.
+- FOUND 12:44 + 18:06: voice agent "mutual yield": two agent jobs in one room each wait for the other ("previous agent draining…"), both shut down after 20 s → room without agent, spoken turn lost. Seen when both doors are used back to back (same session = same room) and jobs double-dispatch. Fix idea: waiting agents mark themselves (participant attribute); among waiting ones the smallest identity serves, the others leave. In branch/voice/agent.py ~L530-566.
+- 18:06/18:08: live-door AP run FAILED twice at low load (tailnet passed) — NOT yet looked at (/tmp/ld-a).
+- ORDER NOW (owner via MAIN 23:01, I work alone): merge p2-spoken (d378eb14; strict L16 default: typed turns answered in writing only — say so in the report) → merge p5-site (bffd6ea3) → deploy → restart voice agent with P2's code → voice checks → report with commit hashes. Then P3/P4/timeline resume one at a time (MAIN does that after my report). P3's stage-B message from lead-next.md is still mine to send (or already sent? check P3's session).
+- Owner pairing link ap-pair.html expired 15:20 → check devices.json, new link in report, delete old artifact.
+- 23:3x merged p2-spoken (d378eb14) + strict L16 (answersTyped, typed turns written even hands-free) + p5-site (bffd6ea3, rig only) + voice agent fixes (repeat words = new turn; waiting jobs: first identity takes the room). Green: cargo 147, tree-e2e 131, restart-e2e, trunk-rtc rtc + s16, held-reply 12, test_repeat_turn 9, test_no_resend, voice_commands 12.
+- DEPLOY: scripts/hub-units.sh release → R3 id in /tmp/p1-release-id → ~/Work/tree-next/scripts/hub-units.sh deploy <R3> (CUTS MY TURN; log ~/.local/share/yggdrasil/hub/logs/switch.log)
+- AFTER: health; voice checks: live-door AP + tailnet back to back TWICE (the case that failed); remove test devices from state/devices.json; pairing link for the owner (check devices.json first; delete old ap-pair.html); work/AGENTS.md rule 2 → hub-units.sh deploy; P3's stage-B message (lead-next.md) if not sent; report to MAIN with commit hashes + strict-L16 default noted + reboot window question.
+- 23:15 DEPLOYED R3 20261120-2314-e05a27d9 (tree-next e05a27d9), health ok, build QmdTZgxcB-002AbLbBbuq. NEXT: voice checks ×2 both doors.
+- 23:41 voice fixes round 2 (presence by sid, serving/draining marks, app calls the serving agent) deployed: release 20261120-2341-a8b73cbf, units voice-agent+apps only. NEXT: live-door ×3 both doors.
+- 23:45 VOICE GREEN LIVE: live-door AP+tailnet back to back ×3 = 6/6 (same sentence each time; answers 1.8–3.9 s after release). Release 20261120-2341-a8b73cbf (agent + apps; brain from R3 e05a27d9, same source). Agent log since deploy: 1 job took the room, 6 turns sent, 17 duplicates left at once, 0 timeouts.
+- Test devices/codes removed from state/devices.json. Owner pair link: artifacts/ap-pair.html valid until 12:43 on 21 Nov (owner's phone still unpaired on ap; they use :8447 voice with MAIN).
+- work/AGENTS.md rules updated for stage B (backup AGENTS.md.pre-stageb-1120.bak).
+- P3 stage-B message: sending now (lead-next.md, as written). MAIN resumes the others one at a time.
+- OPEN: reboot window (owner picks); memory file preview-brain-layout is out of date (update).
+
+## 11-20 23:55 P3 asks: root ↔ root leg (WireGuard node) is off on the home root → merged p3-wg-hub (tree-next 95a7a836), reviewed (matches sim/trunk-full-e2e.sh config), dry run ok.
+- RUN: ~/Work/tree-next/scripts/hub-units.sh wg-on   ← restarts bridge, hub-wg (new), brain (CUTS MY TURN), apps. Log: ~/.local/share/yggdrasil/hub/logs/switch.log. Way back: automatic on failed health; by hand `hub-units.sh wg-off`.
+- AFTER: read switch.log; health (now with the node); curl 127.0.0.1:4506/_wg → []; brain.log "learning linked roots from …4506"; live-door both doors once (mic); tell P3 (POST /session/ses_f35ae2c967344628b6ff6c26adfa297a/message?async=1): done, go on with the joins. Then report to MAIN.
+- Coming from P3: branch p3-model (home side of "Same as the home root") — merge+deploy when P3 reports it green.
+- 23:52 wg-on DONE (switch.log): hub-wg active+enabled, node :4506, health 11/11, home node key fingerprint 415c-c41b-20a9. NEXT: live-door both doors; tell P3's line (new session 'P3 whole tree contd' per MAIN — the old P3 conversation is locked); report MAIN.
+- 23:58 wg-on verified (node [] on both routes, brain learns from :4506, live-door AP + tailnet PASS 23:53–23:54). Told 'P3 whole tree contd' (ses_f30935277fc5…) — it owns P3's line; old P3 conversation is locked. Reported to MAIN.
+- WAITING ON: p3-model (P3 reports green → merge + deploy brain/app), P4's branch (p4-release; P4 reports after rehearsal 2) and later the v0.9.1 draft (then send P5 its lead-next.md message if not sent), the owner: reboot window + phone pairing (ap-pair.html until 21 Nov 12:43; delete once used or expired). After the owner's phone passes voice on ap: retire coturn on the VPS (AP-7).
