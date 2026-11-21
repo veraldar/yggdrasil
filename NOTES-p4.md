@@ -65,6 +65,9 @@ AFTER THE HANDOVER: one docs commit more (ddbb39d8: guides → v0.9.1 + the mode
 PREREQUISITES CHECKED 11-21 10:55: release key present, NO passphrase, = RELEASE-KEY.pub; gh logged in with push;
   no v0.9.1 tag on origin. origin/main is far behind tree-next: I push ONLY the tag (its commit comes with it);
   moving main is P1's/the lead's call.
+MAC STALE FOLDER: the owner's own words 11-21 ("you decide — I never used it, delete the folder if needed") →
+  looked again (unchanged since Nov 14, no root.json, nothing running, no org.veraldar agents) and DELETED
+  ~/.local/share/yggdrasil-root on the Mac. 4180/4181 free. M4 can run as a new person would.
 WAITING ON P1: merge p3-model + p4-release, deploy → P1 says "merged and live" → I build the v0.9.1 DRAFT:
   1. worktree at tree-next HEAD (clean), docs/own-trunk.md + root/install/README.md → v0.9.1 download lines
   2. scripts/release.sh 0.9.1 --mac-host mac   (the REAL key ~/.config/yggdrasil-release/release_ed25519; if it asks
