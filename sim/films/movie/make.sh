@@ -19,8 +19,12 @@ for n in talk tree file; do
   fi
 done
 if [ -n "${STILLS:-}" ]; then RENDER_STILLS=$STILLS APP_DIR="$ROOT/branch" node "$HERE/render.mjs" "$OUT"; ls "$OUT"/still-*.png; exit 0; fi
+# the frames depend on movie.html and the footage: another movie.html = shoot again
+sig=$(cat "$HERE/movie.html" "$RUN"/{talk,tree,file}.json | sha256sum | cut -c1-16)
+[ "$(cat "$OUT/frames.sig" 2>/dev/null)" = "$sig" ] || { rm -rf "$OUT/frames"; echo "$sig" > "$OUT/frames.sig"; }
 APP_DIR="$ROOT/branch" nice -n 10 node "$HERE/render.mjs" "$OUT"
 cd "$OUT"
+ffmpeg -v error -y -framerate 30 -i frames/%05d.jpg -c:v libx264 -preset fast -crf 14 -pix_fmt yuv420p movie-raw.mp4
 ffmpeg -v error -y -i movie-raw.mp4 -an -c:v libx264 -preset slow -crf 26 -pix_fmt yuv420p -movflags +faststart yggdrasil.mp4
 ffmpeg -v error -y -i movie-raw.mp4 -an -c:v libvpx-vp9 -crf 40 -b:v 0 -row-mt 1 -deadline good -cpu-used 2 yggdrasil.webm
 ffmpeg -v error -y -ss "${POSTER_AT:-23.6}" -i movie-raw.mp4 -frames:v 1 -q:v 3 yggdrasil.jpg
