@@ -91,3 +91,4 @@
 ## 11-21 09:20 P4 reported p4-release (1ff95912, now e6e48eea notes); p3-model (8bf92ebf) never reported by P3 (its new session is locked too) — reviewed it myself (GET /root/model gated: via=wg set by the door, peer token, share list, removed roots; doors overwrite x-ygg-via/x-ygg-from, trunk test with forged headers) and merged both.
 - Green on the merge: cargo 148, trunk 42, tree-e2e 131, restart-e2e, trunk-full full (3m model:home + 8a L15 PASS), s17, trunk-rtc. Code tree identical to P4's tested p4-release+p3-model (own-trunk OT_JOIN_MODEL=home 33+12 green, P4's proof).
 - DEPLOY: release → ~/Work/tree-next/scripts/hub-units.sh deploy <id> (all units incl. hub-wg; CUTS MY TURN). AFTER: health 11/11, live-door both doors, curl :4101/root/model without door → 403, tell P4 (ses_e1eb880ac9a44c97bdd868805208795b): p3-model + p4-release merged and live → it builds the v0.9.1 draft; report MAIN.
+- release 20261121-0927-8fc5d3b2
