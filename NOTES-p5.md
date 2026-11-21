@@ -155,3 +155,20 @@ seeing then I should see nothing tell fable 5.2")
   Screenshot: /api/artifact/pair-unpaired-phone.png (Pixel 7).
 - NOT deployed: hub-app is P1's. P1 merges p5-pair-quiet and releases.
 - not mine, seen in passing: `tsc --noEmit` reports one old error in branch/e2e/own-trunk.spec.ts:99.
+
+## 11-21 21:45 — no glimpse of the app for an unpaired phone (owner's screenshot 20:06, via MAIN)
+- branch p5-pair-noflash (worktree ~/Work/p5-pair-noflash, from tree-next 70c8e102), commit c67b7852, 6 files in branch/:
+  lib/gate.ts pageGate + middleware.ts (page requests gated in devices mode: an unpaired visitor is served the
+  /pair page IN PLACE, a rewrite — Next's middleware refuses a relative redirect, and behind the trunk the app
+  does not know its public name), app/pair/page.tsx (in place: one refresh from inside the site, then the page
+  asked for, or /pair?unpaired=1), components/device-auth.tsx (stands down while /pair is up; one refresh for
+  ANY 401 hint), components/pin-state.tsx (no road line for an unpaired visitor), e2e/pair-ladder.spec.ts.
+- found on the way: an access token that ran out AND was pruned (lib/devices.ts prune on every registry write)
+  is answered reauth "pair", and the app sent that paired phone to /pair without trying its refresh. Probably
+  how the owner's phone got to /pair at 17:04. Fixed by the two refresh paths above.
+- seen: v09-ladder auth + pair-ladder + bridge + join 10 passed 1 skipped (twice); cargo test 148 passed;
+  sim/tree-e2e.py GREEN 0 failures (root/ is byte-identical to tree-next's).
+  Proof: /api/artifact/pair-noflash-frames.png (every frame painted), /api/artifact/pair-once-paired-phone.png.
+- gotchas: page.screenshot() in a loop across a navigation hangs the test → CDP screencast for frames.
+- NOT deployed (hub-app is P1's). AFTER P1 deploys: check https://ap.veraldar.org as an unpaired Pixel 7
+  (clean context): the documents served must be the /pair page only, and the frames dark → "not paired".
