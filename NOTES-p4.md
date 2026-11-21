@@ -60,6 +60,11 @@ Engines (L18): agy for reviews/self-contained code, GLM sessions for test matric
 Evidence: ~/Work/root-coord-pwa/artifacts/p4-proofs-1121.md (chain ~/.cache/p4-rig/chain.out):
   same-home rig (temp merge + p3-model) GREEN 33+12 incl. m2 · rehearsal 3 r1-r7 7/7 · Linux rig on its dist 32+12 ·
   Mac check 11/11 · wine 38/38 · model matrix 10/10 · join-test 78/78 · model-fetch 18/18 · model-step-check in step
+AFTER THE HANDOVER: one docs commit more (ddbb39d8: guides → v0.9.1 + the model step words) — P1 merging the branch
+  by name gets it; if tree-next lacks it at draft time, cherry-pick it there via P1 (release.sh warns about v0.9.0 links).
+PREREQUISITES CHECKED 11-21 10:55: release key present, NO passphrase, = RELEASE-KEY.pub; gh logged in with push;
+  no v0.9.1 tag on origin. origin/main is far behind tree-next: I push ONLY the tag (its commit comes with it);
+  moving main is P1's/the lead's call.
 WAITING ON P1: merge p3-model + p4-release, deploy → P1 says "merged and live" → I build the v0.9.1 DRAFT:
   1. worktree at tree-next HEAD (clean), docs/own-trunk.md + root/install/README.md → v0.9.1 download lines
   2. scripts/release.sh 0.9.1 --mac-host mac   (the REAL key ~/.config/yggdrasil-release/release_ed25519; if it asks
