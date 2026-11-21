@@ -1,5 +1,6 @@
 import { type ChildProcess, execFileSync, spawn } from 'child_process';
-import { appendFileSync, existsSync, openSync, readFileSync, writeFileSync } from 'fs';
+import { createHash } from 'crypto';
+import { appendFileSync, existsSync, openSync, readFileSync, readdirSync, statSync, writeFileSync } from 'fs';
 import http from 'node:http';
 import { join, resolve } from 'path';
 import {
@@ -66,6 +67,8 @@ const STATE = process.env.PW_STATE || '';
 const BRIDGE = process.env.PW_BRIDGE || '';
 const HOME = process.env.PW_HOME || '';
 const MOCK = process.env.PW_MOCK || '';
+/** the home root's model key in this run (made up by the rig). Never printed: only compared. */
+const UPKEY = process.env.PW_UPSTREAM_KEY || '';
 const CAFILE = process.env.PW_CAFILE || '';
 const FAR = process.env.PW_FAR || '';
 const YGG_BIN = process.env.PW_YGG_BIN || '';
@@ -585,6 +588,10 @@ test('trunk full: phone ↔ ap ↔ hub ↔ joined root — pair, talk, join, del
             process.env.PW_MAC_WG_UDP || '',
             '--wg-pipe',
             process.env.PW_MAC_PIPE || '',
+            // "Same as the home root" (L15): mac's brain gets no model from the rig — only what the
+            // home root hands it inside its tunnel once the phone approved
+            '--model',
+            'home',
           ],
           { stdio: ['ignore', out, out] }
         );
@@ -610,6 +617,9 @@ test('trunk full: phone ↔ ap ↔ hub ↔ joined root — pair, talk, join, del
         expect(String(J1.wg_fp)).toMatch(/^[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}$/);
         await expect(phone.getByTestId('join-wg-fp')).toHaveText(String(J1.wg_fp));
         await expect(phone.getByTestId('join-name')).toHaveText('mac');
+        // "Same as the home root": the page says what approving shares
+        await expect(phone.getByTestId('join-model')).toHaveText("the home root's model and key");
+        await phone.screenshot({ path: join(STATE, 'p3-model-approve.png') });
         const add = phone.getByTestId('join-approve');
         await expect(add).toHaveText(/Add to my tree/);
         await add.tap();
@@ -683,6 +693,26 @@ test('trunk full: phone ↔ ap ↔ hub ↔ joined root — pair, talk, join, del
     );
 
     // ---------------------------------------------------------------- 4 MAIN delegates
+    await step(
+      '3m',
+      "Same as the home root: once approved, mac fetched the home root's model inside its tunnel and its brain runs on that alone",
+      async () => {
+        await waitFile(join(MACST, 'model.json'), 60_000);
+        expect(joinerError()).toBe('');
+        const m = JSON.parse(readFileSync(join(MACST, 'model.json'), 'utf8'));
+        expect([m.base_url, m.style, m.model, m.has_key]).toEqual([MOCK, 'anthropic', 'mock', true]);
+        expect(m.key_len).toBe(UPKEY.length);
+        // the join's answer said so, the registry keeps it, and the home brain logged who — not what
+        expect(JSON.parse(readFileSync(join(MACST, 'root.json'), 'utf8')).model).toBe('home');
+        const rec = JSON.parse(readFileSync(join(STATE, 'roots.json'), 'utf8')).roots.find(
+          (r: { id: string }) => r.id === 'mac'
+        );
+        expect(rec.share_model).toBe(true);
+        expect(readFileSync(join(STATE, 'home.log'), 'utf8')).toContain('model settings handed to mac');
+        await expect.poll(async () => (await brain(MAC, '/root')).body?.name, { timeout: 30_000 }).toBe('mac');
+      }
+    );
+
     await step(
       '4a',
       'the hub brain learns the joined root by itself (YGG_PEERS_FROM → its node; no restart)',
@@ -1249,6 +1279,65 @@ test('trunk full: phone ↔ ap ↔ hub ↔ joined root — pair, talk, join, del
           )
           .toBe(true);
         expect((await sessionsOf(MAC)).some((s) => s.title === 'hop three')).toBe(false);
+      }
+    );
+
+    await step(
+      '8a',
+      "L15 · the home root's model leaves only to the root it was shared with, only inside WireGuard, only with the peer token",
+      async () => {
+        const tok = process.env.PW_PEER_TOKEN || '';
+        const sha = (s: unknown) => createHash('sha256').update(String(s ?? '')).digest('hex');
+        // mac, approved with "Same as the home root": the settings, the key with them
+        const ok = await brain(MACWG, '/_wg/local/root/model');
+        expect(ok.status).toBe(200);
+        expect(sha(ok.body.api_key) === sha(UPKEY), 'mac got the home key').toBe(true);
+        // lab was approved without it: nothing
+        const lab = await brain(LABWG, '/_wg/local/root/model');
+        expect([lab.status, lab.body.why]).toEqual([403, 'not-shared']);
+        // no token, a wrong token: refused before the route
+        const none = await brain(MACWG, '/_wg/local/root/model', { headers: {} });
+        const wrong = await brain(MACWG, '/_wg/local/root/model', { headers: { 'x-ygg-peer': 'not-the-token' } });
+        expect([none.status, wrong.status]).toEqual([401, 401]);
+        // on the home computer itself, outside any tunnel (the app, a tool): nothing, token or not
+        const local = await brain(HOME, '/root/model', { headers: { 'x-ygg-peer': tok } });
+        expect([local.status, local.body.why]).toEqual([403, 'not-the-root-link']);
+        for (const r of [lab, none, wrong, local]) {
+          expect(JSON.stringify(r.body).includes(UPKEY), 'a refusal never carries the key').toBe(false);
+        }
+        // another root cannot grant itself: only the home computer says who it shares with
+        const self = await brain(LABWG, '/_wg/local/root/peers/lab/model', { method: 'POST', body: { share: true } });
+        expect(self.status).toBe(403);
+        expect((await brain(LABWG, '/_wg/local/root/model')).status).toBe(403);
+      }
+    );
+
+    await step(
+      '8b',
+      'L15 · the key is in no log and no file of the run, and never crossed the access point in clear (the tap saw ciphertext)',
+      async () => {
+        expect(UPKEY.length).toBeGreaterThan(20);
+        const needle = Buffer.from(UPKEY);
+        const hits: string[] = [];
+        let files = 0;
+        const walk = (dir: string) => {
+          for (const e of readdirSync(dir, { withFileTypes: true })) {
+            const p = join(dir, e.name);
+            if (e.isDirectory()) {
+              // the browsers' own profiles and the brains' session stores hold no log line of ours
+              if (e.name === 'node_modules') continue;
+              walk(p);
+            } else if (e.isFile() && statSync(p).size < 64 * 1024 * 1024) {
+              files += 1;
+              if (readFileSync(p).includes(needle)) hits.push(p.slice(STATE.length + 1));
+            }
+          }
+        };
+        walk(STATE);
+        expect(files).toBeGreaterThan(20);
+        // the tap sits where the access point hands the root links to the bridge: it is in STATE too
+        expect(existsSync(TAPDIR) && readdirSync(TAPDIR).length > 0, 'the tap recorded the links').toBe(true);
+        expect(hits, 'files holding the key').toEqual([]);
       }
     );
 

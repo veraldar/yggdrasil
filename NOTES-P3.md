@@ -1,33 +1,27 @@
-# P3 notes (resume from here after a cut)
+# P3 notes (resume from here after a cut) — 11-20 12:45
 
-Contract and rules: `briefs/p3-tree.md`. Branches: p3-tree (brain, merges), p3-app (app sub-agent), p3-search (B7b, merged).
-Build with `TMPDIR=~/.cache/p3-tmp` (/tmp is a shared 16 GB tmpfs, near full). Rig ports: 185xx (app agent), 186xx (search), 187xx (mine).
+Two jobs from the lead (12:36). Branches: `p3-model` (job 1, worktree ~/Work/p3-model), `p3-verify` (job 2, ~/Work/p3-verify).
+Temp: ~/.cache/p3-tmp (never /tmp). Builds/tests under `nice -n 10`.
 
-## Done
-- trunk: `switch::perform` + root-dial.py mark peer calls `x-ygg-via: trunk` (wg test asserts it, forged one replaced)
-- brain: roots.rs — ensure_main (YGG_ROOT_MAIN=1), root-MAIN proxies (`[MAIN] <root>`, card.kind root-main, under local MAIN),
-  GET /root {main, home, roots[] health}, GET /root/{name}/sessions, POST /root/{name}/adopt, POST /session {root},
-  DELETE /root/peers/{name} (loopback, not from a peer; archives proxies "root removed"), POST /tree/placed + forward_home,
-  hops (info.hops, meta.from.hops, MAX_HOPS 2), RELAY_REFUSED on remote send/start, root-main never closed remotely,
-  peers::gate middleware (L8) on every route, learned peers dropped when unlisted (proxies kept), asker gets the answer
-- B7b merged from p3-search (librarian_search roots:"all", POST /ext/{name}/call peer-only, fallback text search)
-- tree-next 4a5f7244 merged
+## Job 1 — home root's side of "Same as the home root" (L15)
+Contract for P4: ~/Work/root-coord-pwa/artifacts/p3-model-share-contract.md (written, v1).
+Design: joiner sends `model:"home"` in POST /api/roots/join → approve page shows it → app tells the brain at approval
+(`POST /root/peers/{id}/model {share:true}`, loopback) → brain keeps data_dir/model-shares.json → joined root asks
+`GET /root/model` through its WireGuard node (/_wg/local/root/model, x-ygg-peer). Route answers only when:
+x-ygg-via == wg (door mark), peer token ok, x-ygg-from (door: the tunnel's pinned peer) is in the shares and not removed.
+- [x] trunk: door sets x-ygg-via: wg|trunk + x-ygg-from (commit 1a97a527, trunk tests 42 green)
+- [ ] brain: Peers.shares, roots.rs get_model/post_share/load_shares, remove() drops the share, routes in main.rs, tests
+- [ ] app: lib/roots.ts JoinReq.model, viewJoin, approveJoin → brain grant, RootRecord.share_model; join page line
+- [ ] rig: trunk-full-joiner.py --model home (mac joins with it, brain started with ONLY what it fetched); spec steps:
+      approve page shows the line; mac answers a turn; lab (no model:home) gets 403; no token 401; plaintext 403;
+      the made-up key string appears in NO log and NOT in the tap
+- [ ] report to P1 + tell P4 the contract
 
-- installer: rootjoin.py brain-env writes YGG_ROOT_MAIN=1 + YGG_HOME_ROOT (checked by hand; join-test.sh is red BEFORE p3 too:
-  join.sh downloads bifrost-net from GitHub, the test gives it none — P4's, reported)
-- 10 roots tests; cargo test 126 green; sim/tree-e2e.py GREEN; sim/trunk-roots-e2e.py GREEN (its tunnel probes now send the token)
+## Job 2 — check the P2×P3 merge on tree-next 5edbb05c
+Chain runs in unit `p3-verify-run` (systemd --user): ~/.cache/p3-tmp/verify/run.sh → status.log, *.log there.
+- [ ] app build · cargo test · trunk-full-e2e · trunk-roots-e2e · tree-e2e
+- [ ] roots sheet on Pixel-7 against a two-brain rig + a session on the other root with live text and a file (P2)
 
-- p3-app merged (sheet, routes, tag, pending joins, remove; its own rig sim/roots-sheet-e2e.sh green; screenshots p3-roots-*.png)
-- bridge refuses + cuts a removed root (rootlink.rs; it only checked the device); a root off at once on a failed call; polls 30 s
-- independent review: 9 findings, all fixed (commit "review fixes"), 127 tests green, tree-e2e GREEN again
-- rig spec: 7a-7i (S10 brain side, L8 through the tunnel, S18 incl. 3rd hop refused), 7s/7z (sheet taps, remove)
-
-- sim/trunk-full-e2e.sh TRUNK-FULL: GREEN, 31/31 steps (13 new: 7a-7i, 7s, 7z); screenshots artifacts/p3-s10-*.png
-- old public brain's data backed up: ~/.local/share/yggdrasil-backups/omarchy-lab-data-20261120-001112 (+ .sha256)
-
-## Waiting
-- omarchy-lab + a Linux container root on the REAL trunk: after P1 reports stage B (home renamed `omarchy`)
-
-## Next
-1. when P1 says stage B is done: join.sh --name omarchy-lab --dir ~/.local/share/yggdrasil-root-lab --no-start,
-   check the data path in its brain.env, copy the backup in, start; the owner approves on the phone
+## Waiting on P1 stage B
+omarchy-lab + a Linux container on the real trunk. Backup of the old public brain's data:
+~/.local/share/yggdrasil-backups/omarchy-lab-data-20261120-001112

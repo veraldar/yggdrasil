@@ -103,6 +103,8 @@ export type Approved = {
   /** the hub brain's root name: the joined root's peer for it (YGG_PEERS <hub>=…/local) */
   hub: string;
   wg?: WgGrant;
+  /** 'home': the home brain will hand this root its model settings (GET /_wg/local/root/model) */
+  model?: 'home';
 };
 
 type JoinReq = {
@@ -115,6 +117,8 @@ type JoinReq = {
   peer: string;
   /** the machine's WireGuard public key (base64), pinned by the approval */
   wgPub?: string;
+  /** "Same as the home root": the machine asks for the home root's model settings (L15) */
+  model?: 'home';
   created: number;
   exp: number;
   status: 'pending' | 'approved' | 'refused' | 'delivered';
@@ -206,6 +210,7 @@ function joinOf(v: unknown): JoinReq | null {
     host: str(o.host),
     peer: str(o.peer),
     ...(wgKey(o.wgPub) ? { wgPub: wgKey(o.wgPub) } : {}),
+    ...(o.model === 'home' ? { model: 'home' as const } : {}),
     created,
     exp,
     status: o.status as JoinReq['status'],
@@ -282,6 +287,9 @@ export type RootRecord = {
   /** its pinned WireGuard public key and tunnel address (roots that joined with one) */
   wg_pub?: string;
   wg_ip?: string;
+  /** approved with "Same as the home root": the home brain hands it its model settings, inside
+   *  the tunnel only (the brain's GET /root/model) */
+  share_model?: boolean;
   /** removed from the tree (the roots sheet): the trunk drops it, refill refuses it, its id stays taken */
   revoked?: boolean;
   revoked_at?: string;
@@ -393,6 +401,24 @@ export const ROOT_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
  * be the brain's own: asked of the brain (GET <OPENCODE_URL>/root → name), else
  * this app's YGG_ROOT_NAME, else "hub".
  */
+/** Tells the home brain the owner approved `root` with "Same as the home root" (its
+ *  POST /root/peers/<id>/model, this computer only). false: the brain did not take it. */
+async function brainShareModel(root: string): Promise<boolean> {
+  try {
+    const r = await undiciFetch(`${OC}/root/peers/${encodeURIComponent(root)}/model`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ share: true }),
+      signal: AbortSignal.timeout(5000),
+    });
+    if (r.ok) return true;
+    console.warn(`join: the brain did not take the model sharing for ${root}: ${r.status}`);
+  } catch (e) {
+    console.warn(`join: the brain did not take the model sharing for ${root}: ${(e as Error).message}`);
+  }
+  return false;
+}
+
 export async function hubBrainName(): Promise<string> {
   try {
     const r = await undiciFetch(`${OC}/root`, { signal: AbortSignal.timeout(3000) });
@@ -491,7 +517,7 @@ export function clean(v: unknown, max: number): string {
 }
 
 export function createJoin(
-  input: { name: string; os: string; host: string; wgPub?: string },
+  input: { name: string; os: string; host: string; wgPub?: string; model?: 'home' },
   peer: string
 ) {
   prune();
@@ -511,6 +537,7 @@ export function createJoin(
     host: input.host,
     peer,
     ...(input.wgPub ? { wgPub: input.wgPub } : {}),
+    ...(input.model === 'home' ? { model: 'home' as const } : {}),
     created: now,
     exp: now + JOIN_TTL_S * 1000,
     status: 'pending',
@@ -539,6 +566,8 @@ export function viewJoin(req: string) {
     code: j.code,
     /** the fingerprint of the WireGuard key this approval pins (null: an older joiner) */
     wg_fp: j.wgPub ? wgFingerprint(j.wgPub) : null,
+    /** 'home': approving it shares the home root's model, key included, with this machine */
+    model: j.model ?? null,
     status: statusOf(j),
     expires_at: new Date(j.exp).toISOString(),
     root_id: j.root_id ?? null,
@@ -630,6 +659,8 @@ export async function approveJoin(req: string, device: string): Promise<Decision
       };
     }
     const addr = j.wgPub ? wgAddress(f) : null;
+    // the settings travel inside WireGuard only: a machine with no tunnel key cannot be handed them
+    const shareModel = j.model === 'home' && !!j.wgPub && !!addr;
     if (j.wgPub && !addr) {
       return { http: 503, body: { error: "the tree's tunnel range is full" } };
     }
@@ -657,6 +688,7 @@ export async function approveJoin(req: string, device: string): Promise<Decision
       secretHash: sha256(root_secret),
       delivered_at: null,
       ...(j.wgPub && addr ? { wg_pub: j.wgPub, wg_ip: addr.ip } : {}),
+      ...(shareModel ? { share_model: true } : {}),
     });
     await writeRoots(f);
     if (!(await addDeviceRoot(device, root_id))) {
@@ -665,6 +697,10 @@ export async function approveJoin(req: string, device: string): Promise<Decision
       await writeRoots(f);
       return { http: 409, body: { error: 'approving device is no longer live' } };
     }
+
+    // "Same as the home root": the owner approved it, so the home brain may hand this root its
+    // model settings when it asks inside its tunnel. A brain that cannot be told shares nothing.
+    const shared = shareModel && (await brainShareModel(root_id));
 
     j.status = 'approved';
     j.by = device;
@@ -680,6 +716,7 @@ export async function approveJoin(req: string, device: string): Promise<Decision
       ...(addr && hubKey
         ? { wg: { public_key: hubKey, hub_ip: `${addr.base}.1`, ip: addr.ip, net: addr.net } }
         : {}),
+      ...(shared ? { model: 'home' as const } : {}),
     };
     saveJoins();
     return {

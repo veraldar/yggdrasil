@@ -1,5 +1,5 @@
 /**
- * POST { name, os, host, wg_pub? } → a join request from a NEW machine (contract v1,
+ * POST { name, os, host, wg_pub?, model? } → a join request from a NEW machine (contract v1,
  * docs/spec-join.md). No device auth — the machine has none yet — so it is
  * rate-limited per client address (5 per 10 min) and grants nothing by
  * itself: a paired device must approve it at `approve_url`. At most
@@ -9,7 +9,9 @@
  *   `secret` is shown once (only its sha256 is kept); `code` is printed on
  *   both screens so the owner can compare them before approving. `wg_pub` is
  *   the machine's WireGuard public key: the approve page shows its fingerprint
- *   next to the code, and approving pins it (lib/roots.ts).
+ *   next to the code, and approving pins it (lib/roots.ts). `model: "home"` =
+ *   "Same as the home root": the approve page says so, and approving it lets
+ *   the home brain hand this machine its model settings inside the tunnel.
  */
 import { NextResponse } from 'next/server';
 import { NO_STORE } from '@/lib/pairing';
@@ -41,7 +43,9 @@ export async function POST(req: Request) {
       { status: 400 }
     );
   }
-  const j = createJoin({ name: name || host, os, host, wgPub }, peerOf(req));
+  // "Same as the home root" (L15): the machine asks for the home root's model settings
+  const model = body?.model === 'home' ? ('home' as const) : undefined;
+  const j = createJoin({ name: name || host, os, host, wgPub, model }, peerOf(req));
   if (!j) {
     return NextResponse.json(
       { error: 'too many joins waiting for approval — try again later' },

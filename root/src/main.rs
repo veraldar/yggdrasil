@@ -4572,12 +4572,15 @@ async fn main() {
         .route("/root/{name}/adopt", post(roots::post_adopt))
         .route("/root/peers/{name}", axum::routing::delete(roots::delete_peer))
         .route("/tree/placed", post(roots::post_placed))
+        .route("/root/model", get(roots::get_model))
+        .route("/root/peers/{name}/model", post(roots::post_share))
         // L8: a call from another root carries the peer token, whatever route it names
         .layer(axum::middleware::from_fn_with_state(state.clone(), peers::gate))
         .with_state(state.clone());
     files::sweep(&state);
     tree::recover(&state, interrupted);
     roots::load_removed(&state);
+    roots::load_shares(&state);
     roots::ensure_main(&state);
     peers::spawn_watch(&state);
     ext::spawn_watch(&state);
