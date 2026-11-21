@@ -21,11 +21,22 @@ PC" — tap **More info → Run anyway**.
 Verify by hand: `ssh-keygen -Y verify -f allowed_signers -I release@yggdrasil -n yggdrasil-release -s SHA256SUMS.sig < SHA256SUMS && sha256sum --ignore-missing -c SHA256SUMS`.
 
 ### Installers (`root/install/`, `trunk/install/`, `win/`, `scripts/`)
+- **The model step, the same on every system** (`install.sh`, `join.sh`, the Windows installer): *Model provider* —
+  Same as the home root · Z AI · OpenRouter · Anthropic · OpenAI · Other. A provider asks only its key; its
+  address is filled in and its default model can be changed. *Other* takes any OpenAI- or Anthropic-compatible
+  address, with no key for a model on your own network. Without a terminal: `--model-provider NAME [--model M]`
+  with the key in `YGG_UPSTREAM_API_KEY` (never on the command line).
+- **Same as the home root** (the default for a computer that joins): nothing is typed. When you approve the
+  computer on your phone, your home computer hands it its model settings inside the root link (WireGuard, end to
+  end — the trunk server carries ciphertext). The new computer then calls the provider itself, so it keeps
+  thinking when the home computer is off. Removing a computer does not take back a key it was given: change the
+  key at the provider for that.
 - **Apple-silicon Macs get a prebuilt root:** `yggdrasil-0.9.1-macos-aarch64.tar.gz` (the brain and the node's root
   build, compiled on a Mac, signed with the rest). `join.sh` picks it the way it picks the Linux archive and installs
   launchd agents; no Rust, no Xcode project, no git. Intel Macs: `join.sh --build` from a checkout.
 - **Windows in one file:** `Veraldar-Setup-0.9.1.exe` — checks Windows 10 2004+/11, installs WSL2 when missing
-  (one admin prompt, continues by itself after the restart), runs this release's own `join.sh` inside WSL, shows the
+  (one admin prompt, continues by itself after the restart), asks the model step above, runs this release's own
+  `join.sh` inside WSL, shows the
   code and the QR in its window, starts the root at every log-on. A failure ends on a short step code
   (`W-OS`, `W-WSL`, `W-NET`, `W-SIG`, `W-JOIN`, `W-MODEL`, `W-RUN`) and `%LOCALAPPDATA%\Veraldar\install-report.txt`
   (no secrets in it). Uninstall leaves WSL alone.
