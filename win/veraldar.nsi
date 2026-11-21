@@ -37,6 +37,26 @@ Unicode true
 !define UNINST_KEY  "Software\Microsoft\Windows\CurrentVersion\Uninstall\Veraldar"
 !define RUNONCE_KEY "Software\Microsoft\Windows\CurrentVersion\RunOnce"
 !define NTCV_KEY    "SOFTWARE\Microsoft\Windows NT\CurrentVersion"
+; The model step's providers — the SAME table as root/install/model-step.sh (win/model-step-check.sh compares
+; them): label, address, kind, models (the default first).
+!define P_SAME_LABEL       "Same as the home root"
+!define P_ZAI_LABEL        "Z AI"
+!define P_ZAI_URL          "https://api.z.ai/api/anthropic"
+!define P_ZAI_STYLE        "anthropic"
+!define P_ZAI_MODELS       "glm-5.3-flash glm-5.3 glm-5.2"
+!define P_OPENROUTER_LABEL "OpenRouter"
+!define P_OPENROUTER_URL   "https://openrouter.ai/api/v1"
+!define P_OPENROUTER_STYLE "openai"
+!define P_OPENROUTER_MODELS "openai/gpt-4o-mini"
+!define P_ANTHROPIC_LABEL  "Anthropic"
+!define P_ANTHROPIC_URL    "https://api.anthropic.com"
+!define P_ANTHROPIC_STYLE  "anthropic"
+!define P_ANTHROPIC_MODELS "claude-fable-5-2 claude-opus-5-5 claude-sonnet-5-5 claude-haiku-5-5"
+!define P_OPENAI_LABEL     "OpenAI"
+!define P_OPENAI_URL       "https://api.openai.com/v1"
+!define P_OPENAI_STYLE     "openai"
+!define P_OPENAI_MODELS    "gpt-4o-mini"
+!define P_OTHER_LABEL      "Other"
 !define QR_WAIT_MS   660000   ; the hub keeps a join request 10 minutes; join.sh gives up 30 s after that
 !define PREP_WAIT_MS 2400000  ; no code after 40 minutes (the release download): give up
 
@@ -119,10 +139,20 @@ Var FontCode
 Var Name          ; uninstaller: the root's name
 Var HaveModel     ; 1: this PC's root already has its model (setup.ini model=1): the model page is not shown
 Var StepModel
+Var hProv         ; the model step (the same choices and words as root/install/model-step.sh)
+Var hPKeyLbl      ; a provider: its key, its model (the default shown, changeable)
+Var hPKey
+Var hPModelLbl
+Var hPModel
+Var hOAddrLbl     ; Other: address, kind, model, key
 Var hUpUrl
+Var hOKindLbl
 Var hUpKind
+Var hOModelLbl
 Var hUpModel
+Var hOKeyLbl
 Var hUpKey
+Var hOHint
 
 ; ------------------------------------------------------------------------------------------------- pages
 !define MUI_CUSTOMFUNCTION_ABORT OnUserAbort
@@ -717,9 +747,101 @@ Function AddressLeave
   ${Log} "trunk: $0"
 FunctionEnd
 
-; step 3b (decision L15): the model, asked the way join.sh asks on Linux, only when this PC's root has none yet.
-; The key is typed into a hidden field, written only to upstream.env (wsl-bootstrap.sh moves it into WSL at once and
-; removes it here), never shown again and never logged.
+; step 3b (decision L15, revised): the model step — the same choices and the same words as join.sh on Linux and
+; macOS. Shown only when this PC's root has no model yet. "Same as the home root" (the default) writes nothing:
+; join.sh then asks the home root for its model once the phone has approved. A provider asks only its key (its
+; address and kind are filled in; its default model is shown and can be changed); Other asks address, kind,
+; model, key. The key is typed into a hidden field, written only to upstream.env (wsl-bootstrap.sh moves it into
+; WSL at once and removes it here), never shown again and never logged.
+Function PresetOf ; $R0 a provider's label -> $R1 address, $R2 kind, $R4 models (default first); $R5 same|preset|other
+  StrCpy $R1 ""
+  StrCpy $R2 ""
+  StrCpy $R4 ""
+  StrCpy $R5 "preset"
+  ${If} $R0 == "${P_SAME_LABEL}"
+    StrCpy $R5 "same"
+  ${ElseIf} $R0 == "${P_ZAI_LABEL}"
+    StrCpy $R1 "${P_ZAI_URL}"
+    StrCpy $R2 "${P_ZAI_STYLE}"
+    StrCpy $R4 "${P_ZAI_MODELS}"
+  ${ElseIf} $R0 == "${P_OPENROUTER_LABEL}"
+    StrCpy $R1 "${P_OPENROUTER_URL}"
+    StrCpy $R2 "${P_OPENROUTER_STYLE}"
+    StrCpy $R4 "${P_OPENROUTER_MODELS}"
+  ${ElseIf} $R0 == "${P_ANTHROPIC_LABEL}"
+    StrCpy $R1 "${P_ANTHROPIC_URL}"
+    StrCpy $R2 "${P_ANTHROPIC_STYLE}"
+    StrCpy $R4 "${P_ANTHROPIC_MODELS}"
+  ${ElseIf} $R0 == "${P_OPENAI_LABEL}"
+    StrCpy $R1 "${P_OPENAI_URL}"
+    StrCpy $R2 "${P_OPENAI_STYLE}"
+    StrCpy $R4 "${P_OPENAI_MODELS}"
+  ${Else}
+    StrCpy $R5 "other"
+  ${EndIf}
+FunctionEnd
+
+Function FillModels ; $R4 "a b c" -> the provider model box's list; $R3 the first (the default)
+  SendMessage $hPModel ${CB_RESETCONTENT} 0 0
+  StrCpy $R3 ""
+  StrCpy $R6 ""
+  StrCpy $R7 0
+  ${Do}
+    StrCpy $R8 $R4 1 $R7
+    ${If} $R8 == " "
+    ${OrIf} $R8 == ""
+      ${If} $R6 != ""
+        ${NSD_CB_AddString} $hPModel "$R6"
+        ${If} $R3 == ""
+          StrCpy $R3 $R6
+        ${EndIf}
+        StrCpy $R6 ""
+      ${EndIf}
+      ${If} $R8 == ""
+        ${ExitDo}
+      ${EndIf}
+    ${Else}
+      StrCpy $R6 "$R6$R8"
+    ${EndIf}
+    IntOp $R7 $R7 + 1
+  ${Loop}
+  ${NSD_SetText} $hPModel "$R3"
+FunctionEnd
+
+Function ModelProvApply ; show the fields of the chosen provider
+  ${NSD_GetText} $hProv $R0
+  Call PresetOf
+  StrCpy $R6 ${SW_HIDE}
+  StrCpy $R7 ${SW_HIDE}
+  ${If} $R5 == "preset"
+    StrCpy $R6 ${SW_SHOW}
+  ${ElseIf} $R5 == "other"
+    StrCpy $R7 ${SW_SHOW}
+  ${EndIf}
+  ShowWindow $hPKeyLbl $R6
+  ShowWindow $hPKey $R6
+  ShowWindow $hPModelLbl $R6
+  ShowWindow $hPModel $R6
+  ShowWindow $hOAddrLbl $R7
+  ShowWindow $hUpUrl $R7
+  ShowWindow $hOKindLbl $R7
+  ShowWindow $hUpKind $R7
+  ShowWindow $hOModelLbl $R7
+  ShowWindow $hUpModel $R7
+  ShowWindow $hOKeyLbl $R7
+  ShowWindow $hUpKey $R7
+  ShowWindow $hOHint $R7
+  ${If} $R5 == "preset"
+    SendMessage $hPKeyLbl ${WM_SETTEXT} 0 "STR:$R0 API key"
+    Call FillModels
+  ${EndIf}
+FunctionEnd
+
+Function ModelProvChange
+  Pop $R9
+  Call ModelProvApply
+FunctionEnd
+
 Function ModelShow
   ${If} $Result != ""
   ${OrIf} $NeedRestart == 1
@@ -727,31 +849,54 @@ Function ModelShow
     Abort
   ${EndIf}
   ${Log} "page: model"
-  !insertmacro MUI_HEADER_TEXT "Model" "This computer needs a model to think with (any OpenAI- or Anthropic-compatible API)."
+  !insertmacro MUI_HEADER_TEXT "Model" " "
   nsDialogs::Create 1018
   Pop $0
-  ${NSD_CreateLabel} 0 2u 52u 12u "Address"
+  ${NSD_CreateLabel} 0 2u 68u 12u "Model provider"
   Pop $1
-  ${NSD_CreateText} 56u 0 100% 13u "https://api.openai.com/v1"
+  ${NSD_CreateDropList} 72u 0 150u 90u ""
+  Pop $hProv
+  ${NSD_CB_AddString} $hProv "${P_SAME_LABEL}"
+  ${NSD_CB_AddString} $hProv "${P_ZAI_LABEL}"
+  ${NSD_CB_AddString} $hProv "${P_OPENROUTER_LABEL}"
+  ${NSD_CB_AddString} $hProv "${P_ANTHROPIC_LABEL}"
+  ${NSD_CB_AddString} $hProv "${P_OPENAI_LABEL}"
+  ${NSD_CB_AddString} $hProv "${P_OTHER_LABEL}"
+  ${NSD_CB_SelectString} $hProv "${P_SAME_LABEL}"
+  ${NSD_OnChange} $hProv ModelProvChange
+  ; a provider: its key, then its model
+  ${NSD_CreateLabel} 0 26u 68u 12u "API key"
+  Pop $hPKeyLbl
+  ${NSD_CreatePassword} 72u 24u 228u 13u ""
+  Pop $hPKey
+  ${NSD_CreateLabel} 0 48u 68u 12u "Model"
+  Pop $hPModelLbl
+  ${NSD_CreateComboBox} 72u 46u 150u 70u ""
+  Pop $hPModel
+  ; Other: address, kind, model, key
+  ${NSD_CreateLabel} 0 26u 68u 12u "Address"
+  Pop $hOAddrLbl
+  ${NSD_CreateText} 72u 24u 228u 13u ""
   Pop $hUpUrl
-  ${NSD_CreateLabel} 0 24u 52u 12u "Kind"
-  Pop $1
-  ${NSD_CreateDropList} 56u 22u 90u 60u ""
+  ${NSD_CreateLabel} 0 48u 68u 12u "Kind"
+  Pop $hOKindLbl
+  ${NSD_CreateDropList} 72u 46u 90u 60u ""
   Pop $hUpKind
   ${NSD_CB_AddString} $hUpKind "openai"
   ${NSD_CB_AddString} $hUpKind "anthropic"
   ${NSD_CB_SelectString} $hUpKind "openai"
-  ${NSD_CreateLabel} 0 46u 52u 12u "Model"
-  Pop $1
-  ${NSD_CreateText} 56u 44u 100% 13u "gpt-4o-mini"
+  ${NSD_CreateLabel} 0 70u 68u 12u "Model"
+  Pop $hOModelLbl
+  ${NSD_CreateText} 72u 68u 228u 13u ""
   Pop $hUpModel
-  ${NSD_CreateLabel} 0 68u 52u 20u "Key"
-  Pop $1
-  ${NSD_CreatePassword} 56u 66u 100% 13u ""
+  ${NSD_CreateLabel} 0 92u 68u 12u "Key"
+  Pop $hOKeyLbl
+  ${NSD_CreatePassword} 72u 90u 228u 13u ""
   Pop $hUpKey
-  ${NSD_CreateLabel} 56u 82u 100% 12u "Empty for a local server."
-  Pop $1
-  ${NSD_SetFocus} $hUpKey
+  ${NSD_CreateLabel} 72u 106u 228u 12u "Empty for a model on your own network."
+  Pop $hOHint
+  Call ModelProvApply
+  ${NSD_SetFocus} $hProv
   Call HideBack
   GetDlgItem $1 $HWNDPARENT 1
   SendMessage $1 ${WM_SETTEXT} 0 "STR:Connect"
@@ -804,33 +949,59 @@ Function TrimBlanks ; $0 without blanks around it
 FunctionEnd
 
 Function ModelLeave
-  ${NSD_GetText} $hUpUrl $0
-  Call TrimBlanks
-  StrCpy $5 $0
-  StrCpy $1 $5 8
-  StrCpy $2 $5 7
-  StrLen $3 $5
-  ${If} $1 != "https://"
-  ${AndIf} $2 != "http://"
-    StrCpy $3 0
+  ${NSD_GetText} $hProv $R0
+  Call PresetOf
+  ${If} $R5 == "same"
+    Delete "$INSTDIR\upstream.env"
+    StrCpy $StepModel "same as the home root"
+    ${Log} "model: same as the home root"
+    Return
   ${EndIf}
-  ${If} $3 < 10
-    MessageBox MB_ICONEXCLAMATION|MB_OK "The address starts with https://, like https://api.openai.com/v1"
-    Abort
+  ${If} $R5 == "preset"
+    StrCpy $5 $R1
+    StrCpy $6 $R2
+    ${NSD_GetText} $hPModel $0
+    Call TrimBlanks
+    StrCpy $7 $0
+    ${If} $7 == ""
+      Call FillModels
+      StrCpy $7 $R3
+    ${EndIf}
+    ${NSD_GetText} $hPKey $0
+    Call TrimBlanks
+    ${If} $0 == ""
+      MessageBox MB_ICONEXCLAMATION|MB_OK "The $R0 API key is needed."
+      Abort
+    ${EndIf}
+  ${Else}
+    ${NSD_GetText} $hUpUrl $0
+    Call TrimBlanks
+    StrCpy $5 $0
+    StrCpy $1 $5 8
+    StrCpy $2 $5 7
+    StrLen $3 $5
+    ${If} $1 != "https://"
+    ${AndIf} $2 != "http://"
+      StrCpy $3 0
+    ${EndIf}
+    ${If} $3 < 10
+      MessageBox MB_ICONEXCLAMATION|MB_OK "The address starts with https:// (or http:// for a model on your own network)."
+      Abort
+    ${EndIf}
+    ${NSD_GetText} $hUpKind $6
+    ${If} $6 != "anthropic"
+      StrCpy $6 "openai"
+    ${EndIf}
+    ${NSD_GetText} $hUpModel $0
+    Call TrimBlanks
+    StrCpy $7 $0
+    ${If} $7 == ""
+      MessageBox MB_ICONEXCLAMATION|MB_OK "Which model?"
+      Abort
+    ${EndIf}
+    ${NSD_GetText} $hUpKey $0
+    Call TrimBlanks
   ${EndIf}
-  ${NSD_GetText} $hUpKind $6
-  ${If} $6 != "anthropic"
-    StrCpy $6 "openai"
-  ${EndIf}
-  ${NSD_GetText} $hUpModel $0
-  Call TrimBlanks
-  StrCpy $7 $0
-  ${If} $7 == ""
-    MessageBox MB_ICONEXCLAMATION|MB_OK "Which model? For example gpt-4o-mini."
-    Abort
-  ${EndIf}
-  ${NSD_GetText} $hUpKey $0
-  Call TrimBlanks
   ClearErrors
   FileOpen $9 "$INSTDIR\upstream.env" w
   ${If} ${Errors}
@@ -850,10 +1021,11 @@ Function ModelLeave
   ${EndIf}
   StrCpy $0 ""
   ${NSD_SetText} $hUpKey ""
+  ${NSD_SetText} $hPKey ""
   StrCpy $0 $5
   Call UrlHost
-  StrCpy $StepModel "$0, $6, $8"
-  ${Log} "model: $0 ($6), $8"
+  StrCpy $StepModel "$R0: $0, $6, $8"
+  ${Log} "model: $R0 ($0, $6), $8"
 FunctionEnd
 
 Function JoinShow
@@ -1058,8 +1230,8 @@ Function DoneShow
   ${ElseIf} $Result == "W-SIG"
     StrCpy $4 "The download failed its signature check. Nothing was installed."
   ${ElseIf} $Result == "W-MODEL"
-    StrCpy $4 "This PC has no AI model to use yet. Nothing was started."
-    StrCpy $5 ""
+    StrCpy $4 "This PC has no model to think with yet."
+    StrCpy $5 "Run Setup again and choose a model provider."
   ${ElseIf} $Result == "W-RUN"
     StrCpy $3 "Joined, not running"
     StrCpy $4 "$CompName joined your tree, but Veraldar did not start."

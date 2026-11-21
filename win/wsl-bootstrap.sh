@@ -336,6 +336,8 @@ case $rc in
   0) ;;
   3) finish 3 fail W-JOIN "refused on the phone" ;;
   4) finish 4 fail W-JOIN "the request expired before it was approved" ;;
+  6) # joined, but "Same as the home root" brought no model (join.sh says why): the join is kept, Setup again picks one
+     finish 6 fail W-MODEL "$(grep -E 'this root has no model yet' "$RUNLOG" | tail -n 1 | sed -E 's/^(!! +|xx +)//; s/^joined, but this root has no model yet: //' || true)" ;;
 esac
 if [ "$rc" != 0 ]; then
   case $errs in

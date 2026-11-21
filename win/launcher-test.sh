@@ -80,6 +80,12 @@ win() { xdotool search --onlyvisible --name "${1:-Veraldar}" 2>/dev/null | tail 
 wait_win() { local i; for i in $(seq 1 150); do [ -n "$(win "$@")" ] && return 0; sleep 0.2; done; return 1; }
 key() { local w; w=$(win); [ -n "$w" ] || return 1; xdotool windowfocus "$w" 2>/dev/null; sleep 0.3; xdotool key "$@"; }
 typein() { local w; w=$(win); xdotool windowfocus "$w" 2>/dev/null; sleep 0.2; xdotool key Home shift+End BackSpace; xdotool type --delay 20 "$1"; }
+pick() { # N FIELD-TABS — on the model page: N times Down in the provider list, then Tab to the first field
+  local w i; w=$(win); xdotool windowfocus "$w" 2>/dev/null; sleep 0.3
+  for i in $(seq 1 "$1"); do xdotool key Down; sleep 0.15; done
+  xdotool key Tab; sleep 0.2
+}
+field() { xdotool key ctrl+a BackSpace; xdotool type --delay 20 "$1"; }   # the focused field := TEXT
 click_cancel() { # the Cancel button: 58 px from the right, 23 from the bottom of the window
   local w g W H; w=$(win); eval "$(xdotool getwindowgeometry --shell "$w")"
   xdotool mousemove --window "$w" $((WIDTH - 58)) $((HEIGHT - 23)) click 1
@@ -119,7 +125,8 @@ start /x/setup.exe
 wait_win; sleep 1.2; shot prepare
 wait_log 'page: address' 180; shot address
 key Return
-wait_log 'page: model' 30; sleep 0.5; typein "$TESTKEY"; shot model
+wait_log 'page: model' 30; sleep 0.5; shot model-same
+pick 1; field "$TESTKEY"; shot model
 key Return
 wait_log 'join: started' 60; shot connecting
 wait_log 'code is up' 60; shot code
@@ -150,11 +157,11 @@ check 'step 7: install-report.txt: versions, distro, each step, the last 40 log 
 wine reg query 'HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\Veraldar' /v DisplayVersion 2>/dev/null | tr -d '\r' | sed -n 's/.*REG_SZ *//p' | grep -qxF "$VERSION"
 check "Apps list: Veraldar $VERSION (per user)" $?
 U2=$(tr -d '\r' </tmp/wslhome/alice/fake-upstream 2>/dev/null)
-grep -qx 'YGG_UPSTREAM_BASE_URL=https://api.openai.com/v1' <<<"$U2" && grep -qx 'YGG_UPSTREAM_STYLE=openai' <<<"$U2" &&
-  grep -qx 'YGG_UPSTREAM_MODEL=gpt-4o-mini' <<<"$U2" && grep -qxF "YGG_UPSTREAM_API_KEY=$TESTKEY" <<<"$U2" &&
+grep -qx 'YGG_UPSTREAM_BASE_URL=https://api.z.ai/api/anthropic' <<<"$U2" && grep -qx 'YGG_UPSTREAM_STYLE=anthropic' <<<"$U2" &&
+  grep -qx 'YGG_UPSTREAM_MODEL=glm-5.3-flash' <<<"$U2" && grep -qxF "YGG_UPSTREAM_API_KEY=$TESTKEY" <<<"$U2" &&
   grep -qx -- '--upstream-env' /tmp/wslhome/alice/fake-join-args &&
-  grep -q '^  3 model      api.openai.com, openai, a key$' <<<"$R"
-check 'step 3b: the model page (L15): address, kind, model and the key reach join.sh as --upstream-env; the report names no key' $?
+  grep -q '^  3 model      Z AI: api.z.ai, anthropic, a key$' <<<"$R"
+check 'the model step (L15): Z AI — only its key typed; its address, kind and default model reach join.sh as --upstream-env; the report names no key' $?
 [ ! -e "$I/upstream.env" ] && ! grep -rqF -- "$TESTKEY" "$I" && ! grep -rqF -- "$TESTKEY" /tmp/fakewsl 2>/dev/null &&
   ! ls /tmp/wslhome/alice/.local/state/veraldar/upstream.* >/dev/null 2>&1
 check 'the key: in no file on the Windows side (setup.log, report, upstream.env gone), not left in WSL after the join' $?
@@ -171,6 +178,38 @@ rc=$?; R=$(report); key Return; wait_exit
   [ "$(result)" = "connected as TESTPC" ] && grep -q '^  3 model      already set on this PC$' <<<"$R"
 check 'model already set (as join.sh on Linux): no model page, join.sh keeps it, connected' $?
 rm -f /home/alice/.local/share/yggdrasil-root/brain.env
+
+echo "[the model step: Same as the home root (the default), Other, a changed model, no model came]"
+flow ok ''; rc=$?; R=$(report)
+[ $rc = 0 ] && ! grep -qx -- '--upstream-env' /tmp/wslhome/alice/fake-join-args && [ ! -e /tmp/wslhome/alice/fake-upstream ] &&
+  [ ! -e "$I/upstream.env" ] && grep -q '^  3 model      same as the home root$' <<<"$R" && [ "$(result)" = "connected as TESTPC" ]
+check 'Same as the home root (the default, nothing typed): no model file at all — join.sh asks the home root after the approval' $?
+reset; scenario default=ok join=ok wait=2; start /x/setup.exe
+wait_log 'page: address' 180 && key Return && wait_log 'page: model' 30 && sleep 0.5
+pick 5; field 'http://192.168.1.20:11434/v1'; xdotool key Tab Tab; field 'llama3.3'; shot model-other
+key Return; wait_log 'page: done' 120; rc=$?; R=$(report); U2=$(tr -d '\r' </tmp/wslhome/alice/fake-upstream 2>/dev/null); key Return; wait_exit
+[ $rc = 0 ] && [ "$U2" = "YGG_UPSTREAM_BASE_URL=http://192.168.1.20:11434/v1
+YGG_UPSTREAM_STYLE=openai
+YGG_UPSTREAM_MODEL=llama3.3
+YGG_UPSTREAM_API_KEY=" ] && grep -q '^  3 model      Other: 192.168.1.20:11434, openai, no key$' <<<"$R"
+check 'Other: address, kind (openai), model, an empty key (a model on your own network) reach join.sh exactly' $?
+reset; scenario default=ok join=ok wait=2; start /x/setup.exe
+wait_log 'page: address' 180 && key Return && wait_log 'page: model' 30 && sleep 0.5
+pick 3; field "$TESTKEY"; xdotool key Tab; field 'claude-haiku-5-5'
+key Return; wait_log 'page: done' 120; rc=$?; U2=$(tr -d '\r' </tmp/wslhome/alice/fake-upstream 2>/dev/null); key Return; wait_exit
+[ $rc = 0 ] && grep -qx 'YGG_UPSTREAM_BASE_URL=https://api.anthropic.com' <<<"$U2" && grep -qx 'YGG_UPSTREAM_STYLE=anthropic' <<<"$U2" &&
+  grep -qx 'YGG_UPSTREAM_MODEL=claude-haiku-5-5' <<<"$U2" && grep -qxF "YGG_UPSTREAM_API_KEY=$TESTKEY" <<<"$U2" && ! grep -rqF -- "$TESTKEY" "$I"
+check 'Anthropic with another model typed over the default: that model, the key only in the file join.sh got' $?
+reset; scenario default=ok join=ok wait=2; start /x/setup.exe
+wait_log 'page: address' 180 && key Return && wait_log 'page: model' 30 && sleep 0.5
+pick 2; key Return; sleep 1.5
+w=$(xdotool search --onlyvisible --name 'Veraldar' 2>/dev/null | wc -l); ! grep -q 'join: started' "$I/setup.log"; nokey=$?
+xdotool key Return; sleep 0.5; click_cancel; wait_exit
+[ "$nokey" = 0 ] && [ "$w" -ge 2 ]
+check 'a provider without its key: said in a box ("The OpenRouter API key is needed."), the join does not start' $?
+flow nomodel done-nomodel
+[ "$(result | cut -d' ' -f1)" = W-MODEL ] && result | grep -q 'the home root is an older version' && [ ! -f "$STARTUP/Veraldar.lnk" ]
+check 'Same as the home root, but no model came (join.sh exit 6): W-MODEL with the reason; Setup again picks a provider' $?
 
 echo "[keepalive.vbs -> launcher.bat, again (as at logon)]"
 : >"$CALLS"
@@ -250,13 +289,14 @@ typein 'ftp://nope'; xdotool key Return
 wait_win 'Veraldar Setup'; sleep 0.5; shot bad-address 'Veraldar Setup'; xdotool key Return; sleep 0.5
 grep -q 'page: join' "$I/setup.log"; bad=$?
 typein ' https://other.example/ '; xdotool key Return
+wait_log 'page: model' 30 && key Return
 wait_log 'page: done' 120; key Return; wait_exit
 [ $bad = 1 ] && calls | grep -qxF -- "$(J Ubuntu alice https://other.example)"
 check 'an address that is not https:// is refused on the page; blanks and the trailing / are dropped' $?
 
 echo "[Cancel while the code is up]"
 reset; scenario default=ok join=wait; start /x/setup.exe
-wait_log 'page: address' 180; key Return; wait_log 'page: model' 30; typein "$TESTKEY"; key Return; wait_log 'code is up' 60
+wait_log 'page: address' 180; key Return; wait_log 'page: model' 30; sleep 0.5; pick 1; field "$TESTKEY"; key Return; wait_log 'code is up' 60
 click_cancel; wait_exit; sleep 1
 calls | grep -qxF -- "-d | Ubuntu | -u | alice | --cd | $WI | -e | bash | ./wsl-bootstrap.sh | --cancel" && ! ps -eo args | grep -v grep | grep -q 'fake-join.sh' \
   && [ "$(result)" = "W-JOIN - cancelled in Setup" ] && [ ! -f "$STARTUP/Veraldar.lnk" ] \

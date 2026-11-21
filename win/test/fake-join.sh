@@ -2,7 +2,7 @@
 # fake-join.sh — stands in for root/install/join.sh in the installer tests (bootstrap-test.sh, launcher-test.sh):
 # prints what the real one prints in each case (its die() lines verbatim) and exits with its code.
 #   FAKE_JOIN_MODE (else the file FAKE_JOIN_FILE, default /tmp/fake-join-mode): ok | run | refused | expired | sig |
-#     net | hubnet | model | other | secret | wait        FAKE_WAIT: seconds the code stays up (default 1), FAKE_PREP:
+#     net | hubnet | model | nomodel | other | secret | wait        FAKE_WAIT: seconds the code stays up (default 1), FAKE_PREP:
 #     seconds before it shows (default 0)
 #   FAKE_ROOTJOIN: rootjoin.py (draws the real QR PNG)   FAKE_BRAIN_PORT: what root.conf names for "ok"
 # Its arguments go to $HOME/fake-join-args (one per line); an --upstream-env file's content to $HOME/fake-upstream.
@@ -57,6 +57,10 @@ case $mode in
       YGG_UPSTREAM_MODEL=gpt-4o-mini
     (YGG_UPSTREAM_STYLE=anthropic for an Anthropic-shaped API), or export those variables." 64 ;;
   other) die "could not make the WireGuard key ($DIR/wg.key) with $DIR/bin/bifrost-net" ;;
+  nomodel) code; joined 4180
+           printf '\033[1;33m!!\033[0m  %s\n' "joined, but this root has no model yet: the home root is an older version: it cannot hand its model over." >&2
+           printf '\033[1;33m!!\033[0m  %s\n' "Run join.sh again and pick a provider (the join is kept; the brain starts as soon as it has a model)." >&2
+           exit 6 ;;
   secret) echo "YGG_UPSTREAM_API_KEY=sk-live-abcdefghijklmnop1234567890"
           echo "token sk-proj-Zx9Yw8Vu7Ts6Rq5Po4Nm3Lk2"
           echo "link token: 9f8e7d6c5b4a39281706f5e4d3c2b1a0ffeeddcc"
