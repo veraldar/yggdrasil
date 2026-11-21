@@ -56,6 +56,26 @@ TO BUILD (order): 1 root/install/model-step.sh (providers: same|zai|openrouter|a
   HTTPS upstream · 5 agy review · 6 rehearsal 3 → report the branch to P1.
 Engines (L18): agy for reviews/self-contained code, GLM sessions for test matrices; builds under nice -n 10.
 
+## 11-21 ~11:20 — v0.9.1 DRAFT EXISTS (not public)
+- P1 merged p3-model + p4-release (tree-next 8fc5d3b2) and deployed it: live release 20261121-0927-8fc5d3b2, all 8
+  hub-* units active, GET :4101/root/model → 403 (verified by me; P1's turn was cut by its deploy before telling me).
+- Built from ~/Work/release-v091 (worktree, detached at 8fc5d3b2): scripts/release.sh 0.9.1 --mac-host mac, REAL key.
+  dist: ~/.cache/p4-release-dist/0.9.1 (11 files, signature good, sha256 ok). Log ~/.cache/p4-rig/release-0.9.1.log
+- Tag v0.9.1: LOCAL ONLY (annotated, at 8fc5d3b2). NOT pushed on purpose: a pushed tag is never moved; if a proof
+  fails, fix → new commit → `git tag -d v0.9.1` locally → rebuild → replace the draft's files.
+- Pushed the commit as branch origin release/v0.9.1; draft created:
+  gh release create v0.9.1 --draft --target release/v0.9.1 (11 assets). Public view 404. Old WG key (6405ead5) is
+  already in public origin/main and is NOT the live hub-wg key (public halves compared).
+- Secret scan of origin/main..8fc5d3b2 (255 commits): only a made-up ghp_ token in win/bootstrap-test.sh (mask test).
+- RUNNING: ~/.cache/p4-rig/chain-draft.sh → chain-draft.out (download the draft's assets back to ~/.cache/p4-rig/
+  draft/0.9.1, verify; Linux rig OT_DIST + OT_JOIN_MODEL=home; mac-bootstrap-check; wine on its exe)
+- TO UN-DRAFT (after the chain is green): git -C ~/Work/release-v091 push origin v0.9.1 ;
+  gh release edit v0.9.1 -R veraldar/yggdrasil --draft=false --verify-tag (fill the "Proven on" table in the body first;
+  add nothing else) ; check `gh release view v0.9.1` isDraft=false, latest; curl the public join.sh.
+  Then: v0.9.0 notes line (AP-30): gh release edit v0.9.0 --notes with the added line "Tag v0.9.0 predates…".
+- THEN Mac M4–M8 on the real Mac (stale folder deleted on the owner's word; the owner approves on the phone),
+  the Windows checklist for the owner, tell P1 → P5.
+
 ## 11-21 10:45 — BRANCH HANDED TO P1: p4-release @ 48f0c61a (merges cleanly into tree-next 0d31a764, also over p3-model)
 Evidence: ~/Work/root-coord-pwa/artifacts/p4-proofs-1121.md (chain ~/.cache/p4-rig/chain.out):
   same-home rig (temp merge + p3-model) GREEN 33+12 incl. m2 · rehearsal 3 r1-r7 7/7 · Linux rig on its dist 32+12 ·
