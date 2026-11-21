@@ -1,7 +1,4 @@
-<!-- DRAFT — the GitHub release body for v0.9.1. The installer part (package 4) is written; the parts of
-     packages 1–3 are added when they are merged into tree-next. Proof status per system is filled in from the
-     runs, never ahead of them. -->
-**yggdrasil v0.9.1** — every computer a root in your tree: Linux, Apple-silicon Macs, and Windows (beta).
+**yggdrasil v0.9.1** — every computer a root in your tree, one phone for all of them: Linux, Apple-silicon Macs, and Windows (beta).
 
 Install (each script checks the release's signed SHA256SUMS against the key written into it before anything runs):
 
@@ -15,10 +12,35 @@ curl -fsSLO https://github.com/veraldar/yggdrasil/releases/download/v0.9.1/join.
 ```
 
 Windows: download `Veraldar-Setup-0.9.1.exe` and open it. It sets up WSL2 if needed, asks for your trunk's
-address, and shows a code to approve on your phone. It is not code-signed yet: Windows shows "Windows protected your
+address and the model, and shows a code to approve on your phone. It is not code-signed yet: Windows shows "Windows protected your
 PC" — tap **More info → Run anyway**.
 
 Verify by hand: `ssh-keygen -Y verify -f allowed_signers -I release@yggdrasil -n yggdrasil-release -s SHA256SUMS.sig < SHA256SUMS && sha256sum --ignore-missing -c SHA256SUMS`.
+
+### The whole tree (`root/src/roots.rs`, `branch/`)
+- **Every computer has its own MAIN, all on one phone.** The home screen has a roots key: one row per computer
+  with its state; tap one for its own MAIN and its sessions, start a session there, hold to remove it.
+- **Any MAIN may place work on any root.** Work handed on more than twice is refused (no two MAINs passing a job
+  back and forth), and the home root is told about work placed between two other roots, so the phone lists it.
+- **Calls between roots carry the tree's peer token on every route**, and ride a WireGuard tunnel end to end
+  (the home root runs its own node: `hub-units.sh wg-on`).
+
+### Sessions on other computers, and files (`root/src/`, `branch/`)
+- **A session on another root is a full session:** its text arrives live, cancel works, and the mic works
+  (speech stays on the home root; other roots need nothing for voice).
+- **Files are files:** the paperclip takes any file, for any session on any root; a file a session makes opens
+  on the phone wherever it was made. A file is stored once, on the root that receives it; messages carry a
+  reference.
+- **Answered the way you asked:** a turn you speak is answered aloud, a turn you type in writing.
+
+### The home root (`scripts/hub-units.sh`, `root/src/`, `branch/voice/`)
+- **Services that survive a reboot, from a frozen release folder:** brain, apps, bridge, librarian, voice agent.
+  A deploy backs the data up, lets short turns finish, checks health and goes back by itself when the check fails.
+- **A turn cut by a restart comes back once**, rebuilt from what is true now, never re-sent as its old text.
+- **Voice:** one agent job serves a room and says so; the same words said again are a new turn; a page change no
+  longer drops the job mid-hold.
+- **No step cap by default** (a session can set one); the session list is in your order; a message from another
+  session names its sender.
 
 ### Installers (`root/install/`, `trunk/install/`, `win/`, `scripts/`)
 - **The model step, the same on every system** (`install.sh`, `join.sh`, the Windows installer): *Model provider* —
