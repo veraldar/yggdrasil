@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # make.sh RUN [OUT] — the main film, "what yggdrasil is", from a passing recording run of record.sh.
 #   RUN = the run's folder (its raw/<name>.ffconcat and <name>.json: the real app's frames and cut marks)
-#   OUT = where the film goes (default RUN/movie): yggdrasil.mp4 · yggdrasil.webm · yggdrasil.jpg · sheet
+#   OUT = where the film goes (default RUN/movie): yggdrasil.mp4 · yggdrasil.webm (both with the voice) · yggdrasil.jpg · sheet
 # STILLS="3,12,30" make.sh RUN   only writes those seconds as pictures (to look before a full render).
 # Checks: the length, no blank frame, both files play to the end. Then look at yggdrasil-sheet.jpg by eye.
 set -euo pipefail
@@ -25,9 +25,10 @@ sig=$(cat "$HERE/movie.html" "$RUN"/{talk,tree,file}.json | sha256sum | cut -c1-
 APP_DIR="$ROOT/branch" nice -n 10 node "$HERE/render.mjs" "$OUT"
 cd "$OUT"
 ffmpeg -v error -y -framerate 30 -i frames/%05d.jpg -c:v libx264 -preset fast -crf 14 -pix_fmt yuv420p movie-raw.mp4
-ffmpeg -v error -y -i movie-raw.mp4 -an -c:v libx264 -preset slow -crf 26 -pix_fmt yuv420p -movflags +faststart yggdrasil.mp4
-ffmpeg -v error -y -i movie-raw.mp4 -an -c:v libvpx-vp9 -crf 40 -b:v 0 -row-mt 1 -deadline good -cpu-used 2 yggdrasil.webm
-ffmpeg -v error -y -ss "${POSTER_AT:-23.6}" -i movie-raw.mp4 -frames:v 1 -q:v 3 yggdrasil.jpg
+ffmpeg -v error -y -i movie-raw.mp4 -an -c:v libx264 -preset slow -crf 26 -pix_fmt yuv420p -movflags +faststart yggdrasil-silent.mp4
+# the voice (vo.json: the lines movie.html names, written by render.mjs) → yggdrasil.mp4 + yggdrasil.webm
+python3 -I "$HERE/../voice/sound.py" yggdrasil-silent.mp4 vo.json yggdrasil
+ffmpeg -v error -y -ss "${POSTER_AT:-27.3}" -i movie-raw.mp4 -frames:v 1 -q:v 3 yggdrasil.jpg
 ffmpeg -v error -y -i movie-raw.mp4 -vf "fps=1/3,scale=270:-2,tile=8x4" -frames:v 1 -q:v 4 yggdrasil-sheet.jpg
 python3 -I - <<'PY'
 import re, subprocess, sys
@@ -35,7 +36,9 @@ d = lambda f: float(subprocess.run(["ffprobe","-v","error","-show_entries","form
 bad = []
 a, b = d("yggdrasil.mp4"), d("yggdrasil.webm")
 if abs(a - b) > 0.5: bad.append(f"mp4 {a:.1f} s, webm {b:.1f} s")
-if a > 90: bad.append(f"{a:.1f} s is too long")
+if a > 95: bad.append(f"{a:.1f} s is too long")
+for f in ("yggdrasil.mp4", "yggdrasil.webm"):
+    if not subprocess.run(["ffprobe","-v","error","-select_streams","a","-show_entries","stream=codec_name","-of","csv=p=0",f],capture_output=True,text=True).stdout.strip(): bad.append(f"{f} has no sound")
 st = subprocess.run(["ffmpeg","-v","error","-i","yggdrasil.mp4","-vf","fps=2,signalstats,metadata=print:file=-","-f","null","-"],capture_output=True,text=True).stdout
 t, blank = 0.0, []
 for line in st.splitlines():

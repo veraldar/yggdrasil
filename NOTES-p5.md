@@ -129,3 +129,18 @@ This worktree (p5-site, from tree-next): films scripts (sim/films/), scripts/sit
   The October films are no longer linked (still at /onboarding/far-vision.html and /onboarding/tree.html).
   Backup of this deploy on the VPS: ~/site-backups/20261121T142002Z-dbfd45b. Undo: scripts/site-deploy.sh --undo.
 - to remake at a release: record.sh OUT → movie/make.sh OUT → veraldar-site scripts/films-in.sh OUT → build → deploy.
+
+## 11-21 17:25 — the films speak (the owner, 17:02: "the film and other video have no sound, or disable or missing the voice over")
+- two causes, both mine: the films were made silent, and the page marked the videos `muted`.
+- sim/films/voice/: sound.py (lines → a track → mp4 aac + webm opus; fails if a line runs into the next),
+  say_kokoro.py (narrator af_heart = the owner's English voice per docs/tts-voice.md; the person who asks =
+  am_michael), say_piper.py (the product's own answer voice: piper lessac, what install.sh installs),
+  clips.py RUN (voices the three clips from their captions), hear.py (speech-to-text of a film's track: how
+  a machine that cannot listen checks the words). Engine: ~/.cache/p5-films/tts (uv venv with kokoro-onnx,
+  kokoro-v1.0.onnx + voices-v1.0.bin from the kokoro-onnx GitHub release; lines cached by their words).
+- the main film: the spoken lines are window.VO in movie/movie.html beside the written ones; it grew to
+  80.2 s to make room (S timings). "Yggdrasil" is said /ˈɪɡdɹæsəl/ (whisper-tiny cannot spell it: "Igg Dressal").
+- site 118de97, live 17:18: no `muted`; site.js pauses the other films when one starts. Backup on the VPS:
+  ~/site-backups/20261121T161842Z-118de97. Sizes: main film 2.0 MB, clips 0.34–0.40 MB (mp4).
+- to remake: record.sh OUT → cut.py (in record.sh) → voice/clips.py OUT → movie/make.sh OUT → films-in.sh OUT.
+  record.sh calls clips.py itself when the TTS folder is there.

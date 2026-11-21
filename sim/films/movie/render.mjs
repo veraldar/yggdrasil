@@ -44,6 +44,7 @@ async function frameAt(t, format = 'jpeg') {
 }
 await open();
 const dur = await page.evaluate(() => window.DURATION);
+writeFileSync(join(DIR, 'vo.json'), JSON.stringify(await page.evaluate(() => window.VO), null, 1)); // the voice's lines, for sound.py
 if (process.env.RENDER_STILLS) {
   for (const t of process.env.RENDER_STILLS.split(',').map(Number)) writeFileSync(join(DIR, `still-${String(t).padStart(5, '0')}.png`), await frameAt(t, 'png'));
   await browser.close();

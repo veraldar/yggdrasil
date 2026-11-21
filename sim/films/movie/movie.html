@@ -1,5 +1,5 @@
 <!doctype html>
-<!-- movie.html — "what yggdrasil is": the site's main film, drawn by script. 1080 × 1920, no sound.
+<!-- movie.html — "what yggdrasil is": the site's main film, drawn by script. 1080 × 1920; the picture only (sound.py adds the voice).
      Nothing here runs on its own clock: window.renderAt(t) draws the whole picture for second t, so
      render.mjs can shoot it frame by frame and the film is the same every time. The phone in it shows
      REAL footage: the frames sim/films/films.mjs recorded from the real app (footage/<name>/NNNNN.jpg,
@@ -48,7 +48,7 @@ const FPS = 30;
 // footage: name, the film's seconds it plays in, how fast (the recordings' dead time goes), frames from make.sh
 const FOOT = window.FOOT || { talk: { n: 475 }, tree: { n: 511 }, file: { n: 468 } };
 const S = {
-  A: 0, B: 6.5, C: 14.5, D: 24.5, ZOOM: 26.2, E: 27.4, F: 40.6, G: 51.8, OUT: 62.0, H: 63.0, CARD: 69.2, END: 73.0,
+  A: 0, B: 6.0, C: 17.8, D: 28.2, ZOOM: 29.9, E: 31.1, F: 45.1, G: 56.7, OUT: 67.3, H: 68.3, CARD: 75.6, END: 80.2,
 };
 const PLAY = { talk: [S.E, S.F], tree: [S.F, S.G], file: [S.G, S.OUT] };
 /* headlines: [from, text]; the newest one whose time has come is typed. '' clears.
@@ -57,34 +57,61 @@ const PLAY = { talk: [S.E, S.F], tree: [S.F, S.G], file: [S.G, S.OUT] };
    G: S17, S8 · H: AGPL-3.0, the repository */
 const HEAD = [
   [0.5, 'you own computers.'],
-  [3.4, 'you own computers.\nmost of the day, they wait.'],
+  [3.3, 'you own computers.\nmost of the day, they wait.'],
   [S.B, ''], [S.B + 0.3, 'yggdrasil is your own AI,\nliving on them.'],
   [S.C, ''], [S.C + 0.3, 'one private line\njoins them to your phone.'],
   [S.D, ''], [S.D + 0.2, 'and one app, in your hand.'],
-  [S.E, ''], [S.E + 0.2, 'hold. speak.'], [S.E + 6.1, 'let go.'], [S.E + 8.0, 'it answers out loud.'],
-  [S.F, ''], [S.F + 0.2, 'every computer, one list.'], [S.F + 3.3, 'each has its own\nmain session.'], [S.F + 6.9, 'it answers from there, live.'],
-  [S.G, ''], [S.G + 0.2, 'send it a file.'], [S.G + 5.9, 'it answers,\nand makes one.'],
+  [S.E, ''], [S.E + 0.2, 'hold. speak.'], [S.E + 6.6, 'let go.'], [S.E + 7.5, 'it answers out loud.'],
+  [S.F, ''], [S.F + 0.2, 'every computer, one list.'], [S.F + 3.4, 'each has its own\nmain session.'], [S.F + 8.6, 'it answers from there, live.'],
+  [S.G, ''], [S.G + 0.2, 'send it a file.'], [S.G + 6.2, 'it answers,\nand makes one.'],
   [S.OUT, ''], [S.H + 0.4, 'one tree,\nacross all your computers.'],
   [S.CARD - 0.3, ''],
 ];
 const SUB = [
   [S.B + 3.4, 'not an app. not a service in someone\nelse\'s cloud.'],
-  [S.B + 5.6, '<b>root</b>: a brain on each computer.\nit thinks, remembers, does the work.'],
+  [S.B + 6.8, '<b>root</b>: a brain on each computer.\nit thinks, remembers, does the work.'],
   [S.C, ''],
-  [S.C + 3.9, '<b>trunk</b>: one small server you rent.'],
-  [S.C + 6.1, '<b>trunk</b>: one small server you rent.\nit carries everything. it holds no key\nto read any of it.'],
+  [S.C + 3.8, '<b>trunk</b>: one small server you rent.'],
+  [S.C + 6.2, '<b>trunk</b>: one small server you rent.\nit carries everything. it holds no key\nto read any of it.'],
   [S.D, ''], [S.D + 0.5, '<b>branch</b>: bifrost, on your phone.'],
   [S.ZOOM, ''],
-  [S.E + 2.9, '“How did the backup go last night?”'],
-  [S.E + 6.1, ''],
-  [S.E + 8.2, '“It finished at ten past three.\nEverything was copied, and there were\nno errors.”'],
+  [S.E + 3.6, '“How did the backup go last night?”'],
+  [S.E + 6.6, ''],
+  [S.E + 8.8, '“It finished at ten past three.\nEverything was copied, and there were\nno errors.”'],
   [S.F, ''],
-  [S.F + 5.6, '<b>end to end</b>: your phone and your\ncomputers hold the keys.'],
-  [S.G, ''], [S.G + 2.2, 'any file, to any session.'], [S.G + 5.9, ''], [S.G + 6.5, 'the file opens right there.'],
+  [S.F + 5.3, '<b>end to end</b>: your phone and your\ncomputers hold the keys.'],
+  [S.G, ''], [S.G + 1.6, 'any file, to any session.'], [S.G + 6.0, ''], [S.G + 8.1, 'the file opens right there.'],
   [S.OUT, ''],
   [S.H + 3.0, 'your phone. one private line.\nall your computers, by voice.'],
   [S.CARD - 0.3, ''],
 ];
+/* the voice: [second, who, words]. narrator = the storyteller · you = the person who asks · app = the voice a
+   home computer really answers with. sound.py says them (and fails the film if one runs into the next: then
+   the seconds above make room). The spoken words follow the written ones. */
+window.VO = [
+  [0.5, 'narrator', 'You own computers.'],
+  [3.3, 'narrator', 'Most of the day, they wait.'],
+  [S.B + 0.4, 'narrator', 'Yggdrasil is your own AI, living on them.'],
+  [S.B + 3.5, 'narrator', "Not an app. Not a service in someone else's cloud."],
+  [S.B + 6.9, 'narrator', 'A root is a brain on each computer. It thinks, remembers, and does the work.'],
+  [S.C + 0.4, 'narrator', 'One private line joins them to your phone.'],
+  [S.C + 3.8, 'narrator', 'The trunk: one small server you rent. It carries everything, and holds no key to read any of it.'],
+  [S.D + 0.3, 'narrator', 'And one app, in your hand.'],
+  [S.E + 0.3, 'narrator', 'Hold, and speak.'],
+  [S.E + 3.7, 'you', 'How did the backup go last night?'],
+  [S.E + 6.7, 'narrator', 'Let go. It answers out loud.'],
+  [S.E + 8.8, 'app', 'It finished at ten past three. Everything was copied, and there were no errors.'],
+  [S.F + 1.2, 'narrator', 'Every computer, in one list.'],
+  [S.F + 3.5, 'narrator', 'Each has its own main session.'],
+  [S.F + 5.4, 'narrator', 'End to end: your phone and your computers hold the keys.'],
+  [S.F + 8.8, 'narrator', 'It answers from there, live.'],
+  [S.G + 0.3, 'narrator', 'Send it a file. Any file, to any session.'],
+  [S.G + 6.3, 'narrator', 'It answers, and makes one.'],
+  [S.G + 8.2, 'narrator', 'The file opens right there.'],
+  [S.H + 0.4, 'narrator', 'One tree, across all your computers.'],
+  [S.H + 3.1, 'narrator', 'Your phone. One private line. All your computers, by voice.'],
+  [S.CARD + 0.5, 'narrator', 'Yggdrasil. Your own AI. Free for everyone.'],
+].map(([t, voice, text]) => ({ t: Math.round(t * 100) / 100, voice, text }));
 
 /* ---------------------------------------------------------------- helpers */
 const $ = (s) => document.querySelector(s);
@@ -192,7 +219,7 @@ window.renderAt = async function (t) {
   // --- words
   typed(hEl, HEAD, t, 26, false);
   typed(subEl, SUB, t, 46, true);
-  subEl.style.color = t >= S.E + 2.9 && t < S.E + 6.1 ? C.amber : t >= S.E + 8.2 && t < S.F ? C.ok : '#9a9ab4';
+  subEl.style.color = t >= S.E + 3.6 && t < S.E + 6.6 ? C.amber : t >= S.E + 8.8 && t < S.F ? C.ok : '#a4a4bc';
 
   // --- the map: how much of it shows
   const zoomIn = ease(prog(t, S.ZOOM, 1.1)), zoomOut = ease(prog(t, S.OUT, 1.0));
@@ -261,7 +288,7 @@ window.renderAt = async function (t) {
     }
     p.setAttribute('x', pos[0] - 8); p.setAttribute('y', pos[1] - 8); p.setAttribute('opacity', o * mapA);
   });
-  call.setAttribute('opacity', t >= S.F + 5.4 && t < S.G ? 1 : 0);
+  call.setAttribute('opacity', t >= S.F + 5.2 && t < S.G ? 1 : 0);
 
   // --- the last card
   endEl.style.opacity = card;
