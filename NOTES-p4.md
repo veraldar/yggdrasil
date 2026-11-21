@@ -56,6 +56,21 @@ TO BUILD (order): 1 root/install/model-step.sh (providers: same|zai|openrouter|a
   HTTPS upstream · 5 agy review · 6 rehearsal 3 → report the branch to P1.
 Engines (L18): agy for reviews/self-contained code, GLM sessions for test matrices; builds under nice -n 10.
 
+## 11-21 10:45 — BRANCH HANDED TO P1: p4-release @ 48f0c61a (merges cleanly into tree-next 0d31a764, also over p3-model)
+Evidence: ~/Work/root-coord-pwa/artifacts/p4-proofs-1121.md (chain ~/.cache/p4-rig/chain.out):
+  same-home rig (temp merge + p3-model) GREEN 33+12 incl. m2 · rehearsal 3 r1-r7 7/7 · Linux rig on its dist 32+12 ·
+  Mac check 11/11 · wine 38/38 · model matrix 10/10 · join-test 78/78 · model-fetch 18/18 · model-step-check in step
+WAITING ON P1: merge p3-model + p4-release, deploy → P1 says "merged and live" → I build the v0.9.1 DRAFT:
+  1. worktree at tree-next HEAD (clean), docs/own-trunk.md + root/install/README.md → v0.9.1 download lines
+  2. scripts/release.sh 0.9.1 --mac-host mac   (the REAL key ~/.config/yggdrasil-release/release_ed25519; if it asks
+     for anything only the owner can type: ask word for word, wait)
+  3. git push origin v0.9.1 (the tag release.sh made) ; gh release create v0.9.1 --draft --verify-tag dist/0.9.1/*
+     with docs/release-notes-v0.9.1.md as the body (fill the proof table from the runs)
+  4. S11 vs the draft: OT_DIST=dist/0.9.1 (no key: re-signed steps SKIP) OT_STAGES=a OT_JOINER=deb443
+     [OT_JOIN_MODEL=home]; sim/mac-bootstrap-check.sh mac dist/0.9.1; wine on its exe
+  5. report the draft to P1 AT ONCE (P1 sends P5 on); un-draft after the proofs; then Mac M4–M8 (owner approves on
+     the phone; the stale ~/.local/share/yggdrasil-root on the Mac: owner's yes/no still open), Windows checklist.
+
 ## 11-21 09:40 — back after 14 h on the usage limit; the owner asks why v0.9.1 is not public
 DONE + committed since 08:45 (HEAD f40df837+):
   - tree-next 0d31a764 merged
