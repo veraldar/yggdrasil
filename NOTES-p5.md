@@ -144,3 +144,14 @@ This worktree (p5-site, from tree-next): films scripts (sim/films/), scripts/sit
   ~/site-backups/20261121T161842Z-118de97. Sizes: main film 2.0 MB, clips 0.34–0.40 MB (mp4).
 - to remake: record.sh OUT → cut.py (in record.sh) → voice/clips.py OUT → movie/make.sh OUT → films-in.sh OUT.
   record.sh calls clips.py itself when the TTS folder is there.
+
+## 11-21 17:40 — /pair for a visitor who is not the box (the owner, 17:07: "if there is nothing I should be
+seeing then I should see nothing tell fable 5.2")
+- branch p5-pair-quiet (worktree ~/Work/p5-pair-quiet, from tree-next d9a78e25), commit d4e7b1a9:
+  branch/app/pair/page.tsx (mode 'quiet' on a 401/403 from the mint: one dim line "not paired"; nothing drawn
+  before the box answers) + e2e/pair-ladder.spec.ts step 1b.
+- seen: scripts/v09-ladder.sh auth + pair-ladder + bridge + join → 10 passed, 1 skipped (YGG_BIN and
+  BIFROST_NET_BIN from this worktree's builds; root/ and trunk/ unchanged since 8fc5d3b2).
+  Screenshot: /api/artifact/pair-unpaired-phone.png (Pixel 7).
+- NOT deployed: hub-app is P1's. P1 merges p5-pair-quiet and releases.
+- not mine, seen in passing: `tsc --noEmit` reports one old error in branch/e2e/own-trunk.spec.ts:99.
