@@ -494,8 +494,14 @@ def cmd_model_fetch(o):
                     or model != model.strip() or key != key.strip()):
                 print("rootjoin: the home root's answer is not a model (base_url, style, model, api_key)", file=sys.stderr)
                 return 8
+            # the home root's model list and vision models come along when it has them (P3's contract v1)
+            more = ""
+            for field, env in (("models", "YGG_MODELS"), ("vision", "YGG_VISION_MODELS")):
+                v = m.get(field)
+                if isinstance(v, str) and v.strip() and "\n" not in v and "\r" not in v:
+                    more += "%s=%s\n" % (env, v.strip())
             write_private(o.out, "YGG_UPSTREAM_BASE_URL=%s\nYGG_UPSTREAM_STYLE=%s\nYGG_UPSTREAM_MODEL=%s\n"
-                                 "YGG_UPSTREAM_API_KEY=%s\n" % (base, style, model, key))
+                                 "YGG_UPSTREAM_API_KEY=%s\n%s" % (base, style, model, key, more))
             say("    model: %s at %s (%s) — the home root's" % (model, urllib.parse.urlsplit(base).netloc.rsplit("@", 1)[-1], style))
             return 0
         if st in (401, 403):

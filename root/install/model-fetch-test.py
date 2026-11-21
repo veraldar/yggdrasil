@@ -59,6 +59,15 @@ def main():
               seen and seen[0] == ("/_wg/local/root/model", TOKEN, "mac-2"), str(seen[:1]))
         check("what it prints names the model and the host, never the key",
               "glm-5.3-flash at api.z.ai (anthropic)" in text and KEY not in text, text)
+        plan[:] = [(200, {**GOOD, "models": "glm-5.3-flash:lite,glm-5.3", "vision": "glm-5.3", "extra": 1})]
+        rc, text, out = fetch(tmp, port)
+        lines = open(out).read().splitlines() if os.path.exists(out) else []
+        check("the home root's model list and vision models come along (YGG_MODELS, YGG_VISION_MODELS); unknown fields ignored",
+              rc == 0 and lines[4:] == ["YGG_MODELS=glm-5.3-flash:lite,glm-5.3", "YGG_VISION_MODELS=glm-5.3"] and len(lines) == 6, str(lines[4:]))
+        plan[:] = [(200, {**GOOD, "models": "a\nYGG_LISTEN=0.0.0.0:1", "vision": ""})]
+        rc, text, out = fetch(tmp, port)
+        lines = open(out).read().splitlines() if os.path.exists(out) else []
+        check("a model list holding a line break is left out (no injected line); an empty one writes no line", rc == 0 and len(lines) == 4, str(lines))
         plan[:] = [(404, {}), (502, {}), (200, GOOD)]
         rc, text, out = fetch(tmp, port)
         check("the link still coming up (404, 502, then 200): it waits and gets it", rc == 0 and os.path.exists(out), "rc=%s" % rc)
