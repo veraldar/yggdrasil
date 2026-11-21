@@ -56,6 +56,27 @@ TO BUILD (order): 1 root/install/model-step.sh (providers: same|zai|openrouter|a
   HTTPS upstream · 5 agy review · 6 rehearsal 3 → report the branch to P1.
 Engines (L18): agy for reviews/self-contained code, GLM sessions for test matrices; builds under nice -n 10.
 
+## 11-21 09:40 — back after 14 h on the usage limit; the owner asks why v0.9.1 is not public
+DONE + committed since 08:45 (HEAD f40df837+):
+  - tree-next 0d31a764 merged
+  - agy's review (5 findings) + GLM's 2 observations FIXED (commit "the model step: fixes from agy's review…"):
+    key never inherited by children, temp key file gone before the phone wait, restart on a model change, 01 choice,
+    retry on broken responses, flag precedence, stray key refused
+  - GLM's matrix script merged: sim/model-step-e2e.sh (MSM_DIST/MSM_STATE); re-run on the fixes 10/10
+  - join-test.sh --docker 78/78; model-fetch-test.py 18/18 (now also YGG_MODELS / YGG_VISION_MODELS, P3 contract v1)
+  - Windows page with the provider list (same table: win/model-step-check.sh "in step"); wsl-bootstrap: exit 6 → W-MODEL
+  - rig: OT_JOIN_MODEL=home + check m2
+P3's side EXISTS: branch p3-model (8bf92ebf), contract ~/Work/root-coord-pwa/artifacts/p3-model-share-contract.md —
+  matches mine (GET /root/model via /_wg/local, x-ygg-peer; 200 has also models + vision). NOT in tree-next yet.
+RUNNING (background, frozen worktrees):
+  - p4-run2: win/launcher-test.sh --shots /tmp/p4win-shots3 → ~/.cache/p4-rig/win-wine.out
+  - p4-run (TEMP merge p4-release + p3-model, 5502da67): sim/own-trunk-e2e.sh OT_STAGES=a OT_JOINER=deb443
+    OT_JOIN_MODEL=home OT_VERSION=0.9.1-rc.3 → ~/.cache/p4-rig/same-home.out (state ~/.cache/p4-rig/same-home)
+NEXT: read both results → fix → copy screenshots to artifacts → rehearsal 3 on p4-release HEAD (release-rehearsal.sh
+  --mac-host mac 0.8.99; then OT_DIST rig, mac-bootstrap-check, wine on its exe) → REPORT THE BRANCH TO P1
+  (POST http://127.0.0.1:4101/session/ses_82772a463f1a495791a851d1d3386d4c/message?async=1&origin=<me>).
+  Then: draft only after P1 says p3-model + mine are merged and live.
+
 ## 11-20 18:10 — after the limit (reset 17:30)
 DONE + committed: root/install/model-step.sh; join.sh + install.sh use it; rootjoin.py model-fetch / --model home /
   --no-upstream-ok; run-brain waits for a model; exit 6. Tests green: model-fetch-test.py 16/16; join-test.sh --docker
