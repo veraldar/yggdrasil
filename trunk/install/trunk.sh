@@ -8,6 +8,11 @@
 #   sudo bash trunk.sh --rotate-token              a NEW connect line (the old token stops working at once)
 #   sudo bash trunk.sh --update                    the newest release, if newer (what the weekly timer runs)
 #   sudo bash trunk.sh --uninstall                 remove the trunk (lists what goes, asks first; -y: no question)
+#   sudo bash trunk.sh --adopt /etc/trunk-ap       take over an access point set up by hand: its key (so the pin),
+#                                                  the hub's token (so the connect line), its certificate, port,
+#                                                  :443 router and renewal webroot are kept; its service is
+#                                                  stopped and disabled once this one answers (put back if not);
+#                                                  the folder itself is left as it was
 #
 # Every download is checked before it runs: the release's SHA256SUMS must be signed by the yggdrasil
 # release key (embedded below as YGG_SIGNER, never fetched), and each file must match its line in it.
@@ -66,6 +71,9 @@ die()  { printf '\033[1;31mxx\033[0m  %s\n' "$1" >&2; exit "${2:-1}"; }
 on_err() {
   local rc=$?
   printf '\033[1;31mxx\033[0m  trunk.sh stopped at line %s: %s\n' "$1" "$2" >&2
+  if [ "${ADOPT_STOPPED:-0}" = 1 ] && [ "${ADOPT_BACK:-0}" = 0 ]; then   # adopting: the access point you had comes back
+    ADOPT_BACK=1; ROLLING=1; adopt_back && warn "the access point you had ($ADOPT_UNIT) is back and answering"
+  fi
   if [ "${HAVE_PREV:-0}" = 1 ] && [ "${CHANGED:-0}" = 1 ] && [ "${ROLLING:-0}" = 0 ]; then
     ROLLING=1; rollback && warn "the previous trunk is back and answering"
   fi
@@ -75,7 +83,7 @@ trap 'on_err $LINENO "$BASH_COMMAND"' ERR
 
 ARGS=("$@")
 NAME='' VERSION='' BINARY='' PORT='' BEHIND='' CERTMODE='' WEBROOT='' EMAIL='' ACME=''
-ROTATE=0 RENEW=0 FORCE=0 YES=0 UPDATE=0 UNINSTALL=0 FIREWALL='' AUTOUPD=''
+ROTATE=0 RENEW=0 FORCE=0 YES=0 UPDATE=0 UNINSTALL=0 FIREWALL='' AUTOUPD='' ADOPT=''
 need() { [ $# -ge 2 ] && [ -n "$2" ] || die "$1 needs a value" 64; }
 while [ $# -gt 0 ]; do
   case $1 in
@@ -95,6 +103,7 @@ while [ $# -gt 0 ]; do
     --force) FORCE=1 ;;
     --update) UPDATE=1 ;;
     --uninstall) UNINSTALL=1 ;;
+    --adopt) need "$@"; ADOPT=${2%/}; shift ;;
     --no-firewall) FIREWALL=0 ;;
     --no-auto-updates) AUTOUPD=0 ;;
     -y|--yes) YES=1 ;;
@@ -158,6 +167,70 @@ if [ $UNINSTALL = 1 ]; then
   exit 0
 fi
 
+# ------------------------------------------------------------- --adopt DIR (an access point made by hand)
+# Its key, the hub's token (by its SHA-256), the certificate, the port, the PROXY line and the ICE forward go
+# into this script's own files BEFORE the install below runs, so the pin and the connect line stay the same.
+ADOPT_UNIT='' ADOPT_TIMERS='' ADOPT_STOPPED=0
+if [ -n "$ADOPT" ]; then
+  [ -s "$ADOPT/key.pem" ] && [ -s "$ADOPT/cert.pem" ] && [ -f "$ADOPT/ap.toml" ] ||
+    die "--adopt $ADOPT: no key.pem, cert.pem and ap.toml there — not an access point made by hand" 64
+  A_HASH=$(sed -n 's/^bridge_token_sha256 = "\([0-9a-f]\{64\}\)".*/\1/p' "$ADOPT/ap.toml" | head -1)
+  [ -n "$A_HASH" ] || die "--adopt: $ADOPT/ap.toml has no bridge_token_sha256 (the hub's token) — nothing to adopt" 64
+  [ "$(openssl pkey -in "$ADOPT/key.pem" -pubout 2>/dev/null)" = "$(openssl x509 -in "$ADOPT/cert.pem" -noout -pubkey 2>/dev/null)" ] ||
+    die "--adopt: $ADOPT/cert.pem does not carry $ADOPT/key.pem's public key — refusing (the hub's pin would break)"
+  if [ -s "$KEY" ] && ! cmp -s "$KEY" "$ADOPT/key.pem"; then
+    die "--adopt: this server already has a trunk of its own ($KEY, another key) — nothing to adopt" 64
+  fi
+  # the [ap] table's own listen (the first one), the ICE forward's (the [[ap.tcp]] named livekit-ice)
+  A_LISTEN=$(sed -n 's/^listen *= *"\(.*\)".*/\1/p' "$ADOPT/ap.toml" | head -1)
+  A_ICE=$(awk -F'"' '/^name *= *"livekit-ice"/ {f = 1; next} f && /^listen *=/ {n = split($2, a, ":"); print a[n]; exit}' "$ADOPT/ap.toml")
+  A_PROXY=$(sed -n 's/^proxy_protocol *= *\(true\|false\).*/\1/p' "$ADOPT/ap.toml" | head -1)
+  case $A_LISTEN/${A_PROXY:-false} in
+    127.0.0.1:*/true|localhost:*/true|\[::1\]:*/true) BEHIND=${BEHIND:-1} ;;
+    127.0.0.1:*/false|localhost:*/false|\[::1\]:*/false)
+      die "--adopt: $ADOPT/ap.toml listens on $A_LISTEN without the PROXY line — a router in front that sends none is not supported" 64 ;;
+    */true) die "--adopt: $ADOPT/ap.toml takes a PROXY line on a public address ($A_LISTEN) — not supported" 64 ;;
+    *) BEHIND=${BEHIND:-0} ;;
+  esac
+  PORT=${PORT:-${A_LISTEN##*:}}
+  [ -n "$A_ICE" ] && ICE_PORT=${ICE_PORT:-$A_ICE}
+  [ -n "$NAME" ] || NAME=$(openssl x509 -in "$ADOPT/cert.pem" -noout -ext subjectAltName 2>/dev/null | tr ',' '\n' |
+    sed -n 's/^ *DNS:\(.*\)$/\1/p' | head -1)
+  # a CA's certificate (Let's Encrypt) is renewed from now on by this script's timer, through the same webroot
+  if [ "$(openssl x509 -in "$ADOPT/cert.pem" -noout -issuer | sed 's/^issuer=//')" != "$(openssl x509 -in "$ADOPT/cert.pem" -noout -subject | sed 's/^subject=//')" ]; then
+    A_CERT=acme; else A_CERT=self-signed; fi
+  CERTMODE=${CERTMODE:-$A_CERT}
+  # the units that ran it: the service whose ExecStart reads its ap.toml, the timer that renews its certificate
+  for u in /etc/systemd/system/*.service; do
+    [ -f "$u" ] || continue
+    if grep -q "^ExecStart=.* -c $ADOPT/ap.toml" "$u"; then ADOPT_UNIT=$(basename "$u"); fi
+  done
+  for t in /etc/systemd/system/*.timer; do
+    [ -f "$t" ] || continue
+    case $(basename "$t") in yggdrasil-trunk-*) continue ;; esac   # ours (this script names the folder in its help)
+    sv=/etc/systemd/system/$(basename "$t" .timer).service; [ -f "$sv" ] || continue
+    ex=$(sed -n 's/^ExecStart=//p' "$sv" | awk '{print $1}')
+    if grep -qs -- "$ADOPT" "$sv" "$ex" && grep -qs certbot "$sv" "$ex"; then   # its certificate renewal (nothing else)
+      ADOPT_TIMERS="$ADOPT_TIMERS $(basename "$t")"
+      if [ -z "$WEBROOT" ]; then WEBROOT=$(grep -hos -- '--webroot -w [^ ]*' "$sv" "$ex" | head -1 | awk '{print $3}' || true); fi
+    fi
+  done
+  # what this run takes over (written once: a re-run of --adopt finds them in place)
+  install -d -m 755 "$ETC"
+  if [ ! -s "$KEY" ]; then (umask 077; cp "$ADOPT/key.pem" "$KEY.new"); chown root:root "$KEY.new"; chmod 600 "$KEY.new"; mv -f "$KEY.new" "$KEY"; fi
+  if [ ! -s "$CERT" ]; then install -m 644 "$ADOPT/cert.pem" "$CERT"; echo "$A_CERT" >"$ETC/cert.source"; fi
+  [ -f "$APTOML" ] || printf '# adopted from %s — rewritten below\nbridge_token_sha256 = "%s"\n' "$ADOPT" "$A_HASH" >"$APTOML"
+  if [ -f "$ADOPT/sni-443.conf" ] && [ ! -f "$ETC/sni-443.conf" ]; then install -m 644 "$ADOPT/sni-443.conf" "$ETC/sni-443.conf"; fi
+  FIREWALL=${FIREWALL:-0}   # a server set up by hand keeps its firewall as it is (--no-firewall, remembered)
+  say "adopting $ADOPT${ADOPT_UNIT:+ ($ADOPT_UNIT)}: the key (the pin), the hub's token, the $A_CERT certificate, ${A_LISTEN}${A_ICE:+, ICE :$A_ICE}${WEBROOT:+, renewal through $WEBROOT}"
+fi
+adopt_back() { # this run stopped the adopted access point: stop ours, start it again → 0 when it answers
+  systemctl disable --now --quiet $UNIT 2>/dev/null || true
+  systemctl start "$ADOPT_UNIT" || return 1
+  ADOPT_STOPPED=0
+  [ "$(probe_ap)" != 000 ]
+}
+
 NAME=${NAME:-$(confget NAME)}
 [ -n "$NAME" ] || die "which name? sudo bash trunk.sh --name trunk.example.org  (a DNS name that points at this server)" 64
 NAME=$(printf '%s' "$NAME" | tr '[:upper:]' '[:lower:]')
@@ -204,7 +277,7 @@ probe_ap() { # → the HTTP status the access point gives a pinned request on it
   local b64 c=000 p
   b64=$(openssl pkey -in "$KEY" -pubout -outform DER 2>/dev/null | openssl dgst -sha256 -binary | base64)
   p=(curl -sk -o /dev/null -m 5 -w '%{http_code}' --pinnedpubkey "sha256//$b64" --resolve "$NAME:$PORT:127.0.0.1" "https://$NAME:$PORT/")
-  [ "$BEHIND" = 1 ] && p=("${p[@]:0:7}" --haproxy-protocol "${p[@]:7}")
+  [ "$BEHIND" = 1 ] && p=(curl --haproxy-protocol "${p[@]:1}")   # (never between -w and its format)
   for _ in $(seq 20); do c=$("${p[@]}" 2>/dev/null || true); [ "$c" != 000 ] && break; sleep 0.5; done
   echo "$c"
 }
@@ -434,6 +507,11 @@ case $(uname -m) in x86_64|amd64) ARCH=x86_64 ;; aarch64|arm64) ARCH=aarch64 ;; 
 command -v ss >/dev/null || apt_need iproute2
 OURS=0; systemctl is-active --quiet $UNIT 2>/dev/null && OURS=1
 OWNER=$(port_owner t "$PORT")
+ADOPT_PID=''; [ -n "$ADOPT_UNIT" ] && ADOPT_PID=$(systemctl show -p MainPID --value "$ADOPT_UNIT" 2>/dev/null || true)
+if [ -n "$OWNER" ] && [ -n "$ADOPT_PID" ] && [ "$ADOPT_PID" != 0 ] &&
+   ss -Hltnp "sport = :$PORT" 2>/dev/null | grep -q "pid=$ADOPT_PID,"; then
+  OWNER=''   # the access point being adopted: stopped just before ours starts
+fi
 if [ -n "$OWNER" ] && ! { [ $OURS = 1 ] && [ "$OWNER" = bifrost-net ]; }; then
   if [ "$BEHIND" = 1 ]; then
     die "port $PORT (loopback, for the access point) is taken by '$OWNER' — pick another: --port N"
@@ -838,11 +916,24 @@ RELEASES=$( [ "$RELEASES" = https://github.com/veraldar/yggdrasil/releases ] || 
 FIREWALL=$FIREWALL
 FIREWALL_RULES=$FW_RULES
 AUTO_UPDATES=$AUTOUPD
+ADOPTED_FROM=${ADOPT:-$(confget ADOPTED_FROM)}
 EOF
 chmod 644 "$CONF.new"; mv -f "$CONF.new" "$CONF"
 systemctl daemon-reload
 systemctl enable --quiet $UNIT
+if [ -n "$ADOPT_UNIT" ] && systemctl is-active --quiet "$ADOPT_UNIT"; then
+  systemctl stop "$ADOPT_UNIT"; ADOPT_STOPPED=1; say "stopped $ADOPT_UNIT (the access point being adopted)"
+fi
 if [ $OURS = 0 ] || [ $CHANGED = 1 ]; then systemctl restart $UNIT; say "started $UNIT"; else say "running $UNIT (unchanged)"; fi
+if [ -n "$ADOPT" ] && [ "$BEHIND" = 1 ] && systemctl is-active --quiet yggdrasil-sni-443; then
+  # the :443 router ran from the adopted folder's config: from now on from ours (the same lines), and at boot
+  sp=$(systemctl show -p MainPID --value yggdrasil-sni-443)
+  if ! tr '\0' ' ' <"/proc/$sp/cmdline" 2>/dev/null | grep -q -- "-c $ETC/sni-443.conf"; then SNI_RESTART=1; fi
+  systemctl enable --quiet yggdrasil-sni-443
+  if systemctl is-enabled --quiet turn-dispatcher 2>/dev/null; then
+    warn "turn-dispatcher is still enabled: at boot it races yggdrasil-sni-443 for :443 — sudo systemctl disable turn-dispatcher"
+  fi
+fi
 if [ "${SNI_RESTART:-0}" = 1 ]; then systemctl restart yggdrasil-sni-443; say "restarted yggdrasil-sni-443 (a new sni-443.py)"; fi
 if [ "$CERTMODE" = acme ]; then systemctl enable --quiet --now yggdrasil-trunk-cert.timer
 else systemctl disable --quiet --now yggdrasil-trunk-cert.timer 2>/dev/null || true; fi
@@ -862,6 +953,20 @@ fi
 
 # the access point answers on its port with THIS key (curl pins it)
 code=$(probe_ap)
+if [ "$code" = 000 ] && [ "$ADOPT_STOPPED" = 1 ]; then
+  journalctl -u $UNIT -n 15 --no-pager -o cat >&2 || true
+  ROLLING=1
+  if adopt_back; then die "the access point does not answer on 127.0.0.1:$PORT (log above) — $ADOPT_UNIT is back and answering; nothing else changed there"; fi
+  die "the access point does not answer on 127.0.0.1:$PORT (log above), and $ADOPT_UNIT did not come back either: sudo systemctl start $ADOPT_UNIT"
+fi
+if [ "$code" != 000 ] && [ -n "$ADOPT" ]; then
+  # ours answers: the adopted one stays off, its renewal too; its folder is left as it was
+  [ -n "$ADOPT_UNIT" ] && systemctl disable --quiet "$ADOPT_UNIT" 2>/dev/null || true
+  for t in $ADOPT_TIMERS; do systemctl disable --now --quiet "$t" 2>/dev/null || true; done
+  ADOPT_STOPPED=0
+  say "adopted: ${ADOPT_UNIT:-the old access point} stopped and disabled${ADOPT_TIMERS:+, its renewal timer ($(echo $ADOPT_TIMERS)) too} — $ADOPT is left as it was"
+  say "  once all is well: sudo rm -rf $ADOPT${ADOPT_UNIT:+ /etc/systemd/system/$ADOPT_UNIT}   (until then: the way back)"
+fi
 if [ "$code" = 000 ]; then
   journalctl -u $UNIT -n 15 --no-pager -o cat >&2 || true
   if [ "$CHANGED" = 1 ] && rollback; then
@@ -876,7 +981,7 @@ say "pin: $PIN"
 # ----------------------------------------------------------------------------------- the end
 line() { printf '%s\n' "────────────────────────────────────────────────────────────────────────────────"; }
 echo
-if [ "$BEHIND" = 1 ]; then
+if [ "$BEHIND" = 1 ] && ! systemctl is-active --quiet yggdrasil-sni-443; then   # a running router needs no how-to
   line
   cat <<EOF
  :443 is your website's. Send the name $NAME to the trunk — pick ONE:

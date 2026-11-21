@@ -8,19 +8,23 @@ have. You talk to it from your phone over your own Wi-Fi, or from anywhere throu
 ## One command
 
 ```sh
-curl -fsSLO https://github.com/veraldar/yggdrasil/releases/download/v0.9.0/install.sh
+curl -fsSLO https://github.com/veraldar/yggdrasil/releases/download/v0.9.1/install.sh
 bash install.sh
 ```
 
-The first time, it asks for your model: its address (any OpenAI-compatible `/v1` endpoint:
-OpenAI, OpenRouter, a local Ollama at `http://127.0.0.1:11434/v1`, llama.cpp, vLLM; or an
-Anthropic-shaped one), its name and your API key. The key is read without showing it and written
-only to `~/.config/yggdrasil/yggdrasil.env` (mode 600), never to a command line or your shell's
-history. Not at a terminal? Pass `--upstream-env FILE` with lines like
-`YGG_UPSTREAM_BASE_URL=https://api.openai.com/v1`, `YGG_UPSTREAM_API_KEY=…`,
-`YGG_UPSTREAM_MODEL=gpt-4o-mini` (and `YGG_UPSTREAM_STYLE=anthropic` for an Anthropic-shaped API).
+The first time, it asks for your **model provider**: Z AI, OpenRouter, Anthropic, OpenAI or Other. A
+provider asks only for its API key: its address is filled in and its default model is shown (press
+Enter, or type another). *Other* asks for the address (any OpenAI-compatible `/v1` endpoint or an
+Anthropic-shaped one: a local Ollama at `http://127.0.0.1:11434/v1`, llama.cpp, vLLM), its kind, the
+model and the key (none for a model on your own network). The key is read without showing it and
+written only to `~/.config/yggdrasil/yggdrasil.env` (mode 600), never to a command line or your
+shell's history. Not at a terminal? `--model-provider zai` (or `openrouter`, `anthropic`, `openai`)
+with the key in the environment variable `YGG_UPSTREAM_API_KEY`, and `--model NAME` for another model;
+or `--upstream-env FILE` with lines like `YGG_UPSTREAM_BASE_URL=https://api.openai.com/v1`,
+`YGG_UPSTREAM_API_KEY=…`, `YGG_UPSTREAM_MODEL=gpt-4o-mini` (and `YGG_UPSTREAM_STYLE=anthropic` for an
+Anthropic-shaped API).
 
-**What it downloads, and how it checks it.** `install.sh` belongs to one release (here `v0.9.0`).
+**What it downloads, and how it checks it.** `install.sh` belongs to one release (here `v0.9.1`).
 It fetches that release's list of checksums (`SHA256SUMS`) and its signature, and checks the
 signature against the yggdrasil release key written into the script itself (`ssh-keygen -Y verify`).
 Then it downloads the release archive and checks it against the list. Anything that does not match
@@ -189,14 +193,19 @@ to the hub's public access point (`wss://<hub>/rootlink`). It needs no open port
 and no certificate, and the phone doesn't have to be on the same Wi-Fi. No sudo.
 
 ```sh
-curl -fsSLO https://github.com/veraldar/yggdrasil/releases/download/v0.9.0/join.sh
+curl -fsSLO https://github.com/veraldar/yggdrasil/releases/download/v0.9.1/join.sh
 bash join.sh --hub https://tree.example.org
 ```
 
-In a terminal it asks for this root's model, and the key is read without echo. Or pass
-`--upstream-env FILE`, in the same format as `yggdrasil.env`: `YGG_UPSTREAM_BASE_URL=…`,
-`YGG_UPSTREAM_API_KEY=…`, `YGG_UPSTREAM_MODEL=…` (plus `YGG_UPSTREAM_STYLE=anthropic` for an
-Anthropic-shaped API). The key is written only to `brain.env` (mode 600) and is never printed.
+In a terminal it asks for this computer's **model provider**, the same step as on the home computer
+with one more choice, the first: **Same as the home root**. With it nothing is typed: when you
+approve the computer on your phone, your home computer hands it its model settings inside the root
+link (WireGuard, end to end; the trunk carries ciphertext), and the new computer then calls the
+provider itself. It is also what a join without a terminal does when no model is given. Removing a
+computer later does not take back a key it was given: change the key at the provider for that.
+Otherwise pick a provider and type its key (read without echo), or pass `--model-provider NAME` with
+`YGG_UPSTREAM_API_KEY` in the environment, or `--upstream-env FILE` in the same format as
+`yggdrasil.env`. The key is written only to `brain.env` (mode 600) and is never printed.
 Like `install.sh`, the `join.sh` you download fetches its release, checks the signature and the
 checksum, unpacks it and runs that release's `join.sh`: the brain and the node come prebuilt.
 
@@ -253,20 +262,23 @@ asks first; `-y` skips the question). Other options: `--name` (default: the host
 `$HOME`), `--no-start`, `--build`. `--cacert` is only for tests against a self-signed hub.
 Exit codes: `0` joined and running · `3` refused on the phone · `4` expired · `64` usage · `1` other.
 
-**Windows: not part of v0.9.0, untested.** `win/Veraldar-Setup.exe` (see `win/README.txt`) has never
-run on a real Windows PC, and its launcher still clones this repository inside WSL (branch `BRANCH`
-in `launcher.bat`) instead of fetching the signed release; the `join.sh` it runs then takes the brain
-and the node from the signed release. The QR lands on the
-Windows Desktop and opens there. `keepalive.vbs` keeps WSL and the root running, and starts them
-at logon.
+**Windows: `Veraldar-Setup-<version>.exe`** (built by `scripts/build-win.sh`, see `win/README.txt`).
+One window, no terminal: it checks Windows and WSL2 (installing WSL with one UAC prompt and a
+restart when it is missing), sets up the Linux user and packages without a question, asks for the
+trunk address, runs this release's stamped `join.sh` (embedded byte for byte) inside WSL through
+`win/wsl-bootstrap.sh`, and shows the code and the QR in its own window until the phone approves.
+`keepalive.vbs` -> `launcher.bat` starts the root and keeps WSL awake, at logon too. Failures end
+with a step code (W-OS, W-WSL, W-NET, W-SIG, W-JOIN, W-MODEL, W-RUN) and
+`%LOCALAPPDATA%\Veraldar\install-report.txt`. Tested under wine with a fake `wsl.exe`; not yet run
+on a real Windows PC (`win/NOTES-win.md`).
 
 **Tests:**
 - `./join-test.sh` runs locally; `./join-test.sh --docker` runs in a clean `ubuntu:24.04`. Both
   use a fake hub that speaks the contract above and a fake trunk on `/rootlink` that needs the
-  real `root-dial.py` to link and earn a pong. They need `python3 openssl zbar-tools`, and `git`
-  for the WSL bootstrap case.
-- `win/launcher-test.sh` runs the installer, launcher and keepalive under wine with a recording
-  fake `wsl.exe`.
+  real `root-dial.py` to link and earn a pong. They need `python3 openssl zbar-tools`.
+- `win/launcher-test.sh` runs the installer under wine (Xvfb, xdotool) with a scripted fake
+  `wsl.exe` that runs the real `wsl-bootstrap.sh`: a case per step code. `win/bootstrap-test.sh`
+  runs `wsl-bootstrap.sh` in a fresh Ubuntu container.
 
 ## Upgrade / uninstall
 
