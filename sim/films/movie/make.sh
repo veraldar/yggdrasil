@@ -28,7 +28,7 @@ ffmpeg -v error -y -framerate 30 -i frames/%05d.jpg -c:v libx264 -preset fast -c
 ffmpeg -v error -y -i movie-raw.mp4 -an -c:v libx264 -preset slow -crf 26 -pix_fmt yuv420p -movflags +faststart yggdrasil-silent.mp4
 # the voice (vo.json: the lines movie.html names, written by render.mjs) → yggdrasil.mp4 + yggdrasil.webm
 python3 -I "$HERE/../voice/sound.py" yggdrasil-silent.mp4 vo.json yggdrasil
-ffmpeg -v error -y -ss "${POSTER_AT:-23.6}" -i movie-raw.mp4 -frames:v 1 -q:v 3 yggdrasil.jpg
+ffmpeg -v error -y -ss "${POSTER_AT:-27.3}" -i movie-raw.mp4 -frames:v 1 -q:v 3 yggdrasil.jpg
 ffmpeg -v error -y -i movie-raw.mp4 -vf "fps=1/3,scale=270:-2,tile=8x4" -frames:v 1 -q:v 4 yggdrasil-sheet.jpg
 python3 -I - <<'PY'
 import re, subprocess, sys

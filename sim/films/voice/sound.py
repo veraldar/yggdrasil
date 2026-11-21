@@ -94,7 +94,7 @@ def main():
     for it in items:
         cmd += ["-i", str(it["wav"])]
     parts = [f"[{i}:a]adelay={int(it['t'] * 1000)}:all=1,volume={'0.85' if it['voice'] == 'app' else '1.0'}[a{i}]" for i, it in enumerate(items)]
-    mix = "".join(f"[a{i}]" for i in range(len(items))) + f"amix=inputs={len(items)}:normalize=0:dropout_transition=0,apad=whole_dur={length:.3f},loudnorm=I=-17:TP=-1.5:LRA=11,aresample=48000[a]"
+    mix = "".join(f"[a{i}]" for i in range(len(items))) + f"amix=inputs={len(items)}:normalize=0:dropout_transition=0,apad=whole_dur={length:.3f},loudnorm=I=-17:TP=-2.5:LRA=11,aresample=48000[a]"
     track = pathlib.Path(out + ".voice.wav")
     run(cmd + ["-filter_complex", ";".join(parts) + ";" + mix, "-map", "[a]", "-t", f"{length:.3f}", "-ac", "1", str(track)])
     run(["ffmpeg", "-v", "error", "-y", "-i", str(video), "-i", str(track), "-map", "0:v", "-map", "1:a", "-c:v", "copy", "-c:a", "aac", "-b:a", "64k", "-ac", "1",
