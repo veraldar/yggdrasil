@@ -42,10 +42,12 @@ export function voiceRoom(r: Room): void {
 }
 
 function agentOf(r: Room): string | null {
-  for (const p of r.remoteParticipants.values()) {
-    if (p.isAgent || p.identity.startsWith('agent-')) return p.identity;
-  }
-  return null;
+  // the job that serves the room (lib/voice-room.ts), else any agent in it
+  const agents = Array.from(r.remoteParticipants.values()).filter(
+    (p) => p.isAgent || p.identity.startsWith('agent-')
+  );
+  const serving = agents.find((p) => p.attributes?.['bifrost.serving'] === '1');
+  return (serving || agents[0])?.identity ?? null;
 }
 
 /** test hook: a harness may watch the bytes that arrived over the room (never set in the app) */

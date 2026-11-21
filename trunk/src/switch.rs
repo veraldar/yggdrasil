@@ -48,8 +48,13 @@ pub const MAX_BODY: usize = 4 << 20;
 const MAX_LOCAL: usize = 32;
 /// The only headers that cross the switchboard (lowercase).
 pub const PASS_HEADERS: [&str; 2] = ["content-type", "x-ygg-peer"];
-/// Set on every call a door performs against its own brain (`perform`): "this came from another root".
+/// Set on every call a door performs against its own brain (`perform`): "this came from another
+/// root", and by which door — `wg` (the WireGuard node's in-tunnel door: end to end between the
+/// two roots) or `trunk` (the switchboard: the old plaintext path, readable on the hub's bridge).
 pub const VIA_HEADER: &str = "x-ygg-via";
+/// Set beside it: the root the call came from, as the door knows it — the tunnel's pinned peer
+/// (wg) or the authenticated link (switchboard). Never what the caller claimed; `local` = the hub.
+pub const FROM_HEADER: &str = "x-ygg-from";
 const METHODS: [&str; 5] = ["GET", "POST", "PUT", "PATCH", "DELETE"];
 
 const B64: base64::engine::GeneralPurpose = base64::engine::general_purpose::STANDARD;
@@ -282,8 +287,8 @@ impl Switchboard {
     }
 
     /// Perform a request against the box's own brain.
-    pub fn perform_local(&self, req: &HttpReq) -> HttpReply {
-        perform(&self.http, &self.local_brain, req)
+    pub fn perform_local(&self, req: &HttpReq, from: &str) -> HttpReply {
+        perform(&self.http, &self.local_brain, req, ("trunk", from))
     }
 
     /// An `http` frame from link `from`; its link-token `roots` claim is the
@@ -326,7 +331,7 @@ impl Switchboard {
             let me = self.clone();
             let from = from.to_string();
             std::thread::spawn(move || {
-                let reply = me.perform_local(&req);
+                let reply = me.perform_local(&req, &from);
                 me.local_calls.fetch_sub(1, Ordering::SeqCst);
                 if let Err(e) = me.reg.send_text(&from, &reply.frame(&id)) {
                     eprintln!("switch: reply to root '{from}' lost: {e}");
@@ -379,7 +384,7 @@ impl Switchboard {
 
 /// Perform one exchange against a brain at `base` (no redirects; only the pass headers cross).
 /// The switchboard's `local` and the WireGuard node's in-tunnel door (wg.rs) both use it.
-pub fn perform(http: &ureq::Agent, base: &str, req: &HttpReq) -> HttpReply {
+pub fn perform(http: &ureq::Agent, base: &str, req: &HttpReq, (via, from): (&str, &str)) -> HttpReply {
     let url = format!("{}{}", base.trim_end_matches('/'), req.path);
     let mut r = http.request(&req.method, &url);
     for (k, v) in &req.headers {
@@ -389,8 +394,8 @@ pub fn perform(http: &ureq::Agent, base: &str, req: &HttpReq) -> HttpReply {
     }
     // every exchange performed here came from another root: the brain checks its peer token on
     // such a call, whatever route it names (L8). Set here, after the header law, so a caller can
-    // neither forge nor drop it.
-    r = r.set(VIA_HEADER, "trunk");
+    // neither forge nor drop it. With it: which door (wg = inside WireGuard) and which root.
+    r = r.set(VIA_HEADER, via).set(FROM_HEADER, from);
     let resp = match if req.body.is_empty() && req.method == "GET" { r.call() } else { r.send_bytes(&req.body) } {
         Ok(resp) => resp,
         Err(ureq::Error::Status(_, resp)) => resp,

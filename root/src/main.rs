@@ -3324,7 +3324,13 @@ fn harness_prompt(history: &[Value], turn_id: &str, auto: bool) -> String {
     if !auto {
         // the files it carries: one line each, with a path the harness's own tools open (files.rs)
         let files = files::harness_lines(&history[at]);
-        let text = if files.is_empty() { message_text(&history[at]) } else { format!("{}\n\n{files}", message_text(&history[at])) };
+        let mut text = if files.is_empty() { message_text(&history[at]) } else { format!("{}\n\n{files}", message_text(&history[at])) };
+        // a spoken turn is answered aloud (L16), on a harness too: the same note the model of a
+        // brain-native session gets, so the reply is short plain speech, not a page of markdown
+        if is_voice_turn(&history[at]) && !text.trim().is_empty() {
+            text.push_str("\n\n");
+            text.push_str(VOICE_TURN_NOTE);
+        }
         // another session wrote it, not the user: the harness reads who (the terminal shows it too)
         return match sender_label(&history[at]["info"]["meta"]["from"]) {
             Some(f) => format!("[from session {f}]\n{text}"),
@@ -4566,12 +4572,15 @@ async fn main() {
         .route("/root/{name}/adopt", post(roots::post_adopt))
         .route("/root/peers/{name}", axum::routing::delete(roots::delete_peer))
         .route("/tree/placed", post(roots::post_placed))
+        .route("/root/model", get(roots::get_model))
+        .route("/root/peers/{name}/model", post(roots::post_share))
         // L8: a call from another root carries the peer token, whatever route it names
         .layer(axum::middleware::from_fn_with_state(state.clone(), peers::gate))
         .with_state(state.clone());
     files::sweep(&state);
     tree::recover(&state, interrupted);
     roots::load_removed(&state);
+    roots::load_shares(&state);
     roots::ensure_main(&state);
     peers::spawn_watch(&state);
     ext::spawn_watch(&state);
@@ -5028,6 +5037,19 @@ mod law_tests {
         assert_eq!(owner_at(&s), 100, "replies, reports, other sessions' and internal messages never move it up");
         s.messages.push(at(make_message("s", "user", vec![text_part("mine again")]), 900));
         assert_eq!(owner_at(&s), 900);
+    }
+
+    #[test]
+    fn a_spoken_turn_tells_the_harness_its_reply_is_said_aloud() {
+        // L16: a held or hands-free turn (`modality: voice`) into a Claude Code session is answered
+        // aloud — the harness gets the same note a brain-native model gets; a typed turn none
+        let mut spoken = make_message("s", "user", vec![text_part("whats on my list")]);
+        spoken["info"]["modality"] = json!("voice");
+        let typed = make_message("s", "user", vec![text_part("whats on my list")]);
+        let id = |m: &Value| m["info"]["id"].as_str().unwrap().to_string();
+        let h = vec![spoken.clone(), typed.clone()];
+        assert_eq!(harness_prompt(&h, &id(&spoken), false), format!("whats on my list\n\n{VOICE_TURN_NOTE}"));
+        assert_eq!(harness_prompt(&h, &id(&typed), false), "whats on my list");
     }
 
     #[test]

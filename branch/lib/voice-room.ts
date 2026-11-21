@@ -23,12 +23,34 @@ export function withTimeout<T>(p: Promise<T>, ms: number, what: string): Promise
  *  commit fired while `remoteParticipants` is still empty reaches nobody
  *  and the hold is lost silently (req 09-29 'switching from hand free to
  *  keyboard and then using the push to talk is not working'). */
+const SERVING = 'bifrost.serving';
+const WAITING = 'bifrost.waiting';
+
+/** The agent that serves this room. A new job is dispatched on every page load and hold; for a
+ *  moment several can be in the room (the newcomer waits its turn, or leaves at once). The
+ *  phone's calls go to the one that says it serves — a waiting one cannot answer them, and the
+ *  hold was lost (11-20). An older agent says nothing: then the first one, as before. */
+export function servingAgent(room: Room) {
+  const all = Array.from(room.remoteParticipants.values());
+  return (
+    all.find((p) => p.attributes?.[SERVING] === '1') ||
+    all.find((p) => p.attributes?.[WAITING] !== '1') ||
+    all[0] ||
+    null
+  );
+}
+
 export async function agentInRoom(room: Room, ms: number) {
   const deadline = Date.now() + ms;
   for (;;) {
-    const agent = Array.from(room.remoteParticipants.values())[0];
-    if (agent) return agent;
-    if (Date.now() >= deadline) return null;
+    const all = Array.from(room.remoteParticipants.values());
+    const serving = all.find((p) => p.attributes?.[SERVING] === '1');
+    if (serving) return serving;
+    // jobs of this agent generation are here but none serves yet (one is about to take the
+    // room): wait for it. An older agent (it marks nothing) is taken at once, as before.
+    const marked = all.some((p) => p.attributes?.[WAITING] === '1');
+    if (all.length && !marked) return servingAgent(room);
+    if (Date.now() >= deadline) return all.length ? servingAgent(room) : null;
     await new Promise((r) => setTimeout(r, 120));
   }
 }
@@ -54,7 +76,7 @@ export function releaseMicDevice(room: Room) {
  *  and stops speaking, so meanwhile it keeps only voice commands and "… over" — room noise and the
  *  reply's own echo never join the next message. Fire and forget. */
 export function tellDeckState(room: Room | null, speaking: boolean, text = ''): void {
-  const agent = room && Array.from(room.remoteParticipants.values())[0];
+  const agent = room && servingAgent(room);
   if (!room || !agent) return;
   void room.localParticipant
     .performRpc({

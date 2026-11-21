@@ -430,6 +430,7 @@ pub fn remove(st: &AppState, name: &str) -> usize {
     }
     p.learned.lock().unwrap().retain(|(n, _)| n != name);
     p.seen.lock().unwrap().remove(name);
+    set_share(st, name, false); // it no longer gets this root's model settings
     let ids: Vec<String> = st.sessions.lock().unwrap().iter().filter(|(_, s)| s.info["remote"]["root"] == name).map(|(id, _)| id.clone()).collect();
     let mut n = 0;
     for id in &ids {
@@ -452,6 +453,103 @@ pub fn remove(st: &AppState, name: &str) -> usize {
     eprintln!("root {}: {name} removed — {n} session(s) here archived", p.me);
     publish(st, "tree.updated", json!({ "root": name, "removed": true }));
     n
+}
+
+// ── the home root's model, shared with a root the owner approved for it (L15) ──
+//
+// "Same as the home root": the joining computer says so at the join (`model: "home"`), the owner
+// approves it on the phone, the app tells this brain (`POST /root/peers/{name}/model`, from this
+// computer only), and the joined root then asks for the settings through its WireGuard tunnel
+// (`GET /root/model`). The answer holds the provider key, so it leaves only when ALL of this holds:
+// the call came in through this root's own WireGuard door (`x-ygg-via: wg` — the door sets it, a
+// caller can neither forge nor drop it; the old plaintext path says `trunk`), it carries the peer
+// token (L8), and the root whose tunnel it came in (`x-ygg-from`, the door's word: the pinned key,
+// never the caller's claim) is one the owner approved for it and has not removed. The key is in no
+// log line: only who was handed the settings.
+
+fn shares_file(st: &AppState) -> std::path::PathBuf {
+    st.data_dir.join("model-shares.json")
+}
+
+/// At start: the roots approved with "Same as the home root" stay so across a restart.
+pub fn load_shares(st: &AppState) {
+    let Ok(raw) = std::fs::read(shares_file(st)) else { return };
+    let names: Vec<String> = serde_json::from_slice(&raw).unwrap_or_default();
+    st.config.peers.shares.lock().unwrap().extend(names.into_iter().filter(|n| peers::valid_id(n)));
+}
+
+/// The owner approved sharing this root's model with `name` (`on`), or it ended.
+pub fn set_share(st: &AppState, name: &str, on: bool) {
+    let names: Vec<String> = {
+        let mut shares = st.config.peers.shares.lock().unwrap();
+        let changed = if on { shares.insert(name.to_string()) } else { shares.remove(name) };
+        if !changed {
+            return;
+        }
+        let mut v: Vec<String> = shares.iter().cloned().collect();
+        v.sort();
+        v
+    };
+    let path = shares_file(st);
+    let tmp = path.with_extension("json.tmp");
+    if let Err(e) = std::fs::write(&tmp, serde_json::to_vec(&names).unwrap_or_default()).and_then(|_| std::fs::rename(&tmp, &path)) {
+        eprintln!("model sharing with {name}: could not keep it: {e}");
+    }
+    eprintln!("root {}: its model is {} {name}", st.config.peers.me, if on { "now shared with" } else { "no longer shared with" });
+}
+
+/// What a joined root needs to call the provider itself: address, kind, model(s), key. THE KEY IS
+/// IN HERE — it goes into the one answer of `get_model` and nowhere else (no log, no event).
+fn model_settings(st: &AppState) -> Value {
+    let c = &st.config;
+    let models: Vec<String> = c.models.iter().map(|m| if c.tiers.get(m).copied() == Some("lite") { format!("{m}:lite") } else { m.clone() }).collect();
+    json!({
+        "base_url": c.base_url,
+        "style": match c.dialect { crate::Dialect::Anthropic => "anthropic", crate::Dialect::OpenAi => "openai" },
+        "model": c.model,
+        "models": models.join(","),
+        "vision": c.vision.join(","),
+        "api_key": c.api_key.clone().unwrap_or_default(),
+    })
+}
+
+/// `GET /root/model` — this root's model settings, for a joined root the owner approved with
+/// "Same as the home root". See the section comment for when it answers.
+pub async fn get_model(State(st): State<AppState>, headers: HeaderMap) -> Response {
+    let p = &st.config.peers;
+    let hdr = |k: &str| headers.get(k).and_then(|v| v.to_str().ok()).unwrap_or_default().to_string();
+    let no = |code: StatusCode, msg: &str, why: &str| (code, Json(json!({ "error": msg, "why": why }))).into_response();
+    if hdr("x-ygg-via") != "wg" {
+        return no(StatusCode::FORBIDDEN, "the model is shared only inside the root link (WireGuard)", "not-the-root-link");
+    }
+    if !p.token_ok(&headers) {
+        return no(StatusCode::UNAUTHORIZED, "peer token", "peer-token");
+    }
+    let from = hdr("x-ygg-from");
+    let shared = peers::valid_id(&from) && p.shares.lock().unwrap().contains(&from) && !p.removed.lock().unwrap().contains(&from);
+    if !shared {
+        eprintln!("root {}: {from:?} asked for the model settings — not shared with it", p.me);
+        return no(StatusCode::FORBIDDEN, "this computer's model is not shared with that root", "not-shared");
+    }
+    eprintln!("root {}: model settings handed to {from}", p.me);
+    Json(model_settings(&st)).into_response()
+}
+
+/// `POST /root/peers/{name}/model {share}` — the owner approved `name` with "Same as the home
+/// root" (the app calls it at approval). From this computer only, never from another root.
+pub async fn post_share(State(st): State<AppState>, ConnectInfo(addr): ConnectInfo<std::net::SocketAddr>, headers: HeaderMap, Path(name): Path<String>, Json(body): Json<Value>) -> Response {
+    if !addr.ip().is_loopback() || peers::from_peer(&headers) {
+        return err(StatusCode::FORBIDDEN, "only this computer shares its model");
+    }
+    if name == st.config.peers.me || !peers::valid_id(&name) {
+        return err(StatusCode::BAD_REQUEST, "not another root");
+    }
+    let on = body["share"] == true;
+    if on && st.config.peers.removed.lock().unwrap().contains(&name) {
+        return err(StatusCode::CONFLICT, "that root was removed");
+    }
+    set_share(&st, &name, on);
+    Json(json!({ "root": name, "share": on })).into_response()
 }
 
 // ── routes ───────────────────────────────────────────────────────────────────
@@ -518,6 +616,11 @@ mod tests {
 
     /// A brain's state for tests: its own data dir, these peers, an upstream that never answers.
     fn state(tag: &str, peers: peers::Peers) -> AppState {
+        state_key(tag, peers, None)
+    }
+
+    /// The same, with a provider key (a made-up one: tests never hold a real key).
+    fn state_key(tag: &str, peers: peers::Peers, key: Option<&str>) -> AppState {
         static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
         let dir = std::env::temp_dir().join(format!("ygg-roots-{tag}-{}-{}", std::process::id(), N.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
         let _ = std::fs::remove_dir_all(&dir);
@@ -527,7 +630,7 @@ mod tests {
             base_url: "http://127.0.0.1:1".into(),
             dialect: Dialect::OpenAi,
             max_tokens: 1024,
-            api_key: None,
+            api_key: key.map(String::from),
             model: "glm-5.3".into(),
             models: vec!["glm-5.3".into()],
             catalog: json!({"default": {"yggdrasil": {}}}),
@@ -583,6 +686,8 @@ mod tests {
             .route("/tree/report", post(crate::tree_report))
             .route("/tree/placed", post(post_placed))
             .route("/root/peers/{name}", delete(delete_peer))
+            .route("/root/model", get(get_model))
+            .route("/root/peers/{name}/model", post(post_share))
             .layer(axum::middleware::from_fn_with_state(st.clone(), peers::gate))
             .with_state(st);
         tokio::spawn(async move { axum::serve(l, app.into_make_service_with_connect_info::<SocketAddr>()).await.unwrap() });
@@ -814,6 +919,68 @@ mod tests {
         serve(l2, state("gate2", peers_of("lab", "", None))).await;
         assert_eq!(req("POST", &format!("{url2}/session"), &[("x-ygg-via", "trunk")], body()).await.0, 401);
         assert_eq!(req("POST", &format!("{url2}/session"), &[], body()).await.0, 200);
+    }
+
+    /// L15 "Same as the home root": the settings (the key with them) leave only through the
+    /// WireGuard door, with the peer token, to a root the owner approved for it and has not removed.
+    #[tokio::test]
+    async fn model_settings_go_only_inside_wireguard_to_a_root_the_owner_approved() {
+        const KEY: &str = "made-up-key-for-this-test";
+        let (l, url) = bind().await;
+        let st = state_key("model", peers_of("home", "", Some(TOKEN)), Some(KEY));
+        serve(l, st.clone()).await;
+        let ask = |h: Vec<(&'static str, &'static str)>| {
+            let url = format!("{url}/root/model");
+            async move { req("GET", &url, &h, None).await }
+        };
+        let wg = |from: &'static str| vec![("x-ygg-via", "wg"), ("x-ygg-from", from), ("x-ygg-peer", TOKEN)];
+        let holds_key = |v: &Value| v.to_string().contains(KEY);
+        // not shared with anyone yet: nobody gets it, whatever the door says
+        let r = ask(wg("lab")).await;
+        assert_eq!((r.0, r.1["why"].as_str()), (403, Some("not-shared")), "{:?}", r.1);
+        // only this computer says who it shares with — never another root, token or not
+        let share = format!("{url}/root/peers/lab/model");
+        assert_eq!(req("POST", &share, &[("x-ygg-via", "wg"), ("x-ygg-from", "lab"), ("x-ygg-peer", TOKEN)], Some(json!({ "share": true }))).await.0, 403);
+        assert_eq!(req("POST", &share, &[], Some(json!({ "share": true }))).await.0, 200);
+        // the approved root, through the WireGuard door, with the token: the settings
+        let r = ask(wg("lab")).await;
+        assert_eq!(r.0, 200, "{:?}", r.1);
+        assert_eq!((r.1["base_url"].as_str(), r.1["style"].as_str(), r.1["model"].as_str(), r.1["api_key"].as_str()), (Some("http://127.0.0.1:1"), Some("openai"), Some("glm-5.3"), Some(KEY)));
+        assert_eq!(r.1["models"], "glm-5.3");
+        // every other way: nothing of it leaves
+        let cases: Vec<(&str, Vec<(&'static str, &'static str)>, u16)> = vec![
+            ("this computer itself (the app, a tool): no door", vec![], 403),
+            ("the old plaintext path between roots", vec![("x-ygg-via", "trunk"), ("x-ygg-from", "lab"), ("x-ygg-peer", TOKEN)], 403),
+            ("no peer token", vec![("x-ygg-via", "wg"), ("x-ygg-from", "lab")], 401),
+            ("a wrong peer token", vec![("x-ygg-via", "wg"), ("x-ygg-from", "lab"), ("x-ygg-peer", "nope")], 401),
+            ("another approved root the model is not shared with", wg("mac"), 403),
+            ("the hub's own name", wg("local"), 403),
+            ("no root named by the door", vec![("x-ygg-via", "wg"), ("x-ygg-peer", TOKEN)], 403),
+        ];
+        for (what, h, code) in cases {
+            let r = ask(h).await;
+            assert_eq!(r.0, code, "{what}: {:?}", r.1);
+            assert!(!holds_key(&r.1), "{what}: the key left");
+        }
+        // a restart keeps the approval
+        let again = state_key("model-restart", peers_of("home", "", Some(TOKEN)), Some(KEY));
+        std::fs::copy(st.data_dir.join("model-shares.json"), again.data_dir.join("model-shares.json")).unwrap();
+        load_shares(&again);
+        assert!(again.config.peers.shares.lock().unwrap().contains("lab"));
+        // the owner removes lab on the phone: it gets nothing any more, and cannot be shared with again
+        remove(&st, "lab");
+        let r = ask(wg("lab")).await;
+        assert_eq!((r.0, r.1["why"].as_str()), (403, Some("not-shared")));
+        assert!(!holds_key(&r.1));
+        assert_eq!(std::fs::read_to_string(st.data_dir.join("model-shares.json")).unwrap(), "[]");
+        assert_eq!(req("POST", &share, &[], Some(json!({ "share": true }))).await.0, 409);
+        // a root with no key of its own (a model on its own network) shares an empty one
+        let (l2, url2) = bind().await;
+        let bare = state("model-nokey", peers_of("home", "", Some(TOKEN)));
+        serve(l2, bare.clone()).await;
+        set_share(&bare, "lab", true);
+        let r = req("GET", &format!("{url2}/root/model"), &wg("lab"), None).await;
+        assert_eq!((r.0, r.1["api_key"].as_str()), (200, Some("")));
     }
 
     #[tokio::test]
