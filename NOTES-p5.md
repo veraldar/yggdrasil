@@ -75,3 +75,14 @@ This worktree (p5-site, from tree-next): films scripts (sim/films/), scripts/sit
   the October films stay as one small line of links; the voice door, products card and funding box stay out.
 - nothing left for the owner on design. Theirs only: funding accounts (if a support box is wanted back),
   their Windows run, and nothing else — publishing follows the plan (v0.9.1 public + the integrator's word).
+
+## 11-21 — the owner's container question (decision only, no change on the VPS)
+- owner (via MAIN, verbatim): separate lxc/incus containers for veraldar.org and the trunk "if better should do it",
+  and maybe a root on the site's machine to improve the site from the phone.
+- decision doc: ~/Work/root-coord-pwa/artifacts/vps-containers-decision.md (/api/artifact/vps-containers-decision.md).
+  Call: Incus, ONE container for the site's workshop + its root; the trunk stays on the host (already
+  DynamicUser + ProtectSystem=strict); not Docker. After v0.9.1; rehearsal on a throwaway Debian 13 first.
+- found on the VPS (read-only survey 11-21): vps-boot-{app,brain,mock,trunk} run as root from
+  /home/debian/vps-test since 10-31, enabled at boot (~270 MB); ufw still allows 8443/tcp (provider firewall
+  blocks it: timed out from outside); veraldar-site has no git remote; speaches in Docker (152 MB, 2 GB image).
+- waiting on the owner: "clean it" (step 1), which key the site's root gets, a go for the container.
