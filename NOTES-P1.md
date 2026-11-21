@@ -92,3 +92,6 @@
 - Green on the merge: cargo 148, trunk 42, tree-e2e 131, restart-e2e, trunk-full full (3m model:home + 8a L15 PASS), s17, trunk-rtc. Code tree identical to P4's tested p4-release+p3-model (own-trunk OT_JOIN_MODEL=home 33+12 green, P4's proof).
 - DEPLOY: release → ~/Work/tree-next/scripts/hub-units.sh deploy <id> (all units incl. hub-wg; CUTS MY TURN). AFTER: health 11/11, live-door both doors, curl :4101/root/model without door → 403, tell P4 (ses_e1eb880ac9a44c97bdd868805208795b): p3-model + p4-release merged and live → it builds the v0.9.1 draft; report MAIN.
 - release 20261121-0927-8fc5d3b2
+- 09:27 deploy 20261121-0927-8fc5d3b2 DONE (health 11/11; :4101/root/model no-door → 403). 09:29 live-door AP + tailnet PASS. Test device removed.
+- P4 (11:20 its clock): v0.9.1 DRAFT from 8fc5d3b2, 11 signed files, not public; proofs on the draft running; tag local only until they pass. Sent P5 on at 10:30 (draft news; publish only after public + my word). Reported MAIN 10:31.
+- WAITING: P4 → "v0.9.1 public" (then give P5 the word to publish, check live pages); P3's line (locked; joins wait for owner approvals); owner: pairing (ap-pair.html until 12:43 today — delete after), reboot window. After owner's phone passes voice on ap: retire coturn (AP-7).
