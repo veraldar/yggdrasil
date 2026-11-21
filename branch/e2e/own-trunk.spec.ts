@@ -253,7 +253,8 @@ test('own trunk: a lay user pairs a phone, talks to MAIN, joins a root, delegate
           [
             'exec', '-u', 'ubuntu', MAC_C, 'bash', '-c',
             `${JOIN_CMD} --hub ${AP} --cacert /sim/trunk-ca.pem --name mac ` +
-              '--upstream-env /home/ubuntu/model.env ' +
+              // OT_JOIN_MODEL=home: no model given — join.sh's default without a terminal, "Same as the home root"
+              (process.env.OT_JOIN_MODEL === 'home' ? '' : '--upstream-env /home/ubuntu/model.env ') +
               '--supervisor nohup --qr-png /sim/join-qr.png >/sim/join.log 2>&1; echo "exit $?" >>/sim/join.log',
           ],
           { stdio: 'ignore' }

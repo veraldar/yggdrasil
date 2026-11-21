@@ -35,6 +35,9 @@
 #   OT_KEEP=1 leaves the containers up · OT_STATE=DIR keeps state + logs there
 #   OT_JOINER=deb443: the third machine is a clean Debian 12 whose firewall lets ONLY tcp 443 out (iptables,
 #   loopback aside); it fetches the release from the fake GitHub over https on 443 (a CA made for this run)
+#   OT_JOIN_MODEL=home: the third machine is given no model — join.sh's default without a terminal, "Same as the
+#   home root": after the approval it fetches the home root's model inside its tunnel (check m2). Needs a home
+#   brain with GET /root/model (v0.9.1).
 #   OT_DIST=DIR: a release made elsewhere (release.sh's dist/VERSION — a draft, a rehearsal), used exactly as it is:
 #   nothing is built, its installers' own embedded key decides (a real-stamped one gets no YGG_RELEASE_TEST_SIGNERS).
 #   OT_DIST_KEY=FILE: the key that signed it, for the forged/newer releases the tamper and update steps need — never
@@ -73,6 +76,8 @@ TSENV="YGG_RELEASE_TEST_SIGNERS=$TS"; [ $REALSTAMP = 1 ] && TSENV=''   # a real-
 REL="TRUNK_RELEASES=$FILES_URL/releases $TSENV"
 HREL="YGG_RELEASES=$FILES_URL/releases $TSENV"
 JOINER=${OT_JOINER:-ubuntu}; JREL=$HREL   # what the third machine runs join.sh with
+# the home root's model key in this run: made up, and unmistakable when "Same as the home root" must not leak it
+HOME_KEY=mock; [ "${OT_JOIN_MODEL:-}" = home ] && HOME_KEY=mock-home-7c1f0e5a9b3d2468
 [ "$JOINER" = deb443 ] && JREL="YGG_RELEASES=https://files.tree.test/releases $TSENV"
 
 say()  { printf '\033[1m==>\033[0m %s\n' "$*"; }
@@ -351,7 +356,7 @@ if stage a; then
   docker cp "$DIST/install.sh" ot-home:"$HH/install.sh" >/dev/null && dx ot-home chown "$HU:$HU" "$HH/install.sh"   # the one file downloaded
   to_box ot-home
   homesh 'mkdir -p ~/mock && cd ~/mock && (setsid nohup python3 /mock/mock_upstream.py 18397 >mock.log 2>&1 &) &&
-    printf "YGG_UPSTREAM_BASE_URL=http://127.0.0.1:18397\nYGG_UPSTREAM_STYLE=anthropic\nYGG_UPSTREAM_API_KEY=mock\nYGG_UPSTREAM_MODEL=mock\n" >~/model.env'
+    printf "YGG_UPSTREAM_BASE_URL=http://127.0.0.1:18397\nYGG_UPSTREAM_STYLE=anthropic\nYGG_UPSTREAM_API_KEY='"$HOME_KEY"'\nYGG_UPSTREAM_MODEL=mock\n" >~/model.env'
   check h0 "the home computer has no node, npm, cargo, rustc or git (the release brings what it needs)" \
     homesh '! command -v node && ! command -v npm && ! command -v cargo && ! command -v rustc && ! command -v git'
   if [ -n "$KEY" ]; then
@@ -426,6 +431,16 @@ if stage a; then
   say "stage a: the phone (Chromium) — pair, MAIN, join + approve, delegate, report home, revoke"
   run_phone full "https://$A" "$IP_A" "$STATE/sim/steps.tsv"; rc=$?
   check p "the phone walk through https://$A (table below; playwright exit $rc)" bash -c "[ $rc = 0 ]"
+  if [ "${OT_JOIN_MODEL:-}" = home ]; then
+    check m2 "Same as the home root: given no model, the third machine holds the home root's (address, kind, model, key) after the approval — fetched inside its tunnel; the key is in none of its logs" \
+      bash -c "h=\$(docker exec -u $HU ot-home grep -E '^YGG_UPSTREAM_(BASE_URL|STYLE|MODEL|API_KEY)=' $HH/.config/yggdrasil/yggdrasil.env | sort) &&
+        m=\$(docker exec ot-mac grep -E '^YGG_UPSTREAM_(BASE_URL|STYLE|MODEL|API_KEY)=' /home/ubuntu/.local/share/yggdrasil-root/brain.env | sort) &&
+        [ -n \"\$h\" ] && [ \"\$h\" = \"\$m\" ] && echo \"\$m\" | grep -q 'API_KEY=$HOME_KEY' &&
+        grep -q 'asking the home root for its own' '$STATE/sim/join.log' && grep -q \"the home root's\" '$STATE/sim/join.log' &&
+        ! grep -q '$HOME_KEY' '$STATE/sim/join.log' &&
+        ! docker exec ot-mac sh -c 'grep -rl $HOME_KEY /home/ubuntu/.local/share/yggdrasil-root/log /home/ubuntu/.local/share/yggdrasil-root/run /tmp 2>/dev/null | grep .' &&
+        ! docker exec ot-mac sh -c 'ls /home/ubuntu/.local/share/yggdrasil-root/.upstream.* 2>/dev/null | grep .'"
+  fi
   check m1 "the third machine joined from the release alone: its brain + root build unpacked and checked, no compiler" \
     bash -c "grep -q 'signature OK' '$STATE/sim/join.log' && docker exec ot-mac test -f /home/ubuntu/.local/share/yggdrasil/release/$VER/.verified && \
       docker exec ot-mac cmp -s /home/ubuntu/.local/share/yggdrasil-root/bin/bifrost-net /home/ubuntu/.local/share/yggdrasil/release/$VER/bin/bifrost-net-root && \
