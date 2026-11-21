@@ -9,8 +9,8 @@ set -u
 cd "$(dirname "$0")/.."           # the repo (worktree) root
 ROOT=$PWD
 HERE=$ROOT/sim/model-step
-DIST=$HOME/.cache/p4-rig/ms-dist/0.9.1-rc.2          # the TEST release under test (prebuilt)
-STATE=$HOME/.cache/p4-msmatrix/run; rm -rf "$STATE"; mkdir -p "$STATE/log"
+DIST=${MSM_DIST:-$HOME/.cache/p4-rig/ms-dist/0.9.1-rc.2}   # the TEST release under test (prebuilt: release.sh X --no-build with a throwaway key)
+STATE=${MSM_STATE:-$HOME/.cache/p4-msmatrix/run}; rm -rf "$STATE"; mkdir -p "$STATE/log"
 LOG=$STATE/log/run.log; : >"$LOG"
 NET=msm-net; UP=msm-upstream; VER=0.9.1-rc.2
 HU=lay; HH=/home/lay; ENVF=$HH/.config/yggdrasil/yggdrasil.env
