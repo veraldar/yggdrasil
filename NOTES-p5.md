@@ -75,3 +75,44 @@ This worktree (p5-site, from tree-next): films scripts (sim/films/), scripts/sit
   the October films stay as one small line of links; the voice door, products card and funding box stay out.
 - nothing left for the owner on design. Theirs only: funding accounts (if a support box is wanted back),
   their Windows run, and nothing else — publishing follows the plan (v0.9.1 public + the integrator's word).
+
+## 11-21 — the owner's container question (decision only, no change on the VPS)
+- owner (via MAIN, verbatim): separate lxc/incus containers for veraldar.org and the trunk "if better should do it",
+  and maybe a root on the site's machine to improve the site from the phone.
+- decision doc: ~/Work/root-coord-pwa/artifacts/vps-containers-decision.md (/api/artifact/vps-containers-decision.md).
+  Call: Incus, ONE container for the site's workshop + its root; the trunk stays on the host (already
+  DynamicUser + ProtectSystem=strict); not Docker. After v0.9.1; rehearsal on a throwaway Debian 13 first.
+- found on the VPS (read-only survey 11-21): vps-boot-{app,brain,mock,trunk} run as root from
+  /home/debian/vps-test since 10-31, enabled at boot (~270 MB); ufw still allows 8443/tcp (provider firewall
+  blocks it: timed out from outside); veraldar-site has no git remote; speaches in Docker (152 MB, 2 GB image).
+- waiting on the owner: "clean it" (step 1), which key the site's root gets, a go for the container.
+
+## 11-21 11:50 — v0.9.1 is public; the site is READY, waiting for P1's word to publish
+- merged tree-next 8fc5d3b2 (release tree); rebuilt root + trunk + branch here; films re-recorded on it
+  (run rel1, ~/.cache/p5-films/rel1: talk 15.8 s, tree 17.0 s, file 15.6 s, all checks pass, sheets looked at).
+- model step + Windows steps now in the installers' own words (model-step.sh, veraldar.nsi).
+- check-commands.py: --dist (draft through a mirror container) ALL PASS, then with NO flags against the public
+  release ALL PASS (33 runs: debian:12, ubuntu:24.04, ubuntu:22.04; the signature block verifies for real).
+  Public SHA256SUMS == the draft's. v0.9.1 published 2026-11-21 09:39 UTC.
+- site-deploy.sh --dry-run against the real server: "release v0.9.1: 6 linked files, all there", would change
+  3 files (index, start, sw.js) and add 20; nothing touched. Stand-in test 10/10 (SITE_RELEASES simulates a
+  missing release now).
+- systemd-run gotcha: StandardOutput=file: does NOT truncate — use truncate: (stale tails fooled me twice).
+- NEXT, only on P1's word: scripts/site-deploy.sh (no flags) → it backs up, copies, checks live byte for byte;
+  then curl+grep the live pages and report. Undo: scripts/site-deploy.sh --undo.
+- still beta on all three add-a-computer pages until P4 reports each PROVEN (one-word edit per page + deploy).
+
+## 11-21 14:40 — PUBLISHED: veraldar.org is the v0.9.1 site
+- the go: P1's own session, 10:39 ("I gave P5 the word to publish the v0.9.1 site"; its message to me was queued
+  and never arrived — read from P1's transcript on the brain, not taken from MAIN's relay).
+- deploy 1: 4f15e55, 23 files (3 changed, 20 new), backup ~/site-backups/20261121T095137Z-4f15e55 on the VPS.
+- deploy 2: 27ff703, 13 files (desktop film layout: 215 px → 349 px wide), backup …T133543Z-27ff703.
+  Undo of the last deploy: scripts/site-deploy.sh --undo (twice = back to the 11-14 site).
+- marking (P4's report to P1, 10:39): Linux no beta tag, "tested end to end on a clean Debian 12"; Mac beta,
+  "tested on a real Mac up to the point of joining"; Windows beta, "passed its checks on a stand-in for Windows".
+- verified as a stranger (no cache, clean profile, service worker blocked): 23/23 fetch 200; every page walked
+  by taps at Pixel 7 and 1280; 3 films play after one tap on play at both; 0 console errors, 0 failed requests;
+  the signature check from the live trunk page's own key line: Good signature, trunk.sh OK.
+- NEXT: flip Mac to tested when the Mac Studio's full join passes (M5–M8); Windows when the owner's PC run
+  passes; Linux line when a join over the real trunk passes. Each = one line in src/add-*.html + deploy.
+  The container plan for the VPS (vps-containers-decision.md) waits on the owner's three answers.
