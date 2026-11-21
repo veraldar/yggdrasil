@@ -86,3 +86,18 @@ This worktree (p5-site, from tree-next): films scripts (sim/films/), scripts/sit
   /home/debian/vps-test since 10-31, enabled at boot (~270 MB); ufw still allows 8443/tcp (provider firewall
   blocks it: timed out from outside); veraldar-site has no git remote; speaches in Docker (152 MB, 2 GB image).
 - waiting on the owner: "clean it" (step 1), which key the site's root gets, a go for the container.
+
+## 11-21 11:50 — v0.9.1 is public; the site is READY, waiting for P1's word to publish
+- merged tree-next 8fc5d3b2 (release tree); rebuilt root + trunk + branch here; films re-recorded on it
+  (run rel1, ~/.cache/p5-films/rel1: talk 15.8 s, tree 17.0 s, file 15.6 s, all checks pass, sheets looked at).
+- model step + Windows steps now in the installers' own words (model-step.sh, veraldar.nsi).
+- check-commands.py: --dist (draft through a mirror container) ALL PASS, then with NO flags against the public
+  release ALL PASS (33 runs: debian:12, ubuntu:24.04, ubuntu:22.04; the signature block verifies for real).
+  Public SHA256SUMS == the draft's. v0.9.1 published 2026-11-21 09:39 UTC.
+- site-deploy.sh --dry-run against the real server: "release v0.9.1: 6 linked files, all there", would change
+  3 files (index, start, sw.js) and add 20; nothing touched. Stand-in test 10/10 (SITE_RELEASES simulates a
+  missing release now).
+- systemd-run gotcha: StandardOutput=file: does NOT truncate — use truncate: (stale tails fooled me twice).
+- NEXT, only on P1's word: scripts/site-deploy.sh (no flags) → it backs up, copies, checks live byte for byte;
+  then curl+grep the live pages and report. Undo: scripts/site-deploy.sh --undo.
+- still beta on all three add-a-computer pages until P4 reports each PROVEN (one-word edit per page + deploy).
