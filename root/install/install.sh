@@ -364,8 +364,13 @@ if [ "$MODEL_PROVIDER_ARG" = same ]; then
   die "--model-provider same is for a computer that joins (join.sh): this is the home root — zai, openrouter, anthropic, openai or other" 64
 elif [ -n "$MODEL_PROVIDER_ARG" ]; then
   model_from_provider "$MODEL_PROVIDER_ARG" "$MODEL_ARG" || die "$MODEL_ERR" 64
-elif [ -z "${YGG_UPSTREAM_BASE_URL:-}" ] && ! grep -q '^YGG_UPSTREAM_BASE_URL=.' "$ENV_FILE" 2>/dev/null && [ -t 0 ]; then
-  model_step home || die "no model chosen" 64
+elif [ -n "$MODEL_ARG" ]; then
+  die "--model goes with --model-provider" 64
+elif [ -z "${YGG_UPSTREAM_BASE_URL:-}" ] && ! grep -q '^YGG_UPSTREAM_BASE_URL=.' "$ENV_FILE" 2>/dev/null; then
+  if [ -t 0 ]; then model_step home || die "no model chosen" 64
+  elif [ -n "${YGG_UPSTREAM_API_KEY:-}" ]; then # a key with no provider to send it to would be written beside an empty address
+    die "YGG_UPSTREAM_API_KEY is set, but not whose it is: add --model-provider zai|openrouter|anthropic|openai (or --upstream-env FILE)" 64
+  fi
 fi
 
 # ---------------------------------------------------------------------------- your trunk's line
@@ -412,6 +417,8 @@ install_brain() {
   if [ -e "$ENV_FILE" ]; then
     if { ! grep -q '^YGG_UPSTREAM_BASE_URL=.' "$ENV_FILE" || [ -n "$MODEL_PROVIDER_ARG" ]; } && [ -n "${YGG_UPSTREAM_BASE_URL:-}" ]; then   # (--model-provider: a change asked for)
       for k in "${UP_KEYS[@]}"; do if [ -n "${!k:-}" ]; then envset "$ENV_FILE" "$k" "${!k}"; fi; done
+      # a model without a key (your own network) takes the old provider's key out
+      [ -n "${YGG_UPSTREAM_API_KEY:-}" ] || envset "$ENV_FILE" YGG_UPSTREAM_API_KEY ''
       say "config  $ENV_FILE (the model set)"; CHANGED="${CHANGED}yggdrasil.service "
     else say "config  $ENV_FILE (kept)"; fi
   else
@@ -423,6 +430,8 @@ install_brain() {
     mv "$ENV_FILE.new" "$ENV_FILE"
     say "config  $ENV_FILE (new$(grep -q '^YGG_UPSTREAM_BASE_URL=.' "$ENV_FILE" || echo '; set YGG_UPSTREAM_BASE_URL'))"
   fi
+  # the key lives in $ENV_FILE (600) from here on: nothing this script starts later inherits it
+  unset YGG_UPSTREAM_API_KEY
   FILES+=("$BIN_DIR/yggdrasil  755  brain binary" "$ENV_FILE  600  brain config (upstream URL + key)" "$DATA_DIR/  700  brain session store")
 
   # unit: regenerated from the template, replaced only if the content changed.
@@ -443,8 +452,8 @@ if [ $MODE = brain ]; then
   install_brain
   [ $SYSTEMD_SEES = 1 ] && systemctl --user daemon-reload
   if [ $NOW = 1 ]; then
-    [ $SYSTEMD_SEES = 1 ] || { echo "--now: the user manager does not read $UNIT_DIR (or has no session bus); not starting" >&2; exit 1; }
     grep -q '^YGG_UPSTREAM_BASE_URL=.' "$ENV_FILE" || { echo "--now: set YGG_UPSTREAM_BASE_URL in $ENV_FILE first" >&2; exit 1; }
+    [ $SYSTEMD_SEES = 1 ] || { echo "--now: the user manager does not read $UNIT_DIR (or has no session bus); not starting" >&2; exit 1; }
     systemctl --user enable yggdrasil.service
     systemctl --user restart yggdrasil.service
     say "service enabled and (re)started"

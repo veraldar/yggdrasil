@@ -39,6 +39,7 @@ The hub's join contract (client side):
 Secrets (join secret, root secret, link tokens, peer token, upstream key) only ever go to files of
 mode 600 in DIR and are never printed. Exit codes of `join`: 0 approved, 3 refused, 4 expired, 1 error.
 """
+import http.client as http_client
 import json, os, re, shutil, ssl, struct, subprocess, sys, time, urllib.error, urllib.parse, urllib.request, zlib
 
 EXIT_REFUSED, EXIT_EXPIRED = 3, 4
@@ -408,6 +409,7 @@ def cmd_brain_env(o):
     base = vals.get("YGG_UPSTREAM_BASE_URL", "")
     if not base and o.no_upstream_ok:
         base = None   # "Same as the home root": the model comes over the root link after the approval
+        order = [k for k in order if not k.startswith("YGG_UPSTREAM_")]   # no stray key without its address
     elif not base:
         print("rootjoin: no model upstream: set YGG_UPSTREAM_BASE_URL (and _API_KEY, _MODEL) or pass --upstream-env FILE",
               file=sys.stderr)
@@ -478,8 +480,8 @@ def cmd_model_fetch(o):
                 st, raw = r.status, r.read(65536)
         except urllib.error.HTTPError as e:
             st = e.code
-        except (urllib.error.URLError, OSError) as e:
-            last = str(getattr(e, "reason", e))
+        except (urllib.error.URLError, http_client.HTTPException, OSError) as e:   # the tunnel still coming up
+            last = str(getattr(e, "reason", e)) or type(e).__name__
         if st == 200:
             try:
                 m = json.loads(raw.decode())
@@ -488,7 +490,8 @@ def cmd_model_fetch(o):
             vals = [m.get(k) if isinstance(m, dict) else None for k in ("base_url", "style", "model", "api_key")]
             base, style, model, key = vals
             if (not all(isinstance(v, str) for v in vals) or any("\n" in v or "\r" in v for v in vals)
-                    or not re.match(r"^https?://[^\s]+$", base) or style not in ("openai", "anthropic") or not model):
+                    or not re.match(r"^https?://[^\s]+$", base) or style not in ("openai", "anthropic") or not model.strip()
+                    or model != model.strip() or key != key.strip()):
                 print("rootjoin: the home root's answer is not a model (base_url, style, model, api_key)", file=sys.stderr)
                 return 8
             write_private(o.out, "YGG_UPSTREAM_BASE_URL=%s\nYGG_UPSTREAM_STYLE=%s\nYGG_UPSTREAM_MODEL=%s\n"

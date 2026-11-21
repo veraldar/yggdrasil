@@ -38,6 +38,7 @@ model_from_provider() { # PROVIDER [MODEL]
   MODEL_PROVIDER=$1
   if [ "$1" = other ]; then
     [ -n "${YGG_UPSTREAM_BASE_URL:-}" ] || { MODEL_ERR="--model-provider other needs its address: --upstream-env FILE (YGG_UPSTREAM_BASE_URL, _STYLE, _MODEL, _API_KEY lines)"; return 1; }
+    [ -z "${2:-}" ] || YGG_UPSTREAM_MODEL=$2
     return 0
   fi
   [ -n "${YGG_UPSTREAM_API_KEY:-}" ] || { MODEL_ERR="--model-provider $1 needs the $P_LABEL API key: YGG_UPSTREAM_API_KEY in the environment (never on the command line)"; return 1; }
@@ -56,9 +57,10 @@ model_step() { # home|join
   while :; do
     read -r -p "Choose [1]: " a || return 1
     a=${a:-1}
-    case $a in *[!0-9]*|'') ;; *) if [ "$a" -ge 1 ] && [ "$a" -le "$n" ]; then break; fi ;; esac
+    case $a in [0-9]|[0-9][0-9]) a=$((10#$a)); if [ "$a" -ge 1 ] && [ "$a" -le "$n" ]; then break; fi ;; esac
   done
-  i=0; for p in $list; do i=$((i + 1)); [ "$i" = "$a" ] && { MODEL_PROVIDER=$p; break; }; done
+  MODEL_PROVIDER=''
+  i=0; for p in $list; do i=$((i + 1)); [ "$i" -eq "$a" ] && { MODEL_PROVIDER=$p; break; }; done
   [ "$MODEL_PROVIDER" = same ] && return 0
   model_preset "$MODEL_PROVIDER"
   if [ "$MODEL_PROVIDER" = other ]; then

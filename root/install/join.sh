@@ -449,29 +449,50 @@ esac
 UP_ARGS=() UP_TMP='' MODEL_SRC=''
 cleanup() { [ -n "$UP_TMP" ] && rm -f "$UP_TMP"; return 0; }
 trap cleanup EXIT
-up_tmp() { # the chosen provider's four lines into a file of ours (600), handed to rootjoin.py; the key leaves the shell
+up_tmp() { # the model's lines into a file of ours (600), handed to rootjoin.py
   UP_TMP=$(mktemp "$DIR/.upstream.XXXXXX")
-  printf 'YGG_UPSTREAM_BASE_URL=%s\nYGG_UPSTREAM_STYLE=%s\nYGG_UPSTREAM_MODEL=%s\nYGG_UPSTREAM_API_KEY=%s\n' \
-    "$YGG_UPSTREAM_BASE_URL" "$YGG_UPSTREAM_STYLE" "$YGG_UPSTREAM_MODEL" "${YGG_UPSTREAM_API_KEY:-}" >"$UP_TMP"
-  unset YGG_UPSTREAM_API_KEY
+  { printf 'YGG_UPSTREAM_BASE_URL=%s\n' "${YGG_UPSTREAM_BASE_URL:-}"
+    [ -z "${YGG_UPSTREAM_STYLE:-}" ] || printf 'YGG_UPSTREAM_STYLE=%s\n' "$YGG_UPSTREAM_STYLE"
+    [ -z "${YGG_UPSTREAM_MODEL:-}" ] || printf 'YGG_UPSTREAM_MODEL=%s\n' "$YGG_UPSTREAM_MODEL"
+    printf 'YGG_UPSTREAM_API_KEY=%s\n' "${YGG_UPSTREAM_API_KEY:-}"   # (empty: a model on your own network — and no old key kept)
+  } >"$UP_TMP"
   UP_ARGS=(--upstream "$UP_TMP")
 }
+HAD_MODEL=0; grep -q '^YGG_UPSTREAM_BASE_URL=.' "$DIR/brain.env" 2>/dev/null && HAD_MODEL=1
+[ -z "$MODEL_ARG" ] || [ -n "$MODEL_PROVIDER_ARG" ] || die "--model goes with --model-provider" 64
 if [ -n "$UPSTREAM_FILE" ]; then
   [ -r "$UPSTREAM_FILE" ] || die "--upstream-env $UPSTREAM_FILE: not readable"
-  UP_ARGS=(--upstream "$UPSTREAM_FILE")
-elif [ "$MODEL_PROVIDER_ARG" = same ]; then
+  [ "$MODEL_PROVIDER_ARG" != same ] || die "--model-provider same takes the home root's model: not with --upstream-env" 64
+  if [ -n "$MODEL_PROVIDER_ARG" ]; then # a provider by name, its key (and anything else) from the file
+    while IFS= read -r l || [ -n "$l" ]; do
+      l=${l%$'\r'}; l=${l#export }
+      case $l in YGG_UPSTREAM_*=*) ;; *) continue ;; esac
+      k=${l%%=*} v=${l#*=}
+      case $v in \"*\") v=${v#\"}; v=${v%\"} ;; \'*\') v=${v#\'}; v=${v%\'} ;; esac
+      printf -v "$k" '%s' "$v"
+    done <"$UPSTREAM_FILE"
+  fi
+fi
+if [ "$MODEL_PROVIDER_ARG" = same ]; then
   MODEL_SRC=home
 elif [ -n "$MODEL_PROVIDER_ARG" ]; then
   model_from_provider "$MODEL_PROVIDER_ARG" "$MODEL_ARG" || die "$MODEL_ERR" 64
-  [ "$MODEL_PROVIDER_ARG" = other ] || up_tmp
-elif [ -n "${YGG_UPSTREAM_BASE_URL:-}" ] || grep -q '^YGG_UPSTREAM_BASE_URL=.' "$DIR/brain.env" 2>/dev/null; then
-  :   # given in the environment, or this root already has its model: kept
+  up_tmp
+elif [ -n "$UPSTREAM_FILE" ]; then
+  UP_ARGS=(--upstream "$UPSTREAM_FILE")   # your file as it is (any other YGG_* line in it is kept too)
+elif [ -n "${YGG_UPSTREAM_BASE_URL:-}" ]; then
+  up_tmp                                  # given in the environment
+elif [ $HAD_MODEL = 1 ]; then
+  :                                       # this root already has its model: kept
 elif [ -t 0 ]; then
   model_step join || die "no model chosen" 64
   if [ "$MODEL_PROVIDER" = same ]; then MODEL_SRC=home; else up_tmp; fi
 else
   MODEL_SRC=home
 fi
+# from here on the key lives in a file only: nothing this script starts (the helper, the node, the services)
+# inherits it from the environment
+unset YGG_UPSTREAM_API_KEY YGG_UPSTREAM_BASE_URL YGG_UPSTREAM_STYLE YGG_UPSTREAM_MODEL
 brain_env() { # write DIR/brain.env: the upstream now; plus the join's lines once joined
   local rc=0 out
   local home=(); [ "$MODEL_SRC" = home ] && home=(--no-upstream-ok)   # the model comes after the approval
@@ -483,6 +504,7 @@ brain_env() { # write DIR/brain.env: the upstream now; plus the join's lines onc
   if [ "$out" = changed ]; then CHANGED=1; fi
 }
 brain_env   # before the join: a bad upstream fails here, and a resumed join remembers it
+if [ -n "$UP_TMP" ]; then rm -f "$UP_TMP"; UP_TMP=''; UP_ARGS=(); fi   # brain.env (600) holds it now: kept from there
 write_conf() { # write_conf HUB SUPERVISOR — the settings re-runs read (no secrets)
   {
     echo "# yggdrasil-root — written by join.sh; re-runs read it (pass an option to change a value)"
@@ -800,7 +822,15 @@ if [ "$MODEL_SRC" = home ]; then
     UP_TMP=$(mktemp "$DIR/.upstream.XXXXXX"); rc=0
     "$PY" "$HELPER" model-fetch --state "$DIR" --peer-port "$PEER_PORT" --out "$UP_TMP" --wait "${JOIN_MODEL_WAIT:-90}" || rc=$?
     case $rc in
-      0) UP_ARGS=(--upstream "$UP_TMP"); MODEL_SRC=''; brain_env; rm -f "$UP_TMP"; UP_TMP= ;;
+      0) UP_ARGS=(--upstream "$UP_TMP"); MODEL_SRC=''; brain_env; rm -f "$UP_TMP"; UP_TMP=''; UP_ARGS=()
+         if [ $HAD_MODEL = 1 ]; then # it was running on its old model: restart it on the new one
+           case $SUP in
+             systemd) systemctl --user restart yggdrasil-root-brain.service ;;
+             launchd) launchctl kickstart -k "gui/$(id -u)/$LABEL.brain" ;;
+             nohup) CHANGED=1; start_nohup ;;
+           esac
+         fi ;;
+      130) exit 130 ;;
       7) NO_MODEL="the home root is an older version: it cannot hand its model over" ;;
       8) NO_MODEL="the home root refused to hand its model to this computer" ;;
       9) NO_MODEL="the home root's model runs on the home computer itself, so this computer cannot use it" ;;
