@@ -101,3 +101,4 @@
 - P5's brain session is blocked by "conversation open in a terminal" since 10:48: my 10:41 word and the owner's 14:37 follow-up (redo the films) failed there. P5 works from the terminal. Told MAIN.
 - 14:39 CORRECTION (MAIN): P5's session takes messages again — a message at 14:37:47 ran, P5 is running the owner's film redo and reports when live. My "unreachable" line was true until 14:37:13, stale since. Verify step closed.
 - WAITING ONLY ON: P5's new films (check them live when reported), P3 contd joins (owner approvals), owner: reboot time, phone pairing (new link on request), Windows run. Then: coturn off (AP-7) after the owner's phone voice on ap.
+- 15:21 P5 third deploy (veraldar-site dbfd45b, live 15:20): new main film films/yggdrasil.mp4 (73 s). Checked by me: mp4/webm 200, range 206, plays on Pixel 7 (4 s in, 0 errors), download lines unchanged. Merged p5-site (sim/films/movie/ only).
