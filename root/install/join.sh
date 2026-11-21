@@ -362,11 +362,13 @@ fi
 case $BRAIN_PORT$PEER_PORT in *[!0-9]*) die "ports must be numbers" 64 ;; esac
 
 # --------------------------------------------------------------------------- 1. brain binary
+REL_BIN=/nonexistent; [ -f "$REPO/RELEASE" ] && [ -d "$REPO/bin" ] && REL_BIN=$REPO/bin   # an unpacked release
 find_brain() {
   local c
   if [ -n "$BRAIN_BIN" ]; then echo "$BRAIN_BIN"; return; fi
   [ $BUILD = 1 ] && return 0
-  for c in "$BIN/yggdrasil" "$REPO/bin/yggdrasil" "$REPO/root/target/release/yggdrasil" "$HOME/.local/bin/yggdrasil" "$(command -v yggdrasil || true)"; do
+  # run from a release: ITS brain (a re-run of a newer release's join.sh is the update); else the one installed
+  for c in "$REL_BIN/yggdrasil" "$BIN/yggdrasil" "$REPO/root/target/release/yggdrasil" "$HOME/.local/bin/yggdrasil" "$(command -v yggdrasil || true)"; do
     [ -n "$c" ] && [ -x "$c" ] && { echo "$c"; return; }
   done
   return 0   # none found: the caller builds one (a failing $(…) would end the script under set -e)
@@ -401,7 +403,7 @@ copy "$DIAL_SRC" "$BIN/root-dial.py" 755
 find_net() {
   local c
   if [ -n "$NET_BIN" ]; then echo "$NET_BIN"; return; fi
-  for c in "$BIN/bifrost-net" "$REPO/bin/bifrost-net-root" "$REPO/bin/bifrost-net" \
+  for c in "$REL_BIN/bifrost-net-root" "$REL_BIN/bifrost-net" "$BIN/bifrost-net" \
     "$REPO/trunk/target/release/bifrost-net" "$REPO/trunk/target/root/release/bifrost-net" \
     "$HOME/.local/bin/bifrost-net" "$(command -v bifrost-net || true)"; do
     [ -n "$c" ] && [ -x "$c" ] && { echo "$c"; return; }
