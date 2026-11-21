@@ -82,6 +82,25 @@ test('v0.9 ladder: QR pair → P2P round-trip → revoke → kill-switch → re-
     await expect(box.getByTestId('pair-fp')).toHaveText(frag.get('fp')!);
   });
 
+  await test.step('1b a phone that is not paired sees one quiet line and nothing of the console', async () => {
+    // the owner's rule (11-21): "if there is nothing I should be seeing then I should see nothing"
+    await pixel.goto(`${LAN}/`);
+    await pixel.waitForURL(/\/pair\?unpaired=1/, { timeout: 20_000 });
+    await expect(pixel.getByTestId('pair-quiet')).toHaveText('not paired');
+    expect((await pixel.locator('body').innerText()).trim()).toBe('not paired');
+    await expect(pixel.getByTestId('pair-qr')).toHaveCount(0);
+    await expect(pixel.getByTestId('pair-status')).toHaveCount(0);
+    await expect(pixel.locator('a')).toHaveCount(0); // no back, no devices link: nothing it could use
+    if (process.env.PW_SHOTS) await pixel.screenshot({ path: join(process.env.PW_SHOTS, 'pair-unpaired-phone.png') });
+    // the console's half is as it was: its heading, the QR, the expiry, the box key, the devices link
+    await expect(box.getByText('scan with the phone')).toBeVisible();
+    await expect(box.getByTestId('pair-qr').locator('svg')).toBeVisible();
+    await expect(box.getByText('expires')).toBeVisible();
+    await expect(box.getByTestId('pair-fp')).toHaveText(/^sha-256 /);
+    await expect(box.getByRole('link', { name: /devices/ })).toBeVisible();
+    if (process.env.PW_SHOTS) await box.screenshot({ path: join(process.env.PW_SHOTS, 'pair-console.png') });
+  });
+
   await test.step('2 phone scans: pairs, mints its token, lands on home — the door (fresh)', async () => {
     await phone.goto(firstQr);
     // never straight into MAIN: a phone that never walked the door gets the door first

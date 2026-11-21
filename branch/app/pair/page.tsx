@@ -8,7 +8,11 @@
  *  tree door for a device that never walked it (its last step is MAIN), the
  *  session list for one that did. Never straight into MAIN: a fresh phone
  *  would skip the door (11-14, a phone paired through the trunk). The
- *  fragment is wiped from history before anything else runs. */
+ *  fragment is wiped from history before anything else runs.
+ *  Anyone else (no fragment, and the box refuses to mint: a phone that is not paired, a
+ *  stranger at the public address) is shown one quiet line and nothing of the console:
+ *  no heading, no QR frame, no link they cannot use. The owner's rule (11-21): "if there
+ *  is nothing I should be seeing then I should see nothing". */
 import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { LineIcon } from '@/components/line-icon';
@@ -39,7 +43,7 @@ function deviceName(): string {
 }
 
 export default function PairPage() {
-  const [mode, setMode] = useState<'console' | 'phone' | null>(null);
+  const [mode, setMode] = useState<'console' | 'phone' | 'quiet' | null>(null);
   const [code, setCode] = useState<Code | null>(null);
   const [status, setStatus] = useState('');
   const [error, setError] = useState('');
@@ -51,10 +55,7 @@ export default function PairPage() {
       history.replaceState(null, '', '/pair');
       void claim(frag);
     } else {
-      setMode('console');
-      if (new URLSearchParams(location.search).get('unpaired')) {
-        setStatus('this device is not paired — scan the QR on the box');
-      }
+      // the console or not: only the box's answer to the mint tells. Until it comes, nothing is drawn.
       void mint();
     }
   }, []);
@@ -67,12 +68,22 @@ export default function PairPage() {
   }, [mode, code]);
 
   async function mint() {
-    const r = await fetch('/api/pair/code', { method: 'POST' });
-    if (!r.ok) {
-      setError('pairing codes come from the box itself — open /pair on the box');
+    const r = await fetch('/api/pair/code', { method: 'POST' }).catch(() => null);
+    if (r && (r.status === 401 || r.status === 403)) {
+      // not the box's console: codes are made there only, and nothing here is for this visitor
+      setMode('quiet');
+      return;
+    }
+    setMode('console');
+    if (!r || !r.ok) {
+      setError('no pairing code yet — trying again');
+      setTimeout(() => void mint(), 5_000);
       return;
     }
     setError('');
+    if (new URLSearchParams(location.search).get('unpaired')) {
+      setStatus('this device is not paired — scan the QR on the box');
+    }
     setCode(await r.json());
   }
 
@@ -106,6 +117,17 @@ export default function PairPage() {
     // be in charge before the first page of the app asks for any
     await Promise.race([navigator.serviceWorker?.ready, new Promise((r) => setTimeout(r, 3_000))]);
     location.replace('/');
+  }
+
+  if (mode === null) return <main className="min-h-dvh" />;
+  if (mode === 'quiet') {
+    return (
+      <main className="flex min-h-dvh items-center justify-center px-3">
+        <p data-testid="pair-quiet" className="text-[12px] text-[var(--oz-dim)]">
+          not paired
+        </p>
+      </main>
+    );
   }
 
   return (
