@@ -12,7 +12,9 @@
  *  Anyone else (no fragment, and the box refuses to mint: a phone that is not paired, a
  *  stranger at the public address) is shown one quiet line and nothing of the console:
  *  no heading, no QR frame, no link they cannot use. The owner's rule (11-21): "if there
- *  is nothing I should be seeing then I should see nothing". */
+ *  is nothing I should be seeing then I should see nothing". They are never served any of the
+ *  app: the page gate (lib/gate.ts) serves this page in place of whatever they asked for. The road line
+ *  (components/pin-state.tsx) is hidden for them too: nothing is being sent. */
 import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { LineIcon } from '@/components/line-icon';
@@ -49,11 +51,23 @@ export default function PairPage() {
   const [error, setError] = useState('');
 
   useEffect(() => {
+    // this page decides what an unpaired visitor is shown, whatever the address says: the app's own
+    // "you are signed out" redirect (components/device-auth.tsx) stands down while it is up
+    document.documentElement.dataset.pairPage = '1';
     const frag = new URLSearchParams(location.hash.slice(1));
     if (frag.get('code')) {
       setMode('phone');
       history.replaceState(null, '', '/pair');
       void claim(frag);
+    } else if (location.pathname !== '/pair') {
+      // served in place of a page of the app (the page gate, lib/gate.ts): this visitor is not the
+      // console and not a device the server knew. Still paired after all → that page again; else to
+      // /pair's own address. Nothing is drawn on the way.
+      void (async () => {
+        if (await stillPaired()) return;
+        sessionStorage.setItem('pair-asked', String(Date.now()));
+        location.replace('/pair?unpaired=1');
+      })();
     } else {
       // the console or not: only the box's answer to the mint tells. Until it comes, nothing is drawn.
       void mint();
@@ -70,7 +84,13 @@ export default function PairPage() {
   async function mint() {
     const r = await fetch('/api/pair/code', { method: 'POST' }).catch(() => null);
     if (r && (r.status === 401 || r.status === 403)) {
-      // not the box's console: codes are made there only, and nothing here is for this visitor
+      // not the box's console: codes are made there only, and nothing here is for this visitor.
+      // One more question first: a PAIRED phone lands here too when the page gate (lib/gate.ts) did
+      // not get its cookie (a link followed from another site) — from inside the site the refresh
+      // cookie rides, and a phone that is still paired goes on to where it was going.
+      if (await stillPaired()) return;
+      document.documentElement.dataset.unpaired = '1';
+      window.dispatchEvent(new Event('bifrost:unpaired'));
       setMode('quiet');
       return;
     }
@@ -85,6 +105,22 @@ export default function PairPage() {
       setStatus('this device is not paired — scan the QR on the box');
     }
     setCode(await r.json());
+  }
+
+  /** true = this device is paired after all, and is on its way to the page it asked for. At most once per
+   *  8 s per tab: if the gate serves this page again, it is not paired for this server, whatever the refresh said. */
+  async function stillPaired(): Promise<boolean> {
+    const last = Number(sessionStorage.getItem('pair-bounce') || 0);
+    if (Date.now() - last < 8_000) return false;
+    // asked a moment ago, on the page served in place: the answer was no
+    if (Date.now() - Number(sessionStorage.getItem('pair-asked') || 0) < 5_000) return false;
+    const r = await fetch('/api/pair/refresh', { method: 'POST' }).catch(() => null);
+    if (!r || !r.ok) return false;
+    sessionStorage.setItem('pair-bounce', String(Date.now()));
+    // served in place of the page it asked for: that page again, now with its cookie. On /pair itself: home.
+    if (location.pathname === '/pair') location.replace('/');
+    else location.reload();
+    return true;
   }
 
   async function claim(frag: URLSearchParams) {

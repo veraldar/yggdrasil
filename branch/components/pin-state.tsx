@@ -23,13 +23,21 @@ const SAY: Record<PinState, string> = {
 
 export function PinStateLine() {
   const [s, setS] = useState(pinState());
+  // /pair found this visitor is not paired (a phone that was, once, still holds its old pin): no road to name
+  const [unpaired, setUnpaired] = useState(false);
   useEffect(() => onPinState((state, why) => setS({ state, why })), []);
+  useEffect(() => {
+    const on = () => setUnpaired(true);
+    if (document.documentElement.dataset.unpaired) on();
+    window.addEventListener('bifrost:unpaired', on);
+    return () => window.removeEventListener('bifrost:unpaired', on);
+  }, []);
   return (
     <div
       data-testid="pin-state"
       data-state={s.state}
       title={s.why}
-      hidden={s.state === 'off'}
+      hidden={s.state === 'off' || unpaired}
       style={{
         position: 'fixed',
         left: 8,
