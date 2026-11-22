@@ -112,3 +112,4 @@
 - Rollback fix edbb0db1: deploy backs up first (no backup → no brain deploy), a failed brain deploy restores data/session + agents.json from that backup before the old release starts; `hub-units.sh rollback <id> <backup>` by hand. Proven on a copy of 61 live sessions: new brain migrates (0 claude/agy roles), restore byte-identical, live release reads them as today.
 - Merged roles-rework 0d179319 (merge c7225857). Green: cargo 153, tree-e2e 141, restart-e2e, app build.
 - DEPLOY (cuts my turn): release from p1-hub → ~/Work/tree-next/scripts/hub-units.sh deploy <id> (all units). Log switch.log; it prints "-- the way back for the data: <backup>". AFTER: health; GET /session → no agent claude/agy, engines set; live-door both doors; Pixel-7 session list screenshot (role badge + engine word); report MAIN with release id + backup path + way back command.
+- release 20261122-2146-111f06ee
