@@ -2391,9 +2391,9 @@ async fn get_agent(State(st): State<AppState>, Path(name): Path<String>) -> Resp
                     })
                     .collect::<Vec<_>>(),
                 Some(h) => vec![json!({ "tier": h, "models": [], "text": if h == "claude" {
-                    format!("Claude Code brings its own system prompt; this agent adds:\n\n{}", harness_system(&shared, &prof))
+                    format!("Claude Code brings its own system prompt; this role adds:\n\n{}", harness_system(&shared, &prof))
                 } else if h == "antigravity" {
-                    format!("Antigravity brings its own system prompt; this agent's first message adds:\n\n{}", harness_system(&shared, &prof))
+                    format!("Antigravity brings its own system prompt; this role's first message adds:\n\n{}", harness_system(&shared, &prof))
                 } else {
                     format!("{h} brings its own system prompt (it takes no extra instructions)")
                 } })],
@@ -4748,7 +4748,7 @@ async fn main() {
                 s.info["model"]["id"] = json!(m);
             }
             persist(&data_dir, id, s);
-        } else if !main && s.info["agent"] == "coordinator" {
+        } else if !main && s.info["agent"] == "coordinator" && !roots::is_root_main(s) {
             // the coordinator is MAIN's alone: a session stamped with it before that rule (a
             // "fix this" from MAIN, 11-13 morning) runs the default agent
             s.info["agent"] = json!(default_agent);
