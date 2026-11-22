@@ -534,17 +534,30 @@ def main():
         check("automation not in MAIN's transcript", len(req(HOME_PORT, "GET", f"/session/{main_id}/message")) == before)
         check("automation filed in the inbox", wait(lambda: any(e["from"] == "external" for e in req(HOME_PORT, "GET", f"/session/{main_id}/inbox")), 15))
 
-        # 6b. agents: read, create, refuse, switch (model stamped, tools enforced), harness, lock, delete
+        # 6b. roles: read, create, refuse, switch (model stamped, tools enforced), engines, lock, delete
         listed_names = [a["name"] for a in req(HOME_PORT, "GET", "/agent")]
-        check("agent list exposes claude and agy, never AGI", "claude" in listed_names and "agy" in listed_names and "AGI" not in listed_names, listed_names)
-        cl = req(HOME_PORT, "GET", "/agent/claude")
-        check("claude agent: Claude Code on Opus", cl["harness"] == "claude" and cl["model"] == "opus" and cl["builtin"], {k: cl.get(k) for k in ("harness", "model")})
-        check("claude offers Claude Code's models, Fable first", {"fable", "opus", "sonnet", "haiku"} <= set(cl["models"]) and cl["models"][0] == "fable", cl.get("models"))
+        check("the roles list holds the six roles, no claude, agy or AGI (roles rework: engines now)",
+              {"coordinator", "lead", "build", "fix", "review", "research"} <= set(listed_names) and not {"claude", "agy", "AGI"} & set(listed_names), listed_names)
+        for old in ("claude", "agy"):
+            try:
+                req(HOME_PORT, "GET", f"/agent/{old}")
+                check(f"{old} is no role any more (404)", False, "found")
+            except urllib.error.HTTPError as e:
+                check(f"{old} is no role any more (404)", e.code == 404, e.code)
+        engines = {e["name"]: e for e in req(HOME_PORT, "GET", "/engine")}
+        check("the engines: root, Claude Code, Antigravity; opencode and Codex behind the fold",
+              list(engines) == ["root", "claude", "antigravity", "opencode", "codex"] and [n for n, e in engines.items() if e["more"]] == ["opencode", "codex"]
+              and engines["claude"]["word"] == "claude" and engines["antigravity"]["word"] == "agy" and engines["root"]["word"] is None, list(engines))
+        cl = engines["claude"]
+        check("Claude Code's default model is opus (the old claude agent's)", cl["model"] == "opus" and cl["label"] == "Claude Code", cl)
+        check("Claude Code offers its models, Fable first", {"fable", "opus", "sonnet", "haiku"} <= set(cl["models"]) and cl["models"][0] == "fable", cl.get("models"))
         try:
-            req(HOME_PORT, "PUT", "/agent/claude", {"model": "gpt-free-text"})
-            check("a harness model must be one it offers", False, "accepted")
+            req(HOME_PORT, "PUT", "/engine/claude", {"model": "gpt-free-text"})
+            check("an engine's model must be one it offers", False, "accepted")
         except urllib.error.HTTPError as e:
-            check("a harness model must be one it offers", e.code == 400, e.code)
+            check("an engine's model must be one it offers", e.code == 400, e.code)
+        check("an engine's default model is set once", req(HOME_PORT, "PUT", "/engine/claude", {"model": "sonnet"})["model"] == "sonnet")
+        req(HOME_PORT, "PUT", "/engine/claude", {"model": "opus"})
         made = req(HOME_PORT, "PUT", "/agent/reader", {"description": "reads only", "tools": {"read": True}, "model": "mock", "variant": "low"})
         check("create an agent", made["tools"]["read"] and not made["tools"]["bash"] and made["harness"] == "root", made.get("tools"))
         try:
@@ -561,9 +574,26 @@ def main():
         r = req(HOME_PORT, "POST", f"/session/{sid}/message", {"parts": [{"type": "text", "text": tool([["bash", {"command": "echo hi"}]])}]}, 60)
         out = [p for p in r["parts"] if p["type"] == "tool"][0]["state"]["output"]
         check("the switched agent's tools are enforced", "permission denied" in out, out)
-        req(HOME_PORT, "POST", f"/api/session/{sid}/agent", {"agent": "claude"})
+        req(HOME_PORT, "POST", f"/api/session/{sid}/engine", {"engine": "claude"})
         info = req(HOME_PORT, "GET", f"/session/{sid}")
-        check("switching to claude moves the session onto Claude Code", info["agent"] == "claude" and info["model"] == {"id": "opus", "providerID": "claude"} and info["harness"]["kind"] == "claude", (info.get("agent"), info["model"], info.get("harness")))
+        check("switching the engine moves the session onto Claude Code, its role unchanged",
+              info["agent"] == "reader" and info["engine"] == "claude" and info["model"] == {"id": "opus", "providerID": "claude"} and info["harness"]["kind"] == "claude", (info.get("agent"), info.get("engine"), info["model"], info.get("harness")))
+        old_word = req(HOME_PORT, "POST", "/session", {"title": "old word", "agent": "claude", "test": True})
+        check("the old word claude: a build on Claude Code", old_word["agent"] == "build" and old_word["engine"] == "claude", (old_word.get("agent"), old_word.get("engine")))
+        lead_agy = req(HOME_PORT, "POST", "/session", {"title": "lead on agy", "agent": "lead", "engine": "agy", "test": True})
+        check("a new session takes the engine asked for: a lead on Antigravity", lead_agy["agent"] == "lead" and lead_agy["engine"] == "antigravity" and lead_agy["harness"] == {"kind": "antigravity"}, (lead_agy.get("agent"), lead_agy.get("engine")))
+        try:
+            req(HOME_PORT, "POST", f"/api/session/{main_id}/engine", {"engine": "claude"})
+            check("MAIN stays on the root", False, "accepted")
+        except urllib.error.HTTPError as e:
+            check("MAIN stays on the root", e.code == 400, e.code)
+        r = say(tool([["session_start", {"title": "lead on the root", "agent": "lead", "engine": "root", "brief": "Reply with exactly: ROOT-LEAD"}]]))
+        out = [p for p in r["parts"] if p["type"] == "tool"][0]["state"]["output"]
+        lr = next((x for x in req(HOME_PORT, "GET", "/session") if x["title"] == "lead on the root"), {})
+        check("MAIN's session_start takes an engine: a lead on the root", out.startswith("STARTED") and lr.get("agent") == "lead" and lr.get("engine") == "root", (out, lr.get("agent"), lr.get("engine")))
+        r = say(tool([["session_start", {"title": "on emacs", "agent": "build", "engine": "emacs", "brief": "Reply with exactly: NO"}]]))
+        out = [p for p in r["parts"] if p["type"] == "tool"][0]["state"]["output"]
+        check("…an engine that is not one is refused, with the list", "unknown engine" in out and "antigravity" in out, out)
         req(HOME_PORT, "POST", f"/session/{sid}/model".replace("/session/", "/api/session/"), {"model": {"id": "sonnet", "providerID": "claude"}})
         check("a Claude Code session can change model within Claude's", req(HOME_PORT, "GET", f"/session/{sid}")["model"] == {"id": "sonnet", "providerID": "claude"})
         try:
@@ -571,8 +601,8 @@ def main():
             check("…and only within Claude's models", False, "accepted")
         except urllib.error.HTTPError as e:
             check("…and only within Claude's models", e.code == 400, e.code)
-        cl2 = req(HOME_PORT, "GET", "/agent/claude")
-        check("model labels for the picker: fable the strongest", cl2["model_labels"]["claude"]["fable"].startswith("strongest") and not cl2["model_labels"]["claude"]["opus"].startswith("strongest"), cl2.get("model_labels", {}).get("claude"))
+        cl2 = {e["name"]: e for e in req(HOME_PORT, "GET", "/engine")}["claude"]
+        check("model labels for the picker: fable the strongest", cl2["labels"]["fable"].startswith("strongest") and not cl2["labels"]["opus"].startswith("strongest"), cl2.get("labels"))
 
         # 6c. continue a Claude Code session from the phone: the list (metadata only), attach, refusals
         cc_id, cc_cwd = "0f1e2d3c-4b5a-4968-8776-655443322110", os.path.join(tmp, "home", "work", "proj")
@@ -589,7 +619,8 @@ def main():
         check("Claude Code's sessions are listed: id, cwd, modified, title", row and row["cwd"] == cc_cwd and row["title"] == "remember the word walrus; reply ok" and row["modified"] > 0 and set(row) == {"id", "cwd", "modified", "title"}, row)
         check("…metadata only, no transcript content", "TOOL-OUTPUT" not in json.dumps(listed) and '"ok"' not in json.dumps(listed))
         att = req(HOME_PORT, "POST", "/session", {"agent": "claude", "harness": {"id": cc_id}, "cwd": cc_cwd})
-        check("attach: a claude session holding the terminal's conversation", att["agent"] == "claude" and att["harness"] == {"kind": "claude", "id": cc_id, "attached": True} and att["cwd"] == cc_cwd, (att.get("agent"), att.get("harness"), att.get("cwd")))
+        check("attach: a session on Claude Code holding the terminal's conversation (no role: the shared prompt only)",
+              att["engine"] == "claude" and att["instructions"] == "shared" and att["harness"] == {"kind": "claude", "id": cc_id, "attached": True} and att["cwd"] == cc_cwd, (att.get("agent"), att.get("engine"), att.get("harness"), att.get("cwd")))
         check("attach: titled after it · Claude Code", att["title"] == "remember the word walrus; reply ok · Claude Code", att["title"])
         for name, body in (("a non-uuid id", {"harness": {"id": "../../etc/passwd"}, "cwd": cc_cwd}),
                            ("a folder that does not exist", {"harness": {"id": cc_id}, "cwd": cc_cwd + "-gone"}),
@@ -654,10 +685,10 @@ def main():
         check("…and so is a brief that carries it", "never pass on the user's approval" in out and not any(x["title"] == "relay" for x in req(HOME_PORT, "GET", "/tree")), out)
 
         # 6d. Google's harness next to Claude Code's and Codex's: built-in agy + custom agent on Antigravity
-        agy_bi = req(HOME_PORT, "GET", "/agent/agy")
-        check("built-in agy: Antigravity with its own model pick", agy_bi["harness"] == "antigravity" and agy_bi["model"] is None and agy_bi["builtin"] and agy_bi["customizable"] == ["description", "model"], agy_bi)
+        agy_e = {e["name"]: e for e in req(HOME_PORT, "GET", "/engine")}["antigravity"]
+        check("the Antigravity engine: its own model pick by default", agy_e["model"] is None and agy_e["label"] == "Antigravity", agy_e)
         agy = req(HOME_PORT, "PUT", "/agent/agy-custom", {"harness": "antigravity", "description": "Antigravity"})
-        check("an agent can run on Antigravity", agy["harness"] == "antigravity" and agy["customizable"] == ["description", "model"], (agy.get("harness"), agy.get("customizable")))
+        check("a role can run on Antigravity by default", agy["harness"] == "antigravity" and agy["customizable"] == ["description", "model"], (agy.get("harness"), agy.get("customizable")))
         mbh = agy["models_by_harness"]
         check("Gemini CLI is no longer a harness", "gemini" not in mbh and set(mbh) == {"root", "claude", "opencode", "codex", "antigravity"}, list(mbh))
         am = mbh["antigravity"]
@@ -688,12 +719,12 @@ def main():
             check("the coordinator's tools are locked", False, "accepted")
         except urllib.error.HTTPError as e:
             check("the coordinator's tools are locked", e.code == 400, e.code)
-        for bi in ("claude", "agy", "AGI"):
+        for bi in ("lead", "claude", "agy", "AGI"):
             try:
                 req(HOME_PORT, "DELETE", f"/agent/{bi}")
-                check(f"built-in agent {bi} cannot be deleted", False, "accepted")
+                check(f"{bi} cannot be deleted (a built-in role, or an engine)", False, "accepted")
             except urllib.error.HTTPError as e:
-                check(f"built-in agent {bi} cannot be deleted", e.code == 400, e.code)
+                check(f"{bi} cannot be deleted (a built-in role, or an engine)", e.code == 400, e.code)
         req(HOME_PORT, "DELETE", "/agent/reader")
         check("a made agent can be deleted", "reader" not in [x["name"] for x in req(HOME_PORT, "GET", "/agent")])
 

@@ -189,7 +189,9 @@ pub async fn tell_home(st: &AppState, pid: &str, root: &str, rid: &str, title: &
         return; // it runs on home itself: home lists it already
     }
     let by_title = st.sessions.lock().unwrap().get(caller).map(|s| s.info["title"].as_str().unwrap_or_default().to_string()).unwrap_or_default();
-    let body = json!({ "root": root, "id": rid, "title": title, "agent": profile, "hops": hops,
+    // what runs it there (the proxy here took it from that root): home's proxy shows the same
+    let engine = st.sessions.lock().unwrap().get(pid).map(|s| s.info["engine"].clone()).unwrap_or(Value::Null);
+    let body = json!({ "root": root, "id": rid, "title": title, "agent": profile, "engine": engine, "hops": hops,
         "by": { "root": st.config.peers.me, "session": caller, "title": by_title } });
     let told = |st: &AppState, v: &Value| {
         if let Some(hp) = v["proxy"].as_str() {
@@ -259,6 +261,7 @@ pub fn placed(st: &AppState, body: &Value) -> Result<String, String> {
     let by = json!({ "root": clip(&body["by"]["root"], 64), "title": clip(&body["by"]["title"], 120) });
     with_session(st, &id, |s| {
         s.info["remote"] = json!({ "root": root, "id": rid });
+        runs_as_there(&mut s.info, body);
         if let Some(h) = body["hops"].as_u64() {
             s.info["hops"] = json!(h.min(10));
         }
@@ -382,6 +385,7 @@ pub async fn adopt(st: &AppState, name: &str, rid: &str) -> Result<Value, (Statu
     let card = &info["card"];
     with_session(st, &pid, |s| {
         s.info["remote"] = json!({ "root": name, "id": rid });
+        runs_as_there(&mut s.info, &info);
         s.info["card"] = json!({ "topic": title, "status": card["status"].as_str().unwrap_or("idle"), "headline": card["headline"],
             "root": name, "adopted": true, "created": now_ms(), "updated": now_ms() });
     });
@@ -389,11 +393,26 @@ pub async fn adopt(st: &AppState, name: &str, rid: &str) -> Result<Value, (Statu
     Ok(json!({ "proxy": pid, "title": title }))
 }
 
+/// A proxy shows what runs the session on its root (roles rework): the engine, model and harness
+/// that root says — none it does not say (a root before the rework names no engine).
+fn runs_as_there(proxy: &mut Value, there: &Value) {
+    for k in ["engine", "model", "harness"] {
+        match there.get(k).filter(|v| !v.is_null()) {
+            Some(v) => proxy[k] = v.clone(),
+            None => {
+                if let Some(o) = proxy.as_object_mut() {
+                    o.remove(k);
+                }
+            }
+        }
+    }
+}
+
 /// `POST /session {title, agent?, root}` from the phone: the session is made on `root`; here it is
 /// a top-level proxy. Nothing is posted yet (the owner types the first message).
-pub async fn create_remote(st: &AppState, root: &str, title: &str, agent: Option<&str>) -> Result<Value, String> {
+pub async fn create_remote(st: &AppState, root: &str, title: &str, agent: Option<&str>, engine: Option<&str>) -> Result<Value, String> {
     let agent = agent.filter(|a| *a != "coordinator");
-    let (pid, _) = peers::open(st, None, root, title, agent, None, None, 0).await?;
+    let (pid, _) = peers::open(st, None, root, title, agent, engine, None, None, 0).await?;
     with_session(st, &pid, |s| {
         s.info["card"] = json!({ "topic": title, "status": "idle", "root": root, "created": now_ms(), "updated": now_ms() });
         s.info.clone()
@@ -1018,14 +1037,14 @@ mod tests {
     #[tokio::test]
     async fn the_phone_starts_a_session_on_another_root() {
         let (home, lab) = two_roots().await;
-        let info = create_remote(&home, "lab", "hi there", None).await.unwrap();
+        let info = create_remote(&home, "lab", "hi there", None, None).await.unwrap();
         let rid = info["remote"]["id"].as_str().unwrap();
         assert_eq!((info["card"]["root"].as_str(), info["parentID"].as_str()), (Some("lab"), None));
         let there = self::info(&lab, rid);
         assert_eq!(there["title"], "hi there");
         assert_eq!(there["report_to"]["root"], "home");
         assert!(there["hops"].is_null(), "the owner's own start is no hop");
-        assert!(create_remote(&home, "nowhere", "x", None).await.is_err());
+        assert!(create_remote(&home, "nowhere", "x", None, None).await.is_err());
         assert_eq!(home.sessions.lock().unwrap().len(), 1, "a refused start leaves no proxy");
     }
 
