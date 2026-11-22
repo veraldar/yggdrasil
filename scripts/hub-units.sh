@@ -28,6 +28,8 @@
 #                                   and both apps; health check after, the old settings back by itself on a
 #                                   failure. `wg-on --dry` shows what it would change, changes nothing
 #   hub-units.sh wg-off             the way back by hand (the newest backup of the four files)
+#   hub-units.sh rollback <id> <backup>  the way back later: releases/<id>, the brain's sessions and agents
+#                                   file restored from <backup> (the folder a deploy prints), health
 #   hub-units.sh status
 # switch / deploy / stageb-back restart the brain: run from inside it (a session's shell), they go on in
 # a unit of their own (log: ~/.local/share/yggdrasil/hub/logs/switch.log).
@@ -48,7 +50,7 @@ UNITS=$HOME/.config/systemd/user
 NODE=${NODE:-$HOME/.local/share/mise/installs/node/26.8.1/bin/node}
 OLD=$HOME/.local/state/trunk-preview
 LOGS=$HUB/logs
-PV=$HOME/.cache/root-sim/preview
+PV=${HUB_PV:-$HOME/.cache/root-sim/preview}
 ART=$HOME/Work/root-coord-pwa/artifacts
 BRAIN=http://127.0.0.1:4101
 
@@ -400,7 +402,13 @@ deploy() {
     case "$only" in "  " | *" $u "*) running="$running $u" ;; esac
   done
   case " $running " in *" hub-brain "*) brain=1 ;; esac
-  if [ "$brain" = 1 ]; then "$HOME/Work/tree-next/scripts/preview-backup.sh" || echo "backup failed — going on"; fi
+  local bk=""
+  if [ "$brain" = 1 ]; then
+    bk=$(backup_data)
+    # a release may change the data when it starts (11-22): no way back without a backup — no deploy
+    [ -n "$bk" ] || die "the backup failed — nothing was deployed"
+    echo "-- the way back for the data: $bk"
+  fi
   ln -sfn "$HUB/releases/$id" "$HUB/current"
   render
   # the brain drains in its ExecStop; the others restart at once
@@ -409,11 +417,63 @@ deploy() {
   if [ "$bad" = 1 ]; then
     echo "== deploy $id: failed — back to $prev"
     ln -sfn "$prev" "$HUB/current"
+    if [ "$brain" = 1 ]; then
+      # the new release may have changed the sessions when it started: the old one gets them back as
+      # it left them
+      systemctl --user stop hub-brain || true
+      restore_data "$bk" || echo "!! data NOT restored — the old release starts on what the new one left"
+    fi
     for u in $running; do systemctl --user restart "$u" || true; done
     health || echo "!! the previous release does not pass the health check either"
     exit 1
   fi
   echo "== deploy $id: done"
+  status || true
+}
+
+# the brain's data backed up; prints the backup's folder on its last line (empty: it failed)
+backup_data() {
+  local out
+  out=$("$HOME/Work/tree-next/scripts/preview-backup.sh" 2>&1) || { echo "$out" >&2; echo; return 0; }
+  echo "$out" >&2
+  sed -n 's/^backup: \([^ ]*\) (.*/\1/p' <<<"$out" | tail -n 1
+}
+
+# the brain's sessions and its agents file put back from a backup (hub-brain must be stopped): a
+# release may change them when it starts (11-22: roles + engines), and the release before it must
+# find them as it left them. What was there is kept beside them (…undone-<time>), never deleted.
+restore_data() {
+  local bk=$1 t
+  [ -n "$bk" ] && [ -s "$bk/sessions.tgz" ] || { echo "!! no backup to restore from (${bk:-none})"; return 1; }
+  if [ -z "${HUB_PV:-}" ] && systemctl --user is-active -q hub-brain; then echo "!! hub-brain still runs: not restoring under it"; return 1; fi
+  tar -tzf "$bk/sessions.tgz" >/dev/null 2>&1 || { echo "!! $bk/sessions.tgz is unreadable"; return 1; }
+  t=$(date +%Y%m%d-%H%M%S)
+  if [ -d "$PV/data/session" ]; then mv "$PV/data/session" "$PV/data/session.undone-$t" || return 1; fi
+  if ! tar -C "$PV" -xzf "$bk/sessions.tgz"; then
+    echo "!! restoring the sessions failed: the copy before is $PV/data/session.undone-$t"
+    return 1
+  fi
+  if [ -f "$bk/agents.json" ]; then
+    [ -f "$PV/agents.json" ] && cp -p "$PV/agents.json" "$PV/agents.json.undone-$t"
+    cp -p "$bk/agents.json" "$PV/agents.json" || return 1
+  fi
+  echo "-- sessions and agents file restored from $bk (what was there: data/session.undone-$t, agents.json.undone-$t)"
+}
+
+# the way back, later and by hand: `current` → releases/<id>, the brain stopped, its data restored
+# from <backup> (the folder the deploy printed), everything restarted, health
+rollback() {
+  local id=${1:?release id} bk=${2:?backup folder (~/.cache/root-sim/backups/<time>)} u
+  [ -x "$HUB/releases/$id/bin/yggdrasil" ] || die "no release $id"
+  [ -s "$bk/sessions.tgz" ] || die "no sessions.tgz in $bk"
+  detach rollback "$id" "$bk"
+  ln -sfn "$HUB/releases/$id" "$HUB/current"
+  render
+  systemctl --user stop hub-brain
+  restore_data "$bk" || { echo "!! data not restored: hub-brain stays stopped — look at $PV/data"; exit 1; }
+  for u in $ALL hub-wg; do systemctl --user is-enabled -q "$u" 2>/dev/null && systemctl --user restart "$u"; done
+  health || echo "!! the health check fails on $id too"
+  echo "== rollback to $id: done"
   status || true
 }
 
@@ -553,11 +613,12 @@ case "${1:-status}" in
   tailnet-up) tailnet_up ;;
   tailnet-back) tailnet_back ;;
   deploy) shift; deploy "$@" ;;
+  rollback) shift; rollback "$@" ;;
   switch) switch ;;
   stageb-back) detach stageb-back; stageb_back ;;
   health) health ;;
   wg-on) shift; wg_on "$@" ;;
   wg-off) wg_off ;;
   status) status ;;
-  *) die "usage: hub-units.sh release|render|deploy <id>|switch|stageb-back|health|public-up|public-back|tailnet-up|tailnet-back|status" ;;
+  *) die "usage: hub-units.sh release|render|deploy <id>|rollback <id> <backup>|switch|stageb-back|health|public-up|public-back|tailnet-up|tailnet-back|status" ;;
 esac
