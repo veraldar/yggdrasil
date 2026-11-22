@@ -1,8 +1,8 @@
 import { devices, expect, test } from '@playwright/test';
 import { OC } from './brain';
 
-/** An existing agent's harness changes in the editor (owner 11-22: "I still can not change a
- *  agent type harness"). The "runs on" picker was enabled for a new agent only; the brain's
+/** An existing role's default engine changes in the editor (owner 11-22: "I still can not change a
+ *  agent type harness"). The "runs on by default" picker was enabled for a new role only; the brain's
  *  upsert always took a harness change. Now: picked, saved, still there after a reload — and the
  *  model the editor sends is the NEW harness's own (the brain refuses one it does not offer).
  *  The coordinator stays on the root: the brain locks its harness, the picker says so.
@@ -20,12 +20,17 @@ test('an existing agent changes harness, and the change survives a reload', asyn
   });
   expect(made.ok(), await made.text()).toBe(true);
   const brainAgent = async () => await (await request.get(`${OC}/agent/${NAME}`)).json();
-  const runsOn = page.locator('.oz-blk', { has: page.getByRole('heading', { name: 'runs on' }) });
+  const runsOn = page.locator('.oz-blk', {
+    has: page.getByRole('heading', { name: 'runs on by default', exact: true }),
+  });
   const chip = (label: string) => runsOn.getByRole('button', { name: label, exact: true });
   try {
     await page.goto(`/agents/${NAME}`);
     await expect(chip('root')).toHaveAttribute('aria-pressed', 'true');
     await expect(chip('Claude Code')).toBeEnabled();
+    await expect(runsOn).toContainText(
+      'a session can still take another engine in its own settings'
+    );
 
     // root → Claude Code: saved with one of Claude Code's own models
     await chip('Claude Code').tap();

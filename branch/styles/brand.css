@@ -413,6 +413,9 @@
   /* root-coord cards: the status word sits before the time, the question leads the subtitle */
   .oz-r1 .oz-st { flex: none; margin-left: auto; font-size: 10px; letter-spacing: .02em; }
   .oz-r1 .oz-st + time { margin-left: 0; }
+  /* the engine: one small grey word before the time (none on the root) */
+  .oz-r1 .oz-eng { flex: none; margin-left: auto; font-size: 10px; color: var(--oz-dim); opacity: .8; }
+  .oz-r1 .oz-st + .oz-eng, .oz-r1 .oz-eng + time { margin-left: 0; }
   .oz-asks { color: var(--oz-active); }
   .oz-closed { font-size: 10px; line-height: 16px; padding: 0 7px; border: 1px dashed var(--oz-border); color: var(--oz-dim); }
   .oz-closed.open { color: var(--oz-text); }
@@ -601,6 +604,8 @@
     background: color-mix(in srgb, var(--oz-success) 12%, var(--oz-surface));
   }
   .oz-chips button:disabled, .oz-field:disabled { opacity: .55; }
+  /* a role chip's badge before its name: [LEA] lead */
+  .oz-chips button .b { display: inline; height: auto; padding: 0; border: 0; color: inherit; opacity: .6; margin-right: 5px; }
   /* agents list: name · where it runs · model, then what it is for */
   .oz-alist a { display: block; padding: 8px 2px; border-bottom: 1px var(--oz-rule) var(--oz-border); font-size: 12px; }
   .oz-alist li:last-child a { border-bottom: 0; }
@@ -608,6 +613,10 @@
   .oz-alist .tag { flex: none; padding: 0 6px; font-size: 10px; line-height: 16px; border: 1px solid var(--oz-border); color: var(--oz-dim); }
   .oz-alist .m { flex: none; margin-left: auto; font-size: 11px; color: var(--oz-dim); }
   .oz-alist .r2 { display: block; margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 10.5px; color: var(--oz-dim); }
+  /* the roles page's engines: a row that opens its model choices in place */
+  .oz-alist li.eng { border-bottom: 1px var(--oz-rule) var(--oz-border); }
+  .oz-alist li.eng:last-child { border-bottom: 0; }
+  .oz-alist li.eng > button { display: block; width: 100%; min-width: 0; padding: 8px 2px; text-align: left; font-size: 12px; }
   /* what changes when a session takes another agent */
   .oz-diff li { grid-template-columns: 7em 1fr; }
   .oz-del { width: 100%; height: 38px; border: 1px solid var(--oz-border); color: var(--oz-dim); font-size: 13px; }

@@ -144,12 +144,12 @@ export default function SettingsPage() {
       </section>
 
       {/* the simple menu (owner feedback): three rows, nothing else —
-          agents opens the types; walk-through re-walks in the test room;
+          roles opens the roles and engines; walk-through re-walks in the test room;
           voice tests toggle their own room */}
       <section className="oz-blk">
         <ul className="oz-kv">
           <li>
-            <span>agents</span>
+            <span>roles</span>
             <span />
             <Link href="/agents" data-testid="agents-link" className="oz-k sm">
               ›

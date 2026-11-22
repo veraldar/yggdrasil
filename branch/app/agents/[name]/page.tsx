@@ -1,11 +1,12 @@
 'use client';
 
-/** /agents/[name] — one agent, edited. Only what the brain says is
- *  `customizable` shows; a `locked` field shows disabled with the reason.
- *  Root agents: description, model + thinking, instructions, tools, steps,
- *  manages sessions. Harness agents (Claude Code / Antigravity / opencode / Codex): less —
- *  the harness brings its own tools. Save = PUT (creates a new one); the
- *  brain's refusal is said inline. A custom agent deletes in two taps. */
+/** /agents/[name] — one ROLE, edited (the brain calls it an agent). Only what the brain says is
+ *  `customizable` shows; a `locked` field shows disabled with the reason. "runs on by default"
+ *  is the engine its sessions start on (a session can still take another in its own settings).
+ *  On the root: description, model + thinking, instructions, tools, steps, manages sessions. On
+ *  a harness (Claude Code / Antigravity / opencode / Codex): less — the harness brings its own
+ *  tools. Save = PUT (creates a new one); the brain's refusal is said inline. A custom role
+ *  deletes in two taps. */
 import { useEffect, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import { LineIcon } from '@/components/line-icon';
@@ -59,7 +60,7 @@ export default function AgentEditor() {
         setLabels(d.model_labels || {});
         return;
       }
-      // a name no agent has yet, opened from '+ new agent': an empty root agent
+      // a name no role has yet, opened from '+ new role': an empty role on the root
       if (new URLSearchParams(location.search).get('new') === '1') {
         const b = await fetch('/api/agents/build', { cache: 'no-store' })
           .then((x) => (x.ok ? x.json() : null))
@@ -169,7 +170,7 @@ export default function AgentEditor() {
       ) : (
         <>
           <section className="oz-blk">
-            <h2>runs on</h2>
+            <h2>runs on by default</h2>
             <div className="oz-chips">
               {HARNESSES.map((x) => (
                 <button
@@ -189,6 +190,7 @@ export default function AgentEditor() {
               ))}
             </div>
             {locked.includes('harness') && lockNote('harness')}
+            <p className="note">a session can still take another engine in its own settings</p>
           </section>
 
           {shows('description') && (
@@ -200,7 +202,7 @@ export default function AgentEditor() {
                   disabled={!can('description')}
                   onChange={(e) => set({ description: e.target.value })}
                   aria-label="description"
-                  placeholder="what this agent is for"
+                  placeholder="what this role is for"
                   className="oz-field"
                 />
               </div>
@@ -301,7 +303,7 @@ export default function AgentEditor() {
                 />
               </div>
               {(() => {
-                // everything the model reads, as saved: the entry for this agent's own model
+                // everything the model reads, as saved: the entry for this role's own model
                 const sys = detail?.system || [];
                 const reads = sys.find((t) => t.models.includes(draft.model || '')) || sys[0];
                 return (
@@ -385,7 +387,7 @@ export default function AgentEditor() {
 
           <div className="mb-2.5 flex flex-col gap-1.5">
             <button onClick={() => void save()} disabled={saving} className="oz-k ok h-10 w-full">
-              {saving ? 'saving…' : isNew ? 'create agent' : 'save'}
+              {saving ? 'saving…' : isNew ? 'create role' : 'save'}
             </button>
             {refused && (
               <p role="alert" className="text-[11px] text-[var(--oz-danger)]">
@@ -397,17 +399,17 @@ export default function AgentEditor() {
 
           {detail && !detail.builtin && !isNew && (
             <section className="oz-blk danger">
-              <h2>agent</h2>
+              <h2>role</h2>
               <div>
                 <button
                   onClick={() => (armed ? void remove() : setArmed(true))}
                   className={`oz-del ${armed ? 'armed' : ''}`}
                 >
-                  {armed ? 'tap again to delete' : 'delete agent'}
+                  {armed ? 'tap again to delete' : 'delete role'}
                 </button>
               </div>
               <p className="note">
-                {armed ? 'this cannot be undone' : 'removes this agent from the root'}
+                {armed ? 'this cannot be undone' : 'removes this role from the root'}
               </p>
             </section>
           )}
