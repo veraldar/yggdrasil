@@ -483,10 +483,68 @@ fn agent(st: &AppState, name: &str) -> Option<profiles::Profile> {
 }
 
 fn session_profile(st: &AppState, id: &str) -> profiles::Profile {
-    let name = st.sessions.lock().unwrap().get(id).map(|s| s.info.clone()).map(|i| profile_name_of(st, &i));
-    let agents = st.config.profiles.read().unwrap();
-    let name = name.unwrap_or_else(|| agents.default_agent.clone());
-    agents.get(&name).or_else(|| agents.get("build")).cloned().expect("build profile")
+    let info = st.sessions.lock().unwrap().get(id).map(|s| s.info.clone()).unwrap_or(Value::Null);
+    profile_of(st, &info)
+}
+
+/// What a session IS, for what it reads and may do: its role — except a session that keeps the
+/// instructions it was started with (`instructions: "shared"`: the 24 sessions relabelled from the
+/// old engine-agents, and the owner's terminal conversations): the shared prompt only, no role
+/// text, no sessions to manage — as on the `claude` / `agy` agents it began on (roles rework: the
+/// badge changes, nothing the session reads does).
+pub(crate) fn profile_of(st: &AppState, info: &Value) -> profiles::Profile {
+    let name = profile_name_of(st, info);
+    let mut p = {
+        let agents = st.config.profiles.read().unwrap();
+        agents.get(&name).or_else(|| agents.get("build")).cloned().expect("build profile")
+    };
+    if info["instructions"] == "shared" {
+        p.prompt = String::new();
+        p.prompt_lite = None;
+        p.sessions = false;
+    }
+    p
+}
+
+/// The engine a session's turns run on (roles rework 11-22; `None` = the root): a terminal's
+/// conversation on its own harness; else the session's own engine (stamped at birth, changed in
+/// its settings; every older session got one at load, `relabel_session`); else an old
+/// engine-agent's engine; else its role's default.
+pub(crate) fn engine_of(st: &AppState, info: &Value) -> Option<harness::Kind> {
+    let h = &info["harness"];
+    if h["attached"] == true {
+        if let Some(k) = h["kind"].as_str().and_then(harness::Kind::parse) {
+            return Some(k);
+        }
+    }
+    if let Some(e) = info["engine"].as_str().and_then(profiles::engine_name) {
+        return harness::Kind::parse(e);
+    }
+    if let Some(e) = info["agent"].as_str().and_then(profiles::legacy_engine) {
+        return harness::Kind::parse(e);
+    }
+    profile_of(st, info).harness.as_deref().and_then(harness::Kind::parse)
+}
+
+/// `root` or the harness's name — the session's `engine` field.
+fn engine_word(kind: Option<harness::Kind>) -> &'static str {
+    kind.map_or("root", harness::Kind::name)
+}
+
+/// The model a session on `engine` starts with (roles rework, harness-demotion §4.5): the one
+/// asked for (on the root: one this upstream serves); else the role's own when the role names a
+/// model for this engine (its default engine is this one); else the engine's default; else the
+/// engine's own pick (`default`; on the root: the brain's model).
+fn engine_model(st: &AppState, role: Option<&profiles::Profile>, engine: Option<harness::Kind>, asked: Option<&str>) -> String {
+    let role_here = role.filter(|p| p.harness.as_deref().and_then(harness::Kind::parse) == engine).and_then(|p| p.model.clone());
+    let default = st.config.profiles.read().unwrap().engine_model(engine_word(engine));
+    match engine {
+        None => {
+            let served = |m: &String| st.config.models.contains(m);
+            asked.map(String::from).filter(served).or(role_here.filter(served)).or(default.filter(served)).unwrap_or_else(|| st.config.model.clone())
+        }
+        Some(_) => asked.filter(|m| !m.is_empty()).map(String::from).or(role_here).or(default).unwrap_or_else(|| "default".into()),
+    }
 }
 
 /// The phone resolves sessions by title slug (pwa lib/slug.ts): lowercase, whitespace → `-`,
@@ -700,6 +758,77 @@ fn persist(dir: &std::path::Path, id: &str, session: &Session) {
     }
 }
 
+/// The 24 sessions started on the old engine-agents `claude` / `agy` (home root, 11-22), and the
+/// role each one really had — the owner's table (roles-cleanup proposal §8). A session there that
+/// is the owner's terminal conversation shows [TRM] whatever its role; any other old session
+/// still on `claude` / `agy` becomes a build.
+const RELABEL: &[(&str, &str)] = &[
+    // [LEA]
+    ("ses_82772a463f1a495791a851d1d3386d4c", "lead"), // P1 · home root on the trunk (integrator)
+    ("ses_a2bfd092134b4d67aa2e7d831e45901b", "lead"), // P2 · full sessions on other roots, and files
+    ("ses_f35ae2c967344628b6ff6c26adfa297a", "lead"), // P3 · the whole tree
+    ("ses_f30935277fc54d16afc05b9128f9f78d", "lead"), // P3 whole tree contd
+    ("ses_e1eb880ac9a44c97bdd868805208795b", "lead"), // P4 · installers and release v0.9.1
+    ("ses_12ed61f31107439cb9c755e5acac9ea6", "lead"), // P5 · veraldar.org
+    ("ses_d054139cd8f94c74a823344b9e9ac724", "lead"), // Trunk observability lead
+    ("ses_2b44a68894aa48e1823cc315107638b4", "lead"), // Fable plan rework
+    ("ses_bfd4e6814c994fc894e30c2726f821f4", "lead"), // solutions design: context + architecture
+    // [RES]
+    ("ses_60d14aebdf7042e7885812d5971407bf", "research"), // ap.veraldar.org architecture report
+    ("ses_5a7089db75ed49258e5d77df6b887baf", "research"), // yggdrasil context anatomy
+    ("ses_c115e3b460d64dac870527937a8fee9d", "research"), // Agent use-cases + escalation
+    ("ses_630172b8cf17405ebafa2cc204473326", "research"), // Roles cleanup proposals
+    // [FIX]
+    ("ses_c0442061293f48919c52e6589c2e8fba", "fix"), // Fix harness picker · Claude
+    ("ses_059bd3e1d5ba43c9b7784862fee9395f", "fix"), // Fix harness picker · Opus 5.5
+    // [BUI]
+    ("ses_0e06ed1dea4d41598318de2f6f7e2dbf", "build"), // Deploy pair no-flash
+    ("ses_b162cee766dc4930bef3879afd5cb46a", "build"), // Deploy no-flash (agy)
+    ("ses_eeea4529f482430fae22f0799714afe7", "build"), // "claude" (11-13 test)
+    // [TRM]: the owner's terminal conversations (Claude Code ×5, Antigravity ×1)
+    ("ses_12844d3561ab43fbae51a9e0b5bf77b9", "build"),
+    ("ses_3f39ed7915bc441287c553ddc23e608c", "build"),
+    ("ses_440f9180cea34d59951a3f6c61631074", "build"),
+    ("ses_88f9338e5f7d4f00a2a98b1e0badd913", "build"),
+    ("ses_ddaa0623a07f40d6b3e593c8128c2163", "build"),
+    ("ses_a2ff025b18e749d69acd320300cf87fd", "build"),
+];
+
+/// Roles rework (11-22), at load: a session still on an old engine-agent takes its role from
+/// `RELABEL` (else build), keeps the engine and the engine's conversation it had, keeps reading
+/// what it read (`instructions: "shared"`), and keeps the old name (`agent_was`, for the way back).
+/// Every session without an engine gets the one it runs on today — a terminal's conversation its
+/// harness, else its role's default — so a later change of a role's default moves only new
+/// sessions. A proxy runs on its root: its badge only. `true` = changed.
+fn relabel_session(info: &mut Value, profiles: &profiles::Profiles) -> bool {
+    let remote = info["remote"].is_object();
+    let mut changed = false;
+    if let Some(old) = info["agent"].as_str().map(String::from) {
+        if let Some(legacy) = profiles::legacy_engine(&old) {
+            let id = info["id"].as_str().unwrap_or_default();
+            let role = RELABEL.iter().find(|(i, _)| *i == id).map_or("build", |(_, r)| *r);
+            info["agent_was"] = json!(old);
+            info["agent"] = json!(role);
+            if !remote {
+                let kind = info["harness"]["kind"].as_str().and_then(profiles::engine_name).filter(|k| *k != "root").unwrap_or(legacy);
+                info["engine"] = json!(kind);
+                info["instructions"] = json!("shared");
+            }
+            changed = true;
+        }
+    }
+    if info["engine"].is_null() && !remote {
+        let h = &info["harness"];
+        let attached = (h["attached"] == true).then(|| h["kind"].as_str().and_then(harness::Kind::parse)).flatten();
+        let main = is_main_title(info["title"].as_str().unwrap_or_default());
+        let role = info["agent"].as_str().and_then(|a| profiles.get(a)).or_else(|| profiles.get(&profiles.default_agent));
+        let kind = attached.or_else(|| if main { None } else { role.and_then(|p| p.harness.as_deref()).and_then(harness::Kind::parse) });
+        info["engine"] = json!(engine_word(kind));
+        changed = true;
+    }
+    changed
+}
+
 fn load_sessions(dir: &std::path::Path) -> HashMap<String, Session> {
     let mut out = HashMap::new();
     let Ok(entries) = std::fs::read_dir(dir.join("session")) else { return out };
@@ -773,41 +902,58 @@ fn bad_request(msg: &str) -> Response {
     (StatusCode::BAD_REQUEST, Json(json!({ "error": msg }))).into_response()
 }
 
-/// Creates + stores a session. Profile (`agent`), model and thinking variant are stamped ONCE
-/// here (cache law): explicit args win, then the profile's defaults, then the brain's.
+/// Creates + stores a session on its role's default engine (`new_session_on`).
 fn new_session(st: &AppState, title: &str, parent: Option<&str>, agent: Option<&str>, model: Option<&str>, variant: Option<&str>) -> Value {
-    let explicit_model = model;
+    new_session_on(st, title, parent, agent, None, model, variant)
+}
+
+/// Creates + stores a session. Its role (`agent`), engine, model and thinking variant are stamped
+/// ONCE here (cache law): explicit args win, then the role's defaults, then the engine's, then the
+/// brain's. `engine`: root | claude | antigravity | opencode | codex (`None` = the role's default);
+/// an old engine-agent's word as the agent (`claude`, `agy`) is a build on that engine. MAIN runs
+/// on the root, always.
+fn new_session_on(st: &AppState, title: &str, parent: Option<&str>, agent: Option<&str>, engine: Option<&str>, model: Option<&str>, variant: Option<&str>) -> Value {
     let id = new_id("ses");
     let now = now_ms();
     let mut info = json!({ "id": id, "title": title, "time": { "created": now, "updated": now } });
     // the coordinator is the door: MAIN's profile and no one else's (a "fix this" session started
     // from MAIN once inherited it — read-only, it could fix nothing)
     let agent_name = agent.filter(|a| *a != "coordinator" || is_main_title(title));
+    let legacy = agent_name.and_then(profiles::legacy_engine);
     if let Some(a) = agent_name.filter(|a| crate::agent(st, a).is_some()) {
         info["agent"] = json!(a);
     } else if is_main_title(title) {
         info["agent"] = json!("coordinator"); // the door is stamped, so the phone shows it right
     }
     let pname = profile_name_of(st, &info);
-    // every session names its agent from birth (the default one included): the list's [TAG]
+    // every session names its role from birth (the default one included): the list's [TAG]
     info["agent"] = json!(pname);
     let prof = crate::agent(st, &pname);
     let prof = prof.as_ref();
-    let model = model
-        .filter(|m| st.config.models.iter().any(|x| x == m))
-        .or(prof.and_then(|p| p.model.as_deref()).filter(|m| st.config.models.iter().any(|x| x == m)))
-        .unwrap_or(&st.config.model);
-    let variant = variant
-        .and_then(|v| resolve_variant(v).ok())
-        .or(prof.and_then(|p| p.variant.clone()))
-        .unwrap_or_else(|| st.config.default_variant.clone());
-    let provider = st.config.catalog["default"].as_object().and_then(|d| d.keys().next().cloned()).unwrap_or_else(|| "yggdrasil".into());
-    info["model"] = json!({ "id": model, "providerID": provider, "variant": variant });
-    // a harness session's model belongs to that harness (any id it accepts; none = its default)
-    if let Some(h) = prof.and_then(|p| p.harness.clone()) {
-        let hm = explicit_model.or(prof.and_then(|p| p.model.as_deref()));
-        info["model"] = json!({ "id": hm.unwrap_or("default"), "providerID": h });
-        info["harness"] = json!({ "kind": h });
+    let kind = if pname == "coordinator" {
+        None
+    } else {
+        match engine.or(legacy).and_then(profiles::engine_name) {
+            Some(e) => harness::Kind::parse(e),
+            None => prof.and_then(|p| p.harness.as_deref()).and_then(harness::Kind::parse),
+        }
+    };
+    info["engine"] = json!(engine_word(kind));
+    let model_id = engine_model(st, prof, kind, model);
+    match kind {
+        None => {
+            let variant = variant
+                .and_then(|v| resolve_variant(v).ok())
+                .or(prof.and_then(|p| p.variant.clone()))
+                .unwrap_or_else(|| st.config.default_variant.clone());
+            let provider = st.config.catalog["default"].as_object().and_then(|d| d.keys().next().cloned()).unwrap_or_else(|| "yggdrasil".into());
+            info["model"] = json!({ "id": model_id, "providerID": provider, "variant": variant });
+        }
+        // a harness session's model belongs to that harness (any id it accepts; default = its own)
+        Some(k) => {
+            info["model"] = json!({ "id": model_id, "providerID": k.name() });
+            info["harness"] = json!({ "kind": k.name() });
+        }
     }
     if let Some(parent) = parent {
         info["parentID"] = json!(parent);
@@ -822,7 +968,7 @@ fn new_session(st: &AppState, title: &str, parent: Option<&str>, agent: Option<&
     info
 }
 
-/// `POST /session` — body `{title?, parentID?, agent?, model?, variant?}` (opencode accepts an
+/// `POST /session` — body `{title?, parentID?, agent?, engine?, model?, variant?}` (opencode accepts an
 /// empty body too; `model` may be a string or `{id}`). With `harness: {kind?, id}` + `cwd` it continues
 /// a conversation started in a terminal (`attach_harness`).
 async fn create_session(State(st): State<AppState>, body: Option<Json<Value>>) -> Response {
@@ -840,13 +986,20 @@ async fn create_session(State(st): State<AppState>, body: Option<Json<Value>>) -
         if body["report_to"].is_object() {
             return bad_request("a session another root asks for runs here (no root)");
         }
-        return match roots::create_remote(&st, root, title, body["agent"].as_str()).await {
+        return match roots::create_remote(&st, root, title, body["agent"].as_str(), body["engine"].as_str().filter(|e| !e.is_empty())).await {
             Ok(info) => Json(info).into_response(),
             Err(e) => (StatusCode::BAD_GATEWAY, Json(json!({ "error": e }))).into_response(),
         };
     }
     let model = body["model"].as_str().or(body["model"]["id"].as_str());
-    let info = new_session(&st, title, body["parentID"].as_str(), body["agent"].as_str(), model, body["variant"].as_str());
+    let engine = body["engine"].as_str().filter(|e| !e.is_empty());
+    if let Some(e) = engine.filter(|e| profiles::engine_name(e).is_none()) {
+        return bad_request(&format!("unknown engine {e:?} (root | claude | antigravity | opencode | codex)"));
+    }
+    if engine.is_some_and(|e| profiles::engine_name(e) != Some("root")) && is_main_title(title) {
+        return bad_request("MAIN runs on the root");
+    }
+    let info = new_session_on(&st, title, body["parentID"].as_str(), body["agent"].as_str(), engine, model, body["variant"].as_str());
     // G7.2: an e2e / voice-test session is marked once at birth. GET /session still lists it
     // (resolveId finds by slug), but tree::snapshot and sessions_find skip it, so MAIN's [tree]
     // stays clean; the librarian's skip of these is phase 2.
@@ -880,7 +1033,7 @@ async fn create_session(State(st): State<AppState>, body: Option<Json<Value>>) -
 /// conversation the owner started in a terminal (`kind`: claude — the default —, opencode or
 /// antigravity) with its full context. The SAME conversation both ways (harness.rs `Attach`): one
 /// bifrost session per conversation — asking again returns the one that exists. It runs on that
-/// harness whatever its agent (default: the built-in one for it — claude, agy — else the default).
+/// engine whatever its role (default: the default role, reading the shared prompt only — [TRM]).
 fn attach_harness(st: &AppState, body: &Value) -> Response {
     let kind = body["harness"]["kind"].as_str().unwrap_or("claude");
     let id = body["harness"]["id"].as_str().unwrap_or_default();
@@ -961,19 +1114,17 @@ pub(crate) fn attach_conversation(st: &AppState, kind: &str, id: &str, cwd: &str
     if let Some(info) = existing {
         return Ok(info);
     }
-    // the session runs on the conversation's harness whatever its agent (run_turn): the agent
-    // built for that harness when there is one (claude · agy), else the default agent
-    let agent_name = match o.agent {
-        Some(a) => a,
-        None => harness_agent(st, kind).unwrap_or_else(|| st.config.profiles.read().unwrap().default_agent.clone()),
-    };
-    let Some(profile) = agent(st, &agent_name) else {
+    // the session runs on the conversation's own engine whatever its role (engine_of). It was
+    // never hired for a job (its badge is [TRM]): unless a role is asked for, it keeps the shared
+    // prompt only, as the claude / agy agents gave it before the roles rework
+    let asked = o.agent.as_deref().filter(|a| profiles::legacy_engine(a).is_none());
+    let agent_name = asked.map(String::from).unwrap_or_else(|| st.config.profiles.read().unwrap().default_agent.clone());
+    if agent(st, &agent_name).is_none() {
         return Err(format!("unknown agent {agent_name}"));
-    };
-    let on_kind = profile.harness.as_deref().and_then(harness::Kind::parse) == Some(kind);
+    }
     let title = title.unwrap_or_else(|| format!("{what} session"));
     let title = format!("{} · {what}{}", title.chars().take(40).collect::<String>().trim_end(), if o.fork { " (new)" } else { "" });
-    let info = new_session(st, &title, o.parent.as_deref(), Some(&agent_name), o.model.as_deref(), None);
+    let info = new_session_on(st, &title, o.parent.as_deref(), Some(&agent_name), Some(kind.name()), o.model.as_deref(), None);
     let sid = info["id"].as_str().unwrap_or_default().to_string();
     let info = with_session(st, &sid, |s| {
         s.info["harness"] = if o.fork {
@@ -982,9 +1133,8 @@ pub(crate) fn attach_conversation(st: &AppState, kind: &str, id: &str, cwd: &str
             json!({ "kind": kind.name(), "id": id, "attached": true })
         };
         s.info["cwd"] = json!(cwd);
-        // an agent made for another engine: the harness's own pick of model, never the agent's
-        if !on_kind && o.model.is_none() {
-            s.info["model"] = json!({ "id": "default", "providerID": kind.name() });
+        if asked.is_none() {
+            s.info["instructions"] = json!("shared");
         }
         s.info.clone()
     })
@@ -1000,19 +1150,6 @@ fn harness_label(kind: harness::Kind) -> &'static str {
         harness::Kind::Codex => "Codex",
         harness::Kind::Antigravity => "Antigravity",
     }
-}
-
-/// The agent a terminal's conversation continues with: the built-in one for its harness
-/// (claude · agy), else the first agent that runs on it.
-fn harness_agent(st: &AppState, kind: harness::Kind) -> Option<String> {
-    let agents = st.config.profiles.read().unwrap();
-    let on = |p: &&profiles::Profile| p.harness.as_deref().and_then(harness::Kind::parse) == Some(kind);
-    let preferred: &[&str] = match kind {
-        harness::Kind::Claude => &["claude", "AGI"],
-        harness::Kind::Antigravity => &["agy"],
-        _ => &[],
-    };
-    preferred.iter().filter_map(|n| agents.get(n)).find(on).or_else(|| agents.by_name.values().find(on)).map(|p| p.name.clone())
 }
 
 /// Is this harness conversation open in a terminal right now? The preview's live helper
@@ -1720,10 +1857,17 @@ async fn list_sessions(State(st): State<AppState>) -> Json<Value> {
     Json(Value::Array(infos))
 }
 
-/// A session made before agents were stamped at birth names the agent it actually runs.
+/// A session made before agents were stamped at birth names the agent it actually runs, and one
+/// made before the roles rework the engine it runs on.
 fn with_agent(st: &AppState, info: &mut Value) {
     if info["agent"].is_null() || info["agent"].as_str().is_some_and(|a| agent(st, a).is_some_and(|p| p.name != a)) {
+        if info["engine"].is_null() && !info["remote"].is_object() {
+            info["engine"] = json!(engine_word(engine_of(st, info)));
+        }
         info["agent"] = json!(profile_name_of(st, info));
+    }
+    if info["engine"].is_null() && !info["remote"].is_object() {
+        info["engine"] = json!(engine_word(engine_of(st, info)));
     }
 }
 
@@ -1734,7 +1878,7 @@ async fn get_session(State(st): State<AppState>, Path(id): Path<String>) -> Resp
             // a proxy: the agent and model are what that root runs (this copy can lag a switch)
             if let Some((root, rid)) = peers::remote_of(&st, &id) {
                 if let Ok(r) = peers::call(&st, &root, "GET", &format!("/session/{rid}"), None, 3).await {
-                    for k in ["model", "agent", "harness"] {
+                    for k in ["model", "agent", "harness", "engine"] {
                         if !r[k].is_null() {
                             i[k] = r[k].clone();
                         }
@@ -1901,7 +2045,7 @@ async fn switch_remote(st: &AppState, id: &str, root: &str, rid: &str, what: &st
     }
     if let Ok(r) = peers::call(st, root, "GET", &format!("/session/{rid}"), None, 10).await {
         let info = with_session(st, id, |s| {
-            for k in ["model", "agent", "harness"] {
+            for k in ["model", "agent", "harness", "engine"] {
                 s.info[k] = r[k].clone();
             }
             s.info.clone()
@@ -1949,8 +2093,9 @@ async fn switch_model(State(st): State<AppState>, Path(id): Path<String>, Json(b
     };
     // a session on a harness picks from that harness's models (providerID = the harness)
     if matches!(pid, "claude" | "opencode" | "codex" | "antigravity") {
-        let on = st.sessions.lock().unwrap().get(&id).and_then(|s| s.info["harness"]["kind"].as_str().map(String::from));
-        if on.as_deref() != Some(pid) {
+        let info = st.sessions.lock().unwrap().get(&id).map(|s| s.info.clone());
+        let on = info.as_ref().and_then(|i| engine_of(&st, i)).map(harness::Kind::name);
+        if on != Some(pid) {
             return bad_request(&format!("this session does not run on {pid}"));
         }
         let offered = models_for(&st, pid);
@@ -1994,9 +2139,11 @@ async fn switch_model(State(st): State<AppState>, Path(id): Path<String>, Json(b
     }
 }
 
-/// `POST /api/session/:id/agent` — v2 switch, `{agent}` → 204. The session takes the agent's
-/// defaults at once — its model and thinking level, and its harness (a different harness starts
-/// a fresh harness session) — and keeps its history; the model can still be changed afterwards.
+/// `POST /api/session/:id/agent` — v2 switch, `{agent}` → 204: the session's ROLE (roles rework
+/// 11-22). Its engine stays — a fact of its own (`/engine`) —, and so does its model unless the
+/// session runs on the role's default engine: then it takes the role's model and thinking. From
+/// now on it reads that role's instructions (a relabelled or terminal session too: picking a role
+/// is the owner's say). An old engine-agent's word (`claude`, `agy`) is a build on that engine.
 async fn switch_agent(State(st): State<AppState>, Path(id): Path<String>, Json(body): Json<Value>) -> Response {
     if let Some((root, rid)) = peers::remote_of(&st, &id) {
         return switch_remote(&st, &id, &root, &rid, "agent", body).await;
@@ -2004,26 +2151,32 @@ async fn switch_agent(State(st): State<AppState>, Path(id): Path<String>, Json(b
     let Some(name) = body["agent"].as_str() else { return bad_request("agent required") };
     let main = st.sessions.lock().unwrap().get(&id).is_some_and(|s| is_main_title(s.info["title"].as_str().unwrap_or_default()));
     if name == "coordinator" && !main {
-        return bad_request("the coordinator is MAIN's alone — pick build, lead, research, plan or a harness");
+        return bad_request("the coordinator is MAIN's alone — pick lead, build, fix, review or research");
     }
     if main && name != "coordinator" {
-        return bad_request("MAIN is the coordinator — it routes work to sessions; give the work to a session with this agent instead");
+        return bad_request("MAIN is the coordinator — it routes work to sessions; give the work to a session with this role instead");
     }
     let Some(target) = agent(&st, name) else {
-        return bad_request(&format!("unknown agent {name}"));
+        return bad_request(&format!("unknown role {name}"));
     };
-    let stamp = agent_model_stamp(&st, &target);
+    if let Some(e) = profiles::legacy_engine(name) {
+        if let Err(r) = set_engine(&st, &id, e, None) {
+            return r;
+        }
+    }
+    // the role's own model (and thinking, on the root) only when the session already runs on the
+    // role's default engine — the same rule as a new session's (engine_model); else its model stays
+    let info = st.sessions.lock().unwrap().get(&id).map(|s| s.info.clone()).unwrap_or(Value::Null);
+    let on = engine_of(&st, &info);
+    let home = target.harness.as_deref().and_then(harness::Kind::parse) == on;
+    let stamp = (home && profiles::legacy_engine(name).is_none()).then(|| agent_model_stamp(&st, &target)).filter(|_| target.model.is_some() || (on.is_none() && target.variant.is_some()));
     match with_session(&st, &id, |s| {
         s.info["agent"] = json!(target.name);
-        s.info["model"] = stamp.clone();
-        match &target.harness {
-            Some(h) if s.info["harness"]["kind"].as_str() == Some(h.as_str()) => {}
-            Some(h) => s.info["harness"] = json!({ "kind": h }),
-            None => {
-                if let Some(o) = s.info.as_object_mut() {
-                    o.remove("harness");
-                }
-            }
+        if let Some(o) = s.info.as_object_mut() {
+            o.remove("instructions");
+        }
+        if let Some(m) = &stamp {
+            s.info["model"] = m.clone();
         }
         s.info.clone()
     }) {
@@ -2035,9 +2188,76 @@ async fn switch_agent(State(st): State<AppState>, Path(id): Path<String>, Json(b
     }
 }
 
-/// The `info.model` an agent gives a session: its model (a root agent's must be one this
-/// upstream serves) and thinking level, else the brain's defaults; a harness agent's model is
-/// the harness's own (none = its default).
+/// `POST /api/session/:id/engine` — `{engine, model?}` → 204: what runs the session from its next
+/// turn (roles rework 11-22), its role unchanged. The model is the one asked for, else the role's
+/// own for that engine, else the engine's default. A different harness starts a fresh
+/// conversation there — the new engine sees only new messages (the app says so before). MAIN runs
+/// on the root; a terminal's conversation on its own engine.
+async fn switch_engine(State(st): State<AppState>, Path(id): Path<String>, Json(body): Json<Value>) -> Response {
+    if let Some((root, rid)) = peers::remote_of(&st, &id) {
+        return switch_remote(&st, &id, &root, &rid, "engine", body).await;
+    }
+    let Some(engine) = body["engine"].as_str() else { return bad_request("engine required (root | claude | antigravity | opencode | codex)") };
+    match set_engine(&st, &id, engine, body["model"].as_str().or(body["model"]["id"].as_str())) {
+        Ok(info) => {
+            publish(&st, "session.updated", json!({ "info": info }));
+            StatusCode::NO_CONTENT.into_response()
+        }
+        Err(r) => r,
+    }
+}
+
+/// Moves a session onto `engine` (see `switch_engine`); `Err` = the refusal to answer.
+fn set_engine(st: &AppState, id: &str, engine: &str, model: Option<&str>) -> Result<Value, Response> {
+    let Some(name) = profiles::engine_name(engine) else {
+        return Err(bad_request(&format!("unknown engine {engine:?} (root | claude | antigravity | opencode | codex)")));
+    };
+    let info = st.sessions.lock().unwrap().get(id).map(|s| s.info.clone()).ok_or_else(|| not_found(id))?;
+    let kind = harness::Kind::parse(name);
+    if is_main_title(info["title"].as_str().unwrap_or_default()) && kind.is_some() {
+        return Err(bad_request("MAIN runs on the root — it routes work; give the work to a session on that engine instead"));
+    }
+    let now = engine_of(st, &info);
+    if info["harness"]["attached"] == true && kind != now {
+        return Err(bad_request("a terminal's conversation runs on its own engine — continue it in a new session for another one"));
+    }
+    let model = model.map(str::trim).filter(|m| !m.is_empty());
+    if let Some(m) = model {
+        let offered = models_for(st, name);
+        let open = offered.len() == 1 && offered[0] == "default";
+        if !open && !offered.iter().any(|x| x == m) {
+            return Err(bad_request(&format!("{} does not offer {m} ({})", engine_label(name), offered.join(", "))));
+        }
+    }
+    let role = profile_of(st, &info);
+    let model_id = engine_model(st, Some(&role), kind, model);
+    with_session(st, id, |s| {
+        s.info["engine"] = json!(name);
+        match kind {
+            None => {
+                // on the root the thinking level stays (else the role's, else the brain's)
+                let variant = s.info["model"]["variant"].as_str().map(String::from).or(role.variant.clone()).unwrap_or_else(|| st.config.default_variant.clone());
+                s.info["model"] = json!({ "id": model_id, "providerID": "yggdrasil", "variant": variant });
+                if let Some(o) = s.info.as_object_mut() {
+                    o.remove("harness");
+                }
+            }
+            Some(k) => {
+                s.info["model"] = json!({ "id": model_id, "providerID": k.name() });
+                // the same harness keeps its conversation; another one starts fresh
+                if s.info["harness"]["kind"].as_str() != Some(k.name()) {
+                    s.info["harness"] = json!({ "kind": k.name() });
+                }
+            }
+        }
+        s.info.clone()
+    })
+    .ok_or_else(|| not_found(id))
+}
+
+/// The `info.model` a role gives a session on its default engine: its model (a root role's must be
+/// one this upstream serves) and thinking level, else the brain's defaults; on a harness the
+/// harness's own (none = its default).
 fn agent_model_stamp(st: &AppState, a: &profiles::Profile) -> Value {
     match &a.harness {
         Some(h) => json!({ "id": a.model.clone().unwrap_or_else(|| "default".into()), "providerID": h }),
@@ -2046,6 +2266,54 @@ fn agent_model_stamp(st: &AppState, a: &profiles::Profile) -> Value {
             let variant = a.variant.clone().unwrap_or_else(|| st.config.default_variant.clone());
             json!({ "id": model, "providerID": "yggdrasil", "variant": variant })
         }
+    }
+}
+
+/// An engine's name on screen.
+fn engine_label(name: &str) -> &'static str {
+    profiles::ENGINES.iter().find(|(n, _, _)| *n == name).map_or("that engine", |(_, l, _)| l)
+}
+
+/// `GET /engine` — the engines a session can run on, each with its default model and its choices
+/// (roles rework 11-22: the roles page's "engines" block). `more` = behind the "more engines" fold.
+async fn list_engines(State(st): State<AppState>) -> Json<Value> {
+    Json(Value::Array(profiles::ENGINES.iter().map(|(n, _, _)| engine_row(&st, n)).collect()))
+}
+
+fn engine_row(st: &AppState, name: &str) -> Value {
+    let (_, label, more) = profiles::ENGINES.iter().find(|(n, _, _)| *n == name).copied().unwrap_or((name, name, true));
+    let set = st.config.profiles.read().unwrap().engine_model(name);
+    let model = if name == "root" { Some(set.filter(|m| st.config.models.contains(m)).unwrap_or_else(|| st.config.model.clone())) } else { set };
+    let word = match name {
+        "root" => Value::Null,
+        "antigravity" => json!("agy"),
+        n => json!(n),
+    };
+    json!({ "name": name, "label": label, "word": word, "model": model, "models": models_for(st, name),
+        "labels": st.harness_labels.lock().unwrap().get(name).cloned().unwrap_or_default(), "more": more })
+}
+
+/// `PUT /engine/:name {model}` — that engine's default model (null / "" = its own pick; on the
+/// root, the brain's model); answers the engine's row.
+async fn put_engine(State(st): State<AppState>, Path(name): Path<String>, Json(body): Json<Value>) -> Response {
+    let Some(engine) = profiles::engine_name(&name) else {
+        return (StatusCode::NOT_FOUND, Json(json!({ "error": format!("no engine {name}") }))).into_response();
+    };
+    let model = body["model"].as_str().map(str::trim).filter(|m| !m.is_empty() && *m != "default");
+    if let Some(m) = model {
+        let offered = models_for(&st, engine);
+        let open = offered.len() == 1 && offered[0] == "default";
+        if !open && !offered.iter().any(|x| x == m) {
+            return bad_request(&format!("{} does not offer {m} ({})", engine_label(engine), offered.join(", ")));
+        }
+    }
+    let res = st.config.profiles.write().unwrap().set_engine_model(engine, model);
+    match res {
+        Ok(()) => {
+            publish(&st, "agent.updated", json!({ "name": "*", "engine": engine }));
+            Json(engine_row(&st, engine)).into_response()
+        }
+        Err(e) => bad_request(&e),
     }
 }
 
@@ -2123,9 +2391,9 @@ async fn get_agent(State(st): State<AppState>, Path(name): Path<String>) -> Resp
                     })
                     .collect::<Vec<_>>(),
                 Some(h) => vec![json!({ "tier": h, "models": [], "text": if h == "claude" {
-                    format!("Claude Code brings its own system prompt; this agent adds:\n\n{}", harness_system(&shared, &prof))
+                    format!("Claude Code brings its own system prompt; this role adds:\n\n{}", harness_system(&shared, &prof))
                 } else if h == "antigravity" {
-                    format!("Antigravity brings its own system prompt; this agent's first message adds:\n\n{}", harness_system(&shared, &prof))
+                    format!("Antigravity brings its own system prompt; this role's first message adds:\n\n{}", harness_system(&shared, &prof))
                 } else {
                     format!("{h} brings its own system prompt (it takes no extra instructions)")
                 } })],
@@ -3242,12 +3510,10 @@ async fn run_turn(st: &AppState, id: &str, tx: &mpsc::Sender<Event>, queue_ms: u
             .and_then(|m| m["parts"].as_array())
             .is_some_and(|ps| ps.iter().any(|p| p["type"] == "file" && p["mime"].as_str().is_some_and(|t| t.starts_with("image/")))),
     };
-    // a terminal's conversation runs on its own harness, whatever the agent; else the agent's
-    let attached = st.sessions.lock().unwrap().get(id).and_then(|s| {
-        let h = &s.info["harness"];
-        (h["attached"] == true).then(|| h["kind"].as_str().and_then(harness::Kind::parse)).flatten()
-    });
-    let harness = attached.or_else(|| session_profile(st, id).harness.as_deref().and_then(harness::Kind::parse));
+    // the session's own engine (roles rework): a terminal's conversation on its harness, else the
+    // engine stamped on the session, else its role's default
+    let info = st.sessions.lock().unwrap().get(id).map(|s| s.info.clone()).unwrap_or(Value::Null);
+    let harness = engine_of(st, &info);
     let outcome = {
         let fut = async {
             match harness {
@@ -3352,7 +3618,14 @@ async fn harness_loop(st: &AppState, id: &str, prompt: String, tx: &mpsc::Sender
     let (model, resume, cwd, dir, h) = {
         let sessions = st.sessions.lock().unwrap();
         let info = sessions.get(id).map(|s| s.info.clone()).unwrap_or_default();
-        let model = info["model"]["id"].as_str().filter(|m| *m != "default").map(String::from);
+        // the model stamped for THIS engine; one left from another engine (a session whose role
+        // moved engine before the roles rework stamped engines) is not this harness's: its default
+        let model = if info["model"]["providerID"] == kind.name() {
+            info["model"]["id"].as_str().map(String::from)
+        } else {
+            st.config.profiles.read().unwrap().engine_model(kind.name())
+        };
+        let model = model.filter(|m| m != "default");
         let dir = info["cwd"].as_str().unwrap_or("?").to_string();
         let cwd = info["cwd"].as_str().map(PathBuf::from).filter(|p| p.is_dir());
         // only this harness's own session id resumes (another harness's would not be found)
@@ -4448,6 +4721,20 @@ async fn main() {
     eprintln!("loaded {} session(s) from {}", sessions.len(), data_dir.display());
     let interrupted = close_interrupted(&mut sessions, &data_dir, prev_boot(&data_dir).as_deref());
     mark_boot(&data_dir);
+    // roles rework (11-22): the old engine-agents' sessions take their role, every session its engine
+    {
+        let ps = config.profiles.read().unwrap();
+        let mut moved = 0;
+        for (id, s) in sessions.iter_mut() {
+            if relabel_session(&mut s.info, &ps) {
+                persist(&data_dir, id, s);
+                moved += 1;
+            }
+        }
+        if moved > 0 {
+            eprintln!("roles: {moved} session(s) took their role or their engine");
+        }
+    }
     // root-coord migration: MAIN carries its profile explicitly (the phone shows the registry
     // default for unpinned sessions, and that default is `build` again)
     let door_model = config.profiles.read().unwrap().get("coordinator").and_then(|p| p.model.clone()).filter(|m| config.models.contains(m));
@@ -4461,7 +4748,7 @@ async fn main() {
                 s.info["model"]["id"] = json!(m);
             }
             persist(&data_dir, id, s);
-        } else if !main && s.info["agent"] == "coordinator" {
+        } else if !main && s.info["agent"] == "coordinator" && !roots::is_root_main(s) {
             // the coordinator is MAIN's alone: a session stamped with it before that rule (a
             // "fix this" from MAIN, 11-13 morning) runs the default agent
             s.info["agent"] = json!(default_agent);
@@ -4545,8 +4832,11 @@ async fn main() {
         .route("/session/{id}/todo", get(get_todo))
         .route("/api/session/{id}/model", post(switch_model))
         .route("/api/session/{id}/agent", post(switch_agent))
+        .route("/api/session/{id}/engine", post(switch_engine))
         .route("/config/providers", get(config_providers))
         .route("/agent", get(list_agents))
+        .route("/engine", get(list_engines))
+        .route("/engine/{name}", axum::routing::put(put_engine))
         .route("/shared-prompt", get(get_shared).put(put_shared))
         .route("/extensions", get(|State(st): State<AppState>| async move { Json(st.config.ext.describe()) }))
         // B7b: a peer root runs this root's extension tool (peer token only; ext.rs)
@@ -5409,11 +5699,11 @@ mod image_tests {
         assert!(rollup::est_tokens(&convo) < 2000, "an image counts as ~1.6k tokens, not its bytes");
     }
 
-    #[test]
-    fn legacy_agi_session_and_new_agy_resolve_cleanly() {
-        let dir = std::env::temp_dir().join(format!("ygg-main-alias-{}", std::process::id()));
+    /// A brain state for the roles tests: models glm-5.3 (root) and Claude Code's list.
+    fn roles_state(tag: &str, profiles: profiles::Profiles) -> (AppState, PathBuf) {
+        let dir = std::env::temp_dir().join(format!("ygg-main-roles-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::create_dir_all(dir.join("session"));
-        let profiles = profiles::Profiles::load(None);
         let http = reqwest::Client::new();
         let config = Config {
             base_url: "http://127.0.0.1:1".into(),
@@ -5421,7 +5711,7 @@ mod image_tests {
             max_tokens: 1024,
             api_key: None,
             model: "glm-5.3".into(),
-            models: vec!["glm-5.3".into()],
+            models: vec!["glm-5.3".into(), "glm-5.2".into()],
             catalog: json!({"default": {"yggdrasil": {}}}),
             max_steps: 20,
             profiles: std::sync::RwLock::new(profiles),
@@ -5439,13 +5729,8 @@ mod image_tests {
             default_variant: "high".into(),
             think_high: 4096,
         };
-        let legacy_id = "ses_legacy_agi";
-        let mut legacy_info = json!({ "id": legacy_id, "title": "old", "agent": "AGI" });
         let st = AppState {
-            sessions: Arc::new(Mutex::new(HashMap::from([(
-                legacy_id.to_string(),
-                Session { info: legacy_info.clone(), messages: Vec::new(), todo: Vec::new(), inbox: Vec::new() },
-            )]))),
+            sessions: Arc::default(),
             running: Arc::default(),
             run_locks: Arc::default(),
             bus: broadcast::channel(16).0,
@@ -5456,29 +5741,181 @@ mod image_tests {
             upstream: Arc::new(tokio::sync::Semaphore::new(2)),
             wakes: Arc::default(),
             harness_slots: Arc::new(tokio::sync::Semaphore::new(2)),
-            harness_models: Arc::new(Mutex::new(HashMap::new())),
+            harness_models: Arc::new(Mutex::new(HashMap::from([(
+                "claude".to_string(),
+                vec!["fable".to_string(), "opus".to_string(), "sonnet".to_string(), "haiku".to_string()],
+            )]))),
             harness_labels: Arc::new(Mutex::new(HashMap::new())),
             ctx: Arc::new(Mutex::new(context::Store::default())),
             draining: Arc::default(),
             relay: Arc::default(),
             files: Arc::default(),
         };
-        assert_eq!(profile_name_of(&st, &legacy_info), "claude");
-        let prof = session_profile(&st, legacy_id);
-        assert_eq!(prof.name, "claude");
-        assert_eq!(prof.harness.as_deref(), Some("claude"));
+        (st, dir)
+    }
+
+    fn info_of(st: &AppState, id: &str) -> Value {
+        st.sessions.lock().unwrap()[id].info.clone()
+    }
+
+    /// The old words still work (harness-demotion §6.4): `claude` / `AGI` → a build on Claude Code,
+    /// `agy` → a build on Antigravity — from a request, and on a stored session never relabelled.
+    #[test]
+    fn legacy_agi_session_and_new_agy_resolve_cleanly() {
+        let (st, dir) = roles_state("legacy", profiles::Profiles::load(None));
+        let legacy_id = "ses_legacy_agi";
+        let mut legacy_info = json!({ "id": legacy_id, "title": "old", "agent": "AGI" });
+        st.sessions.lock().unwrap().insert(legacy_id.into(), Session { info: legacy_info.clone(), messages: Vec::new(), todo: Vec::new(), inbox: Vec::new() });
+        assert_eq!(profile_name_of(&st, &legacy_info), "build");
+        assert_eq!(session_profile(&st, legacy_id).name, "build");
+        assert_eq!(engine_of(&st, &legacy_info), Some(harness::Kind::Claude), "it still runs on Claude Code");
         with_agent(&st, &mut legacy_info);
-        assert_eq!(legacy_info["agent"], "claude");
+        assert_eq!((legacy_info["agent"].as_str(), legacy_info["engine"].as_str()), (Some("build"), Some("claude")));
 
-        let from_agi = new_session(&st, "from agi", None, Some("AGI"), None, None);
-        assert_eq!(from_agi["agent"], "claude");
-        assert_eq!(from_agi["harness"]["kind"], "claude");
-        assert_eq!(from_agi["model"]["id"], "opus");
+        for (word, kind, model) in [("AGI", "claude", "opus"), ("claude", "claude", "opus"), ("agy", "antigravity", "default")] {
+            let s = new_session(&st, &format!("from {word}"), None, Some(word), None, None);
+            assert_eq!(s["agent"], "build", "{word}");
+            assert_eq!(s["engine"], kind, "{word}");
+            assert_eq!(s["harness"]["kind"], kind, "{word}");
+            assert_eq!(s["model"], json!({ "id": model, "providerID": kind }), "{word}");
+            assert!(s.get("instructions").is_none(), "a new session reads its role's instructions");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
-        let from_agy = new_session(&st, "from agy", None, Some("agy"), None, None);
-        assert_eq!(from_agy["agent"], "agy");
-        assert_eq!(from_agy["harness"]["kind"], "antigravity");
-        assert_eq!(from_agy["model"]["id"], "default");
+    /// Role and engine are two facts (roles rework): a session starts on the engine asked for, else
+    /// its role's default; the model follows the engine (the role's own only on its own engine).
+    #[test]
+    fn a_session_runs_on_its_own_engine_with_the_role_default_as_fallback() {
+        let dir = std::env::temp_dir().join(format!("ygg-roles-file-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("agents.json");
+        std::fs::write(&f, r#"{"agent":{"lead":{"harness":"claude","model":"opus"},"agy":{"harness":"antigravity","model":"gemini-4-neon-high"}}}"#).unwrap();
+        let (st, sdir) = roles_state("engine", profiles::Profiles::load(f.to_str()));
+        // the lead's default: Claude Code · fable (migrated); Antigravity's default from the old agy
+        let lead = new_session(&st, "lead default", None, Some("lead"), None, None);
+        assert_eq!((lead["agent"].as_str(), lead["engine"].as_str()), (Some("lead"), Some("claude")));
+        assert_eq!(lead["model"], json!({ "id": "fable", "providerID": "claude" }));
+        // "a lead on agy": [LEA] on Antigravity, Antigravity's default model, the lead's instructions
+        let on_agy = new_session_on(&st, "lead on agy", None, Some("lead"), Some("agy"), None, None);
+        assert_eq!((on_agy["agent"].as_str(), on_agy["engine"].as_str()), (Some("lead"), Some("antigravity")));
+        assert_eq!(on_agy["model"], json!({ "id": "gemini-4-neon-high", "providerID": "antigravity" }));
+        let id = on_agy["id"].as_str().unwrap();
+        assert_eq!(engine_of(&st, &info_of(&st, id)), Some(harness::Kind::Antigravity));
+        assert_eq!(session_profile(&st, id).prompt, profiles::LEAD_PROMPT);
+        // a lead on the root: the root's model, the role's thinking
+        let on_root = new_session_on(&st, "lead on root", None, Some("lead"), Some("root"), None, None);
+        assert_eq!(on_root["engine"], "root");
+        assert_eq!(on_root["model"]["id"], "glm-5.3");
+        assert!(on_root.get("harness").is_none());
+        assert_eq!(engine_of(&st, &on_root), None);
+        // a build: the root by default; a fix with Claude: opus (Claude Code's default)
+        let b = new_session(&st, "a build", None, Some("build"), None, None);
+        assert_eq!((b["engine"].as_str(), b["model"]["id"].as_str()), (Some("root"), Some("glm-5.3")));
+        let fx = new_session_on(&st, "fix with claude", None, Some("fix"), Some("claude"), None, None);
+        assert_eq!(fx["model"], json!({ "id": "opus", "providerID": "claude" }));
+        // MAIN runs on the root whatever is asked
+        let main = new_session_on(&st, "[MAIN]", None, None, Some("claude"), None, None);
+        assert_eq!((main["agent"].as_str(), main["engine"].as_str()), (Some("coordinator"), Some("root")));
+        // the role's default moves later: a session keeps the engine it was stamped with
+        st.config.profiles.write().unwrap().upsert("lead", &json!({"harness": "root", "model": "glm-5.2"})).unwrap();
+        assert_eq!(engine_of(&st, &info_of(&st, lead["id"].as_str().unwrap())), Some(harness::Kind::Claude));
+        assert_eq!(new_session(&st, "a new lead", None, Some("lead"), None, None)["engine"], "root");
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&sdir);
+    }
+
+    /// Settings: the engine switches on its own (fresh harness conversation, the role's model only
+    /// on its own engine), the role switches on its own; MAIN and terminal conversations are locked.
+    #[test]
+    fn engine_and_role_switch_apart() {
+        let (st, dir) = roles_state("switch", profiles::Profiles::load(None));
+        let fx = new_session_on(&st, "a fix", None, Some("fix"), Some("claude"), None, None);
+        let id = fx["id"].as_str().unwrap().to_string();
+        with_session(&st, &id, |s| s.info["harness"]["id"] = json!("conv-1"));
+        // Claude Code → root: the root's model, no harness conversation
+        let i = set_engine(&st, &id, "root", None).map_err(|_| "refused").unwrap();
+        assert_eq!((i["agent"].as_str(), i["engine"].as_str(), i["model"]["id"].as_str()), (Some("fix"), Some("root"), Some("glm-5.3")));
+        assert_eq!(i["model"]["variant"], "high");
+        assert!(i.get("harness").is_none());
+        // → Claude Code with a model asked for: a fresh conversation there
+        let i = set_engine(&st, &id, "claude", Some("sonnet")).map_err(|_| "refused").unwrap();
+        assert_eq!(i["model"], json!({ "id": "sonnet", "providerID": "claude" }));
+        assert_eq!(i["harness"], json!({ "kind": "claude" }), "the new engine starts fresh");
+        assert!(set_engine(&st, &id, "claude", Some("gpt-9")).is_err(), "a model Claude Code does not offer");
+        assert!(set_engine(&st, &id, "emacs", None).is_err());
+        // the same engine again keeps its conversation
+        with_session(&st, &id, |s| s.info["harness"]["id"] = json!("conv-2"));
+        let i = set_engine(&st, &id, "agy", None).map_err(|_| "refused").unwrap();
+        assert_eq!(i["engine"], "antigravity");
+        let i = set_engine(&st, &id, "antigravity", None).map_err(|_| "refused").unwrap();
+        assert_eq!(i["harness"]["kind"], "antigravity");
+        // MAIN: the root only
+        let main = new_session(&st, "[MAIN]", None, None, None, None)["id"].as_str().unwrap().to_string();
+        assert!(set_engine(&st, &main, "claude", None).is_err());
+        assert!(set_engine(&st, &main, "root", None).is_ok());
+        // a terminal's conversation: its own engine
+        let t = new_session_on(&st, "terminal", None, Some("build"), Some("claude"), None, None)["id"].as_str().unwrap().to_string();
+        with_session(&st, &t, |s| s.info["harness"] = json!({ "kind": "claude", "id": "u-1", "attached": true }));
+        assert!(set_engine(&st, &t, "root", None).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The one-time relabel (roles-cleanup §8): the owner's table, else build; same engine, same
+    /// engine conversation, same instructions; the old name kept; every session its engine.
+    #[test]
+    fn old_engine_agent_sessions_take_their_role_badge_only() {
+        let (st, dir) = roles_state("relabel", profiles::Profiles::load(None));
+        let ps = st.config.profiles.read().unwrap();
+        // P1 on `claude`, its Claude Code conversation and model
+        let mut p1 = json!({ "id": "ses_82772a463f1a495791a851d1d3386d4c", "title": "P1 · home root on the trunk (integrator)", "agent": "claude",
+            "harness": { "kind": "claude", "id": "conv-p1" }, "model": { "id": "opus", "providerID": "claude" } });
+        assert!(relabel_session(&mut p1, &ps));
+        assert_eq!((p1["agent"].as_str(), p1["engine"].as_str(), p1["agent_was"].as_str()), (Some("lead"), Some("claude"), Some("claude")));
+        assert_eq!(p1["harness"], json!({ "kind": "claude", "id": "conv-p1" }), "the same conversation");
+        assert_eq!(p1["model"], json!({ "id": "opus", "providerID": "claude" }), "the same model");
+        assert_eq!(p1["instructions"], "shared");
+        assert!(!relabel_session(&mut p1, &ps), "once");
+        // the agy deploy job: build on Antigravity
+        let mut agy = json!({ "id": "ses_b162cee766dc4930bef3879afd5cb46a", "title": "Deploy no-flash (agy)", "agent": "agy", "harness": { "kind": "antigravity", "id": "c" } });
+        relabel_session(&mut agy, &ps);
+        assert_eq!((agy["agent"].as_str(), agy["engine"].as_str()), (Some("build"), Some("antigravity")));
+        // a research one, an unknown one (build), a terminal conversation
+        let mut res = json!({ "id": "ses_630172b8cf17405ebafa2cc204473326", "title": "Roles cleanup proposals", "agent": "claude", "harness": { "kind": "claude" } });
+        relabel_session(&mut res, &ps);
+        assert_eq!(res["agent"], "research");
+        let mut other = json!({ "id": "ses_someone_else", "title": "x", "agent": "AGI" });
+        relabel_session(&mut other, &ps);
+        assert_eq!((other["agent"].as_str(), other["engine"].as_str(), other["agent_was"].as_str()), (Some("build"), Some("claude"), Some("AGI")));
+        let mut term = json!({ "id": "ses_a2ff025b18e749d69acd320300cf87fd", "title": "t · Antigravity", "agent": "agy", "harness": { "kind": "antigravity", "id": "x", "attached": true } });
+        relabel_session(&mut term, &ps);
+        assert_eq!((term["agent"].as_str(), term["engine"].as_str()), (Some("build"), Some("antigravity")));
+        // sessions on roles: the engine they run on today; MAIN the root; a proxy untouched
+        let mut b = json!({ "id": "b", "title": "b", "agent": "build" });
+        assert!(relabel_session(&mut b, &ps));
+        assert_eq!(b["engine"], "root");
+        let mut m = json!({ "id": "m", "title": "[MAIN]", "agent": "coordinator" });
+        relabel_session(&mut m, &ps);
+        assert_eq!(m["engine"], "root");
+        let mut px = json!({ "id": "p", "title": "p", "agent": "claude", "remote": { "root": "lab", "id": "r" } });
+        relabel_session(&mut px, &ps);
+        assert_eq!(px["agent"], "build");
+        assert!(px.get("engine").is_none() && px.get("instructions").is_none(), "it runs on its root");
+        drop(ps);
+        // what a relabelled session reads: the shared prompt only, no role text, no sessions — as before
+        st.sessions.lock().unwrap().insert("p1".into(), Session { info: p1.clone(), messages: Vec::new(), todo: Vec::new(), inbox: Vec::new() });
+        let prof = session_profile(&st, "p1");
+        assert_eq!(prof.name, "lead");
+        assert!(prof.prompt.is_empty() && !prof.sessions, "badge only");
+        assert_eq!(harness_system("SHARED", &prof), "SHARED");
+        assert_eq!(engine_of(&st, &p1), Some(harness::Kind::Claude));
+        // picking a role in its settings is the owner's say: from then on it reads that role
+        with_session(&st, "p1", |s| {
+            s.info["agent"] = json!("lead");
+            s.info.as_object_mut().unwrap().remove("instructions");
+        });
+        assert_eq!(session_profile(&st, "p1").prompt, profiles::LEAD_PROMPT);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

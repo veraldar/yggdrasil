@@ -1,10 +1,12 @@
 'use client';
 
-/** Session settings — name / model / think / agent blocks (shared theme
- *  CSS: .oz-blk + oz tokens). Instant-apply:
+/** Session settings — name / role / runs on / model / think blocks (shared
+ *  theme CSS: .oz-blk + oz tokens). Instant-apply:
  *  no save button, every control commits on tap/blur, like the header mode
- *  toggle. All writes go through PATCH /api/session/[id], which routes title
- *  to the session update and model/agent to opencode's v2 switch endpoints —
+ *  toggle — a role or an engine switch says first what it changes ("what
+ *  changes", then switch / keep). All writes go through PATCH
+ *  /api/session/[id], which routes title to the session update and
+ *  model/role/engine to the brain's switch endpoints —
  *  server-side per-session state, so text AND voice turns both use it. The
  *  current think level is whatever the session records; 'default' means no
  *  explicit level set. DELETE at the bottom removes the session (opencode
@@ -14,7 +16,20 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Link from 'next/link';
 import { useParams, useRouter } from 'next/navigation';
 import { ErrorBox } from '@/components/app/error-box';
-import { type AgentDetail, agentDiff } from '@/lib/agents';
+import {
+  type AgentDetail,
+  type AgentRow,
+  ENGINES,
+  ENGINE_FRESH,
+  type EngineRow,
+  MORE_ENGINES,
+  byRole,
+  engineDiff,
+  engineLabel,
+  roleDiff,
+  roleOf,
+  roleTag,
+} from '@/lib/agents';
 import { slugify } from '@/lib/slug';
 import { isMainSlug } from '@/lib/tree-first';
 
@@ -37,25 +52,36 @@ type SessionInfo = {
   /** what a model-less session runs on — the brain's default (null: the
    * brain didn't say) */
   defaultModel?: ModelRef | null;
+  /** what runs it: root · claude · antigravity · opencode · codex */
+  engine?: string;
   /** a session on another harness: which one, its conversation there, and
-   * whether it continues a terminal's conversation */
+   * whether it continues the owner's own terminal conversation (no role) */
   harness?: { kind: string | null; id: string | null; attached: boolean };
+  /** "shared" = it reads only the shared prompt, no role text */
+  instructions?: string | null;
+  /** a relabelled session's old agent name (claude | agy) */
+  agent_was?: string | null;
 };
 type ProviderRow = {
   id: string;
   name: string;
   models: { id: string; name: string; variants: string[] }[];
 };
-/** one of the brain's agents (/api/agents) — what it is for, in its words */
-type Agent = { name: string; description: string };
-type Block = 'name' | 'model' | 'think' | 'agent' | 'steps';
+type Block = 'name' | 'model' | 'think' | 'role' | 'engine' | 'steps';
 type Res = 'session' | 'models' | 'agents';
-/** root-coord: MAIN's own agent — never offered to another session */
+/** root-coord: MAIN's own role — never offered to another session */
 const COORD = 'coordinator';
+/** a switch waiting for its yes: what taking that role / that engine changes, first */
+type Pending = { kind: 'role' | 'engine'; to: string; rows: [string, string][] };
+
+const getRole = (n: string): Promise<AgentDetail | null> =>
+  fetch(`/api/agents/${n}`, { cache: 'no-store' })
+    .then((r) => (r.ok ? r.json() : null))
+    .catch(() => null);
 
 /** One settings resource: its body, or why it didn't come (HTTP status +
  *  the proxy's error, or the network failure) — never a silent miss. */
-async function grab(url: string): Promise<{ data: any } | { err: string }> {
+async function grab<T>(url: string): Promise<{ data: T } | { err: string }> {
   try {
     const r = await fetch(url, { cache: 'no-store' });
     const d = await r.json().catch(() => null);
@@ -86,7 +112,11 @@ export default function SessionSettingsView() {
   const [nameInput, setNameInput] = useState(slug);
   // null = not landed yet (loading, or failed — loadErr says which)
   const [providers, setProviders] = useState<ProviderRow[] | null>(null);
-  const [agents, setAgents] = useState<Agent[] | null>(null);
+  // the brain's roles (/api/agents): name, what it is for, its default engine + model
+  const [agents, setAgents] = useState<AgentRow[] | null>(null);
+  // the engines (/api/engines): their default models and choices; null = not landed (an older
+  // brain has none — the chips then fall back to the five names)
+  const [engines, setEngines] = useState<EngineRow[] | null>(null);
   // may this session notify the phone (off by default, MAIN on): null until known
   const [notify, setNotify] = useState<boolean | null>(null);
   useEffect(() => {
@@ -109,11 +139,10 @@ export default function SessionSettingsView() {
   // picks from its harness, not from the root's upstream
   const [harnessModels, setHarnessModels] = useState<Record<string, string[]>>({});
   const [modelLabels, setModelLabels] = useState<Record<string, Record<string, string>>>({});
-  // the agent whose meaning shows under the list — the last one tapped
-  // (null: the session's own)
-  // a switch waiting for its yes: what taking that agent changes, first
-  const [pending, setPending] = useState<{ to: string; rows: [string, string][] } | null>(null);
-  const tapRef = useRef(''); // the last agent tapped — an older answer is stale
+  // the role whose meaning shows under the chips — the last one tapped ('': the session's own)
+  const [shown, setShown] = useState('');
+  const [pending, setPending] = useState<Pending | null>(null);
+  const tapRef = useRef(''); // the last role / engine tapped — an older answer is stale
   const [loadErr, setLoadErr] = useState<Partial<Record<Res, string>>>({});
   const [pickOpen, setPickOpen] = useState(false);
   const [filter, setFilter] = useState('');
@@ -132,6 +161,8 @@ export default function SessionSettingsView() {
     setNameInput(slug);
     setPickOpen(false);
     setLoadErr({});
+    setShown('');
+    setPending(null);
   }, [slug]);
 
   const load = useCallback(async () => {
@@ -142,17 +173,19 @@ export default function SessionSettingsView() {
     // session record itself is fine
     // A failure is kept per resource and SHOWN in its block (10-19: a
     // failed load read as 'no model' / 'no models' / invented agents)
-    const [sr, mr, ar, hr] = await Promise.all([
-      grab(`/api/session/${slug}`),
-      grab('/api/models'),
-      grab('/api/agents'),
-      grab('/api/agents/build'),
-    ]);
-    if ('data' in hr) {
-      const d = hr.data as {
+    const [sr, mr, ar, hr, er] = await Promise.all([
+      grab<SessionInfo>(`/api/session/${slug}`),
+      grab<ProviderRow[]>('/api/models'),
+      grab<AgentRow[]>('/api/agents'),
+      grab<{
         models_by_harness?: Record<string, string[]>;
         model_labels?: Record<string, Record<string, string>>;
-      };
+      }>('/api/agents/build'),
+      grab<EngineRow[]>('/api/engines'),
+    ]);
+    if ('data' in er && Array.isArray(er.data) && er.data.length) setEngines(er.data);
+    if ('data' in hr) {
+      const d = hr.data || {};
       setHarnessModels(d.models_by_harness || {});
       setModelLabels(d.model_labels || {});
     }
@@ -163,7 +196,7 @@ export default function SessionSettingsView() {
       setNameInput((prev) => (prev === slug ? sr.data.title || slug : prev));
     }
     if ('data' in mr) setProviders(mr.data);
-    if ('data' in ar) setAgents(ar.data as Agent[]);
+    if ('data' in ar) setAgents(ar.data);
     setLoadErr({
       ...('err' in sr && { session: sr.err }),
       ...('err' in mr && { models: mr.err }),
@@ -210,12 +243,50 @@ export default function SessionSettingsView() {
   // brain's default — shown AS the default ('shown, not asked', like the door)
   const run = model ?? info?.defaultModel ?? null;
   const onDefault = !!info && !model;
-  const agent = info?.agent ?? '';
+  // the role (the brain's `agent`; an old root's `claude` / `agy` read as build)
+  const agent = info?.agent ? roleOf(info.agent) : '';
   const modelKey = (m: ModelRef) => `${m.providerID}/${m.modelID}`;
   const isMain = isMainSlug(slug);
-  // the coordinator is MAIN's alone: offered on MAIN (and shown where it
-  // already runs), never to another session
-  const agentList = (agents || []).filter((a) => a.name !== COORD || isMain || agent === COORD);
+  // the owner's own terminal conversation: it runs on its own engine, and has no role until one
+  // is picked (it reads only the shared prompt)
+  const attached = info?.harness?.attached === true;
+  const noRole = attached && info?.instructions === 'shared';
+  const engine = info?.engine || (run && HARNESSES.has(run.providerID) ? run.providerID : 'root');
+  const engineRow = (n: string) => engines?.find((e) => e.name === n) || null;
+  // the coordinator is MAIN's alone: MAIN shows only it (locked), another session never gets it
+  const roleList = (agents || [])
+    .filter((a) => (isMain ? a.name === COORD : a.name !== COORD || agent === COORD))
+    .sort(byRole);
+  const roleRow = (n: string) => (agents || []).find((a) => a.name === n) || null;
+  const shownRole = shown || (noRole ? '' : agent);
+
+  // the engines in the brain's order; opencode and Codex behind a fold unless it runs on one
+  const engineNames = engines?.map((e) => e.name) || [...ENGINES];
+  const isMore = (n: string) => engineRow(n)?.more ?? MORE_ENGINES.has(n);
+  const engineChips = engineNames.filter((n) => !isMore(n) || n === engine);
+  const moreChips = engineNames.filter((n) => isMore(n) && n !== engine);
+  const engineLocked = isMain || attached;
+  // the role's default: its engine · its model (else that engine's default)
+  const defaultOf = (n: string) => {
+    const r = roleRow(n);
+    if (!r) return '';
+    const e = r.harness || 'root';
+    return `${engineLabel(e)} · ${r.model || engineRow(e)?.model || 'default'}`;
+  };
+  const engineNote = !info
+    ? ''
+    : isMain
+      ? 'locked: MAIN always runs on the root'
+      : attached
+        ? `locked: your terminal conversation runs on ${engineLabel(engine)}`
+        : agent && defaultOf(agent)
+          ? `the ${agent}'s default: ${defaultOf(agent)}`
+          : '';
+  // a review off the root is read-only because its instructions say so — the brain can't hold an
+  // engine's own tools back (the switch waiting counts: it is what the session would become)
+  const nextRole = pending?.kind === 'role' ? pending.to : agent;
+  const nextEngine = pending?.kind === 'engine' ? pending.to : engine;
+  const reviewOff = !noRole && nextRole === 'review' && nextEngine !== 'root';
 
   // ∞ (no cap, the default), a few caps, and the session's own when it is another number
   const STEPS = [50, 100, 200, 500];
@@ -225,54 +296,83 @@ export default function SessionSettingsView() {
     ...(info?.steps && !STEPS.includes(info.steps) ? [info.steps] : []),
   ];
 
-  const agentNote = !agents
+  const roleNote = !agents
     ? loadErr.agents
-      ? `couldn't load agents — ${loadErr.agents} · retrying`
-      : 'loading agents…'
+      ? `couldn't load roles — ${loadErr.agents} · retrying`
+      : 'loading roles…'
     : !agents.length
-      ? 'the brain offers no agents'
+      ? 'the brain offers no roles'
       : '';
 
-  /** a tap shows what switching to it changes (harness, model, thinking, tools,
-   *  instructions) — 'switch' applies it. MAIN only ever goes back to the coordinator */
-  async function pickAgent(a: string) {
+  /** a tap says what the role is for and what switching to it changes (instructions, sessions,
+   *  tools on the root; the model only when it runs on that role's default engine) — 'switch'
+   *  applies it; the engine stays. MAIN is locked: the tap only explains */
+  async function pickRole(a: string) {
     setPending(null);
-    tapRef.current = a;
-    if (a === agent || (isMain && a !== COORD)) return;
-    if (isMain) return void patch({ agent: a }, 'agent');
-    const get = (n: string): Promise<AgentDetail | null> =>
-      fetch(`/api/agents/${n}`, { cache: 'no-store' })
-        .then((r) => (r.ok ? r.json() : null))
-        .catch(() => null);
-    // an unpinned session still runs an agent — the brain's default, which
-    // its tree row names
-    const effective =
-      agent ||
-      (await fetch('/api/tree', { cache: 'no-store' })
-        .then((r) => (r.ok ? r.json() : []))
-        .then(
-          (rows: { id: string; agent?: string }[]) => rows.find((r) => r.id === info?.id)?.agent
-        )
-        .catch(() => ''));
-    const [cur, to] = await Promise.all([effective ? get(effective) : null, get(a)]);
-    if (tapRef.current === a) setPending({ to: a, rows: to ? agentDiff(cur, to, run) : [] });
+    setRefused(null);
+    setShown(a);
+    tapRef.current = `role:${a}`;
+    if (isMain || (a === agent && !noRole)) return;
+    // an unpinned session still runs a role — the brain's default, which its tree row names
+    const effective = noRole
+      ? ''
+      : agent ||
+        (await fetch('/api/tree', { cache: 'no-store' })
+          .then((r) => (r.ok ? r.json() : []))
+          .then(
+            (rows: { id: string; agent?: string }[]) => rows.find((r) => r.id === info?.id)?.agent
+          )
+          .catch(() => ''));
+    const [cur, to] = await Promise.all([effective ? getRole(effective) : null, getRole(a)]);
+    if (tapRef.current !== `role:${a}`) return;
+    setPending({
+      kind: 'role',
+      to: a,
+      rows: to ? roleDiff(cur, to, engine, run, info?.instructions === 'shared') : [],
+    });
+  }
+
+  /** a tap on another engine says what moving there changes (model, tools) — always with the
+   *  fresh-start warning; 'switch' applies it, the role stays */
+  async function pickEngine(x: string) {
+    setPending(null);
+    setRefused(null);
+    tapRef.current = `engine:${x}`;
+    if (engineLocked || x === engine) return;
+    const role = noRole ? null : agent ? await getRole(agent) : null;
+    if (tapRef.current !== `engine:${x}`) return;
+    setPending({
+      kind: 'engine',
+      to: x,
+      rows: engineDiff(
+        role,
+        noRole ? '' : agent,
+        engine,
+        x,
+        run?.modelID || 'default',
+        engines || []
+      ),
+    });
   }
 
   const shownVariant = run?.variant && run.variant !== 'default' ? run.variant : '';
 
-  const onHarness = run && HARNESSES.has(run.providerID) ? run.providerID : '';
+  // the model follows the engine: a session on Claude Code / Antigravity / opencode / Codex picks
+  // from that engine's own models, one on the root from the root's upstream
+  const onHarness = HARNESSES.has(engine) ? engine : '';
   const modelList = useMemo(() => {
     const q = filter.trim().toLowerCase();
+    const eng = engines?.find((e) => e.name === onHarness);
     const rows = onHarness
-      ? (harnessModels[onHarness] || []).map((id) => ({
+      ? (eng?.models?.length ? eng.models : harnessModels[onHarness] || []).map((id) => ({
           id,
-          name: modelLabels[onHarness]?.[id] || '',
+          name: eng?.labels?.[id] || modelLabels[onHarness]?.[id] || '',
           variants: [] as string[],
           providerID: onHarness,
         }))
       : (providers || []).flatMap((p) => p.models.map((m) => ({ ...m, providerID: p.id })));
     return rows.filter((m) => !q || `${m.providerID}/${m.id} ${m.name}`.toLowerCase().includes(q));
-  }, [providers, filter, onHarness, harnessModels, modelLabels]);
+  }, [providers, filter, onHarness, engines, harnessModels, modelLabels]);
 
   const patch = useCallback(
     async (body: Record<string, unknown>, block: Block) => {
@@ -408,6 +508,154 @@ export default function SessionSettingsView() {
         {refused?.block === 'name' && <Refusal msg={refused.msg} />}
       </section>
 
+      {/* ROLE — the job (the badge): the brain's own list, no stand-in names while it's missing.
+          A tap says what the role is for, then what switching changes; the engine stays */}
+      <section className="oz-blk" data-testid="role-block">
+        <h2>role</h2>
+        {roleList.length ? (
+          <div className="oz-chips">
+            {roleList.map((a) => (
+              <button
+                key={a.name}
+                aria-pressed={!noRole && agent === a.name}
+                onClick={() => void pickRole(a.name)}
+              >
+                <span className="b" aria-hidden="true">
+                  [{roleTag(a.name)}]
+                </span>
+                {a.name}
+              </button>
+            ))}
+          </div>
+        ) : null}
+        {roleNote && <p className={`note ${roleList.length ? '' : 'pt-3!'}`}>{roleNote}</p>}
+        {shownRole && roleRow(shownRole)?.description && (
+          <p className="note" data-testid="role-desc">
+            {roleRow(shownRole)!.description}
+          </p>
+        )}
+        {isMain ? (
+          <p className="note">locked: MAIN is the coordinator, on the root</p>
+        ) : (
+          noRole &&
+          !shown && (
+            <p className="note" data-testid="no-role">
+              your terminal conversation: no role
+            </p>
+          )
+        )}
+        {(isMain || (agent && !noRole)) && (
+          <p className="note">
+            {isMain ? (
+              <Link href="/agents">roles ›</Link>
+            ) : (
+              <Link href={`/agents/${agent}`}>customize {agent} ›</Link>
+            )}
+          </p>
+        )}
+        {refused?.block === 'role' && <Refusal msg={refused.msg} />}
+      </section>
+
+      {/* RUNS ON — the engine, apart from the role: root · Claude Code · Antigravity (opencode and
+          Codex behind a fold). MAIN is always on the root; a terminal conversation on its own */}
+      <section className="oz-blk" data-testid="engine-block">
+        <h2>runs on</h2>
+        <div className="oz-chips">
+          {engineChips.map((x) => (
+            <button
+              key={x}
+              aria-pressed={!!info && engine === x}
+              disabled={!info || engineLocked}
+              onClick={() => void pickEngine(x)}
+            >
+              {engineLabel(x)}
+            </button>
+          ))}
+        </div>
+        {moreChips.length > 0 && !engineLocked && (
+          <details className="pt-0" data-testid="more-engines">
+            <summary className="cursor-pointer text-[11px] text-[var(--oz-dim)]">
+              more engines
+            </summary>
+            <div className="oz-chips mt-2">
+              {moreChips.map((x) => (
+                <button
+                  key={x}
+                  aria-pressed={false}
+                  disabled={!info}
+                  onClick={() => void pickEngine(x)}
+                >
+                  {engineLabel(x)}
+                </button>
+              ))}
+            </div>
+          </details>
+        )}
+        {engineNote && (
+          <p className="note" data-testid="engine-note">
+            {engineNote}
+          </p>
+        )}
+        {reviewOff && !pending && (
+          <p className="note text-[var(--oz-active)]!" data-testid="review-note">
+            read-only by instruction, not by a lock
+          </p>
+        )}
+        {refused?.block === 'engine' && <Refusal msg={refused.msg} />}
+      </section>
+
+      {/* WHAT CHANGES — a role or an engine switch, said before it applies; an engine switch
+          always warns that the new engine starts fresh */}
+      {pending && (
+        <section
+          className="oz-blk"
+          data-testid={pending.kind === 'role' ? 'role-diff' : 'engine-diff'}
+        >
+          <h2>what changes</h2>
+          <div>
+            <ul className="oz-kv oz-diff">
+              {pending.rows.map(([k, v]) => (
+                <li key={k}>
+                  <span>{k}</span>
+                  <span>{v}</span>
+                </li>
+              ))}
+              {!pending.rows.length && (
+                <li>
+                  <span>—</span>
+                  <span>nothing else changes</span>
+                </li>
+              )}
+            </ul>
+          </div>
+          {pending.kind === 'engine' && (
+            <p className="note text-[var(--oz-active)]!" data-testid="engine-fresh">
+              {ENGINE_FRESH}
+            </p>
+          )}
+          {reviewOff && (
+            <p className="note text-[var(--oz-active)]!" data-testid="review-note">
+              read-only by instruction, not by a lock
+            </p>
+          )}
+          <div className="flex gap-1.5">
+            <button
+              onClick={() => {
+                const p = pending;
+                setPending(null);
+                void patch(p.kind === 'role' ? { agent: p.to } : { engine: p.to }, p.kind);
+              }}
+              className="oz-k ok flex-1"
+            >
+              switch
+            </button>
+            <button onClick={() => setPending(null)} className="oz-k px-4">
+              keep
+            </button>
+          </div>
+        </section>
+      )}
+
       <section className="oz-blk">
         <h2>model</h2>
         <div>
@@ -525,67 +773,6 @@ export default function SessionSettingsView() {
           {refused?.block === 'think' && <Refusal msg={refused.msg} />}
         </section>
       )}
-
-      <section className="oz-blk">
-        <h2>agent</h2>
-        {/* the brain's own list — no stand-in names while it's missing */}
-        {agentList.length ? (
-          <div className="oz-chips">
-            {agentList.map((a) => (
-              <button
-                key={a.name}
-                aria-pressed={agent === a.name}
-                onClick={() => pickAgent(a.name)}
-              >
-                {a.name}
-              </button>
-            ))}
-          </div>
-        ) : null}
-        {pending && (
-          <div data-testid="agent-diff">
-            <p className="text-[11px] text-[var(--oz-text)]">switching to {pending.to} changes</p>
-            <ul className="oz-kv oz-diff mt-1.5">
-              {pending.rows.map(([k, v]) => (
-                <li key={k}>
-                  <span>{k}</span>
-                  <span>{v}</span>
-                </li>
-              ))}
-              {!pending.rows.length && (
-                <li>
-                  <span>—</span>
-                  <span>nothing else changes</span>
-                </li>
-              )}
-            </ul>
-            <div className="mt-2.5 flex gap-1.5">
-              <button
-                onClick={() => {
-                  const to = pending.to;
-                  setPending(null);
-                  void patch({ agent: to }, 'agent');
-                }}
-                className="oz-k ok flex-1"
-              >
-                switch
-              </button>
-              <button onClick={() => setPending(null)} className="oz-k px-4">
-                cancel
-              </button>
-            </div>
-          </div>
-        )}
-        {agentNote && <p className={`note ${agentList.length ? '' : 'pt-3!'}`}>{agentNote}</p>}
-        <p className="note">
-          {isMain ? (
-            <Link href="/agents">agents ›</Link>
-          ) : (
-            agent && <Link href={`/agents/${agent}`}>customize {agent} ›</Link>
-          )}
-        </p>
-        {refused?.block === 'agent' && <Refusal msg={refused.msg} />}
-      </section>
 
       {/* STEPS — how many model calls one turn may make: none by default (∞, owner 11-19); a
           cap stops a turn that would run on (it ends failed, said so in the list) */}

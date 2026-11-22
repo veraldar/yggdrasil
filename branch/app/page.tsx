@@ -3,18 +3,18 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { LineIcon } from '@/components/line-icon';
-import { BAND_VIEWBOX, YggTree } from '@/components/ygg';
-import { Door } from '@/components/tree-door';
-import { MainBar } from '@/components/main-bar';
-import { HOME_ROOT_KEY, RootsSheet, type Tree } from '@/components/roots-sheet';
-import { Marked } from '@/components/marked';
 import { ContinueTerminal } from '@/components/app/continue-claude';
-import { sessionTag } from '@/lib/agents';
-import { askedSessions, clearAsked, notifyReply } from '@/lib/notify';
-import type { ArtifactEntry } from '@/lib/artifacts';
+import { LineIcon } from '@/components/line-icon';
+import { MainBar } from '@/components/main-bar';
+import { Marked } from '@/components/marked';
+import { HOME_ROOT_KEY, RootsSheet, type Tree } from '@/components/roots-sheet';
+import { Door } from '@/components/tree-door';
+import { BAND_VIEWBOX, YggTree } from '@/components/ygg';
+import { engineWord, roleOf, sessionTag } from '@/lib/agents';
 import { countUnseen, seenInit } from '@/lib/artifact-read';
+import type { ArtifactEntry } from '@/lib/artifacts';
 import { CARD_ST, type Card } from '@/lib/card';
+import { askedSessions, clearAsked, notifyReply } from '@/lib/notify';
 import { lastRead, markRead } from '@/lib/read';
 import { slugify } from '@/lib/slug';
 import { DOOR_KEY, MAIN_SLUG, isMainSlug, isOnboardPrompt } from '@/lib/tree-first';
@@ -42,8 +42,11 @@ type Sess = {
   lastHasQ?: boolean;
   msgs?: number;
   pending?: boolean;
+  /** its role (the badge) — the brain's `agent` field */
   agent?: string | null;
-  /** a terminal's conversation continued here: its harness (claude · antigravity · opencode) */
+  /** what runs it (the small grey word; none on the root): root · claude · antigravity · … */
+  engine?: string | null;
+  /** the owner's own terminal conversation continued here: its kind (badge [TRM]), else null */
   harness?: string | null;
   card?: Card | null;
   archived?: boolean; // closed by its parent — hidden behind "N closed"
@@ -502,9 +505,8 @@ export default function SessionsPage() {
     }
     const famIds = new Set(fam.map((x) => x.id));
     setSessions((list) => list.filter((x) => x.id !== s.id && !famIds.has(x.id))); // optimistic
-    const win = (s.msgs || 0) + fam.reduce((n, x) => n + (x.msgs || 0), 0) >= 10
-      ? UNDO_MS_HEAVY
-      : UNDO_MS;
+    const win =
+      (s.msgs || 0) + fam.reduce((n, x) => n + (x.msgs || 0), 0) >= 10 ? UNDO_MS_HEAVY : UNDO_MS;
     pendingRef.current = { s, fam, timer: setTimeout(commitPending, win) };
     setToast({ s, famCount: fam.length, win, key: Date.now() });
   }
@@ -632,8 +634,13 @@ export default function SessionsPage() {
               </span>
             ) : null}
             <span className={`t ${depth ? 'opacity-85' : ''}`}>
-              {/* every session at a glance: [MAI] [CLA] [AGY] [OPE] [BUI] [FIX]… */}
-              <span className="mr-1 opacity-60" aria-hidden="true" title={s.harness || s.agent || ''}>
+              {/* the badge is the role (roles rework 11-22): [MAI] [LEA] [BUI] [FIX] [REV] [RES],
+                  [TRM] for the owner's own terminal conversation — never the engine */}
+              <span
+                className="mr-1 opacity-60"
+                aria-hidden="true"
+                title={s.harness ? 'your terminal conversation' : roleOf(s.agent)}
+              >
                 [{sessionTag(s, isMainSlug(slugify(s.title || '')))}]
               </span>
               {/* it runs on another computer: that computer's name */}
@@ -666,11 +673,17 @@ export default function SessionsPage() {
                 {kidLive && !open ? ' ●' : ''}
               </span>
             )}
-            {/* one status word, nothing longer (owner 11-17): "working" while it works,
-                "terminal" for a terminal's conversation — the rest is the dot's color */}
-            {(working || s.harness) && (
-              <span className="oz-st" style={{ color: working ? 'var(--oz-success)' : 'var(--oz-dim)' }}>
-                {working ? 'working' : 'terminal'}
+            {/* one status word, nothing longer (owner 11-17): "working" while it works — the
+                rest is the dot's color ([TRM] says a terminal's conversation already) */}
+            {working && (
+              <span className="oz-st" style={{ color: 'var(--oz-success)' }}>
+                working
+              </span>
+            )}
+            {/* the engine, one small grey word (none on the root): claude · agy · opencode · codex */}
+            {engineWord(s.engine) && (
+              <span className="oz-eng" data-testid="engine-word">
+                {engineWord(s.engine)}
               </span>
             )}
             <time>{fmtListTime(byOwner(s))}</time>
@@ -851,7 +864,9 @@ export default function SessionsPage() {
                     </div>
                     {h.snippets.map((sn, i) => (
                       <div key={i} className={`oz-r2 ${i === 0 ? '' : 'opacity-70'}`}>
-                        <span className="text-[10px]">({sn.role === 'assistant' ? 'agent' : sn.role}) </span>
+                        <span className="text-[10px]">
+                          ({sn.role === 'assistant' ? 'agent' : sn.role}){' '}
+                        </span>
                         <Marked text={sn.text} q={gq} />
                       </div>
                     ))}
@@ -896,8 +911,7 @@ export default function SessionsPage() {
           <div className="msg">
             deleted “{toast.s.title || toast.s.id}”
             {(toast.s.msgs || 0) > 0 && ` · ${toast.s.msgs} msgs`}
-            {toast.famCount > 0 &&
-              ` + ${toast.famCount} sub${toast.famCount === 1 ? '' : 's'}`}
+            {toast.famCount > 0 && ` + ${toast.famCount} sub${toast.famCount === 1 ? '' : 's'}`}
           </div>
           <button onClick={undo} className="oz-k sm ok">
             undo

@@ -75,11 +75,13 @@ test.afterAll(async ({ request }) => {
   if (pickerSessionId) await request.delete(`/api/session/${pickerSessionId}`);
 });
 
-test('header slug opens settings — NAME/MODEL/THINK/AGENT tiles render', async ({ page }) => {
+test('header slug opens settings — NAME/ROLE/RUNS ON/MODEL/THINK tiles render', async ({
+  page,
+}) => {
   await page.goto(`/session/${BASE_NAME}?id=${sessionId}`);
   await page.getByLabel('session settings').click();
   await expect(page).toHaveURL(new RegExp(`/session/${BASE_NAME}/settings`));
-  for (const tile of ['name', 'model', 'agent']) {
+  for (const tile of ['name', 'role', 'runs on', 'model']) {
     await expect(page.getByRole('heading', { name: tile, exact: true })).toBeVisible();
   }
   // model tile shows the catalogued id (provider/model); think shows the
@@ -96,9 +98,9 @@ test('header slug opens settings — NAME/MODEL/THINK/AGENT tiles render', async
   } else {
     await expect(page.getByTestId('think-block')).toHaveCount(0);
   }
-  // agent tile lists the CATALOG's primary agents — utility prompts and
-  // subagents must NOT appear
-  for (const a of cat.agents) {
+  // role tile lists the CATALOG's roles — utility prompts and subagents must NOT appear, nor the
+  // coordinator (MAIN's alone)
+  for (const a of cat.agents.filter((n) => n !== 'coordinator')) {
     await expect(page.getByRole('button', { name: a, exact: true })).toBeVisible();
   }
   await expect(page.getByRole('button', { name: 'title', exact: true })).toHaveCount(0);

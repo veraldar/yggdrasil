@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # twin-up.sh <run> [bin] — the acceptance twin (plan §5.1): a full copy of the real system from
 # the CANDIDATE build, beside the live one, never touching it.
-#   brain :4250 (sim/brain-up.sh acc-<run>, real upstream, SIM_HARNESS=1) · librarian :4251
+#   brain :4250 (sim/brain-up.sh acc-<run>, real upstream, SIM_HARNESS=1 unless TWIN_HARNESS=0) · librarian :4251
 #   app   :8250 (next start, the worktree build, OPENCODE_URL=:4250, BIFROST_AUTH=tailnet)
 #   tap   :4252 (optional, TWIN_TAP=1: sim/voice/upstream_tap.py → <twin>/tap.jsonl)
 # Everything lives in ~/.cache/root-sim/acc-<run>/.   twin-up.sh <run> down  — stop the units.
@@ -45,7 +45,9 @@ fi
 
 # 1. the brain: brain-up.sh's sandboxed scratch brain (real upstream key via SIM_UPSTREAM_BASE_URL),
 #    harnesses live (SIM_HARNESS=1), the librarian wired as an extension.
-SIM_HARNESS=1 SIM_EXTENSIONS="librarian=http://127.0.0.1:$LIBP" \
+#    TWIN_HARNESS=0: no harness binaries or logins in the sandbox — a twin seeded with a copy of the
+#    live sessions can never resume one of the owner's real Claude Code / Antigravity conversations.
+SIM_HARNESS=${TWIN_HARNESS:-1} SIM_EXTENSIONS="librarian=http://127.0.0.1:$LIBP" \
   bash "$ROOT/sim/brain-up.sh" "acc-$RUN" 4250 "$BIN"
 
 # 2. the librarian: its own DB beside the twin's brain

@@ -37,15 +37,17 @@ test('the agent editor offers Antigravity with Google’s current models; a sess
   const name = `agy-e2e-${Date.now().toString(36)}`;
   let sid = '';
   try {
-    // agents → + new agent → name → create: the editor opens on a new agent
+    // roles → + new role → name → create: the editor opens on a new role
     await page.goto('/agents');
-    await page.getByRole('button', { name: 'new agent' }).tap();
-    const field = page.getByLabel('new agent name');
+    await page.getByRole('button', { name: 'new role' }).tap();
+    const field = page.getByLabel('new role name');
     await field.tap();
     await field.fill(name);
     await page.getByRole('button', { name: 'create', exact: true }).tap();
     await page.waitForURL(new RegExp(`/agents/${name}`));
-    const runsOn = page.locator('.oz-blk', { has: page.getByRole('heading', { name: 'runs on' }) });
+    const runsOn = page.locator('.oz-blk', {
+      has: page.getByRole('heading', { name: 'runs on by default', exact: true }),
+    });
     await expect(runsOn.getByRole('button', { name: /Gemini/ })).toHaveCount(0);
     await runsOn.getByRole('button', { name: 'Antigravity', exact: true }).tap();
     await expect(runsOn.getByRole('button', { name: 'Antigravity', exact: true })).toHaveAttribute(
@@ -82,13 +84,13 @@ test('the agent editor offers Antigravity with Google’s current models; a sess
       await model.getByRole('button', { name: pick, exact: true }).tap();
     }
     await expect(model.locator('p.note')).toContainText(labels[pick]);
-    await page.getByRole('button', { name: 'create agent' }).tap();
+    await page.getByRole('button', { name: 'create role' }).tap();
     await expect(page.getByText('saved')).toBeVisible({ timeout: 20_000 });
     const made = await (await request.get(`${OC}/agent/${name}`)).json();
     expect(made.harness).toBe('antigravity');
     expect(made.model).toBe(pick);
 
-    // the agents list says where it runs
+    // the roles list says where it runs by default
     await page.goto('/agents');
     await expect(
       page

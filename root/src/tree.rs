@@ -54,8 +54,9 @@ pub fn schemas(profiles: &crate::profiles::Profiles) -> Vec<Value> {
           json!({ "query": s("words describing the topic, project or task"), "limit": { "type": "integer", "description": "max results (default 8)" },
                   "archived": { "type": "boolean", "description": "include closed sessions" } }), &["query"]),
         f("session_start", "Start a new session under you with a self-contained brief. It works in the background and reports back to you; do not wait for it.",
-          json!({ "title": s("short topic title, 2-6 words, unique"), "agent": s(&format!("one of — {}", offer.join(" · "))),
+          json!({ "title": s("short topic title, 2-6 words, unique"), "agent": s(&format!("the role, from the work — {}", offer.join(" · "))),
                   "brief": s("self-contained instructions: goal, constraints, paths, what done means, needed facts"),
+                  "engine": s("optional: what runs it — root · claude (Claude Code) · antigravity (Antigravity); only when the user names one, else the role's own default"),
                   "root": s("optional: another root (machine) to run it on — see the roots line of the [tree] view"),
                   "model": s("optional model id"), "variant": s("optional thinking: high | low | off"),
                   "attach": { "type": "boolean", "description": "true = the files in the user's current message (screenshots, documents) go to this session, unedited" },
@@ -249,8 +250,8 @@ fn in_scope(st: &AppState, sessions: &HashMap<String, Session>, caller: &str, ta
 
 /// The door sees every session; so does a read-only reader (review), which can only read them.
 fn sees_whole_tree(st: &AppState, sessions: &HashMap<String, Session>, caller: &str) -> bool {
-    let name = crate::profile_name_of(st, sessions.get(caller).map(|s| &s.info).unwrap_or(&Value::Null));
-    name == "coordinator" || crate::agent(st, &name).is_some_and(|p| !p.sessions && p.reads_tree())
+    let p = crate::profile_of(st, sessions.get(caller).map(|s| &s.info).unwrap_or(&Value::Null));
+    p.name == "coordinator" || (!p.sessions && p.reads_tree())
 }
 
 /// The session a tool call names (`id` = id or exact title) — if the caller may act on it.
@@ -291,7 +292,12 @@ async fn run_remote(st: &AppState, caller: &str, name: &str, input: &Value) -> O
     if name == "session_start" {
         let root = input["root"].as_str().filter(|r| !r.is_empty() && *r != me)?;
         let (title, brief) = (input["title"].as_str().unwrap_or("work"), input["brief"].as_str().unwrap_or_default());
-        let profile = crate::profiles::Profiles::resolve(input["agent"].as_str().or(input["profile"].as_str()).unwrap_or("build").trim());
+        let asked = input["agent"].as_str().or(input["profile"].as_str()).unwrap_or("build").trim();
+        let profile = crate::profiles::Profiles::resolve(asked);
+        let engine = match engine_of_input(input, asked) {
+            Ok(e) => e,
+            Err(o) => return Some(o),
+        };
         if brief.trim().is_empty() {
             return Some(err("brief required".into()));
         }
@@ -307,10 +313,11 @@ async fn run_remote(st: &AppState, caller: &str, name: &str, input: &Value) -> O
             Err(o) => return Some(o),
         };
         let title = unique_title(&st.sessions.lock().unwrap(), title);
-        return Some(match crate::peers::start(st, caller, root, &title, profile, brief, parts, input["model"].as_str(), input["variant"].as_str(), hops).await {
+        return Some(match crate::peers::start(st, caller, root, &title, profile, engine, brief, parts, input["model"].as_str(), input["variant"].as_str(), hops).await {
             Ok(pid) => {
                 publish(st, "tree.updated", json!({ "sessionID": pid, "parentID": caller }));
-                ok(format!("STARTED, NOT DONE YET: id={pid} \"{title}\" ({profile}) on root {root} reports back when finished. Tell the user it is on its way (→ {title}); never say it is done."))
+                let on = engine.map(|e| format!(" on {e}")).unwrap_or_default();
+                ok(format!("STARTED, NOT DONE YET: id={pid} \"{title}\" ({profile}{on}) on root {root} reports back when finished. Tell the user it is on its way (→ {title}); never say it is done."))
             }
             Err(e) => err(format!("could not start on {root}: {e}")),
         });
@@ -390,6 +397,11 @@ pub(crate) fn card_line(st: &AppState, id: &str, s: &Session, indent: usize) -> 
         .unwrap_or_default();
     // another root's MAIN (roots.rs): named as what it is, not by the stand-in agent here
     let who = if crate::roots::is_root_main(s) { "MAIN".to_string() } else { crate::profile_name_of(st, &s.info) };
+    // its engine when it is not the root (roles rework: a lead on Claude Code reads `lead·claude`)
+    let who = match s.info["engine"].as_str().filter(|e| *e != "root" && !s.info["remote"].is_object()) {
+        Some(e) => format!("{who}·{e}"),
+        None => who,
+    };
     format!(
         "{}- \"{}\" [{}{on}, {}, {} ago] {}{} (id={id})",
         "  ".repeat(indent),
@@ -465,6 +477,10 @@ fn start(st: &AppState, caller: &str, input: &Value) -> Out {
         return err(RELAY_REFUSED.into());
     }
     let raw = input["agent"].as_str().or(input["profile"].as_str()).unwrap_or("build").trim();
+    let engine = match engine_of_input(input, raw) {
+        Ok(e) => e,
+        Err(o) => return o,
+    };
     let Some(prof) = crate::agent(st, raw) else {
         let agents = st.config.profiles.read().unwrap();
         let known: Vec<&str> = agents.by_name.keys().map(String::as_str).filter(|n| *n != "coordinator").collect();
@@ -491,8 +507,9 @@ fn start(st: &AppState, caller: &str, input: &Value) -> Out {
     };
     let model = input["model"].as_str().filter(|m| !m.is_empty());
     let variant = input["variant"].as_str().filter(|v| !v.is_empty());
-    let info = crate::new_session(st, &title, Some(caller), Some(&profile), model, variant);
+    let info = crate::new_session_on(st, &title, Some(caller), Some(&profile), engine, model, variant);
     let sid = info["id"].as_str().unwrap_or_default().to_string();
+    let on = info["engine"].as_str().filter(|e| *e != "root").map(|e| format!(" on {e}")).unwrap_or_default();
     let hops = crate::roots::hops_here(st, caller);
     with_session(st, &sid, |s| {
         s.info["card"] = json!({ "topic": title, "brief": clip(brief, 600), "status": "working", "by": caller,
@@ -514,7 +531,20 @@ fn start(st: &AppState, caller: &str, input: &Value) -> Out {
         return err(format!("created {sid} but could not post the brief ({:?})", e.status()));
     }
     publish(st, "tree.updated", json!({ "sessionID": sid, "parentID": caller }));
-    ok(format!("STARTED, NOT DONE YET: id={sid} \"{title}\" ({profile}) is starting on it and reports back when finished. Tell the user it is on its way (→ {title}); never say it is done."))
+    ok(format!("STARTED, NOT DONE YET: id={sid} \"{title}\" ({profile}{on}) is starting on it and reports back when finished. Tell the user it is on its way (→ {title}); never say it is done."))
+}
+
+/// The engine a `session_start` asks for (roles rework 11-22): its `engine`, else the engine an old
+/// engine-agent word as the agent names (`claude` → Claude Code, `agy` → Antigravity), else none
+/// (the role's default). An engine that is not one is refused, with the list.
+fn engine_of_input(input: &Value, agent: &str) -> Result<Option<&'static str>, Out> {
+    match input["engine"].as_str().map(str::trim).filter(|e| !e.is_empty()) {
+        Some(e) => match crate::profiles::engine_name(e) {
+            Some(n) => Ok(Some(n)),
+            None => Err(err(format!("unknown engine {e:?}; known: root, claude (Claude Code), antigravity (Antigravity)"))),
+        },
+        None => Ok(crate::profiles::legacy_engine(agent)),
+    }
 }
 
 // ── what only the owner gives (11-18) ────────────────────────────────────────────────────────
@@ -1028,7 +1058,8 @@ impl Target {
 /// turns arrive with no origin (`origin=none`), so they keep reporting home.
 pub fn report_target(st: &AppState, sid: &str, origin: Option<&str>) -> Option<Target> {
     let sessions = st.sessions.lock().unwrap();
-    let manages = |id: &str| sessions.get(id).is_some_and(|s| crate::agent(st, &crate::profile_name_of(st, &s.info)).is_some_and(|p| p.sessions));
+    // a session that keeps its first instructions manages none (profile_of), as before
+    let manages = |id: &str| sessions.get(id).is_some_and(|s| crate::profile_of(st, &s.info).sessions);
     let s = sessions.get(sid)?;
     if let Some(p) = parent_of(s).filter(|p| manages(p)) {
         return Some(Target::Local(p));

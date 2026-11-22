@@ -357,7 +357,10 @@ fn summary(r: &Value) -> String {
         .flatten()
         .map(|m| format!("{}{}", m["id"].as_str().unwrap_or("?"), if m["tier"] == "lite" { " (lite)" } else { "" }))
         .collect();
-    let harness: Vec<&str> = r["profiles"].as_array().into_iter().flatten().filter_map(|p| p["harness"].as_str().and(p["name"].as_str())).collect();
+    // the roles that run on another engine there by default (a root before the roles rework also
+    // lists its claude / agy agents this way)
+    let harness: Vec<String> =
+        r["profiles"].as_array().into_iter().flatten().filter_map(|p| Some(format!("{} on {}", p["name"].as_str()?, p["harness"].as_str()?))).collect();
     let hw = &r["hardware"];
     format!(
         "{}: {}{} · {} cpu / {} GB {} · {} running · models {}{}",
@@ -369,7 +372,7 @@ fn summary(r: &Value) -> String {
         hw["os"].as_str().unwrap_or("?"),
         r["load"]["running"],
         models.join(", "),
-        if harness.is_empty() { String::new() } else { format!(" · harnesses {}", harness.join(", ")) }
+        if harness.is_empty() { String::new() } else { format!(" · by default {}", harness.join(", ")) }
     )
 }
 
@@ -469,10 +472,12 @@ pub async fn send(st: &AppState, proxy: &str, root: &str, rid: &str, parts: Vec<
 
 /// Makes the real session on `root` and its proxy here (`parent`: the asking session; None = a
 /// top-level session the owner started from the phone). Returns (proxy id here, id there).
-pub async fn open(st: &AppState, parent: Option<&str>, root: &str, title: &str, profile: Option<&str>, model: Option<&str>, variant: Option<&str>, hops: u64) -> Result<(String, String), String> {
+pub async fn open(st: &AppState, parent: Option<&str>, root: &str, title: &str, profile: Option<&str>, engine: Option<&str>, model: Option<&str>, variant: Option<&str>, hops: u64) -> Result<(String, String), String> {
     let proxy = crate::new_session(st, title, parent, profile, None, None);
     let pid = proxy["id"].as_str().unwrap_or_default().to_string();
-    let body = json!({ "title": title, "agent": profile, "model": model, "variant": variant,
+    // the engine asked for rides along (a root before the roles rework does not read it: there the
+    // session runs on that root's own default for the role)
+    let body = json!({ "title": title, "agent": profile, "engine": engine, "model": model, "variant": variant,
         "report_to": { "root": st.config.peers.me, "session": pid }, "hops": hops });
     let made = call(st, root, "POST", "/session", Some(body), 20).await;
     let rid = match made.as_ref().ok().and_then(|v| v["id"].as_str()) {
@@ -482,9 +487,22 @@ pub async fn open(st: &AppState, parent: Option<&str>, root: &str, title: &str, 
             return Err(made.err().unwrap_or_else(|| "peer returned no session".into()));
         }
     };
+    let made = made.unwrap_or_default();
     crate::with_session(st, &pid, |s| {
         // made: this root started it there (removing the proxy closes it there too)
         s.info["remote"] = json!({ "root": root, "id": rid, "made": true });
+        // what runs it there, as that root stamped it (a root before the roles rework names no
+        // engine: unknown here, so the proxy shows none)
+        for k in ["engine", "model", "harness"] {
+            match made.get(k).filter(|v| !v.is_null()) {
+                Some(v) => s.info[k] = v.clone(),
+                None => {
+                    if let Some(o) = s.info.as_object_mut() {
+                        o.remove(k);
+                    }
+                }
+            }
+        }
         if hops > 0 {
             s.info["hops"] = json!(hops);
         }
@@ -495,8 +513,8 @@ pub async fn open(st: &AppState, parent: Option<&str>, root: &str, title: &str, 
 /// Creates the real session on `root` and the proxy here; posts the brief there (`parts`: the
 /// brief with its files, built by tree::with_files). `hops`: how often this work has passed
 /// between roots once it is there (1 = placed from here directly).
-pub async fn start(st: &AppState, caller: &str, root: &str, title: &str, profile: &str, brief: &str, parts: Vec<Value>, model: Option<&str>, variant: Option<&str>, hops: u64) -> Result<String, String> {
-    let (pid, rid) = open(st, Some(caller), root, title, Some(profile), model, variant, hops).await?;
+pub async fn start(st: &AppState, caller: &str, root: &str, title: &str, profile: &str, engine: Option<&str>, brief: &str, parts: Vec<Value>, model: Option<&str>, variant: Option<&str>, hops: u64) -> Result<String, String> {
+    let (pid, rid) = open(st, Some(caller), root, title, Some(profile), engine, model, variant, hops).await?;
     crate::with_session(st, &pid, |s| {
         s.info["card"] = json!({ "topic": title, "brief": brief.chars().take(600).collect::<String>(), "status": "working",
             "by": caller, "root": root, "created": now_ms(), "updated": now_ms() });
