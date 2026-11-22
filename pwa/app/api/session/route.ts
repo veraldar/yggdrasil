@@ -10,6 +10,7 @@
  *   DELETE /api/session/[id]            → delete
  */
 import { NextResponse } from 'next/server';
+import { readJsonBody } from '@/lib/body';
 import { bustCache, getCache, setCache } from '@/lib/oc-cache';
 import { isRunLive } from '@/lib/oc-live';
 import { PENDING_TTL_MS } from '@/lib/pending-ttl';
@@ -127,7 +128,9 @@ export async function GET() {
 
 export async function POST(req: Request) {
   try {
-    const { name } = await req.json();
+    const parsed = await readJsonBody<{ name?: string }>(req, 'session');
+    if (!parsed.ok) return parsed.response;
+    const name = parsed.body.name;
     const s = await ocFetch('/session', {
       method: 'POST',
       body: JSON.stringify({ title: String(name || '').slice(0, 80) || 'session' }),

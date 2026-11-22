@@ -11,6 +11,7 @@
  * can be correlated. 24k int16 = 48,000 bytes of audio per second.
  */
 import { NextResponse } from 'next/server';
+import { readJsonBody } from '@/lib/body';
 import { appendFile, mkdir } from 'fs/promises';
 import os from 'os';
 import path from 'path';
@@ -95,7 +96,9 @@ const LANG_EN = process.env.TTS_LANG_EN || 'a';
 export async function POST(req: Request) {
   if (!BASE) return NextResponse.json({ error: 'SPEACHES_URL not configured' }, { status: 500 });
   try {
-    const { text, lang, seed, sid } = (await req.json()) as {
+    const parsed = await readJsonBody(req, 'tts-stream');
+    if (!parsed.ok) return parsed.response;
+    const { text, lang, seed, sid } = parsed.body as {
       text?: string;
       lang?: 'fr' | 'en';
       seed?: number;

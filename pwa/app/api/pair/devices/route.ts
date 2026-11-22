@@ -3,6 +3,7 @@
  * DELETE /api/pair/devices { id } → { revoked: true }
  */
 import { NextResponse } from 'next/server';
+import { readJsonBody } from '@/lib/body';
 import { adminOk } from '@/lib/admin';
 import { revokeDevice, validateToken } from '@/lib/devices';
 
@@ -16,8 +17,9 @@ export async function DELETE(req: Request) {
       return NextResponse.json({ error: 'unauthorized' }, { status: 401 });
     }
   }
-  const body = await req.json().catch(() => ({}));
-  const id = String(body?.id || '');
+  const parsed = await readJsonBody<{ id?: string }>(req, 'pair/devices');
+  if (!parsed.ok) return parsed.response;
+  const id = String(parsed.body?.id || '');
   if (!id) return NextResponse.json({ error: 'id required' }, { status: 400 });
   const ok = await revokeDevice(id);
   return NextResponse.json({ revoked: ok }, { status: ok ? 200 : 404 });

@@ -39,6 +39,55 @@ test('server: corrupted upload → actionable 400, not a raw SyntaxError 500', a
   await request.delete(`/api/session/${s.id}`);
 });
 
+/** Live 11-22 regression (thor): the corruption struck again — same hop, same
+ *  raw V8 500 ("Unexpected token 'R', "fR7vF1N7llv"… is not valid JSON") —
+ *  because the 11-11 fix only covered the messages route AND was never
+ *  deployed (live still serves the 10-10 build). Every JSON route must
+ *  answer the honest 400, so the generalized reader (lib/body.ts) is
+ *  swept across the API here. */
+test('server: every JSON route answers the honest 400 on a corrupted upload', async ({
+  request,
+}) => {
+  // exactly today's live corruption shape: the body suffix the server saw
+  const junk = Buffer.from('fR7vF1N7llv' + 'M425G3OupIQUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVph'.repeat(4));
+  const cases: { method: 'POST' | 'DELETE'; url: string }[] = [
+    { method: 'POST', url: '/api/session' },
+    { method: 'POST', url: '/api/push' },
+    { method: 'DELETE', url: '/api/push' },
+    { method: 'POST', url: '/api/dispatch' },
+    { method: 'POST', url: '/api/token' },
+    { method: 'POST', url: '/api/tts' },
+    { method: 'POST', url: '/api/tts/stream' },
+    { method: 'POST', url: '/api/pair' },
+    { method: 'DELETE', url: '/api/pair/devices' },
+  ];
+  for (const { method, url } of cases) {
+    const r = await request.fetch(url, {
+      method,
+      headers: { 'content-type': 'application/json' },
+      data: junk,
+    });
+    const d = (await r.json().catch(() => ({}))) as {
+      error?: string;
+      id?: string;
+      token?: string;
+    };
+    // side-effect guard: on an UNFIXED build pair mints a device from the
+    // corrupt body's `.catch(() => ({}))` fallback — revoke it before the
+    // asserts (on the fixed build this never fires: the route 400s first)
+    if (url === '/api/pair' && r.ok() && d.id && d.token) {
+      await request.fetch('/api/pair/devices', {
+        method: 'DELETE',
+        headers: { authorization: `Bearer ${d.token}` },
+        data: Buffer.from(JSON.stringify({ id: d.id })),
+      });
+    }
+    expect(r.status(), `${method} ${url}`).toBe(400);
+    expect(d.error || '', `${method} ${url}`).toContain('connection');
+    expect(d.error || '', `${method} ${url}`).not.toContain('SyntaxError');
+  }
+});
+
 test('client: failed send keeps text + attachments for a one-tap retry', async ({ page }) => {
   await page.route('**/api/session/*/messages*', (route) => {
     if (route.request().method() === 'POST') {

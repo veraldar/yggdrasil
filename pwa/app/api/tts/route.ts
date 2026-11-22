@@ -11,6 +11,7 @@
  * chunks long texts into sequential requests itself (pseudo-streaming).
  */
 import { NextResponse } from 'next/server';
+import { readJsonBody } from '@/lib/body';
 
 export const dynamic = 'force-dynamic';
 
@@ -87,7 +88,9 @@ function trimSilence(buf: ArrayBuffer): Buffer {
 export async function POST(req: Request) {
   if (!BASE) return NextResponse.json({ error: 'SPEACHES_URL not configured' }, { status: 500 });
   try {
-    const { text, lang, spkEmb } = (await req.json()) as {
+    const parsed = await readJsonBody(req, 'tts');
+    if (!parsed.ok) return parsed.response;
+    const { text, lang, spkEmb } = parsed.body as {
       text?: string;
       lang?: 'fr' | 'en';
       spkEmb?: string;

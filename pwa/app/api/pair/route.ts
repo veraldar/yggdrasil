@@ -12,6 +12,7 @@
  *        Presenting a garbage credential is never "trusted network".
  */
 import { NextResponse } from 'next/server';
+import { readJsonBody } from '@/lib/body';
 import { listDevices, mintDevice, validateToken } from '@/lib/devices';
 import { adminOk } from '@/lib/admin';
 
@@ -34,8 +35,9 @@ export async function POST(req: Request) {
       { status: 403 },
     );
   }
-  const body = await req.json().catch(() => ({}));
-  const name = String(body?.name || 'device');
+  const parsed = await readJsonBody<{ name?: string }>(req, 'pair');
+  if (!parsed.ok) return parsed.response;
+  const name = String(parsed.body?.name || 'device');
   const { id, token } = await mintDevice(name);
   return NextResponse.json({ id, token, name }, { headers: { 'Cache-Control': 'no-store' } });
 }

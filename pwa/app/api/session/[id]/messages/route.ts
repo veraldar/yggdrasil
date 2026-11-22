@@ -3,6 +3,7 @@
  * POST /api/session/[id]/prompt   → send text/images/files to the session
  */
 import { NextResponse } from 'next/server';
+import { readJsonBody } from '@/lib/body';
 import { ocFetch, resolveId } from '@/lib/oc';
 import { bustCache } from '@/lib/oc-cache';
 import { buildParts, forward, runEnded } from '@/lib/oc-forward';
@@ -134,29 +135,13 @@ export async function POST(req: Request, ctx: { params: Promise<{ id: string }> 
     ensureWatchdog(); // global-guarded across module graphs (oc-watchdog)
     const { id } = await ctx.params;
     const sid = await resolveId(id);
-    // read + parse separately: a JSON.parse failure here means the body was
-    // corrupted IN TRANSIT (live 11-11: the phone's front bytes were lost on
-    // the degraded tailscale-serve h2 hop — server received a suffix of the
-    // data-url payload, V8 said "Unexpected non-whitespace character after
-    // JSON at position 1"). req.json() gives no forensic handle; text() does.
-    const raw = await req.text();
-    let body: SendBody;
-    try {
-      body = JSON.parse(raw) as SendBody;
-    } catch (e) {
-      // content-length vs received bytes + first chars pinpoint the cut
-      // offset for the infra report (serve/radio dropping body prefixes)
-      console.error(
-        `[messages] body corrupted in transit ${id}: content-length=${req.headers.get('content-length') || '?'} received=${raw.length} head=${JSON.stringify(raw.slice(0, 24))} · ${e}`
-      );
-      return NextResponse.json(
-        {
-          error:
-            'the upload was cut up by the connection — parts of it never arrived. Send again; if it keeps failing, toggle airplane mode once (it forces a fresh connection) and retry',
-        },
-        { status: 400 }
-      );
-    }
+    // read + parse separately via the shared reader (lib/body.ts): a
+    // JSON.parse failure here means the body was corrupted IN TRANSIT
+    // (degraded tailscale-serve h2 hop dropped the front bytes — thor
+    // 11-09, ve 11-11, thor 11-22 'Unexpected token R' on "fR7vF1N7llv…")
+    const parsed = await readJsonBody<SendBody>(req, 'messages', id);
+    if (!parsed.ok) return parsed.response;
+    const body = parsed.body;
     const async = body.async === true;
     const parts = buildParts(body);
     if (!parts.length) return NextResponse.json({ error: 'empty' }, { status: 400 });

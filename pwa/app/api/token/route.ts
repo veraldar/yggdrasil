@@ -1,4 +1,5 @@
 import { NextResponse } from 'next/server';
+import { readJsonBody } from '@/lib/body';
 import {
   AccessToken,
   type AccessTokenOptions,
@@ -42,8 +43,11 @@ export async function POST(req: Request) {
       throw new Error('LIVEKIT_API_SECRET is not defined');
     }
 
-    // Parse room config from request body.
-    const body = await req.json();
+    // Parse room config from request body. Through the shared reader: a
+    // corrupted upload is an honest 400 + forensic log, not a raw V8 500.
+    const parsedBody = await readJsonBody(req, 'token');
+    if (!parsedBody.ok) return parsedBody.response;
+    const body = parsedBody.body;
     const roomConfig = body?.room_config
       ? RoomConfiguration.fromJson(body.room_config, { ignoreUnknownFields: true })
       : new RoomConfiguration();

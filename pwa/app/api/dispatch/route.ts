@@ -1,4 +1,5 @@
 import { NextResponse } from 'next/server';
+import { readJsonBody } from '@/lib/body';
 import { AgentDispatchClient } from 'livekit-server-sdk';
 import { agentName } from '@/lib/agent-name';
 
@@ -27,8 +28,9 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: 'livekit not configured' }, { status: 500 });
   }
 
-  const body = await req.json().catch(() => ({}));
-  const roomName = String(body?.room || '')
+  const parsed = await readJsonBody<{ room?: string }>(req, 'dispatch');
+  if (!parsed.ok) return parsed.response;
+  const roomName = String(parsed.body?.room || '')
     .replace(/[^a-zA-Z0-9_-]/g, '')
     .slice(0, 60);
   if (!roomName) {

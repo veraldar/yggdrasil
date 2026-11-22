@@ -1,4 +1,5 @@
 import { NextResponse } from 'next/server';
+import { readJsonBody } from '@/lib/body';
 import { OC, ocFetch, resolveId } from '@/lib/oc';
 import { bustCache } from '@/lib/oc-cache';
 
@@ -78,7 +79,13 @@ export async function PATCH(req: Request, ctx: { params: Promise<{ id: string }>
   const { id } = await ctx.params;
   try {
     const sid = await resolveId(id);
-    const body = await req.json();
+    const parsed = await readJsonBody(req, 'session', id);
+    if (!parsed.ok) return parsed.response;
+    const body = parsed.body as {
+      title?: string;
+      agent?: string;
+      model?: { providerID: string; modelID: string; variant?: string | null };
+    };
 
     if (body.title !== undefined) {
       const t = String(body.title || '').trim().slice(0, 80);
