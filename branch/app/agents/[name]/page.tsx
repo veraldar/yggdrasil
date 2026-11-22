@@ -88,7 +88,11 @@ export default function AgentEditor() {
   }, [name]);
 
   const h = draft?.harness || 'root';
-  const custom = detail && !isNew ? detail.customizable : CUSTOMIZABLE[h] || [];
+  // the fields follow the harness picked: the brain's answer is for the saved one
+  const custom =
+    detail && !isNew && h === (detail.harness || 'root')
+      ? detail.customizable
+      : CUSTOMIZABLE[h] || [];
   const locked = detail?.locked || [];
   const shows = (f: string) => custom.includes(f) || locked.includes(f);
   const can = (f: string) => custom.includes(f) && !locked.includes(f);
@@ -105,7 +109,8 @@ export default function AgentEditor() {
 
   async function save() {
     if (!draft) return;
-    const body: Record<string, unknown> = isNew ? { harness: draft.harness } : {};
+    const moved = isNew || draft.harness !== (detail?.harness || 'root');
+    const body: Record<string, unknown> = moved ? { harness: draft.harness } : {};
     for (const f of FIELDS) {
       if (!can(f)) continue;
       const v = draft[f];
@@ -170,11 +175,11 @@ export default function AgentEditor() {
                 <button
                   key={x}
                   aria-pressed={h === x}
-                  disabled={!isNew}
+                  disabled={locked.includes('harness')}
                   onClick={() =>
                     set({
                       harness: x,
-                      model: (x === 'root' ? models : byHarness[x] || [])[0] || null,
+                      model: (byHarness[x] || (x === 'root' ? models : []))[0] || null,
                     })
                   }
                   className="disabled:opacity-60"
@@ -207,7 +212,7 @@ export default function AgentEditor() {
               <h2>model</h2>
               {(() => {
                 // a picker, never free text: the models this harness actually offers
-                const list = h === 'root' ? models : byHarness[h] || models;
+                const list = byHarness[h] || models;
                 const cur = draft.model || 'default';
                 return list.length <= 8 ? (
                   <div className="oz-chips">
