@@ -13,6 +13,7 @@ import {
   urlHash,
 } from '@/lib/file-ref';
 import { ocFetch, PIN_HEADER, resolveId, sessionGone } from '@/lib/oc';
+import { hideNarration, stripStationLine } from '@/lib/station-hide';
 import { bustCache } from '@/lib/oc-cache';
 import { buildParts, forward, runEnded } from '@/lib/oc-forward';
 import { isRunLive, liveSince, runEndedAt } from '@/lib/oc-live';
@@ -101,13 +102,13 @@ export async function GET(req: Request, ctx: { params: Promise<{ id: string }> }
     const errors = new URL(req.url).searchParams.get('errors') === '1';
     const msgs = await ocFetch(`/session/${sid}/message${log ? '?internal=1' : ''}`);
     const out = msgs.map((m: any) => {
-      const text = stripCtx(
+      const text = stripStationLine(stripCtx(
         (m.parts || [])
           .filter((p: any) => p.type === 'text')
           .map((p: any) => p.text || '')
           .join('\n')
           .trim()
-      );
+      ));
       // tool-only steps stay invisible on the phone: the busy indicator
       // already shows activity, ⚙ lines were just clutter (user req)
       return {
@@ -146,7 +147,9 @@ export async function GET(req: Request, ctx: { params: Promise<{ id: string }> }
       for (const m of out) if (m.from && !m.from.title) m.from.title = titles.get(m.from.session) || '';
     }
     const all = out.filter(
-      (m: any) => m.text || m.images.length || m.files.length || m.log?.length || m.error
+      (m: any) =>
+        !((m.role || m.info?.role) === 'assistant' && hideNarration(m.text)) &&
+        (m.text || m.images.length || m.files.length || m.log?.length || m.error)
     );
     // run state for the busy indicator: opencode emits one assistant message
     // per step, so "an assistant message landed" ≠ "the run is done". The run
