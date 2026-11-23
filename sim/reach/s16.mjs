@@ -70,7 +70,9 @@ const t00 = Date.now();
 const LEAD = 3.0;
 const WAV = {
   hold: await renderSay(VOICE, SAY, join(STATE, 's16-hold.wav'), { lead: LEAD, tail: 45 }),
-  free: await renderSay(VOICE, `${SAY}. over`, join(STATE, 's16-free.wav'), { lead: LEAD, tail: 45 }),
+  // a long tail: the hands-free walk now listens for minutes (S16.fr8) and Chromium loops the file —
+  // it must not come round and say the sentence again
+  free: await renderSay(VOICE, `${SAY}. over`, join(STATE, 's16-free.wav'), { lead: LEAD, tail: 300 }),
 };
 process.stderr.write(`s16: walks ${WALKS.map((w) => w.key)}; Ása's WAVs: hold ${WAV.hold.speech.toFixed(1)} s, free ${WAV.free.speech.toFixed(1)} s of speech (+ ${LEAD} s lead, 45 s tail)\n`);
 
