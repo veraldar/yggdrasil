@@ -134,3 +134,8 @@
 - Also folded in: noflash-ship-r2 (000e02a6, live since 16:39 by another session, not in tree-next): md-page artifacts + no-flash pair page + 06a2b5fb "tell Next localhost" (the fix for the trunk 500 I found 11-21).
 - Gates: app build, held-reply 10/10, cargo 153, tree-e2e GREEN, trunk-full GREEN (no-flash through the trunk), S16 GREEN incl. fl8 (typed while hands-free → spoken), trunk-rtc GREEN ×2 (one E1 flake before).
 - Deployed 20261123-1741-90c06927 (tree-next 90c06927), hub-app + hub-app-tailnet. Health 11/11. live-door AP + tailnet PASS; stranger on / and /session/main → 200 "not paired", no app in DOM.
+
+## 11-23 21:5x batch: join-approvals-stable (b3b0a8b9) → harness-fallback (b9d122c9) → root-detail-page (2ecb50e3)
+- Owner's own words: 20:00 root-detail "yes go", 20:04 "merge go" (after 20:01 on the roots approve flow), 20:06 "we should have fallback harness+model for roles", 20:56 "the new harness needs to know".
+- Still open from 20:04: working-filter release 20261123-2004-2044afb1 is live (health 11/11) but its LIVE 360 px check on ap was cut by the quota → do it after this batch (chip testid working-filter, rows .oz-row, aria-pressed).
+- Brain changes (harness-fallback) → full deploy cuts my turn. Gates: cargo, tree-e2e, restart-e2e, harness-fallback-e2e, trunk-full, trunk-rtc, roots-sheet-e2e. After: health, live-door, working chip 360 px live, harness-fallback serving (session field), lab joins (debian-box in-app; omarchy-lab unreachable).
