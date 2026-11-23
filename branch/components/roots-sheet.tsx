@@ -1,18 +1,15 @@
 'use client';
 
 /** The roots sheet (E2 · the whole tree): every computer of the tree, this one first.
- *    list   one row per computer: name, state (on · last seen … · off), os, how many run
- *    tap    that computer: its MAIN on top, then its sessions; ＋ starts one there
+ *    list   one row per computer: name, home tag, world swatch, state (on · last seen … · off),
+ *           os, how many run
+ *    tap    opens that computer's own page (/roots/<id>)
  *    hold   (not home) → "Remove <name>?" · Remove / Keep
- *  Labels and state only (the owner's rule: no help text). The context sheet's .oz-film
- *  column: header, one scrolling pane. Data: GET /api/roots, /api/roots/<root>/sessions;
- *  a session there without a proxy here is adopted first (POST /api/roots/<root>/adopt). */
+ *  Labels and state only (the owner's rule: no help text). */
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { LineIcon } from '@/components/line-icon';
-import { CARD_ST } from '@/lib/card';
-import { slugify } from '@/lib/slug';
-import { MAIN_SLUG, isMainSlug } from '@/lib/tree-first';
+import { cacheRootTheme, cacheTreeThemes, defaultWorldFor, isWorld } from '@/lib/worlds';
 
 /** a press this long on a row (not home) asks to remove it */
 const HOLD_MS = 500;
@@ -23,35 +20,29 @@ const POLL_MS = 5000;
 type Home = {
   name: string;
   os?: string | null;
+  arch?: string | null;
+  cpus?: number | null;
+  mem_gb?: number | null;
   running?: number;
+  theme?: string | null;
   main?: string | null;
 };
 type Root = {
   id: string;
   name: string;
   os?: string | null;
+  arch?: string | null;
+  cpus?: number | null;
+  mem_gb?: number | null;
   reachable?: boolean;
   seen?: number | null;
   running?: number;
+  theme?: string | null;
   main?: string | null;
   main_proxy?: string | null;
 };
 export type Tree = { home: Home | null; roots: Root[] };
 type Row = Root & { home?: boolean };
-type RSess = {
-  id: string;
-  title?: string;
-  status?: string | null;
-  updated?: number | null;
-  busy?: boolean;
-  proxy?: string | null;
-};
-type RView = {
-  root?: string;
-  reachable?: boolean;
-  main?: { id: string; proxy?: string | null; title?: string | null } | null;
-  sessions?: RSess[];
-};
 
 const msOf = (t?: number | null) => (!t ? 0 : t < 1e12 ? t * 1000 : t);
 
@@ -66,23 +57,6 @@ function ago(t: number): string {
 const stateOf = (r: Row) =>
   r.reachable ? 'on' : r.seen ? `last seen ${ago(msOf(r.seen))}` : 'off';
 
-/** the list's stamp: clock time today, a short date before */
-function stamp(t?: number | null): string {
-  const m = msOf(t);
-  if (!m) return '';
-  const d = new Date(m);
-  return d.toDateString() === new Date().toDateString()
-    ? d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })
-    : d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
-}
-
-/** a session's one word and its colour (working is green, the rest as the list's cards) */
-function wordOf(s: RSess): { w: string; c: string } {
-  if (s.busy || s.status === 'working') return { w: 'working', c: 'var(--oz-success)' };
-  const st = CARD_ST[s.status || ''];
-  return st ? { w: st.w, c: st.c } : { w: '', c: 'var(--oz-dim)' };
-}
-
 const NO_SELECT = {
   userSelect: 'none',
   WebkitUserSelect: 'none',
@@ -94,17 +68,13 @@ export function RootsSheet({
   onTree,
 }: {
   onClose: () => void;
-  /** every fresh answer of GET /api/roots (the home list learns the home root's name) */
+  /** every fresh answer of GET /api/roots (the home list learns the home root's name + themes) */
   onTree?: (t: Tree) => void;
 }) {
   const router = useRouter();
   const [tree, setTree] = useState<Tree | null>(null);
-  const [at, setAt] = useState<string | null>(null); // the computer opened
-  const [view, setView] = useState<RView | null>(null);
   const [ask, setAsk] = useState<string | null>(null); // "Remove <name>?"
   const [busy, setBusy] = useState(false);
-  const [creating, setCreating] = useState(false);
-  const [name, setName] = useState('');
   const [failed, setFailed] = useState('');
   const hold = useRef<{ timer: ReturnType<typeof setTimeout>; x: number; y: number } | null>(null);
   const held = useRef(false);
@@ -120,23 +90,10 @@ export function RootsSheet({
       if (!r.ok) return;
       const t = (await r.json()) as Tree;
       setTree(t);
+      cacheTreeThemes(t);
       treeCb.current?.(t);
     } catch {
       /* transient — keep the last answer */
-    }
-  }, []);
-
-  const loadView = useCallback(async (id: string) => {
-    try {
-      const r = await fetch(`/api/roots/${encodeURIComponent(id)}/sessions`, {
-        cache: 'no-store',
-        signal: AbortSignal.timeout(12_000),
-      });
-      const v = (await r.json().catch(() => null)) as RView | null;
-      if (r.ok && v) setView(v);
-      else setView((old) => old ?? { reachable: false, main: null, sessions: [] });
-    } catch {
-      setView((old) => old ?? { reachable: false, main: null, sessions: [] });
     }
   }, []);
 
@@ -148,15 +105,6 @@ export function RootsSheet({
     return () => clearInterval(t);
   }, [loadTree]);
 
-  useEffect(() => {
-    if (!at) return;
-    void loadView(at);
-    const t = setInterval(() => {
-      if (!document.hidden) void loadView(at);
-    }, POLL_MS);
-    return () => clearInterval(t);
-  }, [at, loadView]);
-
   const rows: Row[] = [
     ...(tree?.home?.name
       ? [
@@ -164,8 +112,12 @@ export function RootsSheet({
             id: tree.home.name,
             name: tree.home.name,
             os: tree.home.os,
+            arch: tree.home.arch,
+            cpus: tree.home.cpus,
+            mem_gb: tree.home.mem_gb,
             reachable: true,
             running: tree.home.running,
+            theme: tree.home.theme,
             main: tree.home.main,
             home: true,
           },
@@ -173,41 +125,16 @@ export function RootsSheet({
       : []),
     ...(tree?.roots ?? []),
   ];
-  const row = at ? rows.find((r) => r.id === at) : undefined;
-
-  function back() {
-    setAt(null);
-    setView(null);
-    setCreating(false);
-    setName('');
-    setFailed('');
-  }
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== 'Escape') return;
       if (ask) setAsk(null);
-      else if (at) back();
       else onClose();
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [ask, at, onClose]);
-
-  const open = (id: string, title?: string | null) =>
-    router.push(`/session/${slugify(title || id)}?id=${encodeURIComponent(id)}`);
-
-  /** a session that lives there: its proxy here (adopted first when there is none) */
-  async function reach(root: string, id: string, proxy?: string | null, title?: string | null) {
-    if (proxy) return { proxy, title };
-    const r = await fetch(`/api/roots/${encodeURIComponent(root)}/adopt`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ id }),
-    });
-    const d = (await r.json().catch(() => ({}))) as { proxy?: string; title?: string };
-    return r.ok && d.proxy ? { proxy: d.proxy, title: d.title || title } : null;
-  }
+  }, [ask, onClose]);
 
   async function go(fn: () => Promise<void>) {
     if (busy) return;
@@ -222,49 +149,6 @@ export function RootsSheet({
     }
   }
 
-  const openMain = (r: Row) =>
-    go(async () => {
-      if (r.home) {
-        router.push(`/session/${MAIN_SLUG}`);
-        return;
-      }
-      const m = view?.main;
-      const id = m?.id || r.main;
-      if (!id) return;
-      const p = await reach(r.id, id, m?.proxy || r.main_proxy, m?.title);
-      if (!p) return setFailed('failed');
-      // never the slug `main`: that is this root's own MAIN, with its own page
-      const t = p.title && !isMainSlug(slugify(p.title)) ? p.title : `[MAIN] ${r.id}`;
-      open(p.proxy, t);
-    });
-
-  const openSess = (r: Row, s: RSess) =>
-    go(async () => {
-      if (r.home) {
-        if (isMainSlug(slugify(s.title || ''))) router.push(`/session/${MAIN_SLUG}`);
-        else open(s.proxy || s.id, s.title);
-        return;
-      }
-      const p = await reach(r.id, s.id, s.proxy, s.title);
-      if (!p) return setFailed('failed');
-      open(p.proxy, p.title || s.title);
-    });
-
-  const create = (r: Row) =>
-    go(async () => {
-      const title = name.trim() || `session ${new Date().toLocaleString()}`;
-      const res = await fetch('/api/session', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(r.home ? { name: title } : { name: title, root: r.id }),
-      });
-      const s = (await res.json().catch(() => ({}))) as { id?: string; title?: string };
-      if (!s.id) return setFailed('failed');
-      setCreating(false);
-      setName('');
-      open(s.id, s.title || title);
-    });
-
   const remove = (id: string) =>
     go(async () => {
       const r = await fetch(`/api/roots/${encodeURIComponent(id)}/remove`, { method: 'POST' });
@@ -274,7 +158,7 @@ export function RootsSheet({
       void loadTree();
     });
 
-  // ── press: tap opens the computer; hold (not home) asks to remove it ──
+  // ── press: tap opens the computer's page; hold (not home) asks to remove it ──
   function down(e: React.PointerEvent, r: Row) {
     held.current = false;
     if (!e.isPrimary || r.home) return;
@@ -306,200 +190,93 @@ export function RootsSheet({
   return (
     <div className="oz-film ctx-sheet" role="dialog" aria-label="roots" data-testid="roots-sheet">
       <header className="flex items-center gap-2 px-3 pt-[calc(10px+env(safe-area-inset-top))]">
-        {row ? (
-          <button
-            type="button"
-            className="oz-k sm"
-            aria-label="back"
-            data-testid="roots-back"
-            onClick={back}
-          >
-            <LineIcon name="back" size={14} />
-          </button>
-        ) : (
-          <button
-            type="button"
-            className="oz-k sm"
-            aria-label="close"
-            data-testid="roots-close"
-            onClick={onClose}
-          >
-            <LineIcon name="close" size={14} />
-          </button>
-        )}
+        <button
+          type="button"
+          className="oz-k sm"
+          aria-label="close"
+          data-testid="roots-close"
+          onClick={onClose}
+        >
+          <LineIcon name="close" size={14} />
+        </button>
         <h2 className="min-w-0 flex-1 truncate text-[13px] font-medium" data-testid="roots-title">
-          {row ? row.id : 'roots'}
+          roots
         </h2>
-        {row && (
-          <>
-            <span
-              className="flex-none text-[10px]"
-              style={{ color: row.reachable ? 'var(--oz-success)' : 'var(--oz-dim)' }}
-              data-testid="roots-state"
-            >
-              {stateOf(row)}
-            </span>
-            <button
-              type="button"
-              className="oz-k sm"
-              aria-label="new session"
-              data-testid="roots-new"
-              onClick={() => setCreating((c) => !c)}
-            >
-              <LineIcon name="plus" size={14} />
-            </button>
-          </>
-        )}
       </header>
 
       <div className="min-h-0 flex-1 overflow-y-auto px-3 py-2">
-        {!row && (
-          <ul className="flex flex-col gap-1" data-testid="roots-list">
-            {!tree && (
-              <li className="pt-6 text-center text-xs" style={dim}>
-                …
-              </li>
-            )}
-            {rows.map((r) => {
-              const on = !!r.reachable;
-              return (
-                <li key={r.id}>
-                  <button
-                    type="button"
-                    className="oz-row"
-                    data-testid="root-row"
-                    data-root={r.id}
-                    data-state={on ? 'on' : 'off'}
-                    style={{ ...NO_SELECT, ...grey(on) }}
-                    onPointerDown={(e) => down(e, r)}
-                    onPointerUp={up}
-                    onPointerCancel={up}
-                    onPointerLeave={up}
-                    onPointerMove={move}
-                    onContextMenu={(e) => e.preventDefault()}
-                    onClick={() => {
-                      if (held.current) {
-                        held.current = false;
-                        return;
-                      }
-                      setView(null);
-                      setAt(r.id);
-                    }}
-                  >
-                    <div className="oz-r1">
-                      <span
-                        aria-hidden="true"
-                        style={{ color: on ? 'var(--oz-success)' : 'var(--oz-dim)' }}
-                      >
-                        ●
-                      </span>
-                      <span className="t">{r.id}</span>
-                      {r.home && <span className="oz-subs">home</span>}
-                      <span
-                        className="oz-st"
-                        data-testid="root-state"
-                        style={{ color: on ? 'var(--oz-success)' : 'var(--oz-dim)' }}
-                      >
-                        {stateOf(r)}
-                      </span>
-                    </div>
-                    <div className="oz-r2">
-                      {[r.os, r.running ? `${r.running} running` : '']
-                        .filter(Boolean)
-                        .join(' · ') || ' '}
-                    </div>
-                  </button>
-                </li>
-              );
-            })}
-          </ul>
-        )}
-
-        {row && (
-          <div className="flex flex-col gap-1" data-testid="root-view" data-root={row.id}>
-            {creating && (
-              <div className="oz-box mb-1 p-3">
-                <input
-                  autoFocus
-                  value={name}
-                  onChange={(e) => setName(e.target.value)}
-                  onKeyDown={(e) => e.key === 'Enter' && create(row)}
-                  placeholder="session name…"
-                  className="oz-field mb-2.5"
-                  data-testid="roots-new-name"
-                />
-                <div className="flex gap-1.5">
-                  <button
-                    onClick={() => create(row)}
-                    className="oz-k ok flex-1"
-                    disabled={busy}
-                    data-testid="roots-create"
-                  >
-                    create & open
-                  </button>
-                  <button onClick={() => setCreating(false)} className="oz-k px-4">
-                    cancel
-                  </button>
-                </div>
-              </div>
-            )}
-            {failed && (
-              <p role="alert" className="py-1 text-[11px] text-[var(--oz-danger)]">
-                {failed}
-              </p>
-            )}
-            {!view && (
-              <p className="pt-6 text-center text-xs" style={dim}>
-                …
-              </p>
-            )}
-            {view && (row.home || view.main || row.main) && (
-              <button
-                type="button"
-                className="oz-row"
-                data-testid="root-main"
-                style={grey(row.home || view.reachable)}
-                onClick={() => openMain(row)}
-              >
-                <div className="oz-r1">
-                  <span className="t font-medium">MAIN</span>
-                </div>
-              </button>
-            )}
-            {view &&
-              (view.sessions ?? [])
-                .filter((s) => s.id !== (view.main?.id || row.main))
-                .map((s) => {
-                  const st = wordOf(s);
-                  return (
-                    <button
-                      key={s.id}
-                      type="button"
-                      className="oz-row"
-                      data-testid="root-sess"
-                      data-id={s.id}
-                      style={grey(row.home || view.reachable)}
-                      onClick={() => openSess(row, s)}
+        <ul className="flex flex-col gap-1" data-testid="roots-list">
+          {!tree && (
+            <li className="pt-6 text-center text-xs" style={dim}>
+              …
+            </li>
+          )}
+          {rows.map((r) => {
+            const on = !!r.reachable;
+            const theme = isWorld(r.theme) ? r.theme : defaultWorldFor(r.id, !!r.home);
+            return (
+              <li key={r.id}>
+                <button
+                  type="button"
+                  className="oz-row"
+                  data-testid="root-row"
+                  data-root={r.id}
+                  data-state={on ? 'on' : 'off'}
+                  data-root-theme={theme}
+                  style={{ ...NO_SELECT, ...grey(on) }}
+                  onPointerDown={(e) => down(e, r)}
+                  onPointerUp={up}
+                  onPointerCancel={up}
+                  onPointerLeave={up}
+                  onPointerMove={move}
+                  onContextMenu={(e) => e.preventDefault()}
+                  onClick={() => {
+                    if (held.current) {
+                      held.current = false;
+                      return;
+                    }
+                    cacheRootTheme(r.id, theme);
+                    onClose();
+                    router.push(`/roots/${encodeURIComponent(r.id)}`);
+                  }}
+                >
+                  <div className="oz-r1">
+                    <span
+                      aria-hidden="true"
+                      style={{ color: on ? 'var(--oz-success)' : 'var(--oz-dim)' }}
                     >
-                      <div className="oz-r1">
-                        {st.w === 'working' && (
-                          <span className="oz-breathe" style={{ color: st.c }} aria-hidden="true">
-                            ●
-                          </span>
-                        )}
-                        <span className="t">{s.title || s.id}</span>
-                        {st.w && (
-                          <span className="oz-st" style={{ color: st.c }}>
-                            {st.w}
-                          </span>
-                        )}
-                        <time>{stamp(s.updated)}</time>
-                      </div>
-                    </button>
-                  );
-                })}
-          </div>
-        )}
+                      ●
+                    </span>
+                    <span className="t">{r.id}</span>
+                    {r.home && <span className="oz-subs">home</span>}
+                    <span
+                      className="oz-swt"
+                      data-theme={theme}
+                      data-testid="root-swatch"
+                      aria-hidden="true"
+                    >
+                      <i style={{ background: 'var(--oz-bg)' }} />
+                      <i style={{ background: 'var(--oz-success)' }} />
+                      <i style={{ background: 'var(--oz-info)' }} />
+                    </span>
+                    <span
+                      className="oz-st"
+                      data-testid="root-state"
+                      style={{ color: on ? 'var(--oz-success)' : 'var(--oz-dim)' }}
+                    >
+                      {stateOf(r)}
+                    </span>
+                  </div>
+                  <div className="oz-r2">
+                    {[r.os, on && r.running ? `${r.running} running` : '']
+                      .filter(Boolean)
+                      .join(' · ') || '\u00a0'}
+                  </div>
+                </button>
+              </li>
+            );
+          })}
+        </ul>
       </div>
 
       {ask && (

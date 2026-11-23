@@ -78,6 +78,7 @@ type BrainSession = {
   steps?: unknown;
   model?: { id?: string; modelID?: string; providerID: string } | null;
   harness?: { kind?: string | null; id?: string | null; attached?: boolean } | null;
+  card?: { root?: string | null; kind?: string | null } | null;
   instructions?: unknown;
   agent_was?: unknown;
 };
@@ -90,6 +91,8 @@ async function summary(s: BrainSession) {
     id: s.id,
     title: s.title || s.id,
     agent: s.agent || null,
+    // the computer this session lives on (null = this home root)
+    root: typeof s.card?.root === 'string' && s.card.root ? s.card.root : null,
     // the step cap of this session's turns; null = none (the default)
     steps: typeof s.steps === 'number' && s.steps > 0 ? s.steps : null,
     model,

@@ -11,21 +11,11 @@ import { useTheme } from 'next-themes';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { LineIcon } from '@/components/line-icon';
+import { HOME_ROOT_KEY, type Tree } from '@/components/roots-sheet';
 import { YggTree } from '@/components/ygg';
 import { VERSION } from '@/lib/version';
 import { VOICE_TEST_SLUG, ensureVoiceTestRoom, setVoiceTest, voiceTestOn } from '@/lib/voice-test';
-
-const WORLDS = [
-  { id: 'aether', desc: 'deep-space terminal · plain hairlines' },
-  { id: 'terminus', desc: 'ash & ember · corner ticks' },
-  { id: 'drift', desc: 'moonlit light · dotted rules' },
-  { id: 'divergence', desc: 'the fork · dashed rules' },
-  { id: 'transcendence', desc: 'the dissolve · double rules' },
-  { id: 'control', desc: 'the notary · corner ticks' },
-  { id: 'utopia', desc: 'the orchard · daylight paper' },
-  { id: 'stagnation', desc: 'the winter · bare grey' },
-];
-const SWATCHES = ['bg', 'text', 'success', 'active', 'danger', 'info'] as const;
+import { SWATCHES, WORLDS, cacheRootTheme, isWorld } from '@/lib/worlds';
 
 export default function SettingsPage() {
   const router = useRouter();
@@ -55,10 +45,29 @@ export default function SettingsPage() {
     }
   }
 
+  // the home root's name — picking a world here also persists it on the home root
+  const [homeRoot, setHomeRoot] = useState('');
+
   useEffect(() => {
     setMounted(true);
     setVt(voiceTestOn());
-  }, []);
+    try {
+      setHomeRoot(localStorage.getItem(HOME_ROOT_KEY) || '');
+    } catch {
+      /* private mode */
+    }
+    fetch('/api/roots', { cache: 'no-store' })
+      .then((r) => (r.ok ? (r.json() as Promise<Tree>) : null))
+      .then((t) => {
+        if (!t?.home?.name) return;
+        setHomeRoot(t.home.name);
+        if (isWorld(t.home.theme)) {
+          cacheRootTheme(t.home.name, t.home.theme);
+          setTheme(t.home.theme);
+        }
+      })
+      .catch(() => {});
+  }, [setTheme]);
 
   async function toggleVoiceTest() {
     const on = !vt;
@@ -119,6 +128,14 @@ export default function SettingsPage() {
               onClick={() => {
                 setTheme(w.id);
                 setWake((p) => ({ id: w.id, n: (p?.n || 0) + 1 }));
+                if (homeRoot) {
+                  cacheRootTheme(homeRoot, w.id);
+                  void fetch(`/api/roots/${encodeURIComponent(homeRoot)}/theme`, {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ theme: w.id }),
+                  }).catch(() => {});
+                }
               }}
               className="oz-world"
             >

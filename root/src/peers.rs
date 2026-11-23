@@ -65,6 +65,10 @@ pub struct Peers {
     /// the roots the owner approved with "Same as the home root": they may ask this root for its
     /// model settings (roots.rs `get_model`; kept in the data dir)
     pub shares: Mutex<HashSet<String>>,
+    /// this root's own visual world and revision (kept in `data/root.json`)
+    pub look: Mutex<(String, u64)>,
+    /// last-known snapshot of each peer (loaded from & persisted to `data/roots/<name>.json`)
+    pub snapshots: Mutex<HashMap<String, Value>>,
 }
 
 /// Work passed from root to root more often than this is refused (L6): two MAINs can never hand
@@ -168,6 +172,7 @@ impl Peers {
             }
             None => fallback,
         };
+        let default_theme = crate::roots::default_theme_for(&me, true).to_string();
         Peers {
             me,
             list: parse_peers(peers),
@@ -183,6 +188,8 @@ impl Peers {
             failed: Mutex::new(HashMap::new()),
             absent: Mutex::new(HashMap::new()),
             shares: Mutex::new(HashSet::new()),
+            look: Mutex::new((default_theme, 0)),
+            snapshots: Mutex::new(HashMap::new()),
         }
     }
 
@@ -289,6 +296,7 @@ pub async fn call(st: &AppState, root: &str, method: &str, path: &str, body: Opt
     let base = base.ok_or_else(|| format!("unknown root {root:?} (known: {})", p.names().join(", ")))?;
     let mut req = match method {
         "GET" => st.http.get(format!("{base}{path}")),
+        "PUT" => st.http.put(format!("{base}{path}")),
         "PATCH" => st.http.patch(format!("{base}{path}")),
         "DELETE" => st.http.delete(format!("{base}{path}")),
         _ => st.http.post(format!("{base}{path}")),
@@ -337,8 +345,10 @@ pub fn describe(st: &AppState) -> Value {
     let sessions = st.sessions.lock().unwrap().len();
     let models: Vec<Value> = st.config.models.iter().map(|m| json!({ "id": m, "tier": crate::model_tier(st, m) })).collect();
     let profiles: Vec<Value> = st.config.profiles.read().unwrap().by_name.values().map(|p| json!({ "name": p.name, "description": p.description, "harness": p.harness })).collect();
+    let (theme, theme_rev) = crate::roots::current_look(st);
     json!({
         "name": st.config.peers.me, "note": st.config.peers.note, "models": models, "profiles": profiles,
+        "theme": theme, "theme_rev": theme_rev,
         "hardware": { "os": std::env::consts::OS, "arch": std::env::consts::ARCH,
             "cpus": std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1), "mem_gb": mem_gb() },
         "load": { "running": running, "sessions": sessions },
@@ -434,7 +444,7 @@ pub fn spawn_watch(st: &AppState) {
                 let answered = match call(&st, &name, "GET", "/root", None, 5).await {
                     Ok(v) => {
                         let main = v["main"].as_str().map(String::from);
-                        p.seen.lock().unwrap().insert(name.clone(), (now_ms(), v));
+                        crate::roots::record_peer_root(&st, &name, now_ms(), &v);
                         // its MAIN gets one proxy here (roots.rs): MAIN can talk to it, the phone open it
                         crate::roots::ensure_main_proxy(&st, &name, main.as_deref());
                         true

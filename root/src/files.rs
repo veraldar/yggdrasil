@@ -514,6 +514,59 @@ fn artifact_dirs(st: &AppState, session: Option<&str>) -> Vec<PathBuf> {
     v
 }
 
+/// Servable artifact extensions (same set as the app's `lib/artifacts.ts`).
+const ARTIFACT_EXTS: &[&str] = &[
+    "png", "jpg", "jpeg", "gif", "webp", "svg", "html", "txt", "md", "json", "csv", "log",
+    "xml", "yaml", "yml", "toml", "ini", "conf", "css", "js", "mjs", "ts", "tsx", "jsx",
+    "py", "sh", "rb", "go", "rs", "java", "c", "h", "cpp", "diff", "patch", "pdf", "wav", "mp3",
+];
+
+/// Lists artifacts on this root across `artifact_dirs(&st, None)`, newest first, one entry per name.
+pub fn local_artifacts(st: &AppState) -> Vec<Value> {
+    let mut best: std::collections::HashMap<String, (u64, u64, String)> = std::collections::HashMap::new();
+    for dir in artifact_dirs(st, None) {
+        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        for entry in entries.flatten() {
+            let Some(name) = entry.file_name().to_str().map(String::from) else { continue };
+            if !safe_artifact_name(&name) {
+                continue;
+            }
+            let ext = name.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase()).unwrap_or_default();
+            if !ARTIFACT_EXTS.contains(&ext.as_str()) {
+                continue;
+            }
+            let Ok(meta) = entry.metadata() else { continue };
+            if !meta.is_file() {
+                continue;
+            }
+            let mtime = meta
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0);
+            let size = meta.len();
+            let replace = best.get(&name).is_none_or(|(prev, _, _)| mtime > *prev);
+            if replace {
+                best.insert(name, (mtime, size, ext));
+            }
+        }
+    }
+    let mut list: Vec<(String, u64, u64, String)> = best.into_iter().map(|(n, (m, s, e))| (n, m, s, e)).collect();
+    list.sort_by_key(|(_, m, _, _)| std::cmp::Reverse(*m));
+    list.truncate(200);
+    list.into_iter()
+        .map(|(name, mtime, size, ext)| json!({ "name": name, "mtime": mtime, "size": size, "ext": ext, "type": mime_of(&name) }))
+        .collect()
+}
+
+/// `GET /file/artifacts` — artifacts on this root, newest first.
+pub async fn list_artifacts(State(st): State<AppState>) -> Response {
+    let st2 = st.clone();
+    let list = tokio::task::spawn_blocking(move || local_artifacts(&st2)).await.unwrap_or_default();
+    Json(Value::Array(list)).into_response()
+}
+
 /// `POST /file/artifact {name, root?, session?}` → REF: the artifact stored as a file here (when
 /// it lives on another root, that root stores it and this one pulls it).
 pub async fn share_artifact(State(st): State<AppState>, Json(b): Json<Value>) -> Response {

@@ -94,6 +94,7 @@ export function MainBar({
   branchWorking,
   onSettled,
   onWorking,
+  testId = 'roots',
 }: {
   /** MAIN's row from the session list (or voice-test's, with voice tests on) */
   main?: MainBarRow;
@@ -104,6 +105,8 @@ export function MainBar({
   onSettled: () => void;
   /** the roots walk (MAIN works): the band gives them its odd slots */
   onWorking?: (on: boolean) => void;
+  /** override data-testid when embedded on the home root's own page */
+  testId?: string;
 }) {
   const router = useRouter();
   const rootRef = useRef<HTMLDivElement>(null);
@@ -408,7 +411,7 @@ export function MainBar({
     <div
       ref={rootRef}
       className="oz-roots oz-ygg"
-      data-testid="roots"
+      data-testid={testId}
       data-s={s}
       data-phase={phase}
       data-free={snap.free ? '' : undefined}

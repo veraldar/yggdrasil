@@ -2274,10 +2274,14 @@ fn engine_label(name: &str) -> &'static str {
     profiles::ENGINES.iter().find(|(n, _, _)| *n == name).map_or("that engine", |(_, l, _)| l)
 }
 
+pub(crate) fn engines_json(st: &AppState) -> Value {
+    Value::Array(profiles::ENGINES.iter().map(|(n, _, _)| engine_row(st, n)).collect())
+}
+
 /// `GET /engine` — the engines a session can run on, each with its default model and its choices
 /// (roles rework 11-22: the roles page's "engines" block). `more` = behind the "more engines" fold.
 async fn list_engines(State(st): State<AppState>) -> Json<Value> {
-    Json(Value::Array(profiles::ENGINES.iter().map(|(n, _, _)| engine_row(&st, n)).collect()))
+    Json(engines_json(&st))
 }
 
 fn engine_row(st: &AppState, name: &str) -> Value {
@@ -2295,7 +2299,7 @@ fn engine_row(st: &AppState, name: &str) -> Value {
 
 /// `PUT /engine/:name {model}` — that engine's default model (null / "" = its own pick; on the
 /// root, the brain's model); answers the engine's row.
-async fn put_engine(State(st): State<AppState>, Path(name): Path<String>, Json(body): Json<Value>) -> Response {
+pub(crate) async fn put_engine(State(st): State<AppState>, Path(name): Path<String>, Json(body): Json<Value>) -> Response {
     let Some(engine) = profiles::engine_name(&name) else {
         return (StatusCode::NOT_FOUND, Json(json!({ "error": format!("no engine {name}") }))).into_response();
     };
@@ -2410,7 +2414,7 @@ async fn get_agent(State(st): State<AppState>, Path(name): Path<String>) -> Resp
 }
 
 /// `PUT /agent/:name` — create or edit (partial body); answers the new detail.
-async fn put_agent(State(st): State<AppState>, Path(name): Path<String>, Json(body): Json<Value>) -> Response {
+pub(crate) async fn put_agent(State(st): State<AppState>, Path(name): Path<String>, Json(body): Json<Value>) -> Response {
     if let Some(m) = body["model"].as_str().filter(|m| !m.is_empty()) {
         let harness = body["harness"].as_str().map(String::from).unwrap_or_else(|| {
             agent(&st, &name).and_then(|a| a.harness).unwrap_or_else(|| "root".into())
@@ -4656,7 +4660,12 @@ async fn main() {
             models.push(m.to_string());
         }
     }
-    let profiles = profiles::Profiles::load(std::env::var("YGG_PROFILES").ok().as_deref());
+    let data_dir = PathBuf::from(std::env::var("YGG_DATA_DIR").unwrap_or_else(|_| "./data".into()));
+    let profiles_path = std::env::var("YGG_PROFILES")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .unwrap_or_else(|| data_dir.join("agents.json").to_string_lossy().into_owned());
+    let profiles = profiles::Profiles::load(Some(&profiles_path));
     eprintln!("profiles: {} (default {})", profiles.by_name.keys().cloned().collect::<Vec<_>>().join(", "), profiles.default_agent);
     let catalog = if std::env::var("YGG_CATALOG").is_ok() { load_catalog(&model) } else { models_catalog(&model, &models, &tiers) };
     let tree_cfg = tree::TreeCfg {
@@ -4715,7 +4724,6 @@ async fn main() {
     };
     eprintln!("context: {}", config.context_files.iter().map(|f| f.display().to_string()).collect::<Vec<_>>().join(":"));
     let listen = std::env::var("YGG_LISTEN").unwrap_or_else(|_| "127.0.0.1:4096".into());
-    let data_dir = PathBuf::from(std::env::var("YGG_DATA_DIR").unwrap_or_else(|_| "./data".into()));
     std::fs::create_dir_all(data_dir.join("session")).expect("create YGG_DATA_DIR");
     let mut sessions = load_sessions(&data_dir);
     eprintln!("loaded {} session(s) from {}", sessions.len(), data_dir.display());
@@ -4856,8 +4864,15 @@ async fn main() {
         .route("/file/upload", post(files::upload_start))
         .route("/file/upload/{upload}", axum::routing::put(files::upload_piece))
         .route("/file/artifact", post(files::share_artifact))
+        .route("/file/artifacts", get(files::list_artifacts))
         .route("/file/{hash}", get(files::get_file))
         .route("/file/{hash}/info", get(files::file_info))
+        .route("/root/theme", axum::routing::put(roots::put_self_theme))
+        .route("/root/{name}/theme", axum::routing::put(roots::put_peer_theme))
+        .route("/root/{name}/settings", get(roots::get_settings))
+        .route("/root/{name}/agent/{agent}", axum::routing::put(roots::put_root_agent))
+        .route("/root/{name}/engine/{engine}", axum::routing::put(roots::put_root_engine))
+        .route("/root/{name}/artifacts", get(roots::get_artifacts))
         .route("/root/{name}/sessions", get(roots::get_sessions))
         .route("/root/{name}/adopt", post(roots::post_adopt))
         .route("/root/peers/{name}", axum::routing::delete(roots::delete_peer))
@@ -4871,6 +4886,8 @@ async fn main() {
     tree::recover(&state, interrupted);
     roots::load_removed(&state);
     roots::load_shares(&state);
+    roots::load_look(&state);
+    roots::load_snapshots(&state);
     roots::ensure_main(&state);
     peers::spawn_watch(&state);
     ext::spawn_watch(&state);

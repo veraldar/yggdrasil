@@ -776,9 +776,13 @@ export async function refillTokens(
 export type HomeRoot = {
   name: string;
   os: string | null;
+  arch?: string | null;
   cpus: number | null;
   mem_gb: number | null;
   running: number;
+  models?: string[];
+  theme?: string | null;
+  theme_rev?: number;
   /** its own [MAIN] id (null: none yet) */
   main: string | null;
 };
@@ -790,6 +794,8 @@ export type RootLive = {
   seen: number | null;
   running: number;
   models: string[];
+  theme?: string | null;
+  theme_rev?: number;
   /** its MAIN's id there, and the local proxy of it */
   main: string | null;
   main_proxy: string | null;
@@ -824,6 +830,8 @@ function brainRoot(v: unknown): BrainRoot | null {
     models: (Array.isArray(o.models) ? o.models : [])
       .map((m) => (typeof m === 'string' ? m : str((m as { id?: unknown } | null)?.id)))
       .filter(Boolean),
+    theme: strN(o.theme),
+    theme_rev: num0(o.theme_rev) ?? 0,
     main: strN(o.main),
     main_proxy: strN(o.main_proxy),
   };
@@ -841,9 +849,15 @@ export async function brainTree(): Promise<{ home: HomeRoot | null; roots: Brain
       home: {
         name: str(d.name),
         os: strN(hw.os),
+        arch: strN(hw.arch),
         cpus: num0(hw.cpus),
         mem_gb: num0(hw.mem_gb),
         running: num0(load.running) ?? 0,
+        models: (Array.isArray(d.models) ? d.models : [])
+          .map((m) => (typeof m === 'string' ? m : str((m as { id?: unknown } | null)?.id)))
+          .filter(Boolean),
+        theme: strN(d.theme),
+        theme_rev: num0(d.theme_rev) ?? 0,
         main: strN(d.main),
       },
       roots: (Array.isArray(d.roots) ? d.roots : [])
@@ -860,9 +874,17 @@ const OFF_LINE: RootLive = {
   seen: null,
   running: 0,
   models: [],
+  theme: null,
+  theme_rev: 0,
   main: null,
   main_proxy: null,
 };
+
+/** Registry metadata for one joined root (`joined_at`, `host`, etc.), or null. */
+export async function rootRecord(id: string) {
+  const f = await readRoots();
+  return f.roots.find((r) => !r.revoked && r.id === id) ?? null;
+}
 
 /**
  * GET /api/roots: every root of this tree. The joined ones (roots.json, removed ones left out)
@@ -879,6 +901,8 @@ export async function rootsOverview() {
     seen: b.seen,
     running: b.running,
     models: b.models,
+    theme: b.theme,
+    theme_rev: b.theme_rev,
     main: b.main,
     main_proxy: b.main_proxy,
     arch: b.arch,
