@@ -129,16 +129,18 @@ test('md opened directly gets the black page, fetched stays raw', async ({ page,
   const hn = `e2e-md-${Date.now().toString(36)}.md`;
   made.push(hn);
   await writeFile(path.join(DIR, hn), '# black bg spec');
-  // fetch path (what the chat does): raw text, untouched
+  // fetch path (what the chat does): raw markdown text, untouched
   const raw = await request.get(`/api/artifact/${hn}`);
-  expect(raw.headers()['content-type']).toContain('text/plain');
+  expect(raw.headers()['content-type']).toContain('text/markdown');
   expect(await raw.text()).toBe('# black bg spec');
-  // navigation path (address bar / corner new-tab): wrapped, bifrost black
-  await page.goto(`/api/artifact/${hn}`);
+  // navigation path (address bar / corner new-tab): rendered markdown,
+  // bifrost black — the .md became a real page, by construction
+  const nav = await page.goto(`/api/artifact/${hn}`);
+  expect(nav?.headers()['content-type']).toContain('text/html');
   expect(await page.evaluate(() => getComputedStyle(document.body).backgroundColor)).toBe(
     'rgb(8, 8, 16)'
   );
-  await expect(page.getByText('# black bg spec')).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'black bg spec' })).toBeVisible();
 });
 
 test('api: artifact list is newest-first, names stay sanitized', async ({ request }) => {
