@@ -176,6 +176,12 @@ function fmtListTime(t?: number): string {
 /** the list's order (owner 11-17): when the owner last wrote in it — never a reply's time */
 const byOwner = (s: { userAt?: number; updated?: number }) => s.userAt || s.updated || 0;
 
+/** working = a run in flight (pending) or the brain's card says so — a card can be
+ *  working with no run this proxy sees (a voice run, a run on another root). The one
+ *  truth for the rows' green dot, the band chip's count and the working filter, so
+ *  the chip's number is exactly what the rows show */
+const isWorking = (s: Sess) => !!s.pending || s.card?.status === 'working';
+
 export default function SessionsPage() {
   const router = useRouter();
   // the door, per device (never the server store): not walked yet → the
@@ -207,6 +213,9 @@ export default function SessionsPage() {
   // artifacts the agents left unseen — drives the header bell badge;
   // counted on the same load/poll cycle as the session list
   const [unseenArts, setUnseenArts] = useState(0);
+  // the band chip ("N working") taps to a working-only list; tap again clears
+  // it — and it clears itself when nothing works any more (never a zero list)
+  const [onlyWorking, setOnlyWorking] = useState(false);
   const [creating, setCreating] = useState(false);
   const [name, setName] = useState('');
   // the terminal's sessions (Claude Code, Antigravity, opencode): watch live, continue here
@@ -258,7 +267,7 @@ export default function SessionsPage() {
     for (const s of sessions) {
       if (s.archived) continue;
       const st = s.card?.status;
-      const w = !!s.pending || st === 'working';
+      const w = isWorking(s);
       if (!w && st !== 'blocked') continue;
       const seen = new Set<string>();
       for (let p = s.parentId; p && !seen.has(p); p = byId.get(p)?.parentId) {
@@ -538,8 +547,28 @@ export default function SessionsPage() {
 
   // the caption counts every run on the box (MAIN's too); the crown walks
   // for the branches only — MAIN's run walks the roots
-  const working = sessions.filter((s) => s.pending).length;
+  const working = sessions.filter(isWorking).length;
   const branchWorking = sessions.some((s) => s.pending && !inRoots(s));
+  // the filter never lies about the live list: nothing working → the filter
+  // lifts itself (the chip reads "all quiet", there is nothing to show)
+  useEffect(() => {
+    if (onlyWorking && working === 0) setOnlyWorking(false);
+  }, [onlyWorking, working]);
+
+  /** working-only view: every working session (closed ones included — the
+   *  closed key still gates them, the filter does not swallow rows) with the
+   *  ancestors it hangs from, so a nested child stays visible under its
+   *  parent. Nothing else changes: order law, closed/hidden handling. */
+  const shownTops = useMemo(() => {
+    if (!onlyWorking) return tops;
+    const keep = new Set<string>();
+    for (const s of sessions) {
+      if (!isWorking(s)) continue;
+      keep.add(s.id);
+      for (let p = s.parentId; p && !keep.has(p); p = byId.get(p)?.parentId) keep.add(p);
+    }
+    return tops.filter((s) => keep.has(s.id));
+  }, [onlyWorking, tops, sessions, byId]);
 
   // the list's order law (owner 11-17): the session with the newest message first — a running
   // or unread one shows its dot, it does not jump the order
@@ -592,7 +621,7 @@ export default function SessionsPage() {
       !!s.lastHasQ &&
       Date.now() - (s.lastAt || 0) < OPEN_QUESTION_TTL_MS;
     const st = CARD_ST[s.archived ? 'archived' : s.card?.status || ''];
-    const working = !!s.pending || s.card?.status === 'working';
+    const working = isWorking(s);
     const needs = (s.card?.needs || '').trim();
     const sub = needs ? (
       <>
@@ -744,17 +773,30 @@ export default function SessionsPage() {
         </header>
 
         {/* the tree, once, as a quiet band — one thought walks it at a time
-            while something works; it falls still when nothing does */}
+            while something works; it falls still when nothing does. The chip
+            in its corner taps to a working-only list, again to clear (11-23);
+            with the filter on the band's square goes amber — a held state. */}
         <figure
           className={`oz-band oz-ygg -mx-3 mb-2.5 ${working ? 'live' : ''} ${branchWorking ? 'walk' : ''}`}
           data-shared={branchWorking && rootsWorking ? '' : undefined}
           aria-label={working ? `your box — ${working} working` : 'your box — nothing working'}
         >
           <YggTree viewBox={BAND_VIEWBOX} slice />
-          <figcaption className="oz-cap">
+          <button
+            type="button"
+            onClick={() => working > 0 && setOnlyWorking((v) => !v)}
+            aria-pressed={onlyWorking}
+            aria-label={
+              working
+                ? `${working} working — ${onlyWorking ? 'show every session' : 'show only the working'}`
+                : 'your box — nothing working'
+            }
+            data-testid="working-filter"
+            className={`oz-cap ${onlyWorking ? 'on' : ''}`}
+          >
             <i />
             {working ? `${working} working` : 'all quiet'}
-          </figcaption>
+          </button>
         </figure>
 
         <div className="mb-2 flex items-stretch gap-1.5">
@@ -881,8 +923,10 @@ export default function SessionsPage() {
         ) : (
           <ul className="flex flex-col gap-1">
             {/* one list, the owner's own newest message first (11-17) — MAIN's sub-tree no
-                longer sits above the rest (MAIN itself is the roots); each nests to any depth */}
-            {group(sortTop(tops), 'closed:top')}
+                longer sits above the rest (MAIN itself is the roots); each nests to any depth.
+                The band chip's filter ("N working") narrows it to the working and their
+                ancestors — the closed key still gates its rows behind their parent */}
+            {group(sortTop(shownTops), 'closed:top')}
           </ul>
         )}
       </main>

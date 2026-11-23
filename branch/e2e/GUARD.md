@@ -12,6 +12,8 @@
 #
 # Suites and where they belong (verify-twin.sh):
 #   list-order.spec.ts        twin (writes e2e-order-* sessions)
+#   working-filter.spec.ts    twin (stubs its own status matrix; the last test writes
+#                             e2e-wf-* sessions and sends one real turn)
 #   notify-per-session.spec.ts twin (writes e2e-notify-* sessions)
 #   who-wrote.spec.ts         twin by default (writes e2e-who-*); TS_BRAIN names the brain
 #   antigravity-harness.spec.ts twin (E2E_OC_URL)
