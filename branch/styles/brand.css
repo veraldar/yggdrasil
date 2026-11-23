@@ -124,6 +124,15 @@
     position: absolute; right: 10px; bottom: 8px; font-size: 11px; line-height: 1.6; padding: 2px 6px;
     background: var(--oz-surface); border: 1px solid var(--oz-border); color: var(--oz-text);
   }
+  /* a tap target too, not just a caption (11-23): the working filter — text, box
+     and square reset to what the span painted, then tint like the .oz-chips keys */
+  button.oz-cap { cursor: pointer; }
+  button.oz-cap:disabled { opacity: .55; cursor: default; }
+  .oz-band .oz-cap[aria-pressed='true'] {
+    color: var(--oz-active);
+    border-color: color-mix(in srgb, var(--oz-active) 45%, transparent);
+    background: color-mix(in srgb, var(--oz-active) 12%, var(--oz-surface));
+  }
   .oz-cap i { display: inline-block; width: 7px; height: 7px; margin-right: 6px; background: var(--oz-dim); }
   .oz-band.live .oz-cap i { background: var(--oz-success); }
 
