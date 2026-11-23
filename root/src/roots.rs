@@ -107,29 +107,218 @@ pub fn ensure_main_proxy(st: &AppState, root: &str, rid: Option<&str>) -> Option
     Some(id)
 }
 
+/// The eight visual worlds (matching `branch/styles/tokens.css`).
+pub const THEMES: &[&str] = &["aether", "terminus", "drift", "divergence", "transcendence", "control", "utopia", "stagnation"];
+
+pub fn is_valid_theme(t: &str) -> bool {
+    THEMES.contains(&t)
+}
+
+/// Deterministic default world: the home root wears `aether`; any other computer picks its own
+/// colour from the other seven worlds so it is immediately distinct from home.
+pub fn default_theme_for(name: &str, is_home: bool) -> &'static str {
+    if is_home {
+        return THEMES[0];
+    }
+    let h = name.bytes().fold(5381u64, |acc, b| acc.wrapping_mul(33).wrapping_add(b as u64));
+    THEMES[1 + (h as usize % (THEMES.len() - 1))]
+}
+
+fn look_file(st: &AppState) -> std::path::PathBuf {
+    st.data_dir.join("root.json")
+}
+
+/// This root's current visual world and revision.
+pub fn current_look(st: &AppState) -> (String, u64) {
+    let (theme, rev) = st.config.peers.look.lock().unwrap().clone();
+    if rev == 0 && st.config.peers.home.is_some() && !look_file(st).exists() {
+        return (default_theme_for(&st.config.peers.me, false).to_string(), 0);
+    }
+    (theme, rev)
+}
+
+/// At start: loads `data/root.json` (or seeds the default world for home vs joined root).
+pub fn load_look(st: &AppState) {
+    let fallback = default_theme_for(&st.config.peers.me, st.config.peers.home.is_none()).to_string();
+    let loaded = std::fs::read(look_file(st))
+        .ok()
+        .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
+        .and_then(|v| {
+            let t = v["theme"].as_str().filter(|s| is_valid_theme(s))?.to_string();
+            let rev = v["rev"].as_u64().unwrap_or(1);
+            Some((t, rev))
+        });
+    *st.config.peers.look.lock().unwrap() = loaded.unwrap_or((fallback, 0));
+}
+
+/// Saves this root's visual world to `data/root.json` (atomic) and increments its revision.
+pub fn set_local_theme(st: &AppState, theme: &str) -> Result<(String, u64), String> {
+    if !is_valid_theme(theme) {
+        return Err(format!("unknown theme {theme:?} ({})", THEMES.join(" | ")));
+    }
+    let next_rev = {
+        let mut g = st.config.peers.look.lock().unwrap();
+        let rev = g.1.saturating_add(1);
+        *g = (theme.to_string(), rev);
+        rev
+    };
+    let path = look_file(st);
+    let tmp = path.with_extension("json.tmp");
+    let body = serde_json::to_vec_pretty(&json!({ "theme": theme, "rev": next_rev })).unwrap_or_default();
+    std::fs::write(&tmp, body).and_then(|_| std::fs::rename(&tmp, &path)).map_err(|e| format!("could not save root.json: {e}"))?;
+    publish(st, "root.updated", json!({ "root": st.config.peers.me, "theme": theme, "rev": next_rev }));
+    Ok((theme.to_string(), next_rev))
+}
+
+fn snapshot_dir(st: &AppState) -> std::path::PathBuf {
+    st.data_dir.join("roots")
+}
+
+fn snapshot_file(st: &AppState, name: &str) -> std::path::PathBuf {
+    snapshot_dir(st).join(format!("{name}.json"))
+}
+
+/// At start: loads persisted peer snapshots (`data/roots/<name>.json`) so an offline computer keeps
+/// its last-seen time, world, hardware, sessions, artifacts, roles and engines across a restart.
+pub fn load_snapshots(st: &AppState) {
+    let Ok(entries) = std::fs::read_dir(snapshot_dir(st)) else { return };
+    let removed = st.config.peers.removed.lock().unwrap().clone();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|s| s.to_str()) != Some("json") {
+            continue;
+        }
+        let Some(name) = path.file_stem().and_then(|s| s.to_str()).map(String::from) else { continue };
+        if !peers::valid_id(&name) || name == st.config.peers.me || removed.contains(&name) {
+            continue;
+        }
+        let Ok(raw) = std::fs::read(&path) else { continue };
+        let Ok(snap) = serde_json::from_slice::<Value>(&raw) else { continue };
+        if !snap.is_object() {
+            continue;
+        }
+        let seen_at = snap["seen"].as_u64().unwrap_or(0);
+        if seen_at > 0 {
+            let synth = json!({
+                "name": name,
+                "theme": snap["theme"],
+                "theme_rev": snap["theme_rev"],
+                "hardware": snap["hardware"],
+                "models": snap["models"].as_array().into_iter().flatten().map(|m| if m.is_object() { m.clone() } else { json!({ "id": m }) }).collect::<Vec<_>>(),
+                "load": { "running": 0, "sessions": snap["sessions"].as_array().map_or(0, |a| a.len()) },
+                "main": snap["main"],
+                "profiles": snap["roles"],
+            });
+            st.config.peers.seen.lock().unwrap().insert(name.clone(), (seen_at, synth));
+            // mark as not yet answered in this process: reachable stays false until a live poll succeeds,
+            // while last-seen and cached metadata remain visible immediately
+            st.config.peers.failed.lock().unwrap().insert(name.clone(), seen_at);
+        }
+        st.config.peers.snapshots.lock().unwrap().insert(name, snap);
+    }
+}
+
+fn update_snapshot(st: &AppState, name: &str, f: impl FnOnce(&mut Value)) {
+    if !peers::valid_id(name) || name == st.config.peers.me {
+        return;
+    }
+    let body = {
+        let mut snaps = st.config.peers.snapshots.lock().unwrap();
+        let entry = snaps.entry(name.to_string()).or_insert_with(|| json!({ "name": name }));
+        if !entry.is_object() {
+            *entry = json!({ "name": name });
+        }
+        f(entry);
+        serde_json::to_vec_pretty(entry).unwrap_or_default()
+    };
+    let dir = snapshot_dir(st);
+    let _ = std::fs::create_dir_all(&dir);
+    let path = snapshot_file(st, name);
+    let tmp = path.with_extension("json.tmp");
+    if let Err(e) = std::fs::write(&tmp, body).and_then(|_| std::fs::rename(&tmp, &path)) {
+        eprintln!("snapshot {name}: could not write: {e}");
+    }
+}
+
+/// Records a fresh `GET /root` answer from peer `name` in memory and in `data/roots/<name>.json`.
+pub fn record_peer_root(st: &AppState, name: &str, at: u64, v: &Value) {
+    st.config.peers.seen.lock().unwrap().insert(name.to_string(), (at, v.clone()));
+    update_snapshot(st, name, |snap| {
+        snap["name"] = json!(name);
+        snap["seen"] = json!(at);
+        if let Some(t) = v["theme"].as_str().filter(|s| is_valid_theme(s)) {
+            snap["theme"] = json!(t);
+        } else if snap["theme"].as_str().is_none_or(|s| !is_valid_theme(s)) {
+            snap["theme"] = json!(default_theme_for(name, false));
+        }
+        if let Some(rev) = v["theme_rev"].as_u64() {
+            snap["theme_rev"] = json!(rev);
+        }
+        if v["hardware"].is_object() {
+            snap["hardware"] = v["hardware"].clone();
+        }
+        if let Some(ms) = v["models"].as_array() {
+            let ids: Vec<String> = ms
+                .iter()
+                .filter_map(|m| m.as_str().or_else(|| m["id"].as_str()).map(String::from))
+                .collect();
+            snap["models"] = json!(ids);
+        }
+        if v["main"].is_string() {
+            snap["main"] = v["main"].clone();
+        }
+        if v["profiles"].is_array() && snap["roles"].is_null() {
+            snap["roles"] = v["profiles"].clone();
+        }
+    });
+}
+
 /// Each peer's health for `GET /root`: reachable (answered in the last 3 minutes), when last
-/// seen, what it is and runs, its MAIN there and here.
+/// seen, what it is and runs, its theme, its MAIN there and here.
 pub fn health(st: &AppState) -> Vec<Value> {
     let p = &st.config.peers;
     let peers = p.all();
     let seen = p.seen.lock().unwrap().clone();
     let failed = p.failed.lock().unwrap().clone();
+    let snaps = p.snapshots.lock().unwrap().clone();
     let sessions = st.sessions.lock().unwrap();
     let now = now_ms();
     peers
         .iter()
         .map(|(name, _)| {
             let (at, r) = seen.get(name).cloned().unwrap_or((0, Value::Null));
-            let hw = &r["hardware"];
+            let snap = snaps.get(name);
+            let hw = if r["hardware"].is_object() { &r["hardware"] } else if let Some(s) = snap { &s["hardware"] } else { &Value::Null };
+            let theme = r["theme"]
+                .as_str()
+                .filter(|t| is_valid_theme(t))
+                .or_else(|| snap.and_then(|s| s["theme"].as_str()).filter(|t| is_valid_theme(t)))
+                .unwrap_or_else(|| default_theme_for(name, false));
+            let theme_rev = r["theme_rev"]
+                .as_u64()
+                .or_else(|| snap.and_then(|s| s["theme_rev"].as_u64()))
+                .unwrap_or(0);
+            let seen_ms = if at > 0 { at } else { snap.and_then(|s| s["seen"].as_u64()).unwrap_or(0) };
+            let reachable = at > 0 && now.saturating_sub(at) < 180_000 && failed.get(name).is_none_or(|f| *f < at);
+            let models: Vec<&str> = if let Some(arr) = r["models"].as_array() {
+                arr.iter().filter_map(|m| m.as_str().or_else(|| m["id"].as_str())).collect()
+            } else if let Some(arr) = snap.and_then(|s| s["models"].as_array()) {
+                arr.iter().filter_map(|m| m.as_str().or_else(|| m["id"].as_str())).collect()
+            } else {
+                vec![]
+            };
             json!({
                 "name": name,
                 // answered in the last 3 minutes, and no call failed to reach it since
-                "reachable": at > 0 && now.saturating_sub(at) < 180_000 && failed.get(name).is_none_or(|f| *f < at),
-                "seen": at,
+                "reachable": reachable,
+                "seen": seen_ms,
+                "theme": theme,
+                "theme_rev": theme_rev,
                 "os": hw["os"], "arch": hw["arch"], "cpus": hw["cpus"], "mem_gb": hw["mem_gb"],
-                "running": r["load"]["running"], "sessions": r["load"]["sessions"],
-                "models": r["models"].as_array().into_iter().flatten().filter_map(|m| m["id"].as_str()).collect::<Vec<_>>(),
-                "main": r["main"],
+                "running": if reachable { r["load"]["running"].clone() } else { json!(0) },
+                "sessions": r["load"]["sessions"],
+                "models": models,
+                "main": r["main"].as_str().or_else(|| snap.and_then(|s| s["main"].as_str())),
                 "main_proxy": main_proxy_in(&sessions, name),
             })
         })
@@ -275,12 +464,95 @@ pub fn placed(st: &AppState, body: &Value) -> Result<String, String> {
 
 // ── what lives on a root ─────────────────────────────────────────────────────
 
-fn row(id: &str, info: &Value, busy: bool, proxy: Option<String>) -> Value {
+fn text_of_parts(parts: &Value) -> String {
+    parts
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|p| p["type"] == "text")
+        .filter_map(|p| p["text"].as_str())
+        .collect::<Vec<_>>()
+        .join(" ")
+        .trim()
+        .to_string()
+}
+
+fn msg_summary(messages: &[Value]) -> (String, String, u64, bool, u64) {
+    let last = messages.iter().rev().find(|m| !text_of_parts(&m["parts"]).is_empty());
+    let last_text = last.map(|m| text_of_parts(&m["parts"])).unwrap_or_default();
+    let last_role = last.and_then(|m| m["info"]["role"].as_str()).unwrap_or_default().to_string();
+    let last_at = last.and_then(|m| m["info"]["time"]["created"].as_u64()).unwrap_or(0);
+    let last_has_q = last_text.contains('?');
+    let preview: String = last_text.chars().take(80).collect();
+    let user_at = messages
+        .iter()
+        .rev()
+        .find(|m| {
+            m["info"]["role"] == "user"
+                && m["info"]["meta"]["auto"] != true
+                && m["info"]["meta"]["internal"] != true
+                && !m["info"]["meta"]["origin"].is_string()
+                && !m["parts"].as_array().is_some_and(|ps| ps.iter().any(|p| p["type"] == "compaction"))
+        })
+        .and_then(|m| m["info"]["time"]["created"].as_u64())
+        .unwrap_or(0);
+    (preview, last_role, last_at, last_has_q, user_at)
+}
+
+fn engine_of_info(info: &Value) -> String {
+    if let Some(e) = info["engine"].as_str().filter(|s| !s.is_empty()) {
+        return e.to_string();
+    }
+    if let Some(k) = info["harness"]["kind"].as_str().filter(|s| !s.is_empty()) {
+        return k.to_string();
+    }
+    "root".to_string()
+}
+
+fn attached_harness_of(info: &Value) -> Value {
+    if info["harness"]["attached"] == true {
+        if let Some(k) = info["harness"]["kind"].as_str() {
+            return json!(k);
+        }
+    }
+    Value::Null
+}
+
+fn row(id: &str, info: &Value, busy: bool, proxy: Option<String>, messages: Option<&[Value]>) -> Value {
     let card = &info["card"];
     let status = if busy { "working".to_string() } else { card["status"].as_str().unwrap_or("idle").to_string() };
-    json!({ "id": id, "title": info["title"], "agent": info["agent"], "status": status,
-        "headline": card["headline"].as_str().or(card["summary"].as_str()), "busy": busy,
-        "updated": info["time"]["updated"], "proxy": proxy })
+    let headline = card["headline"].as_str().or(card["summary"].as_str());
+    let (preview, last_role, last_at, last_has_q, msg_user_at) = messages.map(msg_summary).unwrap_or_default();
+    let user_at = if msg_user_at > 0 {
+        msg_user_at
+    } else {
+        info["time"]["user"].as_u64().or(info["time"]["updated"].as_u64()).or(info["time"]["created"].as_u64()).unwrap_or(0)
+    };
+    let preview_str = if !preview.is_empty() {
+        preview
+    } else {
+        headline.unwrap_or_default().chars().take(80).collect()
+    };
+    json!({
+        "id": id,
+        "title": info["title"],
+        "parentId": info["parentID"],
+        "agent": info["agent"],
+        "engine": engine_of_info(info),
+        "harness": attached_harness_of(info),
+        "card": if card.is_object() { card.clone() } else { Value::Null },
+        "archived": info["archived"] == true,
+        "status": status,
+        "headline": headline,
+        "preview": preview_str,
+        "busy": busy,
+        "updated": info["time"]["updated"],
+        "userAt": user_at,
+        "lastRole": last_role,
+        "lastAt": last_at,
+        "lastHasQ": last_has_q,
+        "proxy": proxy,
+    })
 }
 
 /// A session the sheet lists for its root: one that lives there, open, not a test.
@@ -289,7 +561,7 @@ fn listed(info: &Value) -> bool {
 }
 
 fn sorted(mut rows: Vec<Value>) -> Vec<Value> {
-    rows.sort_by_key(|r| std::cmp::Reverse(r["updated"].as_u64().unwrap_or(0)));
+    rows.sort_by_key(|r| std::cmp::Reverse(r["userAt"].as_u64().filter(|t| *t > 0).or(r["updated"].as_u64()).unwrap_or(0)));
     rows.truncate(60);
     rows
 }
@@ -304,44 +576,82 @@ pub async fn sessions(st: &AppState, name: &str) -> Value {
         let rows = sessions
             .iter()
             .filter(|(id, s)| listed(&s.info) && Some(*id) != main.as_ref())
-            .map(|(id, s)| row(id, &s.info, running.contains_key(id), Some(id.clone())))
+            .map(|(id, s)| row(id, &s.info, running.contains_key(id), Some(id.clone()), Some(&s.messages)))
             .collect();
-        let main = main.map(|m| json!({ "id": m, "proxy": m, "title": sessions[&m].info["title"] }));
+        let main = main.map(|m| {
+            let s = &sessions[&m];
+            let (preview, _, _, _, _) = msg_summary(&s.messages);
+            json!({ "id": m, "proxy": m, "title": s.info["title"], "preview": preview, "busy": running.contains_key(&m) })
+        });
         return json!({ "root": me, "reachable": true, "main": main, "sessions": sorted(rows) });
     }
     let (list, busy) = tokio::join!(peers::call(st, name, "GET", "/session", None, 5), peers::call(st, name, "GET", "/session/status", None, 5));
-    let sessions = st.sessions.lock().unwrap();
     match list {
         Ok(Value::Array(infos)) => {
             let busy = busy.unwrap_or(Value::Null);
-            let main = infos.iter().filter(|i| crate::is_main_title(i["title"].as_str().unwrap_or_default()) && listed(i)).max_by_key(|i| i["time"]["updated"].as_u64().unwrap_or(0));
-            let main_id = main.and_then(|m| m["id"].as_str()).map(String::from);
-            let rows = infos
-                .iter()
-                .filter(|i| listed(i) && i["id"].as_str().is_some() && i["id"].as_str() != main_id.as_deref())
-                .map(|i| {
-                    let id = i["id"].as_str().unwrap_or_default();
-                    row(id, i, busy[id].is_object(), proxy_in(&sessions, name, id))
-                })
-                .collect();
-            let main = main_id.map(|m| json!({ "id": m, "proxy": main_proxy_in(&sessions, name), "title": "[MAIN]" }));
-            json!({ "root": name, "reachable": true, "main": main, "sessions": sorted(rows) })
+            let (rows, main) = {
+                let sessions = st.sessions.lock().unwrap();
+                let main = infos.iter().filter(|i| crate::is_main_title(i["title"].as_str().unwrap_or_default()) && listed(i)).max_by_key(|i| i["time"]["updated"].as_u64().unwrap_or(0));
+                let main_id = main.and_then(|m| m["id"].as_str()).map(String::from);
+                let rows = infos
+                    .iter()
+                    .filter(|i| listed(i) && i["id"].as_str().is_some() && i["id"].as_str() != main_id.as_deref())
+                    .map(|i| {
+                        let id = i["id"].as_str().unwrap_or_default();
+                        row(id, i, busy[id].is_object(), proxy_in(&sessions, name, id), None)
+                    })
+                    .collect();
+                let main = main_id.map(|m| {
+                    let mp = main_proxy_in(&sessions, name);
+                    let preview = mp.as_ref().and_then(|p| sessions.get(p)).map(|s| msg_summary(&s.messages).0).unwrap_or_default();
+                    json!({ "id": m, "proxy": mp, "title": "[MAIN]", "preview": preview, "busy": busy[&m].is_object() })
+                });
+                (sorted(rows), main)
+            };
+            update_snapshot(st, name, |snap| {
+                snap["sessions"] = json!(rows);
+                if let Some(m) = &main {
+                    snap["main_info"] = m.clone();
+                }
+            });
+            json!({ "root": name, "reachable": true, "main": main, "sessions": rows })
         }
-        // not there right now: what this root holds of it, greyed on the phone
+        // not there right now: cached last-known rows from snapshot + any local proxies, greyed on the phone
         other => {
             if let Err(e) = &other {
                 eprintln!("root sessions: {e}");
             }
-            let rows = sessions
-                .iter()
-                .filter(|(_, s)| s.info["remote"]["root"] == name && !is_root_main(s) && s.info["archived"] != true)
-                .map(|(id, s)| {
+            let snap = st.config.peers.snapshots.lock().unwrap().get(name).cloned();
+            let sessions = st.sessions.lock().unwrap();
+            let mut by_rid: HashMap<String, Value> = HashMap::new();
+            if let Some(cached) = snap.as_ref().and_then(|s| s["sessions"].as_array()) {
+                for r in cached {
+                    let Some(rid) = r["id"].as_str() else { continue };
+                    let mut entry = r.clone();
+                    entry["busy"] = json!(false);
+                    if entry["status"] == "working" {
+                        entry["status"] = json!("idle");
+                    }
+                    entry["proxy"] = json!(proxy_in(&sessions, name, rid));
+                    by_rid.insert(rid.to_string(), entry);
+                }
+            }
+            for (id, s) in sessions.iter() {
+                if s.info["remote"]["root"] == name && !is_root_main(s) && s.info["archived"] != true {
                     let rid = s.info["remote"]["id"].as_str().unwrap_or_default();
-                    row(rid, &s.info, false, Some(id.clone()))
+                    if !rid.is_empty() {
+                        by_rid.entry(rid.to_string()).or_insert_with(|| row(rid, &s.info, false, Some(id.clone()), Some(&s.messages)));
+                    }
+                }
+            }
+            let main = main_proxy_in(&sessions, name)
+                .map(|p| {
+                    let s = &sessions[&p];
+                    let (preview, _, _, _, _) = msg_summary(&s.messages);
+                    json!({ "id": s.info["remote"]["id"], "proxy": p, "title": "[MAIN]", "preview": preview, "busy": false })
                 })
-                .collect();
-            let main = main_proxy_in(&sessions, name).map(|p| json!({ "id": sessions[&p].info["remote"]["id"], "proxy": p, "title": "[MAIN]" }));
-            json!({ "root": name, "reachable": false, "main": main, "sessions": sorted(rows) })
+                .or_else(|| snap.as_ref().and_then(|s| s.get("main_info")).filter(|v| v.is_object()).cloned());
+            json!({ "root": name, "reachable": false, "main": main, "sessions": sorted(by_rid.into_values().collect()) })
         }
     }
 }
@@ -449,6 +759,8 @@ pub fn remove(st: &AppState, name: &str) -> usize {
     }
     p.learned.lock().unwrap().retain(|(n, _)| n != name);
     p.seen.lock().unwrap().remove(name);
+    p.snapshots.lock().unwrap().remove(name);
+    let _ = std::fs::remove_file(snapshot_file(st, name));
     set_share(st, name, false); // it no longer gets this root's model settings
     let ids: Vec<String> = st.sessions.lock().unwrap().iter().filter(|(_, s)| s.info["remote"]["root"] == name).map(|(id, _)| id.clone()).collect();
     let mut n = 0;
@@ -578,10 +890,265 @@ fn err(code: StatusCode, msg: &str) -> Response {
 }
 
 pub async fn get_sessions(State(st): State<AppState>, Path(name): Path<String>) -> Response {
-    if name != st.config.peers.me && st.config.peers.url(&name).is_none() && !has_proxies(&st, &name) {
+    if name != st.config.peers.me && st.config.peers.url(&name).is_none() && !has_proxies(&st, &name) && !st.config.peers.snapshots.lock().unwrap().contains_key(&name) {
         return err(StatusCode::NOT_FOUND, &format!("unknown root {name}"));
     }
     Json(sessions(&st, &name).await).into_response()
+}
+
+/// `PUT /root/theme {theme}` — changes THIS root's own visual world (`data/root.json`).
+/// Over a peer link, only the home root may change a joined root's settings.
+pub async fn put_self_theme(State(st): State<AppState>, headers: HeaderMap, Json(body): Json<Value>) -> Response {
+    if peers::from_peer(&headers) {
+        if let Some(home) = &st.config.peers.home {
+            if let Some(from) = headers.get("x-ygg-from").and_then(|v| v.to_str().ok()).filter(|s| !s.is_empty()) {
+                if from != home {
+                    return err(StatusCode::FORBIDDEN, "only the home root may change this computer's settings");
+                }
+            }
+        }
+    }
+    let Some(theme) = body["theme"].as_str().map(str::trim) else {
+        return err(StatusCode::BAD_REQUEST, "theme required");
+    };
+    match set_local_theme(&st, theme) {
+        Ok((t, rev)) => Json(json!({ "root": st.config.peers.me, "theme": t, "rev": rev })).into_response(),
+        Err(e) => err(StatusCode::BAD_REQUEST, &e),
+    }
+}
+
+/// `PUT /root/{name}/theme {theme}` — from this computer only (the app): sets `name`'s world on
+/// `name` itself and updates home's cached copy. Never queues while offline.
+pub async fn put_peer_theme(
+    State(st): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<std::net::SocketAddr>,
+    headers: HeaderMap,
+    Path(name): Path<String>,
+    Json(body): Json<Value>,
+) -> Response {
+    if !addr.ip().is_loopback() || peers::from_peer(&headers) {
+        return err(StatusCode::FORBIDDEN, "only this computer changes a root's settings");
+    }
+    let Some(theme) = body["theme"].as_str().map(str::trim) else {
+        return err(StatusCode::BAD_REQUEST, "theme required");
+    };
+    if !is_valid_theme(theme) {
+        return err(StatusCode::BAD_REQUEST, &format!("unknown theme {theme:?} ({})", THEMES.join(" | ")));
+    }
+    if name == st.config.peers.me {
+        return match set_local_theme(&st, theme) {
+            Ok((t, rev)) => Json(json!({ "root": name, "theme": t, "rev": rev })).into_response(),
+            Err(e) => err(StatusCode::BAD_REQUEST, &e),
+        };
+    }
+    match peers::call(&st, &name, "PUT", "/root/theme", Some(json!({ "theme": theme })), 10).await {
+        Ok(v) => {
+            let rev = v["rev"].as_u64().unwrap_or(1);
+            if let Some((_, seen_val)) = st.config.peers.seen.lock().unwrap().get_mut(&name) {
+                seen_val["theme"] = json!(theme);
+                seen_val["theme_rev"] = json!(rev);
+            }
+            update_snapshot(&st, &name, |snap| {
+                snap["theme"] = json!(theme);
+                snap["theme_rev"] = json!(rev);
+            });
+            publish(&st, "root.updated", json!({ "root": name, "theme": theme, "rev": rev }));
+            Json(json!({ "root": name, "theme": theme, "rev": rev })).into_response()
+        }
+        Err(e) => err(StatusCode::BAD_GATEWAY, &e),
+    }
+}
+
+/// `GET /root/{name}/settings` — theme, hardware, models, roles and engines of `name` (live when
+/// reachable, else from home's persisted snapshot `data/roots/<name>.json`).
+pub async fn get_settings(State(st): State<AppState>, Path(name): Path<String>) -> Response {
+    let me = st.config.peers.me.clone();
+    if name == me {
+        let desc = peers::describe(&st);
+        let (theme, theme_rev) = current_look(&st);
+        let roles = st.config.profiles.read().unwrap().catalog();
+        let engines = crate::engines_json(&st);
+        let models: Vec<String> = st.config.models.clone();
+        return Json(json!({
+            "root": me,
+            "home": true,
+            "reachable": true,
+            "seen": now_ms(),
+            "theme": theme,
+            "theme_rev": theme_rev,
+            "hardware": desc["hardware"],
+            "models": models,
+            "roles": roles,
+            "engines": engines,
+        }))
+        .into_response();
+    }
+    let known = st.config.peers.url(&name).is_some()
+        || has_proxies(&st, &name)
+        || st.config.peers.snapshots.lock().unwrap().contains_key(&name);
+    if !known {
+        return err(StatusCode::NOT_FOUND, &format!("unknown root {name}"));
+    }
+    let (r_root, r_agents, r_engines) = tokio::join!(
+        peers::call(&st, &name, "GET", "/root", None, 5),
+        peers::call(&st, &name, "GET", "/agent", None, 5),
+        peers::call(&st, &name, "GET", "/engine", None, 5),
+    );
+    if let Ok(v) = r_root {
+        let now = now_ms();
+        record_peer_root(&st, &name, now, &v);
+        let roles = r_agents.ok().filter(|a| a.is_array()).unwrap_or_else(|| v["profiles"].clone());
+        let engines = r_engines.ok().filter(|e| e.is_array()).unwrap_or_else(|| json!([]));
+        update_snapshot(&st, &name, |snap| {
+            if roles.is_array() {
+                snap["roles"] = roles.clone();
+            }
+            if engines.is_array() && !engines.as_array().unwrap().is_empty() {
+                snap["engines"] = engines.clone();
+            }
+        });
+        let snap = st.config.peers.snapshots.lock().unwrap().get(&name).cloned().unwrap_or(Value::Null);
+        let theme = v["theme"]
+            .as_str()
+            .filter(|t| is_valid_theme(t))
+            .or_else(|| snap["theme"].as_str().filter(|t| is_valid_theme(t)))
+            .unwrap_or_else(|| default_theme_for(&name, false));
+        let theme_rev = v["theme_rev"].as_u64().or_else(|| snap["theme_rev"].as_u64()).unwrap_or(0);
+        let models: Vec<String> = v["models"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|m| m.as_str().or_else(|| m["id"].as_str()).map(String::from))
+            .collect();
+        return Json(json!({
+            "root": name,
+            "home": false,
+            "reachable": true,
+            "seen": now,
+            "theme": theme,
+            "theme_rev": theme_rev,
+            "hardware": v["hardware"],
+            "models": models,
+            "roles": if roles.is_array() { roles } else { json!([]) },
+            "engines": engines,
+        }))
+        .into_response();
+    }
+    let snap = st.config.peers.snapshots.lock().unwrap().get(&name).cloned().unwrap_or(Value::Null);
+    let theme = snap["theme"]
+        .as_str()
+        .filter(|t| is_valid_theme(t))
+        .unwrap_or_else(|| default_theme_for(&name, false));
+    Json(json!({
+        "root": name,
+        "home": false,
+        "reachable": false,
+        "seen": snap["seen"].as_u64(),
+        "theme": theme,
+        "theme_rev": snap["theme_rev"].as_u64().unwrap_or(0),
+        "hardware": if snap["hardware"].is_object() { snap["hardware"].clone() } else { json!({}) },
+        "models": if snap["models"].is_array() { snap["models"].clone() } else { json!([]) },
+        "roles": if snap["roles"].is_array() { snap["roles"].clone() } else { json!([]) },
+        "engines": if snap["engines"].is_array() { snap["engines"].clone() } else { json!([]) },
+    }))
+    .into_response()
+}
+
+/// `PUT /root/{name}/agent/{agent}` — edits a role on `name` (loopback only, never queued offline).
+pub async fn put_root_agent(
+    State(st): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<std::net::SocketAddr>,
+    headers: HeaderMap,
+    Path((name, agent)): Path<(String, String)>,
+    Json(body): Json<Value>,
+) -> Response {
+    if !addr.ip().is_loopback() || peers::from_peer(&headers) {
+        return err(StatusCode::FORBIDDEN, "only this computer changes a root's roles");
+    }
+    if name == st.config.peers.me {
+        return crate::put_agent(State(st), Path(agent), Json(body)).await;
+    }
+    if !peers::valid_id(&agent) {
+        return err(StatusCode::BAD_REQUEST, "bad role name");
+    }
+    match peers::call(&st, &name, "PUT", &format!("/agent/{agent}"), Some(body), 10).await {
+        Ok(v) => {
+            if let Ok(roles) = peers::call(&st, &name, "GET", "/agent", None, 5).await {
+                if roles.is_array() {
+                    update_snapshot(&st, &name, |snap| snap["roles"] = roles);
+                }
+            }
+            Json(v).into_response()
+        }
+        Err(e) if e.contains(" 400 ") => err(StatusCode::BAD_REQUEST, &e),
+        Err(e) => err(StatusCode::BAD_GATEWAY, &e),
+    }
+}
+
+/// `PUT /root/{name}/engine/{engine}` — sets an engine's default model on `name` (loopback only).
+pub async fn put_root_engine(
+    State(st): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<std::net::SocketAddr>,
+    headers: HeaderMap,
+    Path((name, engine)): Path<(String, String)>,
+    Json(body): Json<Value>,
+) -> Response {
+    if !addr.ip().is_loopback() || peers::from_peer(&headers) {
+        return err(StatusCode::FORBIDDEN, "only this computer changes a root's engines");
+    }
+    if name == st.config.peers.me {
+        return crate::put_engine(State(st), Path(engine), Json(body)).await;
+    }
+    if !peers::valid_id(&engine) {
+        return err(StatusCode::BAD_REQUEST, "bad engine name");
+    }
+    match peers::call(&st, &name, "PUT", &format!("/engine/{engine}"), Some(body), 10).await {
+        Ok(v) => {
+            if let Ok(engines) = peers::call(&st, &name, "GET", "/engine", None, 5).await {
+                if engines.is_array() {
+                    update_snapshot(&st, &name, |snap| snap["engines"] = engines);
+                }
+            }
+            Json(v).into_response()
+        }
+        Err(e) if e.contains(" 400 ") => err(StatusCode::BAD_REQUEST, &e),
+        Err(e) => err(StatusCode::BAD_GATEWAY, &e),
+    }
+}
+
+/// `GET /root/{name}/artifacts` — files made on `name` (live when reachable, else from snapshot).
+pub async fn get_artifacts(State(st): State<AppState>, Path(name): Path<String>) -> Response {
+    let me = st.config.peers.me.clone();
+    if name == me {
+        let st2 = st.clone();
+        let list = tokio::task::spawn_blocking(move || crate::files::local_artifacts(&st2)).await.unwrap_or_default();
+        return Json(json!({ "root": me, "reachable": true, "artifacts": list })).into_response();
+    }
+    let known = st.config.peers.url(&name).is_some()
+        || has_proxies(&st, &name)
+        || st.config.peers.snapshots.lock().unwrap().contains_key(&name);
+    if !known {
+        return err(StatusCode::NOT_FOUND, &format!("unknown root {name}"));
+    }
+    match peers::call(&st, &name, "GET", "/file/artifacts", None, 8).await {
+        Ok(Value::Array(list)) => {
+            update_snapshot(&st, &name, |snap| snap["artifacts"] = json!(list));
+            Json(json!({ "root": name, "reachable": true, "artifacts": list })).into_response()
+        }
+        _ => {
+            let cached = st
+                .config
+                .peers
+                .snapshots
+                .lock()
+                .unwrap()
+                .get(&name)
+                .and_then(|s| s["artifacts"].as_array())
+                .cloned()
+                .unwrap_or_default();
+            Json(json!({ "root": name, "reachable": false, "artifacts": cached })).into_response()
+        }
+    }
 }
 
 fn has_proxies(st: &AppState, name: &str) -> bool {
@@ -701,7 +1268,19 @@ mod tests {
             .route("/session/status", get(crate::session_status))
             .route("/session/{id}", get(crate::get_session))
             .route("/session/{id}/message", get(crate::list_messages).post(crate::post_message))
+            .route("/agent", get(crate::list_agents))
+            .route("/agent/{name}", get(crate::get_agent).put(crate::put_agent))
+            .route("/engine", get(crate::list_engines))
+            .route("/engine/{name}", axum::routing::put(crate::put_engine))
+            .route("/file/artifacts", get(crate::files::list_artifacts))
             .route("/root", get(crate::get_root))
+            .route("/root/theme", axum::routing::put(put_self_theme))
+            .route("/root/{name}/theme", axum::routing::put(put_peer_theme))
+            .route("/root/{name}/settings", get(get_settings))
+            .route("/root/{name}/agent/{agent}", axum::routing::put(put_root_agent))
+            .route("/root/{name}/engine/{engine}", axum::routing::put(put_root_engine))
+            .route("/root/{name}/artifacts", get(get_artifacts))
+            .route("/root/{name}/sessions", get(get_sessions))
             .route("/tree/report", post(crate::tree_report))
             .route("/tree/placed", post(post_placed))
             .route("/root/peers/{name}", delete(delete_peer))
@@ -892,6 +1471,7 @@ mod tests {
         let c = reqwest::Client::new();
         let mut r = match method {
             "POST" => c.post(url),
+            "PUT" => c.put(url),
             "DELETE" => c.delete(url),
             _ => c.get(url),
         };
@@ -1087,5 +1667,90 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
         assert!(home.sessions.lock().unwrap()[&home_main].inbox.iter().any(|e| e["from"] == p.as_str()), "home's MAIN heard back: {:?}", home.sessions.lock().unwrap()[&home_main].inbox);
+    }
+
+    #[tokio::test]
+    async fn root_theme_persists_per_root_and_snapshot_survives_restart() {
+        let ((hl, hurl), (ll, lurl)) = (bind().await, bind().await);
+        let home = state("theme-home", peers_of("home", &format!("lab={lurl}"), Some(TOKEN)));
+        let mut lp = peers_of("lab", &format!("home={hurl}"), Some(TOKEN));
+        lp.own_main = true;
+        lp.home = Some("home".into());
+        let lab = state("theme-lab", lp);
+        load_look(&home);
+        load_look(&lab);
+        // home defaults to aether; joined root picks its own non-aether world
+        assert_eq!(current_look(&home).0, "aether");
+        assert_ne!(current_look(&lab).0, "aether");
+        assert!(is_valid_theme(&current_look(&lab).0));
+
+        // create an artifact and a session on lab
+        std::fs::create_dir_all(lab.data_dir.join("artifacts")).unwrap();
+        std::fs::write(lab.data_dir.join("artifacts/report.md"), "# lab report").unwrap();
+        let lab_sess = crate::new_session(&lab, "render run", None, Some("lead"), None, None)["id"].as_str().unwrap().to_string();
+        serve(hl, home.clone()).await;
+        serve(ll, lab.clone()).await;
+
+        // non-home peer trying to change lab's theme via WG door is refused
+        let r = req(
+            "PUT",
+            &format!("{lurl}/root/theme"),
+            &[("x-ygg-via", "wg"), ("x-ygg-from", "other"), ("x-ygg-peer", TOKEN)],
+            Some(json!({ "theme": "terminus" })),
+        )
+        .await;
+        assert_eq!(r.0, 403, "{:?}", r.1);
+
+        // home changes lab's theme → persisted on lab's data/root.json AND home's data/roots/lab.json
+        let r = req("PUT", &format!("{hurl}/root/lab/theme"), &[], Some(json!({ "theme": "terminus" }))).await;
+        assert_eq!(r.0, 200, "{:?}", r.1);
+        assert_eq!(r.1["theme"], "terminus");
+        assert_eq!(current_look(&lab).0, "terminus");
+        assert!(lab.data_dir.join("root.json").exists());
+        assert!(home.data_dir.join("roots/lab.json").exists());
+
+        // invalid theme refused
+        let bad = req("PUT", &format!("{hurl}/root/lab/theme"), &[], Some(json!({ "theme": "neon" }))).await;
+        assert_eq!(bad.0, 400);
+
+        // settings, sessions and artifacts populate home's snapshot of lab
+        let st_res = req("GET", &format!("{hurl}/root/lab/settings"), &[], None).await;
+        assert_eq!(st_res.0, 200);
+        assert_eq!(st_res.1["reachable"], true);
+        assert_eq!(st_res.1["theme"], "terminus");
+        assert!(st_res.1["roles"].as_array().is_some_and(|a| a.iter().any(|x| x["name"] == "lead")));
+        assert!(st_res.1["engines"].as_array().is_some_and(|a| a.iter().any(|x| x["name"] == "root")));
+
+        let art_res = req("GET", &format!("{hurl}/root/lab/artifacts"), &[], None).await;
+        assert_eq!(art_res.0, 200);
+        assert_eq!(art_res.1["reachable"], true);
+        assert!(art_res.1["artifacts"].as_array().unwrap().iter().any(|a| a["name"] == "report.md"));
+
+        let ses_res = req("GET", &format!("{hurl}/root/lab/sessions"), &[], None).await;
+        assert_eq!(ses_res.0, 200);
+        assert!(ses_res.1["sessions"].as_array().unwrap().iter().any(|s| s["id"] == lab_sess));
+
+        // remote role edit writes to lab
+        let ag_res = req("PUT", &format!("{hurl}/root/lab/agent/lead"), &[], Some(json!({ "harness": "claude" }))).await;
+        assert_eq!(ag_res.0, 200, "{:?}", ag_res.1);
+        assert_eq!(lab.config.profiles.read().unwrap().get("lead").unwrap().harness.as_deref(), Some("claude"));
+
+        // simulate home restart with lab unreachable: snapshot keeps theme, last-seen, sessions, artifacts, roles
+        let home2 = state("theme-home-restart", peers_of("home", "lab=http://127.0.0.1:1", Some(TOKEN)));
+        std::fs::create_dir_all(home2.data_dir.join("roots")).unwrap();
+        std::fs::copy(home.data_dir.join("roots/lab.json"), home2.data_dir.join("roots/lab.json")).unwrap();
+        load_snapshots(&home2);
+        let h = health(&home2);
+        assert_eq!(h[0]["name"], "lab");
+        assert_eq!(h[0]["reachable"], false);
+        assert_eq!(h[0]["theme"], "terminus");
+        assert!(h[0]["seen"].as_u64().unwrap_or(0) > 0);
+        let off_ses = sessions(&home2, "lab").await;
+        assert_eq!(off_ses["reachable"], false);
+        assert!(off_ses["sessions"].as_array().unwrap().iter().any(|s| s["id"] == lab_sess));
+
+        // removing lab deletes its snapshot too
+        remove(&home2, "lab");
+        assert!(!home2.data_dir.join("roots/lab.json").exists());
     }
 }

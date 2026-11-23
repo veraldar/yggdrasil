@@ -82,6 +82,15 @@ import {
   voiceToken,
 } from '@/lib/voice-token';
 import { voiceRoom } from '@/lib/voice-tts';
+import { HOME_ROOT_KEY, type Tree as RootsTree } from '@/components/roots-sheet';
+import {
+  type WorldId,
+  cacheTreeThemes,
+  cachedRootTheme,
+  defaultWorldFor,
+  isWorld,
+  useScopedTheme,
+} from '@/lib/worlds';
 
 type Mode = 'text' | 'free';
 /** the door's last step, in MAIN — the walk-through (UX-CALM 10-27: the
@@ -754,6 +763,43 @@ export default function SessionView({
         pinRef.current ? r.id === pinRef.current : slugify(r.title || '') === slug
       );
   const card = me?.card?.status ? me.card : null;
+  // Decision 3: a session that lives on another computer wears that computer's world and names it
+  const [homeRoot, setHomeRoot] = useState('');
+  const [remoteWorld, setRemoteWorld] = useState<WorldId | null>(null);
+  useEffect(() => {
+    try {
+      setHomeRoot(localStorage.getItem(HOME_ROOT_KEY) || '');
+    } catch {
+      /* private mode */
+    }
+  }, []);
+  const sessionRoot = me?.card?.root && me.card.root !== homeRoot ? me.card.root : null;
+  useEffect(() => {
+    if (!sessionRoot) {
+      setRemoteWorld(null);
+      return;
+    }
+    setRemoteWorld(cachedRootTheme(sessionRoot) || defaultWorldFor(sessionRoot, false));
+    let live = true;
+    fetch('/api/roots', { cache: 'no-store' })
+      .then((r) => (r.ok ? (r.json() as Promise<RootsTree>) : null))
+      .then((t) => {
+        if (!live || !t) return;
+        cacheTreeThemes(t);
+        if (t.home?.name) setHomeRoot(t.home.name);
+        if (t.home?.name === sessionRoot) {
+          setRemoteWorld(null);
+          return;
+        }
+        const matched = t.roots.find((x) => x.id === sessionRoot)?.theme;
+        setRemoteWorld(isWorld(matched) ? matched : defaultWorldFor(sessionRoot, false));
+      })
+      .catch(() => {});
+    return () => {
+      live = false;
+    };
+  }, [sessionRoot]);
+  useScopedTheme(remoteWorld);
   const routes = useMemo(
     () => (isMainSlug(slug) ? tree.map((r) => ({ id: r.id, title: r.title || '' })) : undefined),
     [slug, tree]
@@ -3002,6 +3048,15 @@ export default function SessionView({
             </span>
           )}
         </Link>
+        {sessionRoot && (
+          <Link
+            href={`/roots/${encodeURIComponent(sessionRoot)}`}
+            className="oz-subs"
+            data-testid="session-root-tag"
+          >
+            {sessionRoot}
+          </Link>
+        )}
         {voiceTest && (
           <button
             type="button"

@@ -430,18 +430,22 @@ impl Profiles {
         let mut engines = default_engines();
         let mut raw = json!({ "agent": {} });
         if let Some(path) = path.filter(|p| !p.is_empty()) {
-            match std::fs::read(path).map_err(|e| e.to_string()).and_then(|b| serde_json::from_slice::<Value>(&b).map_err(|e| e.to_string())) {
-                Ok(v) => {
-                    Self::overlay(&mut by_name, &v);
-                    Self::overlay_engines(&mut engines, &v);
-                    raw = v.clone();
-                    if let Some(d) = v["default_agent"].as_str().map(Self::resolve) {
-                        // The coordinator is MAIN's profile, never a session default.
-                        if d != "coordinator" {
-                            default_agent = d.to_string();
+            match std::fs::read(path) {
+                Ok(b) => match serde_json::from_slice::<Value>(&b) {
+                    Ok(v) => {
+                        Self::overlay(&mut by_name, &v);
+                        Self::overlay_engines(&mut engines, &v);
+                        raw = v.clone();
+                        if let Some(d) = v["default_agent"].as_str().map(Self::resolve) {
+                            // The coordinator is MAIN's profile, never a session default.
+                            if d != "coordinator" {
+                                default_agent = d.to_string();
+                            }
                         }
                     }
-                }
+                    Err(e) => eprintln!("YGG_PROFILES {path}: {e} — built-in profiles only"),
+                },
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
                 Err(e) => eprintln!("YGG_PROFILES {path}: {e} — built-in profiles only"),
             }
         }
@@ -893,6 +897,9 @@ impl Profiles {
 
     fn write(&self) -> Result<(), String> {
         let Some(path) = &self.path else { return Ok(()) }; // no file: edits live in memory
+        if let Some(parent) = std::path::Path::new(path).parent().filter(|p| !p.as_os_str().is_empty()) {
+            let _ = std::fs::create_dir_all(parent);
+        }
         let tmp = format!("{path}.tmp");
         let bytes = serde_json::to_vec_pretty(&self.raw).map_err(|e| e.to_string())?;
         std::fs::write(&tmp, bytes).and_then(|_| std::fs::rename(&tmp, path)).map_err(|e| format!("could not save agents to {path}: {e}"))
