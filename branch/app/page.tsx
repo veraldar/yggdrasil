@@ -20,7 +20,7 @@ import { lastRead, markRead } from '@/lib/read';
 import { slugify } from '@/lib/slug';
 import { DOOR_KEY, MAIN_SLUG, isMainSlug, isOnboardPrompt } from '@/lib/tree-first';
 import { VOICE_TEST_SLUG, voiceTestOn } from '@/lib/voice-test';
-import { cacheTreeThemes, cachedRootTheme, defaultWorldFor, isWorld } from '@/lib/worlds';
+import { cacheTreeThemes, cachedRootTheme, chosenWorld } from '@/lib/worlds';
 
 // open-question circles go stale after this long
 const OPEN_QUESTION_TTL_MS = 48 * 60 * 60 * 1000;
@@ -228,7 +228,7 @@ export default function SessionsPage() {
   const [rootsOpen, setRootsOpen] = useState(false);
   const [homeRoot, setHomeRoot] = useState('');
   const [pendingJoins, setPendingJoins] = useState(0);
-  const [rootThemes, setRootThemes] = useState<Record<string, string>>({});
+  const [rootThemes, setRootThemes] = useState<Record<string, string | null>>({});
   const [loading, setLoading] = useState(true);
   const loadInFlightRef = useRef(false);
   // undo window: row (and its sub-tree) vanishes instantly, but the DELETE
@@ -436,13 +436,15 @@ export default function SessionsPage() {
     (t: Tree) => {
       setPendingJoins(t.joins?.length ?? 0);
       cacheTreeThemes(t);
-      const map: Record<string, string> = {};
-      if (t.home?.name && isWorld(t.home.theme)) map[t.home.name] = t.home.theme;
+      // only worlds someone picked (theme_rev > 0): an unpicked one is the brain's name-hashed
+      // default, and adopting it flipped the owner's light app to dark aether (11-23 22:17)
+      const map: Record<string, string | null> = {};
       for (const r of t.roots ?? []) {
-        if (r.id && isWorld(r.theme)) map[r.id] = r.theme;
+        if (r.id) map[r.id] = chosenWorld(r.theme, r.theme_rev);
       }
       setRootThemes((prev) => ({ ...prev, ...map }));
-      if (isWorld(t.home?.theme)) setTheme(t.home.theme);
+      const homeWorld = chosenWorld(t.home?.theme, t.home?.theme_rev);
+      if (homeWorld) setTheme(homeWorld);
       const n = t.home?.name || '';
       if (!n) return;
       setHomeRoot(n);
@@ -658,6 +660,12 @@ export default function SessionsPage() {
         : s.preview)
     );
     const dot = depth ? 'text-[10px]' : '';
+    const onRoot = s.card?.root && s.card.root !== homeRoot ? s.card.root : null;
+    const rootWorld = !onRoot
+      ? null
+      : onRoot in rootThemes
+        ? rootThemes[onRoot]
+        : cachedRootTheme(onRoot);
     return (
       <>
         <SwipeRow
@@ -696,26 +704,26 @@ export default function SessionsPage() {
               >
                 [{sessionTag(s, isMainSlug(slugify(s.title || '')))}]
               </span>
-              {/* it runs on another computer: that computer's name + its world swatch */}
-              {s.card?.root && s.card.root !== homeRoot && (
+              {/* it runs on another computer: that computer's name, + its world's swatch when
+                  a world was picked for it (rows only render client-side: the server pass is
+                  the door, so reading the paint cache here cannot split hydration) */}
+              {onRoot && (
                 <>
                   <span className="mr-1 opacity-60" data-testid="root-tag">
-                    [{s.card.root}]
+                    [{onRoot}]
                   </span>
-                  <span
-                    className="oz-swt mr-1"
-                    data-theme={
-                      rootThemes[s.card.root] ||
-                      cachedRootTheme(s.card.root) ||
-                      defaultWorldFor(s.card.root, false)
-                    }
-                    data-testid="root-tag-swatch"
-                    aria-hidden="true"
-                  >
-                    <i style={{ background: 'var(--oz-bg)' }} />
-                    <i style={{ background: 'var(--oz-success)' }} />
-                    <i style={{ background: 'var(--oz-info)' }} />
-                  </span>
+                  {rootWorld && (
+                    <span
+                      className="oz-swt mr-1"
+                      data-theme={rootWorld}
+                      data-testid="root-tag-swatch"
+                      aria-hidden="true"
+                    >
+                      <i style={{ background: 'var(--oz-bg)' }} />
+                      <i style={{ background: 'var(--oz-success)' }} />
+                      <i style={{ background: 'var(--oz-info)' }} />
+                    </span>
+                  )}
                 </>
               )}
               {s.title || s.id}

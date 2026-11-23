@@ -113,7 +113,7 @@ test('roots sheet → root detail page: tabs, theme saved on lab, sessions, MAIN
     const view = page.getByTestId('root-view');
     await expect(view).toHaveAttribute('data-root', 'lab');
     await expect(page.getByTestId('roots-title')).toHaveText('lab');
-    await expect(page.getByTestId('tab-sessions')).toHaveAttribute('aria-selected', 'true');
+    await expect(page.getByTestId('tab-sessions')).toHaveAttribute('aria-pressed', 'true');
     await expect(page.getByTestId('tab-artifacts')).toBeVisible();
     await expect(page.getByTestId('tab-settings')).toBeVisible();
     await expect(page.getByTestId('root-main')).toBeVisible();
@@ -265,6 +265,7 @@ test.describe('away', () => {
               seen,
               running: 0,
               theme: 'terminus',
+              theme_rev: 1, // picked for it: an away computer keeps its picked world
             },
             {
               id: 'old-box',
@@ -300,6 +301,7 @@ test.describe('away', () => {
           reachable: false,
           seen,
           theme: 'terminus',
+          theme_rev: 1,
           hardware: { os: 'macos', arch: 'arm64', cpus: 28 },
           models: ['glm-5.3'],
           roles: [{ name: 'lead', description: '', harness: 'claude', model: 'opus' }],

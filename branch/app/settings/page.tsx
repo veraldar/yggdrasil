@@ -1,21 +1,19 @@
 'use client';
 
-/** /settings — about, world, yours. The world list is the theme switch:
- *  each world is drawn with its own tree in its own palette (the button
- *  carries data-theme, so tokens.css scopes the colors to it), the choice is
- *  seen before it is made. Tapping applies at once via next-themes — one
- *  data-theme attribute on <html>, transitions suppressed for the swap
- *  frame — and that world's tree answers with one pulse up the trunk. */
+/** /settings — about, world, yours. The world list is the theme switch
+ *  (components/world-picker.tsx, the same list a computer's settings tab
+ *  shows). Tapping applies at once via next-themes — one data-theme
+ *  attribute on <html>, transitions suppressed for the swap frame. */
 import { useEffect, useState } from 'react';
 import { useTheme } from 'next-themes';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { LineIcon } from '@/components/line-icon';
 import { HOME_ROOT_KEY, type Tree } from '@/components/roots-sheet';
-import { YggTree } from '@/components/ygg';
+import { WorldPicker } from '@/components/world-picker';
 import { VERSION } from '@/lib/version';
 import { VOICE_TEST_SLUG, ensureVoiceTestRoom, setVoiceTest, voiceTestOn } from '@/lib/voice-test';
-import { SWATCHES, WORLDS, cacheRootTheme, isWorld } from '@/lib/worlds';
+import { chosenWorld } from '@/lib/worlds';
 
 export default function SettingsPage() {
   const router = useRouter();
@@ -23,8 +21,6 @@ export default function SettingsPage() {
   // next-themes only knows the stored theme after mount — render no
   // "current" marker on the server pass instead of a wrong one
   const [mounted, setMounted] = useState(false);
-  // the world whose tree answers right now (+ a counter so a re-tap replays)
-  const [wake, setWake] = useState<{ id: string; n: number } | null>(null);
   // voice tests in their own room (lib/voice-test.ts) — device-local
   const [vt, setVt] = useState(false);
   const [vtBusy, setVtBusy] = useState(false);
@@ -61,10 +57,10 @@ export default function SettingsPage() {
       .then((t) => {
         if (!t?.home?.name) return;
         setHomeRoot(t.home.name);
-        if (isWorld(t.home.theme)) {
-          cacheRootTheme(t.home.name, t.home.theme);
-          setTheme(t.home.theme);
-        }
+        // the home root's world only once one was picked (theme_rev > 0): its unpicked default
+        // must not overwrite the world this phone shows (11-23: it flipped the app dark)
+        const w = chosenWorld(t.home.theme, t.home.theme_rev);
+        if (w) setTheme(w);
       })
       .catch(() => {});
   }, [setTheme]);
@@ -82,12 +78,6 @@ export default function SettingsPage() {
       setVtBusy(false);
     }
   }
-
-  useEffect(() => {
-    if (!wake) return;
-    const t = setTimeout(() => setWake(null), 2500);
-    return () => clearTimeout(t);
-  }, [wake]);
 
   const current = mounted ? theme : undefined;
 
@@ -118,46 +108,19 @@ export default function SettingsPage() {
 
       <section className="oz-blk">
         <h2>world</h2>
-        <div className="oz-worlds">
-          {WORLDS.map((w) => (
-            <button
-              key={w.id}
-              data-theme={w.id}
-              aria-pressed={current === w.id}
-              aria-label={`${w.id} — ${w.desc}`}
-              onClick={() => {
-                setTheme(w.id);
-                setWake((p) => ({ id: w.id, n: (p?.n || 0) + 1 }));
-                if (homeRoot) {
-                  cacheRootTheme(homeRoot, w.id);
-                  void fetch(`/api/roots/${encodeURIComponent(homeRoot)}/theme`, {
-                    method: 'PUT',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ theme: w.id }),
-                  }).catch(() => {});
-                }
-              }}
-              className="oz-world"
-            >
-              <span
-                key={wake?.id === w.id ? wake.n : 0}
-                className={`oz-ygg block ${wake?.id === w.id ? 'wake' : ''}`}
-              >
-                <YggTree />
-              </span>
-              <span>
-                <b>{w.id}</b>
-                <small>{w.desc}</small>
-                <span className="sw6">
-                  {SWATCHES.map((r) => (
-                    <i key={r} style={{ background: `var(--oz-${r})` }} />
-                  ))}
-                </span>
-                <span className="cur">current</span>
-              </span>
-            </button>
-          ))}
-        </div>
+        <WorldPicker
+          current={current}
+          onPick={(w) => {
+            setTheme(w);
+            if (homeRoot) {
+              void fetch(`/api/roots/${encodeURIComponent(homeRoot)}/theme`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ theme: w }),
+              }).catch(() => {});
+            }
+          }}
+        />
       </section>
 
       {/* the simple menu (owner feedback): three rows, nothing else —

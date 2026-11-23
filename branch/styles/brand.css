@@ -660,34 +660,9 @@
   .oz-tabs button { padding: 4px 10px; font-size: 11px; color: var(--oz-dim); }
   .oz-tabs button[aria-pressed='true'] { background: var(--oz-surface-hover); color: var(--oz-text); }
 
-  /* ── root detail page & world swatches ── */
+  /* ── a computer's world swatch (roots sheet, [root] tag) & an offline computer ── */
   .oz-swt { display: inline-flex; gap: 2px; flex: none; vertical-align: middle; }
   .oz-swt i { display: block; width: 7px; height: 9px; border: 1px solid var(--oz-border); }
-  .oz-root-sub { margin: -6px 0 10px; font-size: 11px; color: var(--oz-dim); }
-  .oz-ptabs { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; margin-bottom: 12px; flex: none; }
-  .oz-ptabs button {
-    height: 34px; display: flex; align-items: center; justify-content: center; gap: 5px; min-width: 0;
-    border: 1px solid var(--oz-border); background: var(--oz-surface); color: var(--oz-dim);
-    font-size: 11px; letter-spacing: .04em;
-  }
-  .oz-ptabs button i { font-style: normal; font-size: 10px; opacity: .7; }
-  .oz-ptabs button[aria-selected='true'] {
-    color: var(--oz-success); border-color: color-mix(in srgb, var(--oz-success) 45%, transparent);
-    background: color-mix(in srgb, var(--oz-success) 12%, var(--oz-surface));
-  }
-  .oz-worlds2 { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
-  .oz-world2 {
-    display: block; width: 100%; min-width: 0; text-align: left; padding: 7px 8px 5px;
-    border: 1px solid var(--oz-border); background: var(--oz-bg); color: var(--oz-text);
-  }
-  .oz-world2:disabled { cursor: default; }
-  .oz-world2[aria-pressed='true'] { border-color: var(--oz-info); }
-  .oz-world2 b { display: block; font-weight: 400; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .oz-world2 .sw6 { display: flex; gap: 3px; margin-top: 5px; }
-  .oz-world2 .sw6 i { width: 12px; height: 8px; border: 1px solid var(--oz-border); }
-  .oz-world2 .cur { display: block; font-size: 10px; line-height: 1.5; color: var(--oz-info); }
-  .oz-world2[aria-pressed='false'] .cur { visibility: hidden; }
-  .oz-kind { flex: none; padding: 0 6px; font-size: 10px; line-height: 16px; border: 1px solid var(--oz-border); color: var(--oz-dim); }
   .oz-gone { opacity: .5; }
 }
 

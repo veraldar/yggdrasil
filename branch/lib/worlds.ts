@@ -1,6 +1,15 @@
-/** The eight visual worlds (tokens.css) and the phone's paint cache (per-root world).
- *  Each computer owns its world (`data/root.json`); the phone caches it only so the first
- *  frame paints the right colour before the server answers — server always wins. */
+/** The eight visual worlds (tokens.css) and the per-computer world.
+ *
+ *  The app has ONE look: the world the owner picked in settings (next-themes, `data-theme` on
+ *  <html>). A computer's page, and a session living on another computer, wear a world of their
+ *  own only once someone picked one FOR that computer (root settings tab, or MAIN on request):
+ *  the brain counts those picks in `theme_rev`. Until then the brain still reports a world —
+ *  root/src/roots.rs `default_theme_for` hashes the name into one — but nobody chose it, so it
+ *  is ignored here and the page follows the app (owner 11-23 22:19: "keep the same design, the
+ *  ux should be the same between root as is our current root").
+ *
+ *  The phone caches chosen worlds only, so the first frame paints right before the server
+ *  answers — server always wins. */
 'use client';
 
 import { useEffect } from 'react';
@@ -24,23 +33,20 @@ export function isWorld(v: unknown): v is WorldId {
   return typeof v === 'string' && (WORLD_IDS as readonly string[]).includes(v);
 }
 
-/** Deterministic fallback world matching root/src/roots.rs `default_theme_for`. */
-export function defaultWorldFor(name: string, isHome = false): WorldId {
-  if (isHome || !name) return 'aether';
-  const MUL = BigInt(33);
-  const MASK = BigInt('0xffffffffffffffff');
-  let h = BigInt(5381);
-  for (let i = 0; i < name.length; i++) {
-    h = (h * MUL + BigInt(name.charCodeAt(i))) & MASK;
-  }
-  const rest = WORLD_IDS.slice(1);
-  return rest[Number(h % BigInt(rest.length))] || 'terminus';
+/** The world someone picked for a computer, or null when its world is only the brain's
+ *  name-hashed default (`theme_rev` 0 or absent: an older brain, a never-touched computer). */
+export function chosenWorld(theme: unknown, rev: unknown): WorldId | null {
+  return isWorld(theme) && typeof rev === 'number' && rev > 0 ? theme : null;
 }
 
-const CACHE_KEY = 'oz-root-themes';
+// 'oz-root-themes' (release 20261123-2204) also cached the brain's unchosen defaults, which is
+// what painted debian-box dark: it is dropped, never read
+const CACHE_KEY = 'oz-root-worlds';
+const OLD_CACHE_KEY = 'oz-root-themes';
 
 function readCache(): Record<string, WorldId> {
   try {
+    localStorage.removeItem(OLD_CACHE_KEY);
     const raw = localStorage.getItem(CACHE_KEY);
     if (!raw) return {};
     const parsed = JSON.parse(raw) as Record<string, unknown>;
@@ -54,50 +60,57 @@ function readCache(): Record<string, WorldId> {
   }
 }
 
-export function cachedRootTheme(root: string): WorldId | null {
-  if (!root) return null;
-  return readCache()[root] ?? null;
-}
-
-export function cacheRootTheme(root: string, theme: string) {
-  if (!root || !isWorld(theme)) return;
+function writeCache(m: Record<string, WorldId>) {
   try {
-    const m = readCache();
-    if (m[root] === theme) return;
-    m[root] = theme;
     localStorage.setItem(CACHE_KEY, JSON.stringify(m));
   } catch {
     /* private mode / quota */
   }
 }
 
+/** the world picked for `root`, as this phone last heard it (null: none picked) */
+export function cachedRootTheme(root: string): WorldId | null {
+  if (!root) return null;
+  return readCache()[root] ?? null;
+}
+
+/** remember `root`'s picked world (null: it has none — forget any old one) */
+export function cacheRootTheme(root: string, theme: WorldId | null) {
+  if (!root) return;
+  const m = readCache();
+  if (theme ? m[root] === theme : !(root in m)) return;
+  if (theme) m[root] = theme;
+  else delete m[root];
+  writeCache(m);
+}
+
+/** one GET /api/roots answer → the cache holds exactly the computers that have a picked world
+ *  (never home: its world is the app's own, next-themes keeps that one) */
 export function cacheTreeThemes(tree: {
-  home?: { name?: string | null; theme?: string | null } | null;
-  roots?: Array<{ id?: string; name?: string; theme?: string | null }>;
+  home?: { name?: string | null; theme?: string | null; theme_rev?: number } | null;
+  roots?: Array<{ id?: string; name?: string; theme?: string | null; theme_rev?: number }>;
 }) {
-  try {
-    const m = readCache();
-    let changed = false;
-    if (tree.home?.name && isWorld(tree.home.theme) && m[tree.home.name] !== tree.home.theme) {
-      m[tree.home.name] = tree.home.theme;
+  const m = readCache();
+  let changed = false;
+  const put = (id: string | null | undefined, w: WorldId | null) => {
+    if (!id) return;
+    if (w && m[id] !== w) {
+      m[id] = w;
+      changed = true;
+    } else if (!w && id in m) {
+      delete m[id];
       changed = true;
     }
-    for (const r of tree.roots ?? []) {
-      const id = r.id || r.name;
-      if (id && isWorld(r.theme) && m[id] !== r.theme) {
-        m[id] = r.theme;
-        changed = true;
-      }
-    }
-    if (changed) localStorage.setItem(CACHE_KEY, JSON.stringify(m));
-  } catch {
-    /* private mode / quota */
-  }
+  };
+  put(tree.home?.name, null);
+  for (const r of tree.roots ?? []) put(r.id || r.name, chosenWorld(r.theme, r.theme_rev));
+  if (changed) writeCache(m);
 }
 
 /** Temporarily paints `<html data-theme>` and `<meta name="theme-color">` with `theme` while
  *  viewing a computer's page or a session that lives on another computer, restoring the home
- *  world on unmount without touching next-themes' stored home preference. */
+ *  world on unmount without touching next-themes' stored home preference. null = nothing to
+ *  paint: the page keeps the app's own world. */
 export function useScopedTheme(theme: WorldId | null | undefined) {
   useEffect(() => {
     if (!theme) return;

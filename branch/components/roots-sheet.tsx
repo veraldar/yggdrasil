@@ -9,7 +9,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { LineIcon } from '@/components/line-icon';
-import { cacheRootTheme, cacheTreeThemes, defaultWorldFor, isWorld } from '@/lib/worlds';
+import { cacheTreeThemes, chosenWorld } from '@/lib/worlds';
 
 /** a press this long on a row (not home) asks to remove it */
 const HOLD_MS = 500;
@@ -25,6 +25,8 @@ type Home = {
   mem_gb?: number | null;
   running?: number;
   theme?: string | null;
+  /** how many times a world was picked for it (0: `theme` is the brain's unpicked default) */
+  theme_rev?: number;
   main?: string | null;
 };
 type Root = {
@@ -38,6 +40,7 @@ type Root = {
   seen?: number | null;
   running?: number;
   theme?: string | null;
+  theme_rev?: number;
   main?: string | null;
   main_proxy?: string | null;
 };
@@ -184,6 +187,7 @@ export function RootsSheet({
             reachable: true,
             running: tree.home.running,
             theme: tree.home.theme,
+            theme_rev: tree.home.theme_rev,
             main: tree.home.main,
             home: true,
           },
@@ -357,7 +361,9 @@ export function RootsSheet({
           )}
           {rows.map((r) => {
             const on = !!r.reachable;
-            const theme = isWorld(r.theme) ? r.theme : defaultWorldFor(r.id, !!r.home);
+            // a computer's own world only if one was picked for it; else (and always for
+            // home, whose world IS the app's) the swatch shows the app's own colours
+            const theme = r.home ? null : chosenWorld(r.theme, r.theme_rev);
             return (
               <li key={r.id}>
                 <button
@@ -366,7 +372,7 @@ export function RootsSheet({
                   data-testid="root-row"
                   data-root={r.id}
                   data-state={on ? 'on' : 'off'}
-                  data-root-theme={theme}
+                  data-root-theme={theme ?? undefined}
                   style={{ ...NO_SELECT, ...grey(on) }}
                   onPointerDown={(e) => down(e, r)}
                   onPointerUp={up}
@@ -379,7 +385,6 @@ export function RootsSheet({
                       held.current = false;
                       return;
                     }
-                    cacheRootTheme(r.id, theme);
                     onClose();
                     router.push(`/roots/${encodeURIComponent(r.id)}`);
                   }}
@@ -395,7 +400,7 @@ export function RootsSheet({
                     {r.home && <span className="oz-subs">home</span>}
                     <span
                       className="oz-swt"
-                      data-theme={theme}
+                      data-theme={theme ?? undefined}
                       data-testid="root-swatch"
                       aria-hidden="true"
                     >

@@ -14,42 +14,12 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
 import { Streamdown } from 'streamdown';
 import { LineIcon } from '@/components/line-icon';
+import { glyphOf, kindOf } from '@/lib/artifact-kind';
 import type { ArtifactEntry } from '@/lib/artifacts';
 import { countUnseen, lastSeen, markAllSeen, markSeen, seenInit } from '@/lib/artifact-read';
 
 // instant paint on back-navigation, same trick as the sessions list
 const CACHE_KEY = 'oz-artifacts';
-
-type Kind = 'image' | 'html' | 'md' | 'text' | 'pdf' | 'audio';
-
-const KIND: Record<string, Kind> = {
-  png: 'image', jpg: 'image', jpeg: 'image', gif: 'image', webp: 'image', svg: 'image',
-  html: 'html',
-  md: 'md',
-  txt: 'text', json: 'text', csv: 'text', log: 'text', xml: 'text',
-  yaml: 'text', yml: 'text', toml: 'text', ini: 'text', conf: 'text',
-  css: 'text', js: 'text', mjs: 'text', ts: 'text', tsx: 'text', jsx: 'text',
-  py: 'text', sh: 'text', rb: 'text', go: 'text', rs: 'text', java: 'text',
-  c: 'text', h: 'text', cpp: 'text', diff: 'text', patch: 'text',
-  pdf: 'pdf',
-  wav: 'audio', mp3: 'audio',
-};
-
-function kindOf(name: string): Kind {
-  return KIND[name.split('.').pop()?.toLowerCase() || ''] || 'text';
-}
-
-/** One type letter for the row glyph — the unread dot does the talking,
- *  this only disambiguates. */
-function glyphOf(name: string): string {
-  const k = kindOf(name);
-  if (k === 'image') return '▣';
-  if (k === 'html') return '▤';
-  if (k === 'audio') return '♪';
-  if (k === 'pdf') return '▦';
-  if (k === 'md') return '¶';
-  return '·';
-}
 
 /** provenance tag — this checkout's own files go untagged */
 const SOURCE_TAG: Record<string, string> = { main: 'main', builtin: 'built-in' };

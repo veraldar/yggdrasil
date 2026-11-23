@@ -87,8 +87,7 @@ import {
   type WorldId,
   cacheTreeThemes,
   cachedRootTheme,
-  defaultWorldFor,
-  isWorld,
+  chosenWorld,
   useScopedTheme,
 } from '@/lib/worlds';
 
@@ -763,7 +762,8 @@ export default function SessionView({
         pinRef.current ? r.id === pinRef.current : slugify(r.title || '') === slug
       );
   const card = me?.card?.status ? me.card : null;
-  // Decision 3: a session that lives on another computer wears that computer's world and names it
+  // Decision 3: a session that lives on another computer names it, and wears its world when one
+  // was picked for it (none picked: the app's own world, like every page — lib/worlds.ts)
   const [homeRoot, setHomeRoot] = useState('');
   const [remoteWorld, setRemoteWorld] = useState<WorldId | null>(null);
   useEffect(() => {
@@ -779,7 +779,7 @@ export default function SessionView({
       setRemoteWorld(null);
       return;
     }
-    setRemoteWorld(cachedRootTheme(sessionRoot) || defaultWorldFor(sessionRoot, false));
+    setRemoteWorld(cachedRootTheme(sessionRoot));
     let live = true;
     fetch('/api/roots', { cache: 'no-store' })
       .then((r) => (r.ok ? (r.json() as Promise<RootsTree>) : null))
@@ -791,8 +791,8 @@ export default function SessionView({
           setRemoteWorld(null);
           return;
         }
-        const matched = t.roots.find((x) => x.id === sessionRoot)?.theme;
-        setRemoteWorld(isWorld(matched) ? matched : defaultWorldFor(sessionRoot, false));
+        const r = t.roots.find((x) => x.id === sessionRoot);
+        setRemoteWorld(chosenWorld(r?.theme, r?.theme_rev));
       })
       .catch(() => {});
     return () => {

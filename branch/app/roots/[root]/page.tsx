@@ -1,14 +1,20 @@
 'use client';
 
 /** /roots/[root] — A page for every computer (root-detail-proposal.html & root-detail-mockup.html).
- *  The home screen, scoped to one computer:
+ *  The home screen, scoped to one computer — its design, not a look of its own (owner 11-23
+ *  22:19: "keep the same design, the ux should be the same between root as is our current
+ *  root"): the app's world (a computer wears its own only once one was picked for it,
+ *  lib/worlds.ts), the home screen's band, new-session key and rows, the app's tab strip
+ *  (.oz-tabs, as /artifacts), its artifact rows and its world list (components/world-picker).
  *    header   ‹ (back to roots list) · name (+ home tag) · ● on / ○ last seen … / ○ off
  *    sub      os · arch · cpus · mem · N running
+ *    band     the home screen's tree band; its chip filters to the working rows
  *    tabs     sessions · artifacts · settings
  *    sessions ＋ new session + the exact same rows as the home screen (nested sub-sessions, role
- *             badges, status dots/words, engine words, asks/headline/preview)
+ *             badges, status dots + "working", engine words, asks/headline/preview)
  *    artifacts files made on that computer (inline viewer for non-html, direct open for html)
- *    settings world (8 worlds saved on that computer) · roles (inline runs-on + model editor) ·
+ *    settings world (the app's world list, saved on that computer) · roles (inline runs-on +
+ *             model editor) ·
  *             engines · this computer · remove (non-home, works offline too)
  *    bottom   its MAIN bar (home: full MainBar with hold-to-talk; remote: tap opens its MAIN)
  *  When offline: keeps its world, last-seen time, last known rows, artifacts, and settings from
@@ -21,7 +27,8 @@ import { Streamdown } from 'streamdown';
 import { LineIcon } from '@/components/line-icon';
 import { MainBar, type MainBarRow } from '@/components/main-bar';
 import { HOME_ROOT_KEY, type Tree } from '@/components/roots-sheet';
-import { YggRoots } from '@/components/ygg';
+import { WorldPicker } from '@/components/world-picker';
+import { BAND_VIEWBOX, YggRoots, YggTree } from '@/components/ygg';
 import {
   type AgentRow,
   ENGINE_NOTE,
@@ -34,19 +41,17 @@ import {
   roleTag,
   sessionTag,
 } from '@/lib/agents';
+import { glyphOf, kindOf } from '@/lib/artifact-kind';
 import { CARD_ST, type Card } from '@/lib/card';
 import { lastRead } from '@/lib/read';
 import { slugify } from '@/lib/slug';
 import { MAIN_SLUG, isMainSlug, isOnboardPrompt } from '@/lib/tree-first';
 import {
-  SWATCHES,
-  WORLDS,
   type WorldId,
   cacheRootTheme,
   cacheTreeThemes,
   cachedRootTheme,
-  defaultWorldFor,
-  isWorld,
+  chosenWorld,
   useScopedTheme,
 } from '@/lib/worlds';
 
@@ -159,17 +164,6 @@ const byOwner = (s: { userAt?: number | null; updated?: number | null }) =>
 const isWorking = (s: RootSess) =>
   !!s.busy || !!s.pending || s.status === 'working' || s.card?.status === 'working';
 
-type ArtKind = 'image' | 'html' | 'md' | 'text' | 'pdf' | 'audio';
-const ART_KIND: Record<string, ArtKind> = {
-  png: 'image', jpg: 'image', jpeg: 'image', gif: 'image', webp: 'image', svg: 'image',
-  html: 'html',
-  md: 'md',
-  pdf: 'pdf',
-  wav: 'audio', mp3: 'audio',
-};
-const artKindOf = (name: string): ArtKind =>
-  ART_KIND[name.split('.').pop()?.toLowerCase() || ''] || 'text';
-
 function ArtifactViewer({
   file,
   root,
@@ -179,7 +173,7 @@ function ArtifactViewer({
   root: string;
   isHome: boolean;
 }) {
-  const kind = artKindOf(file.name);
+  const kind = kindOf(file.name);
   const src = `/api/artifact/${encodeURIComponent(file.name)}${
     isHome ? '' : `?root=${encodeURIComponent(root)}`
   }`;
@@ -245,7 +239,7 @@ export default function RootDetailPage({ params }: { params: Promise<{ root: str
   }, [rawRoot]);
 
   const router = useRouter();
-  const { setTheme: setHomeTheme } = useTheme();
+  const { theme: appTheme, setTheme: setHomeTheme } = useTheme();
 
   const [tab, setTab] = useState<Tab>('sessions');
   const [tree, setTree] = useState<Tree | null>(null);
@@ -259,6 +253,8 @@ export default function RootDetailPage({ params }: { params: Promise<{ root: str
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState('');
   const [askRemove, setAskRemove] = useState(false);
+  // the band's chip: only the working rows (and the parents they hang from), as on home
+  const [onlyWorking, setOnlyWorking] = useState(false);
 
   // inline role & engine editor state in Settings tab
   const [openRole, setOpenRole] = useState('');
@@ -278,17 +274,13 @@ export default function RootDetailPage({ params }: { params: Promise<{ root: str
   const homeName = tree?.home?.name || cachedHome;
   const isHome = settings?.home === true || (!!homeName && homeName === rootId);
 
-  // visual world: paint cache first, server always wins
-  const [world, setWorld] = useState<WorldId>(() => {
-    return defaultWorldFor(rootId, false);
-  });
+  // this computer's own world: only one picked for it (paint cache first, server always wins);
+  // null = none picked → the page wears the app's world like every other page. Home's world
+  // IS the app's (the home screen and /settings keep them one), so home never paints over it.
+  const [world, setWorld] = useState<WorldId | null>(null);
   useEffect(() => {
-    const cached = cachedRootTheme(rootId);
-    if (cached) setWorld(cached);
-    else setWorld(defaultWorldFor(rootId, isHome));
+    setWorld(isHome ? null : cachedRootTheme(rootId));
   }, [rootId, isHome]);
-
-  // apply this computer's world to the page and browser chrome
   useScopedTheme(world);
 
   // expandable sub-sessions state (shared key with home list)
@@ -312,9 +304,12 @@ export default function RootDetailPage({ params }: { params: Promise<{ root: str
   }
 
   const loadInFlight = useRef(false);
+  // bumped by every world pick: a load that started before it must not undo it
+  const pickSeq = useRef(0);
   const loadAll = useCallback(async () => {
     if (loadInFlight.current) return;
     loadInFlight.current = true;
+    const seq = pickSeq.current;
     const enc = encodeURIComponent(rootId);
     try {
       const [rTree, rSess, rSet, rArt] = await Promise.all([
@@ -349,13 +344,16 @@ export default function RootDetailPage({ params }: { params: Promise<{ root: str
               /* private mode */
             }
           }
-          const matchedTheme =
-            t.home?.name === rootId
-              ? t.home.theme
-              : t.roots.find((x) => x.id === rootId)?.theme;
-          if (isWorld(matchedTheme)) {
-            setWorld(matchedTheme);
-            cacheRootTheme(rootId, matchedTheme);
+          if (seq !== pickSeq.current) {
+            /* a pick landed meanwhile: this answer predates it */
+          } else if (t.home?.name === rootId) {
+            // home's world is the app's: a world picked for it (on another phone too) is adopted
+            // as the app's, exactly as the home screen does — an unpicked one never is
+            const hw = chosenWorld(t.home.theme, t.home.theme_rev);
+            if (hw) setHomeTheme(hw);
+          } else {
+            const r = t.roots.find((x) => x.id === rootId);
+            if (r) setWorld(chosenWorld(r.theme, r.theme_rev));
           }
         }
       }
@@ -371,9 +369,10 @@ export default function RootDetailPage({ params }: { params: Promise<{ root: str
         const s = (await rSet.json().catch(() => null)) as RootSettingsResp | null;
         if (s) {
           setSettings(s);
-          if (isWorld(s.theme)) {
-            setWorld(s.theme);
-            cacheRootTheme(rootId, s.theme);
+          if (!s.home && seq === pickSeq.current) {
+            const w = chosenWorld(s.theme, s.theme_rev);
+            setWorld(w);
+            cacheRootTheme(rootId, w);
           }
         }
       }
@@ -407,7 +406,7 @@ export default function RootDetailPage({ params }: { params: Promise<{ root: str
     } finally {
       loadInFlight.current = false;
     }
-  }, [rootId, homeName]);
+  }, [rootId, homeName, setHomeTheme]);
 
   useEffect(() => {
     void loadAll();
@@ -546,6 +545,22 @@ export default function RootDetailPage({ params }: { params: Promise<{ root: str
     return Math.max(fromRows, treeEntry?.running ?? 0);
   }, [reachable, displaySessions, sessView, treeEntry]);
 
+  // the band's chip, as on home: nothing working → the filter lifts itself
+  const branchWorking = reachable && displaySessions.some(isWorking);
+  useEffect(() => {
+    if (onlyWorking && runningCount === 0) setOnlyWorking(false);
+  }, [onlyWorking, runningCount]);
+  const shownTops = useMemo(() => {
+    if (!onlyWorking) return topSessions;
+    const keep = new Set<string>();
+    for (const s of displaySessions) {
+      if (!isWorking(s)) continue;
+      keep.add(s.id);
+      for (let p = s.parentId; p && !keep.has(p); p = byId.get(p)?.parentId) keep.add(p);
+    }
+    return topSessions.filter((s) => keep.has(s.id));
+  }, [onlyWorking, topSessions, displaySessions, byId]);
+
   // ── actions ──────────────────────────────────────────────────────────────
   const openSessionUrl = (id: string, title?: string | null) =>
     router.push(`/session/${slugify(title || id)}?id=${encodeURIComponent(id)}`);
@@ -618,32 +633,43 @@ export default function RootDetailPage({ params }: { params: Promise<{ root: str
     });
   };
 
+  // home: the app's world (as /settings does); another computer: its own world
   const pickWorld = async (next: WorldId) => {
     if (!reachable || busy) return;
     setSaveErr('');
+    pickSeq.current += 1;
     const prev = world;
-    setWorld(next);
-    cacheRootTheme(rootId, next);
+    const prevApp = appTheme;
+    const undo = () => {
+      if (isHome) {
+        if (prevApp) setHomeTheme(prevApp);
+        return;
+      }
+      setWorld(prev);
+      cacheRootTheme(rootId, prev);
+    };
     if (isHome) setHomeTheme(next);
+    else {
+      setWorld(next);
+      cacheRootTheme(rootId, next);
+    }
     try {
       const r = await fetch(`/api/roots/${encodeURIComponent(rootId)}/theme`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ theme: next }),
       });
-      const d = (await r.json().catch(() => ({}))) as { theme?: string; error?: string };
+      const d = (await r.json().catch(() => ({}))) as { theme?: string; rev?: number; error?: string };
       if (!r.ok) {
-        setWorld(prev);
-        cacheRootTheme(rootId, prev);
-        if (isHome) setHomeTheme(prev);
+        undo();
         setSaveErr(d.error || `save failed (${r.status})`);
       } else {
-        setSettings((cur) => (cur ? { ...cur, theme: next } : cur));
+        setSettings((cur) =>
+          cur ? { ...cur, theme: next, theme_rev: d.rev ?? (cur.theme_rev ?? 0) + 1 } : cur
+        );
       }
     } catch {
-      setWorld(prev);
-      cacheRootTheme(rootId, prev);
-      if (isHome) setHomeTheme(prev);
+      undo();
       setSaveErr('could not reach computer');
     }
   };
@@ -808,18 +834,13 @@ export default function RootDetailPage({ params }: { params: Promise<{ root: str
                 {kidLive && reachable && !isOpen ? ' ●' : ''}
               </span>
             )}
-            {working ? (
+            {/* one status word, as on home (owner 11-17): "working" while it works — the
+                rest is the dot's color */}
+            {working && (
               <span className="oz-st" style={{ color: 'var(--oz-success)' }}>
                 working
               </span>
-            ) : st?.w ? (
-              <span
-                className="oz-st"
-                style={{ color: reachable ? st.c : 'var(--oz-dim)' }}
-              >
-                {st.w}
-              </span>
-            ) : null}
+            )}
             {eng && (
               <span className="oz-eng" data-testid="engine-word">
                 {eng}
@@ -895,13 +916,13 @@ export default function RootDetailPage({ params }: { params: Promise<{ root: str
   const engineModel = (e: string) => engines.find((x) => x.name === e)?.model || null;
 
   return (
-    <div data-theme={world} className="min-h-dvh bg-[var(--oz-bg)] text-[var(--oz-text)]">
+    <div data-theme={world ?? undefined} className="min-h-dvh bg-[var(--oz-bg)] text-[var(--oz-text)]">
       <main
         className="relative mx-auto flex min-h-dvh max-w-md flex-col px-3"
         style={{ paddingBottom: 'calc(var(--oz-roots-h) + 16px + env(safe-area-inset-bottom))' }}
         data-testid="root-view"
         data-root={rootId}
-        data-root-theme={world}
+        data-root-theme={world ?? undefined}
         data-reachable={reachable ? 'on' : 'off'}
       >
         {/* header: ‹ · computer name (+ home) · status */}
@@ -934,46 +955,75 @@ export default function RootDetailPage({ params }: { params: Promise<{ root: str
         </header>
 
         {subtitle && (
-          <p className={`oz-root-sub truncate ${reachable ? '' : 'oz-gone'}`} data-testid="root-sub">
+          <p
+            className={`-mt-1.5 mb-2.5 truncate text-[11px] text-[var(--oz-dim)] ${reachable ? '' : 'oz-gone'}`}
+            data-testid="root-sub"
+          >
             {subtitle}
           </p>
         )}
 
-        {/* three tabs: sessions · artifacts · settings */}
-        <div className="oz-ptabs" role="tablist" aria-label={`${rootId} sections`} data-testid="root-tabs">
+        {/* the home screen's band, for this computer: still unless something works there; the
+            chip taps to a working-only list, again to clear */}
+        <figure
+          className={`oz-band oz-ygg -mx-3 mb-2.5 ${runningCount ? 'live' : ''} ${branchWorking ? 'walk' : ''}`}
+          aria-label={
+            runningCount ? `${rootId} — ${runningCount} working` : `${rootId} — nothing working`
+          }
+          data-testid="root-band"
+        >
+          <YggTree viewBox={BAND_VIEWBOX} slice />
           <button
             type="button"
-            role="tab"
-            aria-selected={tab === 'sessions'}
-            data-testid="tab-sessions"
-            onClick={() => {
-              setTab('sessions');
-              setOpenArt(null);
-            }}
+            onClick={() => runningCount > 0 && setOnlyWorking((v) => !v)}
+            aria-pressed={onlyWorking}
+            aria-label={
+              runningCount
+                ? `${runningCount} working — ${onlyWorking ? 'show every session' : 'show only the working'}`
+                : `${rootId} — nothing working`
+            }
+            data-testid="working-filter"
+            className={`oz-cap ${onlyWorking ? 'on' : ''}`}
           >
-            sessions{openCount > 0 && <i>{openCount}</i>}
+            <i />
+            {runningCount ? `${runningCount} working` : 'all quiet'}
           </button>
-          <button
-            type="button"
-            role="tab"
-            aria-selected={tab === 'artifacts'}
-            data-testid="tab-artifacts"
-            onClick={() => setTab('artifacts')}
-          >
-            artifacts{artifacts && artifacts.length > 0 && <i>{artifacts.length}</i>}
-          </button>
-          <button
-            type="button"
-            role="tab"
-            aria-selected={tab === 'settings'}
-            data-testid="tab-settings"
-            onClick={() => {
-              setTab('settings');
-              setOpenArt(null);
-            }}
-          >
-            settings
-          </button>
+        </figure>
+
+        {/* three tabs: sessions · artifacts · settings — the app's tab strip (as /artifacts) */}
+        <div className="mb-2 flex items-center gap-2">
+          <div className="oz-tabs" role="tablist" aria-label={`${rootId} sections`} data-testid="root-tabs">
+            <button
+              type="button"
+              aria-pressed={tab === 'sessions'}
+              data-testid="tab-sessions"
+              onClick={() => {
+                setTab('sessions');
+                setOpenArt(null);
+              }}
+            >
+              sessions{openCount > 0 && ` ${openCount}`}
+            </button>
+            <button
+              type="button"
+              aria-pressed={tab === 'artifacts'}
+              data-testid="tab-artifacts"
+              onClick={() => setTab('artifacts')}
+            >
+              artifacts{artifacts && artifacts.length > 0 && ` ${artifacts.length}`}
+            </button>
+            <button
+              type="button"
+              aria-pressed={tab === 'settings'}
+              data-testid="tab-settings"
+              onClick={() => {
+                setTab('settings');
+                setOpenArt(null);
+              }}
+            >
+              settings
+            </button>
+          </div>
         </div>
 
         {err && (
@@ -985,17 +1035,20 @@ export default function RootDetailPage({ params }: { params: Promise<{ root: str
         {/* ── TAB 1: SESSIONS ── */}
         {tab === 'sessions' && (
           <section className="flex flex-col gap-2" data-testid="root-sessions-tab">
-            <button
-              type="button"
-              className={`oz-k ok h-11 w-full justify-center text-[13px] ${
-                reachable ? '' : 'oz-gone'
-              }`}
-              disabled={!reachable || busy}
-              data-testid="roots-new"
-              onClick={() => setCreating((c) => !c)}
-            >
-              <LineIcon name="plus" size={14} /> new session
-            </button>
+            {/* the home screen's new-session key */}
+            <div className="flex items-stretch gap-1.5">
+              <button
+                type="button"
+                className={`oz-k ok h-11 flex-1 justify-start px-3 text-[13px] ${
+                  reachable ? '' : 'oz-gone'
+                }`}
+                disabled={!reachable || busy}
+                data-testid="roots-new"
+                onClick={() => setCreating((c) => !c)}
+              >
+                <LineIcon name="plus" size={14} /> new session
+              </button>
+            </div>
 
             {creating && reachable && (
               <div className="oz-box p-3">
@@ -1032,12 +1085,12 @@ export default function RootDetailPage({ params }: { params: Promise<{ root: str
             <div className="flex flex-col gap-1" data-testid="root-sessions-list">
               {!sessView && !(isHome && homeSessions) ? (
                 <p className="pt-6 text-center text-xs text-[var(--oz-dim)]">…</p>
-              ) : topSessions.length === 0 ? (
+              ) : shownTops.length === 0 ? (
                 <p className="pt-6 text-center text-xs text-[var(--oz-dim)]">
                   {reachable ? 'no sessions yet' : 'offline · no cached sessions'}
                 </p>
               ) : (
-                renderGroup(topSessions, `root-closed:${rootId}:top`)
+                renderGroup(shownTops, `root-closed:${rootId}:top`)
               )}
               {!reachable && topSessions.length > 0 && (
                 <div
@@ -1078,7 +1131,6 @@ export default function RootDetailPage({ params }: { params: Promise<{ root: str
             ) : (
               <ul className="flex flex-col gap-1" data-testid="root-artifacts-list">
                 {artifacts.map((a) => {
-                  const ext = a.ext || a.name.split('.').pop()?.toLowerCase() || '';
                   const canOpen = reachable || isHome;
                   return (
                     <li key={a.name}>
@@ -1090,7 +1142,7 @@ export default function RootDetailPage({ params }: { params: Promise<{ root: str
                         data-name={a.name}
                         onClick={() => {
                           if (!canOpen) return;
-                          if (artKindOf(a.name) === 'html') {
+                          if (kindOf(a.name) === 'html') {
                             window.location.assign(
                               `/api/artifact/${encodeURIComponent(a.name)}${
                                 isHome ? '' : `?root=${encodeURIComponent(rootId)}`
@@ -1101,15 +1153,23 @@ export default function RootDetailPage({ params }: { params: Promise<{ root: str
                           }
                         }}
                       >
+                        {/* the artifacts page's row: glyph · name · provenance · time · size */}
                         <div className="oz-r1">
-                          <span className="t">{a.name}</span>
-                          {ext && <span className="oz-kind">{ext}</span>}
-                          <time>{fmtListTime(a.mtime)}</time>
-                        </div>
-                        <div className="oz-r2">
-                          {[fmtSize(a.size), a.source && a.source !== 'local' ? a.source : '']
-                            .filter(Boolean)
-                            .join(' · ')}
+                          <span
+                            className="w-4 shrink-0 text-center text-[var(--oz-dim)]"
+                            aria-hidden="true"
+                          >
+                            {glyphOf(a.name)}
+                          </span>
+                          <span className="t opacity-80">{a.name}</span>
+                          {a.source && a.source !== 'local' && (
+                            <span className="shrink-0 text-[10px] text-[var(--oz-dim)]">
+                              {a.source}
+                            </span>
+                          )}
+                          <time>
+                            {fmtListTime(a.mtime)} · {fmtSize(a.size)}
+                          </time>
                         </div>
                       </button>
                     </li>
@@ -1132,29 +1192,11 @@ export default function RootDetailPage({ params }: { params: Promise<{ root: str
             {/* World picker (saved on that computer) */}
             <section className={`oz-blk ${reachable ? '' : 'oz-gone'}`} data-testid="root-world-block">
               <h2>world</h2>
-              <div className="oz-worlds2">
-                {WORLDS.map((w) => (
-                  <button
-                    key={w.id}
-                    type="button"
-                    data-theme={w.id}
-                    data-testid="world-pick"
-                    data-world={w.id}
-                    aria-pressed={world === w.id}
-                    disabled={!reachable}
-                    onClick={() => void pickWorld(w.id)}
-                    className="oz-world2"
-                  >
-                    <b>{w.id}</b>
-                    <span className="sw6">
-                      {SWATCHES.map((s) => (
-                        <i key={s} style={{ background: `var(--oz-${s})` }} />
-                      ))}
-                    </span>
-                    <span className="cur">current</span>
-                  </button>
-                ))}
-              </div>
+              <WorldPicker
+                current={isHome ? appTheme : world ?? appTheme}
+                disabled={!reachable}
+                onPick={(w) => void pickWorld(w)}
+              />
             </section>
 
             {/* Roles (saved on that computer) */}
