@@ -127,6 +127,29 @@
   .oz-cap i { display: inline-block; width: 7px; height: 7px; margin-right: 6px; background: var(--oz-dim); }
   .oz-band.live .oz-cap i { background: var(--oz-success); }
 
+  /* § pin — the pinned channel's word (components/pin-state.tsx), a caption like the band's:
+     square hairline, opaque, one line that ends in … rather than spill (the reason is its title).
+     Fixed over every page, so it sits where no chrome is: bottom-left by default (in the session
+     footer that is the empty words line), and on the front page the roots' top-right corner —
+     the bottom-left there is MAIN's name (11-23: "end to end" sat across its box at 360 px). */
+  .oz-pin {
+    position: fixed; z-index: 60; left: 12px; bottom: calc(5px + env(safe-area-inset-bottom));
+    max-width: calc(100vw - 24px); height: 18px; padding: 0 6px; pointer-events: none;
+    overflow: hidden; white-space: nowrap; text-overflow: ellipsis;
+    font-size: 10px; line-height: 16px; letter-spacing: .04em; color: var(--oz-dim);
+    background: var(--oz-surface); border: 1px solid var(--oz-border);
+  }
+  .oz-pin i { display: inline-block; width: 6px; height: 6px; margin-right: 6px; vertical-align: 1px; background: var(--oz-dim); }
+  .oz-pin[data-state='pinned'] i { background: var(--oz-success); }
+  .oz-pin:is([data-state='connecting'], [data-state='reconnecting']) i { animation: oz-breathe 1.6s ease-in-out infinite; }
+  .oz-pin[data-state='fallback'] { color: var(--oz-active); border-color: color-mix(in srgb, var(--oz-active) 50%, transparent); }
+  .oz-pin[data-state='refused'] { color: var(--oz-danger); border-color: color-mix(in srgb, var(--oz-danger) 60%, transparent); }
+  .oz-pin:is([data-state='fallback'], [data-state='refused']) i { background: currentColor; }
+  body:has(.oz-roots) .oz-pin {
+    left: auto; right: max(12px, calc(50% - 14rem + 12px)); max-width: calc(min(100vw, 28rem) - 24px);
+    bottom: calc(var(--oz-roots-h) - 26px + env(safe-area-inset-bottom));
+  }
+
   /* tree-first — the whole tree, alone, on a device's first open; afterwards
      the front page carries it as crown (band) and roots (§ roots) */
   .oz-first { position: fixed; inset: 0; background: var(--oz-bg); }
