@@ -45,4 +45,13 @@ Long jobs: `systemd-run --user --unit <name> --collect --nice=10` (a brain resta
   exception (speak every answer in hands-free).
 - ade078b0: the override is undone (answersTyped + its 2 tests removed); S16.fr8 added (hands-free
   on lab, a typed turn → its answer spoken, STT checks it).
-- Proof run: unit p2-handsfree → ~/.cache/p2-reach/handsfree/status (S16 twice + held spec).
+- Proof: ~/.cache/p2-reach/handsfree/status — S16 GREEN runs 6, 7, 8 (+9), 22 steps each;
+  held-reply spec 10/10. S16.fr8 types from another client (the phone shows no message box in
+  hands-free, so a typed turn there can only come from her computer / another tab); the phone
+  speaks that answer, first sound ~1 s after the send.
+  Runs 1-5 failed on the test itself: no box to type in hands-free (fixed: type elsewhere), a too
+  strict STT word check (fixed: share of words, like every step), the looping mic file saying the
+  sentence again (fixed: 300 s silent tail).
+- Evidence: root-coord-pwa/artifacts/p2-handsfree-typed.png
+- For P1: merge p2-handsfree, deploy the app (hub-app, hub-app-tailnet); the brain and voice agent
+  are unchanged by this branch.
