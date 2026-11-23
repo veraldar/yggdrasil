@@ -34,6 +34,7 @@ import {
   applyVoiceCommand,
 } from '@/lib/speech';
 import { shouldAutoSpeak } from '@/lib/auto-speak';
+import { engineWord } from '@/lib/agents';
 import { CARD_ST, type TreeRow } from '@/lib/card';
 import { slugify } from '@/lib/slug';
 import { diagEvent } from '@/lib/diag';
@@ -3058,29 +3059,38 @@ export default function SessionView({
 
       {/* a managed session's card: who works it, on what, how it stands —
           its question for you, then the summary (tap: the whole of it) */}
-      {me && card && (
-        <button
-          type="button"
-          data-testid="session-card"
-          aria-expanded={cardOpen}
-          onClick={() => setCardOpen((o) => !o)}
-          className="oz-card"
-        >
-          <span>
-            {[me.agent, me.model?.id].filter(Boolean).join(' · ')}
-            {(me.agent || me.model?.id) && ' · '}
-            <b style={{ color: CARD_ST[card.status || '']?.c }}>{card.status}</b>
-          </span>
-          {card.needs?.trim() && (
+      {me && card && (() => {
+        const engText = engineWord(card.engine || me.engine || '');
+        return (
+          <button
+            type="button"
+            data-testid="session-card"
+            aria-expanded={cardOpen}
+            onClick={() => setCardOpen((o) => !o)}
+            className="oz-card"
+          >
             <span>
-              <i className="oz-asks">asks:</i> {card.needs.trim()}
+              {[me.agent, me.model?.id].filter(Boolean).join(' · ')}
+              {(me.agent || me.model?.id) && ' · '}
+              <b style={{ color: CARD_ST[card.status || '']?.c }}>{card.status}</b>
+              {engText && (
+                <span data-testid="card-engine" className="opacity-70">
+                  {' · '}
+                  {engText}
+                </span>
+              )}
             </span>
-          )}
-          {(card.summary || card.headline) && (
-            <span className="s">{card.summary || card.headline}</span>
-          )}
-        </button>
-      )}
+            {card.needs?.trim() && (
+              <span>
+                <i className="oz-asks">asks:</i> {card.needs.trim()}
+              </span>
+            )}
+            {(card.summary || card.headline) && (
+              <span className="s">{card.summary || card.headline}</span>
+            )}
+          </button>
+        );
+      })()}
 
       {searchOpen && (
         <div className="oz-box mt-2 flex items-center gap-2 px-2 py-1.5">
