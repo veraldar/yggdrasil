@@ -268,8 +268,13 @@ async function walk(w, P) {
       const pcm = Buffer.concat(roomTts.chunks);
       must(pcm.length > 16_000, `${pcm.length} bytes of speech`);
       const stt = await sttOf(VOICE, pcm, roomTts.rate);
-      must(/seven|six/i.test(stt), `the speech is not that answer: "${stt.slice(0, 120)}"`);
-      return `typed turn stored without modality · ${pcm.length} bytes of speech, first sound ${roomTts.first - sent} ms after send · STT "${stt.slice(0, 60)}"`;
+      // that answer, not the first one said again (the rig's small STT garbles words: by share)
+      const want = new Set(words(textOf(got.a)));
+      const heard = words(stt);
+      const share = heard.filter((w) => want.has(w)).length / Math.max(1, heard.length);
+      must(share > 0.4, `STT "${stt.slice(0, 120)}" vs the answer "${textOf(got.a).slice(0, 120)}"`);
+      must(hits(stt) < 2, `this is the first answer again: "${stt.slice(0, 120)}"`);
+      return `typed turn stored without modality · ${pcm.length} bytes of speech, first sound ${roomTts.first - sent} ms after send · STT "${stt.slice(0, 60)}" (${Math.round(share * 100)}% in the answer)`;
     });
     await phone.getByTestId('free-exit').tap({ timeout: 5_000 }).catch(() => {});
   }
