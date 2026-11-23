@@ -37,12 +37,21 @@ if (!existsSync(path.join(process.cwd(), 'next.config.ts')) && existsSync(server
 
 const port = Number(process.env.PORT || 8095);
 const hostname = process.env.HOST || '0.0.0.0';
+// What we tell NEXT the server's hostname is. This must stay `localhost` whatever we bind:
+// Next's middleware sandbox normalizes every request URL's loopback host to `localhost`
+// (web/next-url.js REGEX_LOCALHOST_HOSTNAME), and a middleware rewrite carrying a different
+// host than the request's internal URL (next-server runMiddleware: initProtocol + fetchHostname)
+// is taken for an EXTERNAL rewrite and proxied — over TLS, at a plain-HTTP listener, i.e. the
+// live 11-21 failure: "Failed to proxy https://localhost:4502/pair … EPROTO wrong version
+// number", 500 on every gated page behind the trunk. Same hostname on both sides makes the
+// rewrite relativize to an internal one (resolve-routes getRelativeURL) — never a proxy hop.
+const nextHostname = hostname === '127.0.0.1' ? 'localhost' : hostname;
 const trustProxy = process.env.BIFROST_TRUST_PROXY === '1';
 
 // in-process marker (never from the env file): x-bifrost-peer is ours to read
 process.env.BIFROST_PEER_STAMP = 'server.mjs';
 
-const app = next({ dev: false, hostname, port });
+const app = next({ dev: false, hostname: nextHostname, port });
 const handle = app.getRequestHandler();
 await app.prepare();
 

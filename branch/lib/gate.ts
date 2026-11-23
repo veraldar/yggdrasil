@@ -85,6 +85,8 @@ export function routeClass(p: string): string {
   if (seg[0] !== 'api') return 'page';
   if (seg[1] === 'session') return seg.length === 2 ? 'api.session' : seg[3] === 'messages' ? 'api.session.messages' : 'api.session.one';
   return seg[1] ? `api.${seg[1].replace(/[^a-z0-9-]/gi, '').slice(0, 24)}` : 'api';
+}
+
 /**
  * The same question for a PAGE (the owner, 11-21: an unpaired phone must never get a glimpse of the app).
  * In devices mode a visitor who is neither a paired device nor the box's console is served the /pair
