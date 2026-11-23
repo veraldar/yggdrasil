@@ -18,6 +18,9 @@ export default defineConfig({
   testMatch: /md-page\.spec\.ts/,
   timeout: 120_000,
   outputDir: 'test-results/md-page',
+  // pin the target: tests hit THIS run's app (spawned or PW_BASE_URL),
+  // never the base config's stray :8080 default
+  use: { ...base.use, baseURL },
   webServer: [
     {
       command: 'node e2e/fixtures/files-brain.mjs',

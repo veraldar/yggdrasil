@@ -1,5 +1,5 @@
 import { afterAll, expect, test } from '@playwright/test';
-import { unlink, writeFile } from 'fs/promises';
+import { mkdir, unlink, writeFile } from 'fs/promises';
 import path from 'path';
 
 /** MD-PAGE (11-23): an owner-facing deliverable is HTML by construction —
@@ -12,6 +12,9 @@ import path from 'path';
 
 const DIR = process.env.E2E_ARTIFACTS_DIR || path.join(process.cwd(), '..', 'artifacts');
 const made: string[] = [];
+test.beforeAll(async () => {
+  await mkdir(DIR, { recursive: true });
+});
 afterAll(async () => {
   for (const f of made) await unlink(path.join(DIR, f)).catch(() => {});
 });
@@ -45,7 +48,7 @@ test('an .md artifact renders as a phone page: no sideways scroll, real markdown
   expect(res?.headers()['content-type']).toContain('text/html');
   // it rendered (not the escaped source): heading and table cells as such
   await expect(page.getByRole('heading', { name: 'Phone deliverable' })).toBeVisible();
-  await expect(page.getByRole('cell', { name: 'column one' })).toBeVisible();
+  await expect(page.getByRole('columnheader', { name: 'column one' })).toBeVisible();
   // 360px shape: nothing pushes the page wider than the screen
   const overflow = await page.evaluate(
     () => document.documentElement.scrollWidth - document.documentElement.clientWidth

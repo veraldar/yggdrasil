@@ -1,6 +1,6 @@
 {
   "name": "agent-starter-react",
-  "version": "0.9.1-33-g81ebc091",
+  "version": "0.9.1-41-gf2604c5b",
   "private": true,
   "engines": {
     "node": "24.x"
