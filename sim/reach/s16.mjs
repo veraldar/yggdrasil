@@ -26,8 +26,9 @@
  *          the VPS), the bytes the box's TTS made, its STT = that root's reply
  *  S16.xr7 still once, 20 s later; reading the session on home shows the turn
  *  S16.hr8 (hold walks) she then TYPES a turn there → the answer comes in writing, nothing is said
- *  S16.fr8 (hands-free walks) she TYPES a turn while hands-free is on → that answer is spoken too
- *          (L16's exception: hands-free speaks every answer — you switched it on to listen)
+ *  S16.fr8 (hands-free walks) while the phone listens hands-free, a turn TYPED elsewhere (her
+ *          computer: the phone shows no box to type in hands-free) → the phone speaks its answer
+ *          too (L16's exception: hands-free speaks every answer — you switched it on to listen)
  *
  * S16_SAY / S16_KEYWORDS: the sentence and its key words. (S16_ROOT + S16_WAYS, the older knobs,
  * still pick the walks: S16_ROOT=home S16_WAYS=hold = hold@home.)
@@ -242,16 +243,17 @@ async function walk(w, P) {
 
   if (way === 'free') {
     // L16's exception: while hands-free is on, the answer to a TYPED turn is spoken too
-    await step(`S16.${x}8`, `[${way}@${ROOT}] hands-free still on, she types "${TYPED}" → that answer is spoken too`, async () => {
+    await step(`S16.${x}8`, `[${way}@${ROOT}] the phone listens hands-free; "${TYPED}" is typed on her computer → the phone speaks that answer too`, async () => {
       must(turn, `needs S16.${x}4`);
-      await poll(() => Date.now() - roomTts.last > 4_000, 120_000, 'the first answer never finished', 500);
+      // the first answer is said to its end, the mic is back: listening
+      const cycle = phone.getByTestId('free-phase');
+      await poll(async () => (await cycle.getAttribute('data-cycle').catch(() => '')) === 'listening', 150_000, 'hands-free never came back to listening', 500);
       roomTts.chunks = [];
       roomTts.first = roomTts.last = 0;
       const sent = Date.now();
-      const boxEl = phone.getByPlaceholder('message…');
-      await boxEl.tap({ timeout: 30_000 });
-      await boxEl.fill(TYPED, { timeout: 30_000 });
-      await phone.getByRole('button', { name: 'send', exact: true }).tap({ timeout: 30_000 });
+      // typed elsewhere: a plain text turn, no modality, posted to home like any other client
+      const r = await brain(HOME, `/session/${s.proxy}/message?async=1`, { method: 'POST', body: { parts: [{ type: 'text', text: TYPED }] }, timeout: 30_000 });
+      must(r.status === 200, `the typed turn was refused: ${r.status}`);
       const got = await poll(async () => {
         const ms = (await brain(WHERE, `/session/${s.real}/message`)).body || [];
         const at = ms.findIndex((m) => m.info.role === 'user' && textOf(m).includes('seven times six'));
