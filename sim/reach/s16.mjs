@@ -26,6 +26,8 @@
  *          the VPS), the bytes the box's TTS made, its STT = that root's reply
  *  S16.xr7 still once, 20 s later; reading the session on home shows the turn
  *  S16.hr8 (hold walks) she then TYPES a turn there → the answer comes in writing, nothing is said
+ *  S16.fr8 (hands-free walks) she TYPES a turn while hands-free is on → that answer is spoken too
+ *          (L16's exception: hands-free speaks every answer — you switched it on to listen)
  *
  * S16_SAY / S16_KEYWORDS: the sentence and its key words. (S16_ROOT + S16_WAYS, the older knobs,
  * still pick the walks: S16_ROOT=home S16_WAYS=hold = hold@home.)
@@ -238,7 +240,37 @@ async function walk(w, P) {
     return `first sound ${roomTts.first - released} ms after ${way === 'hold' ? 'release' : 'the tap'} · ${pcm.length} bytes (${(pcm.length / 2 / roomTts.rate).toFixed(1)} s) over the room, 0 via https · STT "${stt.slice(0, 70)}" (${Math.round(share * 100)}% in ${ROOT}'s reply)`;
   });
 
-  if (way === 'free') await phone.getByTestId('free-exit').tap({ timeout: 5_000 }).catch(() => {});
+  if (way === 'free') {
+    // L16's exception: while hands-free is on, the answer to a TYPED turn is spoken too
+    await step(`S16.${x}8`, `[${way}@${ROOT}] hands-free still on, she types "${TYPED}" → that answer is spoken too`, async () => {
+      must(turn, `needs S16.${x}4`);
+      await poll(() => Date.now() - roomTts.last > 4_000, 120_000, 'the first answer never finished', 500);
+      roomTts.chunks = [];
+      roomTts.first = roomTts.last = 0;
+      const sent = Date.now();
+      const boxEl = phone.getByPlaceholder('message…');
+      await boxEl.tap({ timeout: 30_000 });
+      await boxEl.fill(TYPED, { timeout: 30_000 });
+      await phone.getByRole('button', { name: 'send', exact: true }).tap({ timeout: 30_000 });
+      const got = await poll(async () => {
+        const ms = (await brain(WHERE, `/session/${s.real}/message`)).body || [];
+        const at = ms.findIndex((m) => m.info.role === 'user' && textOf(m).includes('seven times six'));
+        const a = at < 0 ? null : ms.slice(at + 1).find((m) => m.info.role === 'assistant' && m.info.time?.completed);
+        return a ? { u: ms[at], a } : null;
+      }, 90_000, `${ROOT} never answered the typed turn`);
+      must(got.u.info.modality !== 'voice', `the typed turn is marked ${JSON.stringify(got.u.info.modality)}`);
+      await poll(() => roomTts.chunks.length > 0, 60_000, 'the typed turn\'s answer was not spoken while hands-free was on');
+      await sleep(1500);
+      await phone.screenshot({ path: join(STATE, `s16-${x}-typed.png`) }).catch(() => {});
+      await poll(() => Date.now() - roomTts.last > 4_000, 120_000, 'that answer\'s audio never ended', 500);
+      const pcm = Buffer.concat(roomTts.chunks);
+      must(pcm.length > 16_000, `${pcm.length} bytes of speech`);
+      const stt = await sttOf(VOICE, pcm, roomTts.rate);
+      must(/seven|six/i.test(stt), `the speech is not that answer: "${stt.slice(0, 120)}"`);
+      return `typed turn stored without modality · ${pcm.length} bytes of speech, first sound ${roomTts.first - sent} ms after send · STT "${stt.slice(0, 60)}"`;
+    });
+    await phone.getByTestId('free-exit').tap({ timeout: 5_000 }).catch(() => {});
+  }
 
   await step(`S16.${x}7`, `[${way}@${ROOT}] still once, 20 s later; reading it on home shows ${ROOT}'s turn`, async () => {
     must(turn, `needs S16.${x}4`);

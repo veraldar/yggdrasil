@@ -1,6 +1,6 @@
 import { expect, test } from '@playwright/test';
 import type { Msg } from '../components/session-message';
-import { answersTyped, heldReply } from '../lib/held-reply';
+import { heldReply } from '../lib/held-reply';
 
 /** L16: a turn you speak is answered aloud, a turn you type in writing — which reply the
  *  session page says for a HELD turn (text mode). Times are server times; `at` is the press. */
@@ -109,23 +109,4 @@ test('a session on another root reads the same (its transcript, its ids)', () =>
     reply('msg_lab_2', 260, 'msg_lab_1', { text: 'from lab' }),
   ];
   expect(heldReply(msgs, held(0)).reply?.text).toBe('from lab');
-});
-
-test('strict L16, hands-free too: the answer to a typed turn is written, to a spoken turn it is said', () => {
-  const msgs = [
-    user('u1', 100),
-    reply('a1', 110, 'u1'),
-    user('u2', 200, voice),
-    reply('a2', 210, 'u2'),
-  ];
-  expect(answersTyped(msgs, msgs[1])).toBe(true);
-  expect(answersTyped(msgs, msgs[3])).toBe(false);
-});
-
-test('strict L16: MAIN coming back by itself, or another session’s message, is not a typed turn', () => {
-  const own = reply('a9', 300, 'w-hidden', { autoReply: true }); // its question is not on screen
-  const other = [user('u3', 100, { from: { session: 's', title: 'MAIN' } } as Partial<Msg>), reply('a3', 110, 'u3')];
-  expect(answersTyped([user('u1', 100), own], own)).toBe(false);
-  expect(answersTyped(other, other[1])).toBe(false);
-  expect(answersTyped([user('u1', 100)], reply('a4', 120, undefined))).toBe(false);
 });
