@@ -51,7 +51,7 @@ import { clearAsked, ensureNotifyPermission, markAsked, notifyReply } from '@/li
 import { PENDING_TTL_MS } from '@/lib/pending-ttl';
 import { markRead } from '@/lib/read';
 import { lastHeard, markHeard } from '@/lib/heard';
-import { type Held, answersTyped, heldReply } from '@/lib/held-reply';
+import { type Held, heldReply } from '@/lib/held-reply';
 import {
   DOOR_KEY,
   FIRST_TURN_KEY,
@@ -1975,13 +1975,8 @@ export default function SessionView({
       freeMicGiveBack();
       return;
     }
-    // L16, strict: a typed turn is answered in writing, hands-free or not (lib/held-reply.ts)
-    if (answersTyped(msgs, a)) {
-      diagEvent('voice', 'typed turn — answered in writing');
-      markHeard(slug, a.time);
-      freeMicGiveBack();
-      return;
-    }
+    // L16: hands-free is the exception — while it is on, every answer is spoken, a typed turn's
+    // too (you switched it on to listen; lead-review L16, decided again 11-23)
     try {
       if (!shouldAutoSpeak(a, isMainSlug(slug))) {
         // quiet-assess: silent verdict reply — give the mic back, no voice

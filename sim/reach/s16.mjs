@@ -26,6 +26,9 @@
  *          the VPS), the bytes the box's TTS made, its STT = that root's reply
  *  S16.xr7 still once, 20 s later; reading the session on home shows the turn
  *  S16.hr8 (hold walks) she then TYPES a turn there → the answer comes in writing, nothing is said
+ *  S16.fr8 (hands-free walks) while the phone listens hands-free, a turn TYPED elsewhere (her
+ *          computer: the phone shows no box to type in hands-free) → the phone speaks its answer
+ *          too (L16's exception: hands-free speaks every answer — you switched it on to listen)
  *
  * S16_SAY / S16_KEYWORDS: the sentence and its key words. (S16_ROOT + S16_WAYS, the older knobs,
  * still pick the walks: S16_ROOT=home S16_WAYS=hold = hold@home.)
@@ -67,7 +70,9 @@ const t00 = Date.now();
 const LEAD = 3.0;
 const WAV = {
   hold: await renderSay(VOICE, SAY, join(STATE, 's16-hold.wav'), { lead: LEAD, tail: 45 }),
-  free: await renderSay(VOICE, `${SAY}. over`, join(STATE, 's16-free.wav'), { lead: LEAD, tail: 45 }),
+  // a long tail: the hands-free walk now listens for minutes (S16.fr8) and Chromium loops the file —
+  // it must not come round and say the sentence again
+  free: await renderSay(VOICE, `${SAY}. over`, join(STATE, 's16-free.wav'), { lead: LEAD, tail: 300 }),
 };
 process.stderr.write(`s16: walks ${WALKS.map((w) => w.key)}; Ása's WAVs: hold ${WAV.hold.speech.toFixed(1)} s, free ${WAV.free.speech.toFixed(1)} s of speech (+ ${LEAD} s lead, 45 s tail)\n`);
 
@@ -238,7 +243,43 @@ async function walk(w, P) {
     return `first sound ${roomTts.first - released} ms after ${way === 'hold' ? 'release' : 'the tap'} · ${pcm.length} bytes (${(pcm.length / 2 / roomTts.rate).toFixed(1)} s) over the room, 0 via https · STT "${stt.slice(0, 70)}" (${Math.round(share * 100)}% in ${ROOT}'s reply)`;
   });
 
-  if (way === 'free') await phone.getByTestId('free-exit').tap({ timeout: 5_000 }).catch(() => {});
+  if (way === 'free') {
+    // L16's exception: while hands-free is on, the answer to a TYPED turn is spoken too
+    await step(`S16.${x}8`, `[${way}@${ROOT}] the phone listens hands-free; "${TYPED}" is typed on her computer → the phone speaks that answer too`, async () => {
+      must(turn, `needs S16.${x}4`);
+      // the first answer is said to its end, the mic is back: listening
+      const cycle = phone.getByTestId('free-phase');
+      await poll(async () => (await cycle.getAttribute('data-cycle').catch(() => '')) === 'listening', 150_000, 'hands-free never came back to listening', 500);
+      roomTts.chunks = [];
+      roomTts.first = roomTts.last = 0;
+      const sent = Date.now();
+      // typed elsewhere: a plain text turn, no modality, posted to home like any other client
+      const r = await brain(HOME, `/session/${s.proxy}/message?async=1`, { method: 'POST', body: { parts: [{ type: 'text', text: TYPED }] }, timeout: 30_000 });
+      must(r.status === 200, `the typed turn was refused: ${r.status}`);
+      const got = await poll(async () => {
+        const ms = (await brain(WHERE, `/session/${s.real}/message`)).body || [];
+        const at = ms.findIndex((m) => m.info.role === 'user' && textOf(m).includes('seven times six'));
+        const a = at < 0 ? null : ms.slice(at + 1).find((m) => m.info.role === 'assistant' && m.info.time?.completed);
+        return a ? { u: ms[at], a } : null;
+      }, 90_000, `${ROOT} never answered the typed turn`);
+      must(got.u.info.modality !== 'voice', `the typed turn is marked ${JSON.stringify(got.u.info.modality)}`);
+      await poll(() => roomTts.chunks.length > 0, 60_000, 'the typed turn\'s answer was not spoken while hands-free was on');
+      await sleep(1500);
+      await phone.screenshot({ path: join(STATE, `s16-${x}-typed.png`) }).catch(() => {});
+      await poll(() => Date.now() - roomTts.last > 4_000, 120_000, 'that answer\'s audio never ended', 500);
+      const pcm = Buffer.concat(roomTts.chunks);
+      must(pcm.length > 16_000, `${pcm.length} bytes of speech`);
+      const stt = await sttOf(VOICE, pcm, roomTts.rate);
+      // that answer, not the first one said again (the rig's small STT garbles words: by share)
+      const want = new Set(words(textOf(got.a)));
+      const heard = words(stt);
+      const share = heard.filter((w) => want.has(w)).length / Math.max(1, heard.length);
+      must(share > 0.4, `STT "${stt.slice(0, 120)}" vs the answer "${textOf(got.a).slice(0, 120)}"`);
+      must(hits(stt) < 2, `this is the first answer again: "${stt.slice(0, 120)}"`);
+      return `typed turn stored without modality · ${pcm.length} bytes of speech, first sound ${roomTts.first - sent} ms after send · STT "${stt.slice(0, 60)}" (${Math.round(share * 100)}% in the answer)`;
+    });
+    await phone.getByTestId('free-exit').tap({ timeout: 5_000 }).catch(() => {});
+  }
 
   await step(`S16.${x}7`, `[${way}@${ROOT}] still once, 20 s later; reading it on home shows ${ROOT}'s turn`, async () => {
     must(turn, `needs S16.${x}4`);
