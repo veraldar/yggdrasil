@@ -10,6 +10,12 @@ export type Card = {
   summary?: string;
   needs?: string; // a question for the user ('' = none)
   updated?: number;
+  /** which harness/engine + model actually served the last turn */
+  engine?: string;
+  model?: string;
+  /** set when the brain automatically fell back from an exhausted harness */
+  fallback_from?: string;
+  fallback_reason?: string;
   /** the computer (root) it runs on — set on a proxy of a session that lives on another root */
   root?: string;
   /** 'root-main' = the proxy of another root's MAIN (it lives in the roots sheet, not the list) */
@@ -22,6 +28,7 @@ export type TreeRow = {
   title: string;
   parentID?: string | null;
   agent?: string;
+  engine?: string;
   model?: { id?: string } | null;
   card?: Card | null;
   archived?: boolean;

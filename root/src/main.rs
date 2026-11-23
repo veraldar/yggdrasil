@@ -999,7 +999,17 @@ async fn create_session(State(st): State<AppState>, body: Option<Json<Value>>) -
     if engine.is_some_and(|e| profiles::engine_name(e) != Some("root")) && is_main_title(title) {
         return bad_request("MAIN runs on the root");
     }
-    let info = new_session_on(&st, title, body["parentID"].as_str(), body["agent"].as_str(), engine, model, body["variant"].as_str());
+    let mut info = new_session_on(&st, title, body["parentID"].as_str(), body["agent"].as_str(), engine, model, body["variant"].as_str());
+    // deploy-rule pinning: a pinned session never falls back to another harness on quota
+    if body["pinned"] == true {
+        let id = info["id"].as_str().unwrap_or_default().to_string();
+        if let Some(i) = with_session(&st, &id, |s| {
+            s.info["pinned"] = json!(true);
+            s.info.clone()
+        }) {
+            info = i;
+        }
+    }
     // G7.2: an e2e / voice-test session is marked once at birth. GET /session still lists it
     // (resolveId finds by slug), but tree::snapshot and sessions_find skip it, so MAIN's [tree]
     // stays clean; the librarian's skip of these is phase 2.
@@ -1009,7 +1019,7 @@ async fn create_session(State(st): State<AppState>, body: Option<Json<Value>>) -
             s.info["test"] = json!(true);
             s.info.clone()
         }) {
-            return Json(i).into_response();
+            info = i;
         }
     }
     // a peer root asked for this session: its turns report home (peers.rs); the hop count rides
@@ -1225,6 +1235,7 @@ async fn get_tree(State(st): State<AppState>) -> Json<Value> {
         .iter()
         .map(|(id, s)| {
             json!({ "id": id, "title": s.info["title"], "parentID": s.info["parentID"], "agent": profile_name_of(&st, &s.info),
+                "engine": engine_word(engine_of(&st, &s.info)),
                 "model": s.info["model"], "card": s.info["card"], "archived": s.info["archived"] == true,
                 "busy": running.contains_key(id), "depth": tree::depth(&sessions, id),
                 "inbox": s.inbox.iter().filter(|e| e["delivered"] != true).count(),
@@ -1547,7 +1558,7 @@ fn resume_interrupted(st: &AppState, cuts: &[(String, Vec<String>)]) -> Vec<Stri
                         if let Some(m) = s.messages.iter_mut().rev().find(|m| m["info"]["id"].as_str() == Some(mid.as_str())) {
                             m["info"]["meta"]["resent_of"] = json!(pid);
                         }
-                        if s.info["card"].is_object() && !is_main_title(s.info["title"].as_str().unwrap_or_default()) {
+                        if s.info["card"]["status"].is_string() && !is_main_title(s.info["title"].as_str().unwrap_or_default()) {
                             s.info["card"]["status"] = json!("working");
                         }
                     });
@@ -1910,6 +1921,17 @@ async fn patch_session(State(st): State<AppState>, Path(id): Path<String>, Json(
                 }
             }
         }
+        // deploy-rule pinning: true = never automatically fall back to another harness
+        if let Some(v) = body.get("pinned") {
+            match v.as_bool() {
+                Some(true) => s.info["pinned"] = json!(true),
+                _ => {
+                    if let Some(o) = s.info.as_object_mut() {
+                        o.remove("pinned");
+                    }
+                }
+            }
+        }
         s.info.clone()
     });
     match info {
@@ -2249,6 +2271,12 @@ fn set_engine(st: &AppState, id: &str, engine: &str, model: Option<&str>) -> Res
                     s.info["harness"] = json!({ "kind": k.name() });
                 }
             }
+        }
+        if let Some(card) = s.info["card"].as_object_mut() {
+            card.insert("engine".into(), json!(name));
+            card.insert("model".into(), json!(model_id));
+            card.remove("fallback_from");
+            card.remove("fallback_reason");
         }
         s.info.clone()
     })
@@ -2971,7 +2999,7 @@ fn close_interrupted(sessions: &mut HashMap<String, Session>, data_dir: &std::pa
         // (wakes=56) for months because of this line; a managed child's card is corrected by
         // its digest/wake in a moment, so only the door needs the guard.
         let is_main = crate::is_main_title(s.info["title"].as_str().unwrap_or_default());
-        if s.info["card"].is_object() && !is_main && real {
+        if s.info["card"]["status"].is_string() && !is_main && real {
             s.info["card"]["status"] = json!("failed");
         }
         persist(data_dir, id, s);
@@ -3373,6 +3401,10 @@ struct Run {
 }
 
 impl Run {
+    fn tool_count(&self) -> usize {
+        self.msg["parts"].as_array().map(|p| p.iter().filter(|x| x["type"] == "tool").count()).unwrap_or(0)
+    }
+
     fn push_part(&mut self, part: Value) -> usize {
         let mut part = part;
         part["id"] = json!(new_id("prt"));
@@ -3450,6 +3482,196 @@ impl Run {
     }
 }
 
+#[derive(Clone, Debug, PartialEq)]
+struct FallbackPlan {
+    from_engine: harness::Kind,
+    from_model: String,
+    to_engine: Option<harness::Kind>,
+    to_model: String,
+    reason: String,
+}
+
+/// The trunk integrator session (P1, lead-review.md L2): pinned by deploy rules, never falls back.
+/// Recognised by its live id on omarchy, by a title opening with `P1` (the integrator package),
+/// or by naming `(integrator)` / `trunk integrator`.
+fn is_integrator_session(info: &Value) -> bool {
+    if info["id"].as_str() == Some("ses_82772a463f1a495791a851d1d3386d4c") {
+        return true;
+    }
+    let lower = info["title"].as_str().unwrap_or_default().trim().to_ascii_lowercase();
+    lower == "p1"
+        || lower.starts_with("p1 ")
+        || lower.starts_with("p1·")
+        || lower.starts_with("p1:")
+        || lower.starts_with("p1-")
+        || lower.starts_with("p1_")
+        || lower.contains("(integrator)")
+        || lower.contains("trunk integrator")
+}
+
+/// True when a session or its role is pinned and must never automatically fall back to another
+/// harness on quota exhaustion: pinned role (`agents.json`), `coordinator` / `integrator`, the
+/// trunk integrator session (P1), an explicitly pinned session (`info.pinned`), an attached
+/// terminal conversation, or a role named in `YGG_PINNED_ROLES`.
+fn is_pinned_for_fallback(info: &Value, prof: &profiles::Profile) -> bool {
+    if prof.pinned || matches!(prof.name.as_str(), "coordinator" | "integrator") {
+        return true;
+    }
+    if info["pinned"] == true || info["harness"]["attached"] == true {
+        return true;
+    }
+    if is_main_title(info["title"].as_str().unwrap_or_default()) || is_integrator_session(info) {
+        return true;
+    }
+    if let Ok(extra) = std::env::var("YGG_PINNED_ROLES") {
+        if extra.split(',').map(str::trim).any(|r| !r.is_empty() && r.eq_ignore_ascii_case(&prof.name)) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Best root model for fallback: role's explicit fallback model → role's root model → `engines.root`
+/// default → full non-flash model (e.g. `glm-5.3` over `glm-5.3-flash`) → the root's default model.
+fn fallback_root_model(st: &AppState, prof: &profiles::Profile) -> String {
+    let served = |m: &String| st.config.models.contains(m);
+    if let Some(m) = prof.fallback_model.clone().filter(served) {
+        return m;
+    }
+    if prof.harness.is_none() {
+        if let Some(m) = prof.model.clone().filter(served) {
+            return m;
+        }
+    }
+    let eng_default = st.config.profiles.read().unwrap().engine_model("root");
+    if let Some(m) = eng_default.filter(served) {
+        return m;
+    }
+    if let Some(base) = st.config.model.strip_suffix("-flash") {
+        let full = base.to_string();
+        if served(&full) {
+            return full;
+        }
+    }
+    let glm = "glm-5.3".to_string();
+    if served(&glm) {
+        return glm;
+    }
+    st.config.model.clone()
+}
+
+/// Resolves the single fallback `(engine, model)` for `prof` when `failed` hit a hard quota:
+/// 1. Explicit `prof.fallback_harness` (`"none"` = opt out; else that engine if != `failed`).
+/// 2. The role's own default engine (`prof.harness`) when the session was running on an override
+///    engine different from the role's default.
+/// 3. The `root` engine on this same root (preferring full GLM e.g. `glm-5.3`).
+fn resolve_fallback_target(st: &AppState, prof: &profiles::Profile, failed: harness::Kind) -> Option<(Option<harness::Kind>, String)> {
+    let model_for_harness = |k: harness::Kind, preferred: Option<&str>| -> String {
+        preferred
+            .map(str::trim)
+            .filter(|m| !m.is_empty())
+            .map(String::from)
+            .or_else(|| st.config.profiles.read().unwrap().engine_model(k.name()))
+            .unwrap_or_else(|| "default".into())
+    };
+    if let Some(fb) = prof.fallback_harness.as_deref() {
+        if fb == "none" {
+            return None;
+        }
+        let fb_kind = harness::Kind::parse(fb);
+        if fb_kind != Some(failed) {
+            let model = match fb_kind {
+                None => fallback_root_model(st, prof),
+                Some(k) => model_for_harness(k, prof.fallback_model.as_deref()),
+            };
+            return Some((fb_kind, model));
+        }
+    }
+    let role_default = prof.harness.as_deref().and_then(harness::Kind::parse);
+    if role_default != Some(failed) {
+        let model = match role_default {
+            None => fallback_root_model(st, prof),
+            Some(k) => model_for_harness(k, prof.model.as_deref()),
+        };
+        return Some((role_default, model));
+    }
+    Some((None, fallback_root_model(st, prof)))
+}
+
+/// Decides whether a failed harness attempt should retry once on the role's fallback harness+model:
+/// ONLY when 0 tools ran (no work done), the failure is a hard quota error, and neither the role
+/// nor the session is pinned by deploy rules.
+fn plan_harness_fallback(st: &AppState, info: &Value, prof: &profiles::Profile, failed: harness::Kind, err: &str, tools_ran: usize) -> Option<FallbackPlan> {
+    if tools_ran > 0 || !harness::is_quota_error(err) || is_pinned_for_fallback(info, prof) {
+        return None;
+    }
+    let (to_engine, to_model) = resolve_fallback_target(st, prof, failed)?;
+    let from_model = if info["model"]["providerID"] == failed.name() {
+        info["model"]["id"].as_str().unwrap_or("default").to_string()
+    } else {
+        st.config.profiles.read().unwrap().engine_model(failed.name()).unwrap_or_else(|| "default".into())
+    };
+    Some(FallbackPlan { from_engine: failed, from_model, to_engine, to_model, reason: err.chars().take(240).collect() })
+}
+
+/// Switches `id` onto the fallback engine + model so the retry (and subsequent turns) run there.
+fn apply_fallback(st: &AppState, id: &str, prof: &profiles::Profile, plan: &FallbackPlan) -> Option<Value> {
+    let to_name = engine_word(plan.to_engine);
+    let updated = with_session(st, id, |s| {
+        s.info["engine"] = json!(to_name);
+        match plan.to_engine {
+            None => {
+                let variant = s.info["model"]["variant"]
+                    .as_str()
+                    .map(String::from)
+                    .or(prof.variant.clone())
+                    .unwrap_or_else(|| st.config.default_variant.clone());
+                let provider = st.config.catalog["default"]
+                    .as_object()
+                    .and_then(|d| d.keys().next().cloned())
+                    .unwrap_or_else(|| "yggdrasil".into());
+                s.info["model"] = json!({ "id": plan.to_model, "providerID": provider, "variant": variant });
+                if let Some(o) = s.info.as_object_mut() {
+                    o.remove("harness");
+                }
+            }
+            Some(k) => {
+                s.info["model"] = json!({ "id": plan.to_model, "providerID": k.name() });
+                s.info["harness"] = json!({ "kind": k.name() });
+            }
+        }
+        s.info.clone()
+    });
+    if let Some(ref info) = updated {
+        publish(st, "session.updated", json!({ "info": info }));
+    }
+    updated
+}
+
+/// Records which harness/engine + model actually served the turn on the session's card (non-MAIN
+/// sessions only, so MAIN stays card-free), plus fallback provenance when a fallback served.
+fn record_serving_engine(st: &AppState, id: &str, served_engine: &str, served_model: &str, fallback: Option<&FallbackPlan>) {
+    let updated = with_session(st, id, |s| {
+        if is_main_title(s.info["title"].as_str().unwrap_or_default()) {
+            return None;
+        }
+        if !s.info["card"].is_object() {
+            s.info["card"] = json!({});
+        }
+        s.info["card"]["engine"] = json!(served_engine);
+        s.info["card"]["model"] = json!(served_model);
+        if let Some(fb) = fallback {
+            s.info["card"]["fallback_from"] = json!(fb.from_engine.name());
+            s.info["card"]["fallback_reason"] = json!(fb.reason);
+        }
+        Some(s.info.clone())
+    })
+    .flatten();
+    if let Some(info) = updated {
+        publish(st, "session.updated", json!({ "info": info }));
+    }
+}
+
 /// One run, called with the session's run lock held: snapshot history, create the
 /// un-completed assistant placeholder, run the agent loop (abortable), store the
 /// outcome, then `session.idle`. Returns the final assistant message (aborted ones included).
@@ -3513,11 +3735,49 @@ async fn run_turn(st: &AppState, id: &str, tx: &mpsc::Sender<Event>, queue_ms: u
     // the session's own engine (roles rework): a terminal's conversation on its harness, else the
     // engine stamped on the session, else its role's default
     let info = st.sessions.lock().unwrap().get(id).map(|s| s.info.clone()).unwrap_or(Value::Null);
+    let prof = profile_of(st, &info);
     let harness = engine_of(st, &info);
+    let mut served_engine: Option<harness::Kind> = harness;
+    let mut fallback_used: Option<FallbackPlan> = None;
     let outcome = {
         let fut = async {
             match harness {
-                Some(kind) => harness_loop(st, id, harness_prompt(&history, turn_id, auto_class), tx, &mut run, kind).await,
+                Some(kind) => {
+                    let prompt = harness_prompt(&history, turn_id, auto_class);
+                    match harness_loop(st, id, prompt.clone(), tx, &mut run, kind).await {
+                        Ok(()) => Ok(()),
+                        Err(e) => {
+                            if let Some(plan) = plan_harness_fallback(st, &info, &prof, kind, &e, run.tool_count()) {
+                                eprintln!(
+                                    "FALLBACK session={id} role={} from={}/{} to={}/{} reason={}",
+                                    prof.name,
+                                    plan.from_engine.name(),
+                                    plan.from_model,
+                                    engine_word(plan.to_engine),
+                                    plan.to_model,
+                                    plan.reason.chars().take(160).collect::<String>()
+                                );
+                                apply_fallback(st, id, &prof, &plan);
+                                // clear any quota error text streamed by the bounced harness before retrying once
+                                run.text.clear();
+                                run.msg["parts"] = json!([]);
+                                run.first_delta_ms = None;
+                                run.first_token_seen = false;
+                                run.retries += 1;
+                                replace_message(st, id, &run.msg);
+                                served_engine = plan.to_engine;
+                                fallback_used = Some(plan.clone());
+                                match plan.to_engine {
+                                    None => agent_loop(st, id, history, tx, &mut run).await,
+                                    Some(fb_kind) => harness_loop(st, id, prompt, tx, &mut run, fb_kind).await,
+                                }
+                                .map_err(|fb_err| format!("{fb_err} (fallback {}/{} after {} quota)", engine_word(plan.to_engine), plan.to_model, plan.from_engine.name()))
+                            } else {
+                                Err(e)
+                            }
+                        }
+                    }
+                }
                 None => agent_loop(st, id, history, tx, &mut run).await,
             }
         };
@@ -3533,6 +3793,17 @@ async fn run_turn(st: &AppState, id: &str, tx: &mpsc::Sender<Event>, queue_ms: u
             running.remove(id);
         }
     }
+    let served_name = engine_word(served_engine);
+    let served_model = match served_engine {
+        None => session_upstream(st, id).0,
+        Some(_) => st
+            .sessions
+            .lock()
+            .unwrap()
+            .get(id)
+            .and_then(|s| s.info["model"]["id"].as_str().map(String::from))
+            .unwrap_or_else(|| "default".into()),
+    };
     let result = match outcome {
         Some(Ok(())) => {
             if let Some(ms) = run.first_delta_ms {
@@ -3547,6 +3818,21 @@ async fn run_turn(st: &AppState, id: &str, tx: &mpsc::Sender<Event>, queue_ms: u
                     run.msg["info"]["meta"]["internal"] = json!(true);
                 }
             }
+            if !run.msg["info"]["meta"].is_object() {
+                run.msg["info"]["meta"] = json!({});
+            }
+            run.msg["info"]["meta"]["engine"] = json!(served_name);
+            run.msg["info"]["meta"]["model"] = json!(served_model);
+            if let Some(ref fb) = fallback_used {
+                run.msg["info"]["meta"]["fallback"] = json!({
+                    "from": fb.from_engine.name(),
+                    "from_model": fb.from_model,
+                    "to": served_name,
+                    "to_model": served_model,
+                    "reason": fb.reason,
+                });
+            }
+            record_serving_engine(st, id, served_name, &served_model, fallback_used.as_ref());
             replace_message(st, id, &run.msg);
             publish(st, "message.updated", json!({ "info": run.msg["info"] }));
             emit(st, tx, "message.completed", run.msg.clone()).await;
@@ -3557,6 +3843,9 @@ async fn run_turn(st: &AppState, id: &str, tx: &mpsc::Sender<Event>, queue_ms: u
             run.finish(&e);
             run.lat_log(&format!("error: {}", &e[..e.len().min(120)]));
             run.msg["info"]["error"] = json!({ "name": "UnknownError", "data": { "message": e } });
+            if let Some(ref fb) = fallback_used {
+                record_serving_engine(st, id, served_name, &served_model, Some(fb));
+            }
             replace_message(st, id, &run.msg);
             emit(st, tx, "error", json!({ "sessionID": id, "error": e })).await;
             Err(e)
@@ -6672,5 +6961,326 @@ mod c5_tests {
         let one = tree::read(&st, &main, &json!({ "id": sid, "turns": 1 })).output;
         assert!(one.contains("third ask about gamma") && !one.contains("second ask about beta"), "{one}");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod fallback_tests {
+    use super::*;
+    use axum::{Router, routing::post};
+
+    fn fb_app(base_url: String, profiles: profiles::Profiles, models: Vec<String>) -> (AppState, PathBuf) {
+        static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let dir = std::env::temp_dir().join(format!("ygg-fb-{}-{}", std::process::id(), N.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("session")).unwrap();
+        let http = reqwest::Client::new();
+        let default_model = models.first().cloned().unwrap_or_else(|| "glm-5.3-flash".into());
+        let config = Config {
+            base_url,
+            dialect: Dialect::OpenAi,
+            max_tokens: 1024,
+            api_key: None,
+            model: default_model,
+            models,
+            catalog: json!({"default": {"yggdrasil": {}}}),
+            max_steps: 5,
+            profiles: std::sync::RwLock::new(profiles),
+            tree: tree::TreeCfg { max_depth: 12, max_children: 24, digest_model: None, wake_debounce_ms: 4000, max_wakes: 60 },
+            context_files: Vec::new(),
+            peers: peers::Peers::load(),
+            ext: ext::Extensions::load(),
+            tiers: HashMap::new(),
+            vision: Vec::new(),
+            tools_enabled: false,
+            rollup_tokens: 100_000,
+            rollup_keep_tokens: 25_000,
+            voice: false,
+            voice_max_words: 300,
+            default_variant: "high".into(),
+            think_high: 4096,
+        };
+        let st = AppState {
+            sessions: Arc::new(Mutex::new(HashMap::new())),
+            running: Arc::default(),
+            run_locks: Arc::default(),
+            bus: broadcast::channel(16).0,
+            data_dir: Arc::new(dir.clone()),
+            config: Arc::new(config),
+            http: http.clone(),
+            tools: Arc::new(tools::ToolEnv { project_dir: dir.clone(), bash_timeout: Duration::from_secs(1), http }),
+            upstream: Arc::new(tokio::sync::Semaphore::new(2)),
+            wakes: Arc::default(),
+            harness_slots: Arc::new(tokio::sync::Semaphore::new(2)),
+            harness_models: Arc::new(Mutex::new(HashMap::new())),
+            harness_labels: Arc::new(Mutex::new(HashMap::new())),
+            ctx: Arc::new(Mutex::new(context::Store::default())),
+            draining: Arc::default(),
+            relay: Arc::default(),
+            files: Arc::default(),
+        };
+        (st, dir)
+    }
+
+    #[test]
+    fn fallback_target_prefers_explicit_then_role_default_then_root_glm() {
+        let dir = std::env::temp_dir().join(format!("ygg-fb-prof-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("agents.json");
+        std::fs::write(
+            &f,
+            r#"{"agent":{
+                "fix":{"harness":"claude","model":"opus"},
+                "build":{"harness":"antigravity","model":"gemini-4-neon-high"},
+                "research":{"harness":"root","model":"glm-5.3-flash"},
+                "custom":{"harness":"claude","model":"opus","fallback":{"engine":"antigravity","model":"gemini-4-hydrogen"}},
+                "optout":{"harness":"claude","model":"opus","fallback":"none"}
+            }}"#,
+        )
+        .unwrap();
+        let ps = profiles::Profiles::load(f.to_str());
+        let (st, sdir) = fb_app("http://127.0.0.1:1".into(), ps, vec!["glm-5.3-flash".into(), "glm-5.3".into(), "glm-5.2".into()]);
+        let get = |n: &str| st.config.profiles.read().unwrap().get(n).cloned().unwrap();
+
+        // claude default role -> root + full glm-5.3 (not -flash)
+        assert_eq!(resolve_fallback_target(&st, &get("fix"), harness::Kind::Claude), Some((None, "glm-5.3".into())));
+        // claude override on an antigravity-default role -> role's other default engine (antigravity)
+        assert_eq!(
+            resolve_fallback_target(&st, &get("build"), harness::Kind::Claude),
+            Some((Some(harness::Kind::Antigravity), "gemini-4-neon-high".into()))
+        );
+        // antigravity default role failing on antigravity -> root + glm-5.3
+        assert_eq!(resolve_fallback_target(&st, &get("build"), harness::Kind::Antigravity), Some((None, "glm-5.3".into())));
+        // claude override on a root-default role -> root + role's own model (glm-5.3-flash)
+        assert_eq!(resolve_fallback_target(&st, &get("research"), harness::Kind::Claude), Some((None, "glm-5.3-flash".into())));
+        // explicit fallback engine + model
+        assert_eq!(
+            resolve_fallback_target(&st, &get("custom"), harness::Kind::Claude),
+            Some((Some(harness::Kind::Antigravity), "gemini-4-hydrogen".into()))
+        );
+        // explicit fallback opt-out ("none")
+        assert_eq!(resolve_fallback_target(&st, &get("optout"), harness::Kind::Claude), None);
+
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&sdir);
+    }
+
+    #[test]
+    fn pinning_and_midwork_rules_block_fallback() {
+        let dir = std::env::temp_dir().join(format!("ygg-fb-pin-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("agents.json");
+        std::fs::write(
+            &f,
+            r#"{"agent":{
+                "fix":{"harness":"claude","model":"opus"},
+                "pinned_role":{"harness":"claude","model":"opus","pinned":true},
+                "integrator":{"harness":"claude","model":"opus"}
+            }}"#,
+        )
+        .unwrap();
+        let ps = profiles::Profiles::load(f.to_str());
+        let (st, sdir) = fb_app("http://127.0.0.1:1".into(), ps, vec!["glm-5.3-flash".into(), "glm-5.3".into()]);
+        let get = |n: &str| st.config.profiles.read().unwrap().get(n).cloned().unwrap();
+        let quota = "claude: You've hit your 5-hour limit · resets 11:30pm (Europe/Paris)";
+
+        let normal = json!({"id":"ses_a","title":"Fix login bug","agent":"fix","engine":"claude","model":{"id":"opus","providerID":"claude"}});
+        // 0 tools + quota -> fallback planned
+        assert!(plan_harness_fallback(&st, &normal, &get("fix"), harness::Kind::Claude, quota, 0).is_some());
+        // >= 1 tools (mid-work) -> NEVER fall back
+        assert!(plan_harness_fallback(&st, &normal, &get("fix"), harness::Kind::Claude, quota, 1).is_none());
+        // non-quota error -> NEVER fall back
+        assert!(plan_harness_fallback(&st, &normal, &get("fix"), harness::Kind::Claude, "claude exited 1: invalid flag", 0).is_none());
+        // pinned role -> NEVER fall back
+        assert!(plan_harness_fallback(&st, &normal, &get("pinned_role"), harness::Kind::Claude, quota, 0).is_none());
+        // integrator role -> NEVER fall back
+        assert!(plan_harness_fallback(&st, &normal, &get("integrator"), harness::Kind::Claude, quota, 0).is_none());
+        // P1 trunk integrator session (by live id or title) -> NEVER fall back
+        let p1_by_id = json!({"id":"ses_82772a463f1a495791a851d1d3386d4c","title":"integrator","agent":"lead","engine":"claude"});
+        let p1_by_title = json!({"id":"ses_other","title":"P1 · home root on the trunk (integrator)","agent":"lead","engine":"claude"});
+        let p2_title = json!({"id":"ses_p2","title":"P2 · full sessions on other roots","agent":"lead","engine":"claude"});
+        assert!(plan_harness_fallback(&st, &p1_by_id, &get("lead"), harness::Kind::Claude, quota, 0).is_none());
+        assert!(plan_harness_fallback(&st, &p1_by_title, &get("lead"), harness::Kind::Claude, quota, 0).is_none());
+        assert!(plan_harness_fallback(&st, &p2_title, &get("lead"), harness::Kind::Claude, quota, 0).is_some(), "P2 is not pinned");
+        // explicitly pinned session -> NEVER fall back
+        let pinned_sess = json!({"id":"ses_pin","title":"release","agent":"fix","engine":"claude","pinned":true});
+        assert!(plan_harness_fallback(&st, &pinned_sess, &get("fix"), harness::Kind::Claude, quota, 0).is_none());
+        // attached terminal conversation -> NEVER fall back
+        let attached = json!({"id":"ses_trm","title":"term","agent":"build","engine":"claude","harness":{"kind":"claude","id":"u1","attached":true}});
+        assert!(plan_harness_fallback(&st, &attached, &get("build"), harness::Kind::Claude, quota, 0).is_none());
+
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&sdir);
+    }
+
+    /// End-to-end `run_turn` with fake `claude` + fake `agy` binaries and an in-process root upstream:
+    /// 1) 0 tools + quota -> retries once on root glm-5.3, succeeds, card records serving engine + fallback_from
+    /// 2) 1 tool ran + quota -> does NOT fall back, fails with quota error, keeps claude
+    /// 3) pinned role + 0 tools + quota -> does NOT fall back
+    /// 4) P1 trunk integrator session + 0 tools + quota -> does NOT fall back
+    /// 5) double-quota (claude -> antigravity, both hit quota) -> retries ONCE, never loops
+    #[tokio::test]
+    async fn run_turn_fallback_end_to_end() {
+        let _path_guard = harness::TEST_PATH_LOCK.lock().await;
+        let orig_path = std::env::var("PATH").unwrap_or_default();
+
+        // in-process OpenAI-compatible mock root upstream that records requested models
+        let seen_models: Arc<Mutex<Vec<String>>> = Arc::default();
+        let sm = seen_models.clone();
+        let mock_app = Router::new().route(
+            "/chat/completions",
+            post(move |Json(body): Json<Value>| {
+                let sm = sm.clone();
+                async move {
+                    let m = body["model"].as_str().unwrap_or_default().to_string();
+                    sm.lock().unwrap().push(m.clone());
+                    Json(json!({
+                        "choices": [{ "message": { "role": "assistant", "content": format!("SERVED-BY-ROOT:{m}") } }]
+                    }))
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let srv = tokio::spawn(async move { axum::serve(listener, mock_app).await.unwrap() });
+
+        let tmp = std::env::temp_dir().join(format!("ygg-fb-e2e-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let bin_dir = tmp.join("bin");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        let claude_hits = tmp.join("claude.hits");
+        let agy_hits = tmp.join("agy.hits");
+
+        // fake `claude`: inspects prompt on stdin to decide behavior
+        let claude_script = bin_dir.join("claude");
+        std::fs::write(
+            &claude_script,
+            format!(
+                r#"#!/bin/sh
+echo 1 >> '{hits}'
+PROMPT=$(cat)
+case "$PROMPT" in
+  *MIDWORK_QUOTA*)
+    echo '{{"type":"system","subtype":"init","session_id":"cc-mid-1"}}'
+    echo '{{"type":"assistant","session_id":"cc-mid-1","message":{{"content":[{{"type":"tool_use","name":"Bash","input":{{"command":"ls"}}}}]}}}}'
+    echo '{{"type":"result","subtype":"error","is_error":true,"result":"You'\''ve hit your 5-hour limit · resets 11:30pm (Europe/Paris)","session_id":"cc-mid-1"}}'
+    exit 1
+    ;;
+  *QUOTA_BOUNCE*)
+    echo '{{"type":"system","subtype":"init","session_id":"cc-bounce-1"}}'
+    echo '{{"type":"assistant","session_id":"cc-bounce-1","message":{{"content":[{{"type":"text","text":"You'\''ve hit your 5-hour limit · resets 11:30pm (Europe/Paris)"}}]}}}}'
+    echo '{{"type":"result","subtype":"error","is_error":true,"result":"You'\''ve hit your 5-hour limit · resets 11:30pm (Europe/Paris)","session_id":"cc-bounce-1"}}'
+    exit 1
+    ;;
+  *)
+    echo '{{"type":"result","subtype":"success","is_error":false,"result":"CLAUDE-OK","session_id":"cc-ok-1"}}'
+    ;;
+esac
+"#,
+                hits = claude_hits.display()
+            ),
+        )
+        .unwrap();
+        // fake `agy`: hits quota too (for double-quota single-retry proof)
+        let agy_script = bin_dir.join("agy");
+        std::fs::write(
+            &agy_script,
+            format!(
+                r#"#!/bin/sh
+echo 1 >> '{hits}'
+cat >/dev/null
+echo '{{"event":"result","result":{{"status":"ERROR","error":"RESOURCE_EXHAUSTED: quota exceeded"}}}}'
+exit 1
+"#,
+                hits = agy_hits.display()
+            ),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&claude_script, std::fs::Permissions::from_mode(0o755)).unwrap();
+            std::fs::set_permissions(&agy_script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        // SAFETY: serialized by harness::TEST_PATH_LOCK
+        unsafe { std::env::set_var("PATH", format!("{}:{}", bin_dir.display(), orig_path)) };
+
+        let agents_file = tmp.join("agents.json");
+        std::fs::write(
+            &agents_file,
+            r#"{"agent":{
+                "fix":{"harness":"claude","model":"opus"},
+                "pinned_deploy":{"harness":"claude","model":"opus","pinned":true},
+                "double_q":{"harness":"claude","model":"opus","fallback":{"engine":"antigravity","model":"gemini-4-neon-high"}}
+            }}"#,
+        )
+        .unwrap();
+        let ps = profiles::Profiles::load(agents_file.to_str());
+        let (st, sdir) = fb_app(format!("http://{addr}"), ps, vec!["glm-5.3-flash".into(), "glm-5.3".into()]);
+
+        let run_one = |st: AppState, title: &'static str, agent: &'static str, engine: Option<&'static str>, text: &'static str| async move {
+            let info = new_session_on(&st, title, None, Some(agent), engine, None, None);
+            let sid = info["id"].as_str().unwrap().to_string();
+            let umsg = make_message(&sid, "user", vec![text_part(text)]);
+            let tid = umsg["info"]["id"].as_str().unwrap().to_string();
+            with_session(&st, &sid, |s| {
+                s.info["card"] = json!({ "topic": title, "status": "working" });
+                s.messages.push(umsg);
+            });
+            let (tx, _rx) = mpsc::channel(32);
+            let res = run_turn(&st, &sid, &tx, 0, false, &tid).await;
+            let final_info = st.sessions.lock().unwrap().get(&sid).unwrap().info.clone();
+            (res, final_info)
+        };
+
+        // 1. 0 tools + Claude 5-hour quota -> falls back once to root glm-5.3 and succeeds
+        let (res, info) = run_one(st.clone(), "Fix auth", "fix", None, "QUOTA_BOUNCE please fix").await;
+        let msg = res.expect("fallback to root must succeed");
+        assert_eq!(message_text(&msg), "SERVED-BY-ROOT:glm-5.3");
+        assert_eq!(info["engine"], "root");
+        assert_eq!(info["model"]["id"], "glm-5.3");
+        assert_eq!(info["card"]["engine"], "root");
+        assert_eq!(info["card"]["model"], "glm-5.3");
+        assert_eq!(info["card"]["fallback_from"], "claude");
+        assert_eq!(msg["info"]["meta"]["fallback"]["from"], "claude");
+        assert_eq!(msg["info"]["meta"]["fallback"]["to"], "root");
+        assert_eq!(seen_models.lock().unwrap().as_slice(), &["glm-5.3"]);
+
+        // 2. 1 tool ran + quota -> NEVER falls back mid-work
+        let (res, info) = run_one(st.clone(), "Midwork fix", "fix", None, "MIDWORK_QUOTA do work").await;
+        assert!(res.is_err(), "mid-work quota must fail, not fall back");
+        assert_eq!(info["engine"], "claude");
+        assert!(info["card"].get("fallback_from").is_none());
+        assert_eq!(seen_models.lock().unwrap().len(), 1, "root upstream must not be called for mid-work");
+
+        // 3. Pinned role + 0 tools + quota -> NEVER falls back
+        let (res, info) = run_one(st.clone(), "Deploy job", "pinned_deploy", None, "QUOTA_BOUNCE deploy").await;
+        assert!(res.is_err(), "pinned role must not fall back");
+        assert_eq!(info["engine"], "claude");
+        assert!(info["card"].get("fallback_from").is_none());
+        assert_eq!(seen_models.lock().unwrap().len(), 1);
+
+        // 4. P1 trunk integrator session + 0 tools + quota -> NEVER falls back
+        let (res, info) = run_one(st.clone(), "P1 · home root on the trunk (integrator)", "lead", Some("claude"), "QUOTA_BOUNCE merge").await;
+        assert!(res.is_err(), "P1 integrator must not fall back");
+        assert_eq!(info["engine"], "claude");
+        assert!(info["card"].get("fallback_from").is_none());
+        assert_eq!(seen_models.lock().unwrap().len(), 1);
+
+        // 5. Double quota (claude -> antigravity, both hit quota) -> retries ONCE only
+        let (res, info) = run_one(st.clone(), "Double quota", "double_q", None, "QUOTA_BOUNCE double").await;
+        let err = res.expect_err("double quota must fail after one retry");
+        assert!(err.contains("fallback antigravity/gemini-4-neon-high after claude quota"), "{err}");
+        assert_eq!(info["card"]["fallback_from"], "claude");
+        let agy_count = std::fs::read_to_string(&agy_hits).unwrap_or_default().lines().count();
+        assert_eq!(agy_count, 1, "fallback harness must be tried exactly once");
+        assert_eq!(seen_models.lock().unwrap().len(), 1, "must not chain a third attempt to root");
+
+        unsafe { std::env::set_var("PATH", orig_path) };
+        srv.abort();
+        let _ = std::fs::remove_dir_all(&tmp);
+        let _ = std::fs::remove_dir_all(&sdir);
     }
 }

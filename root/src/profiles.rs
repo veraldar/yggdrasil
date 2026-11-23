@@ -49,6 +49,13 @@ pub struct Profile {
     pub rules: Vec<Rule>,
     /// another agent harness runs this session's turns (`claude` | `opencode` | `codex` | `antigravity`)
     pub harness: Option<String>,
+    /// fallback engine when the primary harness hits a hard quota with 0 tools ran
+    /// (`root` | `claude` | `opencode` | `codex` | `antigravity` | `none`); `None` = automatic default
+    pub fallback_harness: Option<String>,
+    /// optional model for the fallback engine (`None` = pick best/default for that engine)
+    pub fallback_model: Option<String>,
+    /// pinned by deploy rules: never automatically fall back to another harness
+    pub pinned: bool,
     /// the role text for lite-tier models (short, few rules); `None` = the full prompt
     pub prompt_lite: Option<String>,
 }
@@ -243,6 +250,9 @@ pub fn builtins() -> Vec<Profile> {
         sessions,
         rules,
         harness: None,
+        fallback_harness: None,
+        fallback_model: None,
+        pinned: false,
         prompt_lite: None,
     };
     let mut coordinator = p(
@@ -254,6 +264,7 @@ pub fn builtins() -> Vec<Profile> {
         allow_only(&["read", "glob", "grep", "webfetch", "todowrite"]),
     );
     coordinator.variant = Some("off".into());
+    coordinator.pinned = true;
     coordinator.prompt_lite = Some(COORDINATOR_LITE.into());
     let mut lead = p("lead", "owns a project end to end: plans, splits into sub-sessions, iterates until done", LEAD_PROMPT, false, true, allow_all());
     lead.prompt_lite = Some(LEAD_LITE.into());
@@ -378,6 +389,9 @@ fn review_profile() -> Profile {
         sessions: false,
         rules,
         harness: None,
+        fallback_harness: None,
+        fallback_model: None,
+        pinned: false,
         prompt_lite: None,
     }
 }
@@ -568,6 +582,9 @@ impl Profiles {
                 sessions: false,
                 rules: Vec::new(),
                 harness: None,
+                fallback_harness: None,
+                fallback_model: None,
+                pinned: false,
                 prompt_lite: None,
             });
             let mut p = base;
@@ -608,6 +625,21 @@ impl Profiles {
                     p.model = p.model.take().filter(|m| crate::harness::antigravity::carry_model(m));
                 }
             }
+            if let Some(b) = a["pinned"].as_bool() {
+                p.pinned = if name == "coordinator" { true } else { b };
+            }
+            if let Some(fb) = a.get("fallback") {
+                if let Some((eng, mdl)) = parse_fallback_value(fb) {
+                    p.fallback_harness = eng;
+                    p.fallback_model = mdl;
+                }
+            }
+            if let Some(fh) = a["fallback_harness"].as_str() {
+                p.fallback_harness = parse_fallback_engine(fh);
+            }
+            if let Some(fm) = a["fallback_model"].as_str().filter(|m| !m.trim().is_empty()) {
+                p.fallback_model = Some(fm.trim().into());
+            }
             // The coordinator's tool scope is the brain's contract (it routes, it does not
             // write); a file entry may describe it but not widen it.
             if name != "coordinator" {
@@ -630,10 +662,55 @@ impl Profiles {
                 .values()
                 .map(|p| {
                     json!({ "name": p.name, "mode": p.mode, "description": p.description,
-                        "model": p.model, "variant": p.variant, "steps": p.steps, "sessions": p.sessions, "harness": p.harness })
+                        "model": p.model, "variant": p.variant, "steps": p.steps, "sessions": p.sessions, "harness": p.harness,
+                        "fallback": fallback_json(p), "pinned": p.pinned })
                 })
                 .collect(),
         )
+    }
+}
+
+fn parse_fallback_engine(raw: &str) -> Option<String> {
+    let t = raw.trim();
+    if t.is_empty() {
+        return None;
+    }
+    if matches!(t, "none" | "off") {
+        return Some("none".into());
+    }
+    engine_name(t).map(String::from)
+}
+
+fn parse_fallback_value(v: &Value) -> Option<(Option<String>, Option<String>)> {
+    match v {
+        Value::Null => Some((None, None)),
+        Value::Bool(false) => Some((Some("none".into()), None)),
+        Value::String(s) => {
+            let t = s.trim();
+            if t.is_empty() {
+                Some((None, None))
+            } else {
+                parse_fallback_engine(t).map(|e| (Some(e), None))
+            }
+        }
+        Value::Object(o) => {
+            let eng_raw = o.get("engine").or_else(|| o.get("harness")).and_then(Value::as_str);
+            let eng = match eng_raw {
+                Some(s) if !s.trim().is_empty() => Some(parse_fallback_engine(s)?),
+                _ => None,
+            };
+            let mdl = o.get("model").and_then(Value::as_str).map(str::trim).filter(|m| !m.is_empty()).map(String::from);
+            Some((eng, mdl))
+        }
+        _ => None,
+    }
+}
+
+fn fallback_json(p: &Profile) -> Value {
+    match (&p.fallback_harness, &p.fallback_model) {
+        (None, None) => Value::Null,
+        (Some(e), None) if e == "none" => json!("none"),
+        (e, m) => json!({ "engine": e, "model": m }),
     }
 }
 
@@ -658,6 +735,7 @@ impl Profiles {
         Some(json!({
             "name": p.name, "description": p.description, "builtin": Self::builtin(&p.name),
             "harness": p.harness.clone().unwrap_or_else(|| "root".into()),
+            "fallback": fallback_json(p), "pinned": p.pinned,
             "model": p.model, "variant": p.variant, "prompt": p.prompt, "prompt_lite": p.prompt_lite,
             "steps": p.steps, "fold": p.fold, "sessions": p.sessions && root, "tools": tools,
             // pattern rules (bash allowlists…) are shown, not flattened, until the user edits tools
@@ -680,7 +758,8 @@ impl Profiles {
         }
         let mut p = self.by_name.get(name).cloned().unwrap_or_else(|| Profile {
             name: name.into(), description: String::new(), mode: "primary".into(), prompt: BUILD_PROMPT.into(), model: None,
-            variant: None, steps: None, fold: false, sessions: false, rules: allow_all(), harness: None, prompt_lite: None,
+            variant: None, steps: None, fold: false, sessions: false, rules: allow_all(), harness: None,
+            fallback_harness: None, fallback_model: None, pinned: false, prompt_lite: None,
         });
         let door = name == "coordinator";
         if let Some(h) = body["harness"].as_str() {
@@ -693,6 +772,19 @@ impl Profiles {
                 "agy" => Some("antigravity".into()),
                 other => return Err(format!("unknown harness {other:?} (root | claude | opencode | codex | antigravity)")),
             };
+        }
+        if let Some(b) = body["pinned"].as_bool() {
+            if door && !b {
+                return Err("the coordinator is always pinned to the root".into());
+            }
+            p.pinned = b;
+        }
+        if let Some(fb) = body.get("fallback") {
+            let Some((eng, mdl)) = parse_fallback_value(fb) else {
+                return Err("invalid fallback (want null | \"none\" | engine | {engine, model?})".into());
+            };
+            p.fallback_harness = eng;
+            p.fallback_model = mdl;
         }
         if let Some(d) = body["description"].as_str() {
             p.description = d.trim().chars().take(300).collect();
@@ -759,6 +851,19 @@ impl Profiles {
         entry["description"] = json!(p.description);
         entry["mode"] = json!(p.mode);
         entry["harness"] = json!(p.harness.clone().unwrap_or_else(|| "root".into()));
+        let fb = fallback_json(p);
+        if fb.is_null() {
+            if let Some(o) = entry.as_object_mut() {
+                o.remove("fallback");
+            }
+        } else {
+            entry["fallback"] = fb;
+        }
+        if p.pinned {
+            entry["pinned"] = json!(true);
+        } else if let Some(o) = entry.as_object_mut() {
+            o.remove("pinned");
+        }
         entry["model"] = json!(p.model);
         entry["variant"] = json!(p.variant);
         entry["prompt"] = json!(p.prompt);
@@ -971,7 +1076,8 @@ mod tests {
 
     fn prof(rules: Vec<Rule>) -> Profile {
         Profile { name: "t".into(), description: String::new(), mode: "primary".into(), prompt: String::new(), model: None,
-            variant: None, steps: None, fold: false, sessions: false, rules, harness: None, prompt_lite: None }
+            variant: None, steps: None, fold: false, sessions: false, rules, harness: None,
+            fallback_harness: None, fallback_model: None, pinned: false, prompt_lite: None }
     }
 
     #[test]
@@ -1228,5 +1334,43 @@ mod tests {
         let s = ps.get("scout").unwrap();
         assert_eq!(s.steps, Some(5));
         assert!(s.check("read", &json!({"filePath": "x"})).is_ok() && s.check("bash", &json!({"command": "ls"})).is_err());
+    }
+
+    #[test]
+    fn fallback_and_pinned_load_upsert_and_persist() {
+        let dir = std::env::temp_dir().join(format!("ygg-prof-fb-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("agents.json");
+        std::fs::write(
+            &f,
+            r#"{"agent":{
+                "fix":{"harness":"claude","model":"opus","fallback":{"engine":"root","model":"glm-5.3"}},
+                "integrator":{"harness":"claude","model":"opus","pinned":true},
+                "strict":{"harness":"claude","fallback":"none"}
+            }}"#,
+        )
+        .unwrap();
+        let mut ps = Profiles::load(f.to_str());
+        let fix = ps.get("fix").unwrap();
+        assert_eq!(fix.fallback_harness.as_deref(), Some("root"));
+        assert_eq!(fix.fallback_model.as_deref(), Some("glm-5.3"));
+        assert!(!fix.pinned);
+        assert!(ps.get("integrator").unwrap().pinned);
+        assert_eq!(ps.get("strict").unwrap().fallback_harness.as_deref(), Some("none"));
+        assert!(ps.get("coordinator").unwrap().pinned);
+        // upsert validates fallback and pinned
+        assert!(ps.upsert("fix", &json!({"fallback": "emacs"})).is_err());
+        assert!(ps.upsert("coordinator", &json!({"pinned": false})).is_err());
+        ps.upsert("lead", &json!({"harness": "claude", "fallback": {"engine": "agy", "model": "gemini-4-neon-high"}, "pinned": false})).unwrap();
+        let again = Profiles::load(f.to_str());
+        let lead = again.get("lead").unwrap();
+        assert_eq!(lead.fallback_harness.as_deref(), Some("antigravity"));
+        assert_eq!(lead.fallback_model.as_deref(), Some("gemini-4-neon-high"));
+        assert!(!lead.pinned);
+        let d = again.detail("lead").unwrap();
+        assert_eq!(d["fallback"], json!({"engine": "antigravity", "model": "gemini-4-neon-high"}));
+        assert_eq!(d["pinned"], false);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

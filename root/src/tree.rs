@@ -397,10 +397,21 @@ pub(crate) fn card_line(st: &AppState, id: &str, s: &Session, indent: usize) -> 
         .unwrap_or_default();
     // another root's MAIN (roots.rs): named as what it is, not by the stand-in agent here
     let who = if crate::roots::is_root_main(s) { "MAIN".to_string() } else { crate::profile_name_of(st, &s.info) };
-    // its engine when it is not the root (roles rework: a lead on Claude Code reads `lead·claude`)
-    let who = match s.info["engine"].as_str().filter(|e| *e != "root" && !s.info["remote"].is_object()) {
-        Some(e) => format!("{who}·{e}"),
-        None => who,
+    // its serving engine (roles rework: a lead on Claude Code reads `lead·claude`; a fallback
+    // records both serving and original engine, e.g. `fix·root←claude`)
+    let eng = card["engine"].as_str().or(s.info["engine"].as_str());
+    let who = if s.info["remote"].is_object() {
+        match (eng.filter(|e| *e != "root"), card["fallback_from"].as_str()) {
+            (_, Some(from)) => format!("{who}·{}←{from}", eng.unwrap_or("root")),
+            (Some(e), None) => format!("{who}·{e}"),
+            _ => who,
+        }
+    } else {
+        match (eng, card["fallback_from"].as_str()) {
+            (e, Some(from)) => format!("{who}·{}←{from}", e.unwrap_or("root")),
+            (Some(e), None) if e != "root" => format!("{who}·{e}"),
+            _ => who,
+        }
     };
     format!(
         "{}- \"{}\" [{}{on}, {}, {} ago] {}{} (id={id})",
@@ -511,8 +522,13 @@ fn start(st: &AppState, caller: &str, input: &Value) -> Out {
     let sid = info["id"].as_str().unwrap_or_default().to_string();
     let on = info["engine"].as_str().filter(|e| *e != "root").map(|e| format!(" on {e}")).unwrap_or_default();
     let hops = crate::roots::hops_here(st, caller);
+    let pinned = input["pinned"] == true;
     with_session(st, &sid, |s| {
+        if pinned {
+            s.info["pinned"] = json!(true);
+        }
         s.info["card"] = json!({ "topic": title, "brief": clip(brief, 600), "status": "working", "by": caller,
+            "engine": info["engine"], "model": info["model"]["id"],
             "created": now_ms(), "updated": now_ms() });
         // L6: work placed here from another root stays counted in what it starts here
         if hops > 0 {
@@ -655,8 +671,10 @@ pub(crate) fn read(st: &AppState, caller: &str, input: &Value) -> Out {
         .flatten()
         .filter_map(|k| sessions.get(k).map(|ks| card_line(st, k, ks, 1)))
         .collect();
+    let eng = card["engine"].as_str().or(s.info["engine"].as_str()).unwrap_or("root");
+    let fb = card["fallback_from"].as_str().map(|f| format!(" (fallback from {f})")).unwrap_or_default();
     let mut out = format!(
-        "\"{}\" (id={t}) profile={} model={} status={}{}\nbrief: {}\nsummary: {}\n",
+        "\"{}\" (id={t}) profile={} engine={eng}{fb} model={} status={}{}\nbrief: {}\nsummary: {}\n",
         title_of(s),
         crate::profile_name_of(st, &s.info),
         s.info["model"]["id"].as_str().unwrap_or("-"),
@@ -1006,11 +1024,39 @@ async fn digest(st: &AppState, sid: &str, f: &Facts) -> Value {
     if status != "blocked" && question.is_none() && relevance == "needs_you" && needs.is_empty() {
         relevance = "worth_knowing".into();
     }
-    json!({
+    let (served_engine, served_model, fallback_from, fallback_reason) = {
+        let sessions = st.sessions.lock().unwrap();
+        sessions
+            .get(sid)
+            .map(|s| {
+                let c = &s.info["card"];
+                (
+                    c["engine"].as_str().or(s.info["engine"].as_str()).map(String::from),
+                    c["model"].as_str().or(s.info["model"]["id"].as_str()).map(String::from),
+                    c["fallback_from"].as_str().map(String::from),
+                    c["fallback_reason"].as_str().map(String::from),
+                )
+            })
+            .unwrap_or((None, None, None, None))
+    };
+    let mut ev = json!({
         "id": new_id("evt"), "at": now_ms(), "from": sid, "title": f.title, "profile": f.profile,
         "status": status, "headline": headline, "summary": summary, "needs": needs, "relevance": relevance,
         "body": clip(&f.reply, 2500), "delivered": false,
-    })
+    });
+    if let Some(e) = served_engine {
+        ev["engine"] = json!(e);
+    }
+    if let Some(m) = served_model {
+        ev["model"] = json!(m);
+    }
+    if let Some(ff) = fallback_from {
+        ev["fallback_from"] = json!(ff);
+    }
+    if let Some(fr) = fallback_reason {
+        ev["fallback_reason"] = json!(fr);
+    }
+    ev
 }
 
 fn write_card(st: &AppState, sid: &str, ev: &Value) {
@@ -1021,6 +1067,11 @@ fn write_card(st: &AppState, sid: &str, ev: &Value) {
         }
         for k in ["status", "headline", "summary", "needs"] {
             card[k] = ev[k].clone();
+        }
+        for k in ["engine", "model", "fallback_from", "fallback_reason"] {
+            if !ev[k].is_null() {
+                card[k] = ev[k].clone();
+            }
         }
         card["updated"] = json!(now_ms());
         card["runs"] = json!(card["runs"].as_u64().unwrap_or(0) + 1);
