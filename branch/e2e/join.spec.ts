@@ -162,6 +162,16 @@ test('join: QR approve → 20 link tokens once → bridge accepts → allowlist 
   expect(expiring.status).toBe(201);
   const expiringAt = Date.now();
 
+  // a rig with a WireGuard key starts at the same time so it expires and renews in-place
+  const RENEW_WG = Buffer.alloc(32, 0x31).toString('base64');
+  const renewFirst = await joinFrom(at(12).base, at(12).from, {
+    name: 'omarchy-lab',
+    os: 'linux',
+    host: 'omarchy',
+    wg_pub: RENEW_WG,
+  });
+  expect(renewFirst.status).toBe(201);
+
   let deviceId = '';
   await test.step('pair a phone (the box mints a code; the phone claims it and lands on home)', async () => {
     const code = await request.post(`${BASE}/api/pair/code`, {
@@ -423,6 +433,112 @@ test('join: QR approve → 20 link tokens once → bridge accepts → allowlist 
     expect(u.body).toEqual({ status: 'expired', why: 'undelivered' });
     const list = (await (await phoneApi(phoneCtx, 'get', '/api/roots')).json()).roots as J[];
     expect(list.find((x) => x.id === 'local-2')?.delivered_at).toBeNull();
+  });
+
+  await test.step('renewal keeps the same approve URL & code; link minted BEFORE renewal approves AFTER it', async () => {
+    const r0 = renewFirst.body;
+    // expired before renewal: old joiner gets 410
+    const dead = await poll(String(r0.poll_url), String(r0.secret), at(12).from);
+    expect(dead.status).toBe(410);
+    expect(dead.body.status).toBe('expired');
+
+    // rig renews with the same wg_pub -> req, code, and approve_url stay identical
+    const renewSecond = await joinFrom(at(12).base, at(12).from, {
+      name: 'omarchy-lab',
+      os: 'linux',
+      host: 'omarchy',
+      wg_pub: RENEW_WG,
+    });
+    expect(renewSecond.status).toBe(201);
+    const r1 = renewSecond.body;
+    expect(r1.req).toBe(r0.req);
+    expect(r1.code).toBe(r0.code);
+    expect(r1.approve_url).toBe(r0.approve_url);
+    expect(r1.secret).not.toBe(r0.secret);
+    expect((await poll(String(r0.poll_url), String(r0.secret), at(12).from)).status).toBe(401);
+    expect((await poll(String(r1.poll_url), String(r1.secret), at(12).from)).status).toBe(202);
+
+    // open the PRE-RENEWAL approve_url on the paired phone: buttons render and approve succeeds
+    expect((await phoneCtx.request.post(`${LAN}/api/pair/refresh`)).status()).toBe(200);
+    await phone.goto(String(r0.approve_url));
+    await expect(phone.getByTestId('join-name')).toHaveText('omarchy-lab');
+    await expect(phone.getByTestId('join-code')).toHaveText(String(r0.code));
+    await expect(phone.getByTestId('join-wg-fp')).toBeVisible();
+    await phone.getByTestId('join-approve').click();
+    await expect(phone.getByTestId('join-status')).toContainText('omarchy-lab');
+
+    const collected = await poll(String(r1.poll_url), String(r1.secret), at(12).from);
+    expect(collected.status).toBe(200);
+    expect(collected.body.root_id).toBe('omarchy-lab');
+    const saved = JSON.parse(readFileSync(join(STATE, 'roots.json'), 'utf8')).roots as J[];
+    const pinned = saved.find((x) => x.id === 'omarchy-lab');
+    expect(pinned?.wg_pub).toBe(RENEW_WG);
+    expect(pinned?.wg_ip).toBeTruthy();
+  });
+
+  await test.step('in-app roots sheet: pending joins show live, survive renewal, approve & refuse in one tap', async () => {
+    const BOX_WG = Buffer.alloc(32, 0x42).toString('base64');
+    const NO_WG = Buffer.alloc(32, 0x43).toString('base64');
+    const jBox = await joinFrom(at(13).base, at(13).from, {
+      name: 'debian-box',
+      os: 'linux',
+      host: 'debian-box',
+      wg_pub: BOX_WG,
+    });
+    expect(jBox.status).toBe(201);
+    // live renewal keeps the exact same req id
+    const jBoxRenew = await joinFrom(at(13).base, at(13).from, {
+      name: 'debian-box',
+      os: 'linux',
+      host: 'debian-box',
+      wg_pub: BOX_WG,
+    });
+    expect(jBoxRenew.status).toBe(201);
+    expect(jBoxRenew.body.req).toBe(jBox.body.req);
+
+    const jNo = await joinFrom(at(14).base, at(14).from, {
+      name: 'stray-laptop',
+      os: 'macos',
+      host: 'stray.local',
+      wg_pub: NO_WG,
+    });
+    expect(jNo.status).toBe(201);
+
+    expect((await phoneCtx.request.post(`${LAN}/api/pair/refresh`)).status()).toBe(200);
+    // mark first-run door complete on this phone so `/` renders the home list with roots-key
+    await phone.evaluate(() => localStorage.setItem('bifrost-door', 'v2'));
+    await phone.goto(`${LAN}/`);
+    await expect(phone.getByTestId('joins-badge')).toHaveText('2', { timeout: 15_000 });
+    await phone.getByTestId('roots-key').click();
+    const sheet = phone.getByTestId('roots-sheet');
+    await expect(sheet).toBeVisible();
+
+    const boxRow = sheet.locator('[data-testid="join-row"][data-join="debian-box"]');
+    await expect(boxRow).toBeVisible({ timeout: 10_000 });
+    await expect(boxRow.getByTestId('join-code')).toHaveText(String(jBox.body.code));
+    await expect(boxRow.getByTestId('join-left')).toContainText(':');
+    await boxRow.getByTestId('join-add').click();
+    await expect(boxRow).toHaveCount(0, { timeout: 15_000 });
+
+    const boxPoll = await poll(
+      String(jBoxRenew.body.poll_url),
+      String(jBoxRenew.body.secret),
+      at(13).from
+    );
+    expect(boxPoll.status).toBe(200);
+    expect(boxPoll.body.root_id).toBe('debian-box');
+    const saved = JSON.parse(readFileSync(join(STATE, 'roots.json'), 'utf8')).roots as J[];
+    expect(saved.find((x) => x.id === 'debian-box')?.wg_pub).toBe(BOX_WG);
+
+    const noRow = sheet.locator('[data-testid="join-row"][data-join="stray-laptop"]');
+    await expect(noRow).toBeVisible();
+    await noRow.getByTestId('join-refuse').click();
+    await expect(noRow).toHaveCount(0, { timeout: 15_000 });
+    expect(
+      (await poll(String(jNo.body.poll_url), String(jNo.body.secret), at(14).from)).body
+    ).toEqual({
+      status: 'refused',
+    });
   });
 
   await test.step('join is rate-limited per client address: 5 per 10 min, then 429', async () => {

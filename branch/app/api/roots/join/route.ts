@@ -45,14 +45,17 @@ export async function POST(req: Request) {
   }
   // "Same as the home root" (L15): the machine asks for the home root's model settings
   const model = body?.model === 'home' ? ('home' as const) : undefined;
-  const j = createJoin({ name: name || host, os, host, wgPub, model }, peerOf(req));
+  const base = (process.env.BIFROST_PUBLIC_URL || new URL(req.url).origin).replace(/\/$/, '');
+  const j = createJoin(
+    { name: name || host, os, host, wgPub, model, approveBase: base },
+    peerOf(req)
+  );
   if (!j) {
     return NextResponse.json(
       { error: 'too many joins waiting for approval — try again later' },
       { status: 503, headers: { 'Retry-After': '60', ...NO_STORE } }
     );
   }
-  const base = (process.env.BIFROST_PUBLIC_URL || new URL(req.url).origin).replace(/\/$/, '');
   return NextResponse.json(
     {
       req: j.req,

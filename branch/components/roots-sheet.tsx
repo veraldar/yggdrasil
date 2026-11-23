@@ -36,7 +36,21 @@ type Root = {
   main?: string | null;
   main_proxy?: string | null;
 };
-export type Tree = { home: Home | null; roots: Root[] };
+/** a pending machine join waiting for the owner's tap (from GET /api/roots `joins`) */
+export type PendingJoin = {
+  req: string;
+  name: string;
+  os: string;
+  host: string;
+  code: string;
+  wg_fp: string | null;
+  model?: 'home' | null;
+  status: string;
+  expires_at: string;
+  root_id?: string | null;
+  approve_url?: string;
+};
+export type Tree = { home: Home | null; roots: Root[]; joins?: PendingJoin[] };
 type Row = Root & { home?: boolean };
 type RSess = {
   id: string;
@@ -106,6 +120,8 @@ export function RootsSheet({
   const [creating, setCreating] = useState(false);
   const [name, setName] = useState('');
   const [failed, setFailed] = useState('');
+  const [joins, setJoins] = useState<PendingJoin[]>([]);
+  const [now, setNow] = useState(() => Date.now());
   const hold = useRef<{ timer: ReturnType<typeof setTimeout>; x: number; y: number } | null>(null);
   const held = useRef(false);
   const treeCb = useRef(onTree);
@@ -120,11 +136,53 @@ export function RootsSheet({
       if (!r.ok) return;
       const t = (await r.json()) as Tree;
       setTree(t);
+      setJoins(t.joins ?? []);
       treeCb.current?.(t);
     } catch {
       /* transient — keep the last answer */
     }
   }, []);
+
+  /** Approve or refuse a pending machine join in-app; on a tailnet origin without a paired
+   *  device cookie, hand off to the join's paired public approve URL instead of failing dead. */
+  const decideJoin = useCallback(
+    async (j: PendingJoin, what: 'approve' | 'refuse') => {
+      setBusy(true);
+      setFailed('');
+      try {
+        const r = await fetch(`/api/roots/join/${encodeURIComponent(j.req)}/${what}`, {
+          method: 'POST',
+        });
+        const v = (await r.json().catch(() => ({}))) as { error?: string };
+        if (r.status === 401 && j.approve_url) {
+          try {
+            if (new URL(j.approve_url).origin !== window.location.origin) {
+              window.location.assign(j.approve_url);
+              return;
+            }
+          } catch {
+            /* fall through to error */
+          }
+        }
+        if (!r.ok) {
+          setFailed(v.error || `${what} failed`);
+          if (r.status === 404 || r.status === 409 || r.status === 410) void loadTree();
+        } else {
+          setJoins((js) => {
+            const next = js.filter((x) => x.req !== j.req);
+            if (tree) treeCb.current?.({ ...tree, joins: next });
+            return next;
+          });
+          void loadTree();
+        }
+      } catch {
+        setFailed('could not reach the box');
+      } finally {
+        setBusy(false);
+      }
+    },
+    [loadTree, tree]
+  );
 
   const loadView = useCallback(async (id: string) => {
     try {
@@ -147,6 +205,14 @@ export function RootsSheet({
     }, POLL_MS);
     return () => clearInterval(t);
   }, [loadTree]);
+
+  const hasJoins = joins.length > 0;
+  useEffect(() => {
+    if (!hasJoins) return;
+    setNow(Date.now());
+    const c = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(c);
+  }, [hasJoins]);
 
   useEffect(() => {
     if (!at) return;
@@ -353,6 +419,84 @@ export function RootsSheet({
       </header>
 
       <div className="min-h-0 flex-1 overflow-y-auto px-3 py-2">
+        {!row && joins.length > 0 && (
+          <div className="mb-3" data-testid="joins-list">
+            <p className="px-1 pb-1 text-[10px]" style={dim}>
+              wants to join
+            </p>
+            <ul className="flex flex-col gap-1">
+              {joins.map((j) => {
+                const left = Math.max(0, Math.round((Date.parse(j.expires_at) - now) / 1000));
+                const mm = Math.floor(left / 60);
+                const ss = String(left % 60).padStart(2, '0');
+                return (
+                  <li
+                    key={j.req}
+                    className="oz-box p-2.5"
+                    data-testid="join-row"
+                    data-join={j.name}
+                    data-req={j.req}
+                  >
+                    <div className="oz-r1">
+                      <span aria-hidden="true" style={{ color: 'var(--oz-warn, #e6a23c)' }}>
+                        ●
+                      </span>
+                      <span className="t">{j.name}</span>
+                      <span
+                        className="oz-st"
+                        data-testid="join-left"
+                        style={{ color: left > 0 ? undefined : 'var(--oz-danger)' }}
+                      >
+                        {left > 0 ? `${mm}:${ss}` : 'expired'}
+                      </span>
+                    </div>
+                    <div className="oz-r2">
+                      {[j.os, j.host, j.wg_fp ? `key ${j.wg_fp}` : ''].filter(Boolean).join(' · ')}
+                    </div>
+                    {j.model === 'home' && (
+                      <div className="oz-r2" data-testid="join-model">
+                        shares home model &amp; key
+                      </div>
+                    )}
+                    <div className="flex items-center justify-between gap-2 pt-1.5">
+                      <span
+                        className="font-mono text-[15px] tracking-[0.15em]"
+                        data-testid="join-code"
+                      >
+                        {j.code}
+                      </span>
+                      <span className="flex gap-1.5">
+                        <button
+                          type="button"
+                          className="oz-k"
+                          disabled={busy}
+                          data-testid="join-add"
+                          onClick={() => decideJoin(j, 'approve')}
+                        >
+                          Add to my tree
+                        </button>
+                        <button
+                          type="button"
+                          className="oz-k red"
+                          disabled={busy}
+                          data-testid="join-refuse"
+                          onClick={() => decideJoin(j, 'refuse')}
+                        >
+                          Refuse
+                        </button>
+                      </span>
+                    </div>
+                  </li>
+                );
+              })}
+            </ul>
+            {failed && (
+              <p role="alert" className="px-1 pt-1.5 text-[11px] text-[var(--oz-danger)]">
+                {failed}
+              </p>
+            )}
+          </div>
+        )}
         {!row && (
           <ul className="flex flex-col gap-1" data-testid="roots-list">
             {!tree && (
