@@ -25,26 +25,16 @@ export function PinStateLine() {
   const [s, setS] = useState(pinState());
   useEffect(() => onPinState((state, why) => setS({ state, why })), []);
   return (
+    // the look and the place are styles/brand.css § pin (a caption like the band's, and a spot
+    // no page's chrome uses — on the front page, the roots' top-right corner)
     <div
+      className="oz-pin"
       data-testid="pin-state"
       data-state={s.state}
       title={s.why}
       hidden={s.state === 'off'}
-      style={{
-        position: 'fixed',
-        left: 8,
-        bottom: 'calc(6px + env(safe-area-inset-bottom))',
-        zIndex: 60,
-        font: '10px/1.4 var(--font-commit-mono, monospace)',
-        padding: '1px 6px',
-        borderRadius: 8,
-        pointerEvents: 'none',
-        opacity: s.state === 'pinned' ? 0.55 : 0.9,
-        color:
-          s.state === 'refused' ? '#ff6b6b' : s.state === 'fallback' ? '#e0b44c' : 'currentColor',
-        border: '1px solid currentColor',
-      }}
     >
+      <i aria-hidden="true" />
       {SAY[s.state]}
     </div>
   );
