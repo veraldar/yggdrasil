@@ -36,3 +36,13 @@ Report the branch to P1 (merges + deploys).
 - reported to MAIN for P1 (merge + deploy). After the deploy: the voice agent must be restarted
   with the new branch/voice/agent.py (it marks held turns voice) — P1's deploy does that.
 Long jobs: `systemd-run --user --unit <name> --collect --nice=10` (a brain restart kills children).
+
+## 11-23 — L16 hands-free exception (branch p2-handsfree off tree-next 0340cca8)
+- Conflict found: lead-review L16 (11-20 18:05) says hands-free speaks every answer, typed ones too;
+  P1 merged p2-spoken with a "strict L16 default" (597d54a0, 11-20 23:04, an order recorded as
+  "owner via MAIN 23:01" — the owner's own words at 23:01 were only "should have token now...") and
+  it went live: in hands-free a typed turn's answer is NOT spoken. MAIN decided 11-23: keep the
+  exception (speak every answer in hands-free).
+- ade078b0: the override is undone (answersTyped + its 2 tests removed); S16.fr8 added (hands-free
+  on lab, a typed turn → its answer spoken, STT checks it).
+- Proof run: unit p2-handsfree → ~/.cache/p2-reach/handsfree/status (S16 twice + held spec).
