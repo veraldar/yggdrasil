@@ -13,7 +13,7 @@ import {
   urlHash,
 } from '@/lib/file-ref';
 import { ocFetch, PIN_HEADER, resolveId, sessionGone } from '@/lib/oc';
-import { hideNarration, stripStationLine } from '@/lib/station-hide';
+import { hideNarration, stripStationLine, stripUserMachinery } from '@/lib/station-hide';
 import { bustCache } from '@/lib/oc-cache';
 import { buildParts, forward, runEnded } from '@/lib/oc-forward';
 import { isRunLive, liveSince, runEndedAt } from '@/lib/oc-live';
@@ -102,20 +102,25 @@ export async function GET(req: Request, ctx: { params: Promise<{ id: string }> }
     const errors = new URL(req.url).searchParams.get('errors') === '1';
     const msgs = await ocFetch(`/session/${sid}/message${log ? '?internal=1' : ''}`);
     const out = msgs.map((m: any) => {
-      const text = stripStationLine(stripCtx(
+      const role = m.info?.role || m.role;
+      const sender = role === 'user' ? senderOf(m.info?.meta) : {};
+      const shown = stripStationLine(stripCtx(
         (m.parts || [])
           .filter((p: any) => p.type === 'text')
           .map((p: any) => p.text || '')
           .join('\n')
           .trim()
       ));
+      // a turn shown in the owner's voice "(you)": injected reports and brain blocks never read
+      // as the owner's words — pure machinery renders as nothing, the owner's own words stay
+      const text = role === 'user' && !sender.from && !sender.auto ? stripUserMachinery(shown) : shown;
       // tool-only steps stay invisible on the phone: the busy indicator
       // already shows activity, ⚙ lines were just clutter (user req)
       return {
         id: m.info?.id,
         // a reply: the message it answers (with messages waiting, not the one just before it)
         parent: m.info?.parentID || undefined,
-        role: m.info?.role || m.role,
+        role,
         text,
         ...fileViews(m.parts || []),
         time: m.info?.time?.created || 0,
@@ -132,7 +137,7 @@ export async function GET(req: Request, ctx: { params: Promise<{ id: string }> }
         stopped: (m.info?.role || m.role) === 'assistant' && m.info?.error ? true : undefined,
         // who wrote it when not the owner: another session (here or on another root), or the
         // brain itself (a report, a wake-up). Older messages carry only the sender's id (origin)
-        ...((m.info?.role || m.role) === 'user' && senderOf(m.info?.meta)),
+        ...sender,
         ...(errors && m.info?.error && { error: String(m.info.error?.data?.message || m.info.error?.name || 'error') }),
         ...(log && {
           internal: m.info?.meta?.internal === true ? true : undefined,
