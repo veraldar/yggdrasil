@@ -223,7 +223,8 @@ WantedBy=default.target
 EOF
   # the trunk meter's reader (trunk observability, proposal v2): the morning page at 07:00 (filed in
   # MAIN's inbox as one line + the link) and a watcher every 5 min (an outage, a theft signal, a slow
-  # revoke -> one line in MAIN's inbox). Read-only on the meter's files; posts never start a model turn.
+  # revoke -> one line in MAIN's inbox, each incident once). Read-only on the meter's files. A post is
+  # never a transcript turn, but each costs one digest call on the brain's model and may wake MAIN.
   local t cmd when
   for t in report watch; do
     cmd="day --post"; when="OnCalendar=*-*-* 07:00:00"
@@ -231,6 +232,8 @@ EOF
     cat >"$UNITS/hub-trunk-$t.service" <<EOF
 [Unit]
 Description=yggdrasil home root: the trunk meter's $t (scripts/trunk-report.py $cmd)
+# a release without the reader (a way back to an older one) skips cleanly, it never fails
+ConditionPathExists=$HUB/current/scripts/trunk-report.py
 
 [Service]
 Type=oneshot
@@ -245,7 +248,6 @@ Description=yggdrasil home root: the trunk meter's $t
 
 [Timer]
 $when
-Persistent=true
 
 [Install]
 WantedBy=timers.target
@@ -254,6 +256,8 @@ EOF
   systemctl --user daemon-reload
   if [ -f "$HUB/current/scripts/trunk-report.py" ]; then
     systemctl --user enable -q --now hub-trunk-report.timer hub-trunk-watch.timer || true
+  else
+    systemctl --user disable -q --now hub-trunk-report.timer hub-trunk-watch.timer 2>/dev/null || true
   fi
   echo "rendered: hub-brain hub-librarian hub-cclive hub-voice-agent hub-app hub-app-tailnet hub-bridge hub-trunk-{report,watch}.timer"
 }
@@ -454,6 +458,8 @@ deploy() {
   if [ "$bad" = 1 ]; then
     echo "== deploy $id: failed — back to $prev"
     ln -sfn "$prev" "$HUB/current"
+    render >/dev/null # the previous release's units (its trunk-meter timers, or none)
+    systemctl --user stop 'hub-trunk-release-check-*.timer' 2>/dev/null || true
     if [ "$brain" = 1 ]; then
       # the new release may have changed the sessions when it started: the old one gets them back as
       # it left them
@@ -511,6 +517,7 @@ rollback() {
   detach rollback "$id" "$bk"
   ln -sfn "$HUB/releases/$id" "$HUB/current"
   render
+  systemctl --user stop 'hub-trunk-release-check-*.timer' 2>/dev/null || true
   systemctl --user stop hub-brain
   restore_data "$bk" || { echo "!! data not restored: hub-brain stays stopped — look at $PV/data"; exit 1; }
   for u in $ALL hub-wg; do systemctl --user is-enabled -q "$u" 2>/dev/null && systemctl --user restart "$u"; done

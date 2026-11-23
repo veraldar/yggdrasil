@@ -15,13 +15,14 @@
  *   BIFROST_OBS_DIR=<dir>  where; else `<the devices file's folder>/../obs` (the bridge's)
  * Files: app-events-YYYY-MM-DD.jsonl (UTC), deleted after 14 days by the bridge's meter.
  */
-import { appendFile, mkdir } from 'fs/promises';
+import { appendFile, chmod, mkdir } from 'fs/promises';
 import path from 'path';
 
 const MAX_QUEUE = 2000;
 const queue: string[] = [];
 let dropped = 0;
 let timer: ReturnType<typeof setInterval> | null = null;
+let flushing = false;
 let ready: Promise<string | null> | null = null;
 
 export function obsOff(): boolean {
@@ -73,7 +74,9 @@ export function event(kind: string, fields: Record<string, unknown> = {}): void 
 
 /** Write what is queued (the timer calls it; tests call it directly). */
 export async function flush(): Promise<number> {
-  if (queue.length === 0) return 0;
+  // one write at a time: a slow disk never piles appends up on node's thread pool
+  if (queue.length === 0 || flushing) return 0;
+  flushing = true;
   const lines = queue.splice(0, queue.length);
   try {
     ready ??= (async () => {
@@ -81,18 +84,21 @@ export async function flush(): Promise<number> {
       if (!d) return null;
       // device ids and regions live here: the owner's eyes only (the bridge makes it 0700 too)
       await mkdir(d, { recursive: true, mode: 0o700 });
+      await chmod(d, 0o700); // an existing folder too
       return d;
     })();
     const d = await ready;
     if (!d) return 0;
     // one file per UTC day; a batch spanning midnight lands by its first line's day
     const ts = Number(JSON.parse(lines[0]).ts) || Date.now();
-    await appendFile(path.join(d, `app-events-${day(ts)}.jsonl`), lines.join('\n') + '\n');
+    await appendFile(path.join(d, `app-events-${day(ts)}.jsonl`), lines.join('\n') + '\n', { mode: 0o600 });
     return lines.length;
   } catch {
     ready = null;
     dropped += lines.length;
     return 0;
+  } finally {
+    flushing = false;
   }
 }
 

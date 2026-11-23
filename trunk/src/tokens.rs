@@ -223,11 +223,6 @@ impl TokenStore {
         let hash = hash_token(raw);
         self.with(|s| s.access.get(&hash).map(|(d, _, _)| d.clone()).or_else(|| s.v1.get(&hash).cloned()))
     }
-
-    /// The registry file (the meter keeps its folder beside it).
-    pub fn path(&self) -> &std::path::Path {
-        &self.path
-    }
 }
 
 #[derive(serde::Deserialize)]
@@ -302,7 +297,7 @@ impl RegFile {
 /// `2026-11-23T11:41:17.123Z` (JS toISOString) → unix ms. UTC only (what the app writes).
 pub fn parse_iso_ms(t: &str) -> Option<u64> {
     let b = t.as_bytes();
-    if b.len() < 20 || b[4] != b'-' || b[7] != b'-' || b[10] != b'T' || !t.ends_with('Z') {
+    if !t.is_ascii() || b.len() < 20 || b[4] != b'-' || b[7] != b'-' || b[10] != b'T' || !t.ends_with('Z') {
         return None;
     }
     let n = |r: std::ops::Range<usize>| t.get(r)?.parse::<i64>().ok();
@@ -340,6 +335,7 @@ mod tests {
         assert_eq!(parse_iso_ms("2026-11-22T19:08:52.596Z"), Some(1_795_374_532_596));
         assert_eq!(parse_iso_ms("2000-02-29T00:00:00Z"), Some(951_782_400_000));
         assert_eq!(parse_iso_ms("yesterday"), None);
+        assert_eq!(parse_iso_ms("2026-11-22T19:08:52.5ééZ"), None); // never a panic on a split char
     }
 
     fn store(json: serde_json::Value) -> (TokenStore, PathBuf) {

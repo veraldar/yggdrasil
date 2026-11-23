@@ -217,7 +217,7 @@ pub fn set(l: &AtomicU64, v: u64) {
 /// A counter whose name is known only at run time (log targets): a small locked map, used
 /// on rare paths only (a warning line, never a packet).
 pub fn inc_named(name: &str) {
-    let mut m = named().lock().unwrap();
+    let mut m = named().lock().unwrap_or_else(|e| e.into_inner());
     *m.entry(name.to_string()).or_insert(0) += 1;
 }
 
@@ -321,7 +321,7 @@ struct Meter {
     proc_: String,
     dir: Option<PathBuf>,
     rel: String,
-    events: SyncSender<(String, Value)>,
+    events: SyncSender<Msg>,
     ring: Mutex<VecDeque<Value>>,
     totals: Mutex<Map<String, Value>>,
     /// minute lines other processes sent this one (the ap's, over the channel): proc → ring
@@ -329,6 +329,12 @@ struct Meter {
     hooks: Mutex<Vec<Box<dyn Fn(&Value) + Send>>>,
     sources: Mutex<Vec<(String, Box<dyn Fn() -> Option<Value> + Send>)>>,
     started: u64,
+}
+
+/// What the writer thread writes: an event, or a minute line another process sent (the ap's).
+enum Msg {
+    Event(String, Value),
+    Foreign(String, Value),
 }
 
 static M: OnceLock<Meter> = OnceLock::new();
@@ -387,7 +393,7 @@ pub fn init(proc_: &str, dir: Option<PathBuf>) {
         }
     }
     let dir = dir.filter(|d| d.is_dir());
-    let (tx, rx) = sync_channel::<(String, Value)>(8192);
+    let (tx, rx) = sync_channel::<Msg>(8192);
     let m = Meter {
         proc_: proc_.to_string(),
         dir: dir.clone(),
@@ -418,7 +424,7 @@ pub fn init(proc_: &str, dir: Option<PathBuf>) {
 /// Run `f` with every minute line this process makes (the ap sends it home).
 pub fn on_minute(f: impl Fn(&Value) + Send + 'static) {
     if let Some(m) = M.get() {
-        m.hooks.lock().unwrap().push(Box::new(f));
+        m.hooks.lock().unwrap_or_else(|e| e.into_inner()).push(Box::new(f));
     }
 }
 
@@ -426,7 +432,7 @@ pub fn on_minute(f: impl Fn(&Value) + Send + 'static) {
 /// asked once a minute, written into the line under `key`.
 pub fn add_source(key: &str, f: impl Fn() -> Option<Value> + Send + 'static) {
     if let Some(m) = M.get() {
-        m.sources.lock().unwrap().push((key.to_string(), Box::new(f)));
+        m.sources.lock().unwrap_or_else(|e| e.into_inner()).push((key.to_string(), Box::new(f)));
     }
 }
 
@@ -436,7 +442,7 @@ pub fn event(kind: &str, fields: Value) {
     if OFF.load(Relaxed) {
         return;
     }
-    match m.events.try_send((kind.to_string(), fields)) {
+    match m.events.try_send(Msg::Event(kind.to_string(), fields)) {
         Ok(()) => {}
         Err(TrySendError::Full(_)) | Err(TrySendError::Disconnected(_)) => inc(&C.obs_dropped),
     }
@@ -447,11 +453,15 @@ pub fn event(kind: &str, fields: Value) {
 /// caller caps its size; here it must be a JSON object with a numeric `ts`.
 pub fn ingest(proc_: &str, line: Value) -> bool {
     let Some(m) = M.get() else { return false };
-    if !line.is_object() || line.get("ts").and_then(Value::as_u64).is_none() || !valid_proc(proc_) {
+    // only the access point sends lines home, and only lines of the last few hours: a hostile
+    // VPS can neither pick a file's name nor date it (the writer names it `ap-min-<that day>`)
+    let now = now_ms();
+    let ts_ok = line.get("ts").and_then(Value::as_u64).is_some_and(|t| t + 3 * 3_600_000 >= now && t <= now + 300_000);
+    if !line.is_object() || !ts_ok || !ALLOWED_FOREIGN.contains(&proc_) {
         return false;
     }
     {
-        let mut f = m.foreign.lock().unwrap();
+        let mut f = m.foreign.lock().unwrap_or_else(|e| e.into_inner());
         let r = f.entry(proc_.to_string()).or_default();
         let ts = line["ts"].as_u64();
         if r.iter().any(|x| x["ts"].as_u64() == ts) {
@@ -462,22 +472,21 @@ pub fn ingest(proc_: &str, line: Value) -> bool {
         }
         r.push_back(line.clone());
     }
-    if let Some(d) = &m.dir {
-        let ts = line["ts"].as_u64().unwrap_or(0);
-        append(d, &format!("{proc_}-min-{}.jsonl", day(ts)), &line);
+    // the file write happens on the writer thread, never on the caller's (the channel's runtime)
+    if m.dir.is_some() && m.events.try_send(Msg::Foreign(proc_.to_string(), line)).is_err() {
+        inc(&C.obs_dropped);
     }
     true
 }
 
-fn valid_proc(p: &str) -> bool {
-    !p.is_empty() && p.len() <= 16 && p.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
-}
+/// The processes whose minute lines this one takes in (over the channel): the access point only.
+const ALLOWED_FOREIGN: [&str; 1] = ["ap"];
 
 /// What `GET /_obs` answers: this process's last hour, the totals since start, and the
 /// minute lines other processes sent (the ap's).
 pub fn snapshot() -> Value {
     let Some(m) = M.get() else { return json!({ "on": false }) };
-    let ring: Vec<Value> = m.ring.lock().unwrap().iter().cloned().collect();
+    let ring: Vec<Value> = m.ring.lock().unwrap_or_else(|e| e.into_inner()).iter().cloned().collect();
     let foreign: Map<String, Value> = m
         .foreign
         .lock()
@@ -488,15 +497,15 @@ pub fn snapshot() -> Value {
     json!({
         "on": !OFF.load(Relaxed), "proc": m.proc_, "release": m.rel, "since": m.started,
         "dir": m.dir.as_ref().map(|d| d.display().to_string()),
-        "minutes": ring, "totals": Value::Object(m.totals.lock().unwrap().clone()), "from": foreign,
+        "minutes": ring, "totals": Value::Object(m.totals.lock().unwrap_or_else(|e| e.into_inner()).clone()), "from": foreign,
     })
 }
 
 /// The last minute lines + totals, for sending home (the ap's backlog after a reconnect).
 pub fn backlog() -> (Vec<Value>, Value) {
     let Some(m) = M.get() else { return (vec![], json!({})) };
-    let ring = m.ring.lock().unwrap().iter().cloned().collect();
-    (ring, Value::Object(m.totals.lock().unwrap().clone()))
+    let ring = m.ring.lock().unwrap_or_else(|e| e.into_inner()).iter().cloned().collect();
+    (ring, Value::Object(m.totals.lock().unwrap_or_else(|e| e.into_inner()).clone()))
 }
 
 pub fn now_ms() -> u64 {
@@ -511,7 +520,7 @@ fn tick_loop() {
         let mut line = minute_line();
         let Some(m) = M.get() else { return };
         {
-            let mut t = m.totals.lock().unwrap();
+            let mut t = m.totals.lock().unwrap_or_else(|e| e.into_inner());
             add_totals(&mut t, &line);
             if m.dir.is_none() {
                 // memory only (the VPS): every line carries the totals since start, so an outage
@@ -520,7 +529,7 @@ fn tick_loop() {
             }
         }
         {
-            let mut r = m.ring.lock().unwrap();
+            let mut r = m.ring.lock().unwrap_or_else(|e| e.into_inner());
             if r.len() >= RING {
                 r.pop_front();
             }
@@ -531,7 +540,7 @@ fn tick_loop() {
                 append(d, &format!("{}-min-{}.jsonl", m.proc_, day(now_ms())), &line);
             }
         }
-        for h in m.hooks.lock().unwrap().iter() {
+        for h in m.hooks.lock().unwrap_or_else(|e| e.into_inner()).iter() {
             h(&line);
         }
         crate::meter::logrl::flush();
@@ -549,8 +558,14 @@ pub fn minute_line() -> Value {
             c.insert(name.into(), v.into());
         }
     }
-    for (name, v) in std::mem::take(&mut *named().lock().unwrap()) {
+    for (name, v) in std::mem::take(&mut *named().lock().unwrap_or_else(|e| e.into_inner())) {
         c.insert(name, v.into());
+    }
+    for (name, a) in ROUTES.iter().zip(ROUTE_N.iter()) {
+        let v = a.swap(0, Relaxed);
+        if v > 0 {
+            c.insert(format!("edge.route.{name}"), v.into());
+        }
     }
     let mut g = Map::new();
     for (name, a) in peaks() {
@@ -574,7 +589,7 @@ pub fn minute_line() -> Value {
         line["p"] = p;
     }
     if let Some(m) = M.get() {
-        for (k, f) in m.sources.lock().unwrap().iter() {
+        for (k, f) in m.sources.lock().unwrap_or_else(|e| e.into_inner()).iter() {
             if let Some(v) = f() {
                 line[k.as_str()] = v;
             }
@@ -607,13 +622,21 @@ fn proc_stats() -> Option<Value> {
     Some(json!({ "cpu_s": (cpu * 100.0).round() / 100.0, "rss": rss_pages * 4096, "fds": fds, "threads": threads }))
 }
 
-fn event_writer(proc_: String, dir: Option<PathBuf>, rx: Receiver<(String, Value)>) {
+fn event_writer(proc_: String, dir: Option<PathBuf>, rx: Receiver<Msg>) {
     let mut last_sweep = 0u64;
-    while let Ok((kind, fields)) = rx.recv() {
+    while let Ok(msg) = rx.recv() {
         let Some(d) = &dir else { continue };
         if OFF.load(Relaxed) {
             continue;
         }
+        let (kind, fields) = match msg {
+            Msg::Event(k, f) => (k, f),
+            Msg::Foreign(from, line) => {
+                let ts = line["ts"].as_u64().unwrap_or(0);
+                append(d, &format!("{from}-min-{}.jsonl", day(ts)), &line);
+                continue;
+            }
+        };
         let ts = now_ms();
         let mut line = json!({ "ts": ts, "t": iso(ts), "kind": kind });
         if let (Some(o), Value::Object(f)) = (line.as_object_mut(), fields) {
@@ -635,9 +658,16 @@ fn event_writer(proc_: String, dir: Option<PathBuf>, rx: Receiver<(String, Value
 }
 
 fn append(dir: &std::path::Path, name: &str, line: &Value) {
+    use std::os::unix::fs::OpenOptionsExt;
     let mut s = line.to_string();
     s.push('\n');
-    let r = std::fs::OpenOptions::new().create(true).append(true).open(dir.join(name)).and_then(|mut f| f.write_all(s.as_bytes()));
+    // device ids and regions: the owner's eyes only (a new file is 0600)
+    let r = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .mode(0o600)
+        .open(dir.join(name))
+        .and_then(|mut f| f.write_all(s.as_bytes()));
     if r.is_err() {
         inc(&C.obs_dropped);
     }
@@ -651,7 +681,7 @@ pub fn sweep(dir: &std::path::Path) {
     for e in rd.flatten() {
         let n = e.file_name().to_string_lossy().into_owned();
         let stem = n.trim_end_matches(".gz").trim_end_matches(".jsonl");
-        if stem.len() < 10 || !(n.ends_with(".jsonl") || n.ends_with(".jsonl.gz")) {
+        if !n.is_ascii() || stem.len() < 10 || !(n.ends_with(".jsonl") || n.ends_with(".jsonl.gz")) {
             continue;
         }
         let d = &stem[stem.len() - 10..];
@@ -682,6 +712,22 @@ pub fn iso(ms: u64) -> String {
     let mm = if mp < 10 { mp + 3 } else { mp - 9 };
     let yy = if mm <= 2 { y + 1 } else { y };
     format!("{yy:04}-{mm:02}-{dd:02}T{:02}:{:02}:{:02}Z", s / 3600, s % 3600 / 60, s % 60)
+}
+
+/// The route classes `route_class` can answer, each with its own counter (no lock per stream).
+const ROUTES: [&str; 25] = [
+    "page", "api.session", "api.session.messages", "api.session.abort", "api.session.one", "api.run-events",
+    "api.pair.refresh", "api.pair.claim", "api.pair", "api.file", "api.artifact", "api.roots", "api.tree",
+    "api.voice", "api.diag", "api.other", "rtc", "offer", "identity", "branch", "rootlink", "probe", "static",
+    "", "",
+];
+static ROUTE_N: [AtomicU64; 25] = [const { AtomicU64::new(0) }; 25];
+
+/// Count one stream of this route class at the edge (written as `edge.route.<class>`).
+pub fn route_inc(class: &str) {
+    if let Some(i) = ROUTES.iter().position(|r| !r.is_empty() && *r == class) {
+        ROUTE_N[i].fetch_add(1, Relaxed);
+    }
 }
 
 /// Route class of a request path: a fixed name, never the path itself (no ids, no query).
@@ -731,7 +777,7 @@ pub mod logrl {
     /// Should this line be printed? `key` names the callsite (target + line).
     pub fn allow(key: &str, what: &str) -> bool {
         let minute = super::now_ms() / 60_000;
-        let mut s = state().lock().unwrap();
+        let mut s = state().lock().unwrap_or_else(|e| e.into_inner());
         let e = s.entry(key.to_string()).or_insert((0, 0, what.to_string()));
         if e.0 != minute {
             if e.1 > 0 {
@@ -748,7 +794,7 @@ pub mod logrl {
     /// Print the "N more" lines of minutes that are over (the meter tick calls it).
     pub fn flush() {
         let minute = super::now_ms() / 60_000;
-        let mut s = state().lock().unwrap();
+        let mut s = state().lock().unwrap_or_else(|e| e.into_inner());
         for (_, e) in s.iter_mut() {
             if e.0 != minute && e.1 > 0 {
                 eprintln!("{} {} more '{}' lines that minute (counted, not printed)", super::iso(e.0 * 60_000), e.1, e.2);

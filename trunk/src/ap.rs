@@ -621,13 +621,13 @@ async fn serve(cfg: ApConfig, ready: Option<std::sync::mpsc::Sender<Result<(Sock
                                     }
                                     if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&buf[..n]) {
                                         if v.is_object() {
-                                            *l2.lock().unwrap() = Some(v);
+                                            *l2.lock().unwrap_or_else(|e| e.into_inner()) = Some(v);
                                         }
                                     }
                                 }
                             })
                             .ok();
-                        meter::add_source("sni", move || last.lock().unwrap().take());
+                        meter::add_source("sni", move || last.lock().unwrap_or_else(|e| e.into_inner()).take());
                         println!("  ap: the :443 dispatcher's minute counts on udp {at}");
                     }
                     Err(e) => println!("  ap: dispatcher counts not received (udp {at}: {e})"),
@@ -826,7 +826,7 @@ async fn edge_conn(
     };
     let t0 = Instant::now();
     meter::inc(&MC.edge_streams);
-    meter::inc_named(&format!("edge.route.{}", meter::route_class(&path)));
+    meter::route_inc(meter::route_class(&path));
     // open while this lives (every way out of edge_conn, `?` included)
     struct Open(Instant);
     impl Drop for Open {
@@ -906,7 +906,7 @@ async fn own_probe(mut tls: tokio_rustls::server::TlsStream<TcpStream>, hub: Arc
     };
     let id = hub.ids.fetch_add(1, Ordering::Relaxed) + 1;
     let (tx, rx) = tokio::sync::oneshot::channel();
-    hub.probes.lock().unwrap().insert(id, tx);
+    hub.probes.lock().unwrap_or_else(|e| e.into_inner()).insert(id, tx);
     let t0 = Instant::now();
     let _ = link.out.send(mux(PROBE, id, &[]));
     let answer = match timeout(PROBE_WAIT, rx).await {
@@ -916,7 +916,7 @@ async fn own_probe(mut tls: tokio_rustls::server::TlsStream<TcpStream>, hub: Arc
                 .into_bytes()
         }
         _ => {
-            hub.probes.lock().unwrap().remove(&id);
+            hub.probes.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
             http_response(504, "Gateway Timeout", "text/plain", "the bridge did not answer\n")
         }
     };
@@ -1087,7 +1087,7 @@ async fn bridge_link(
                 let Some((kind, id, body)) = unmux(&p) else { continue };
                 match kind {
                     PROBE => {
-                        if let Some(tx) = hub.probes.lock().unwrap().remove(&id) {
+                        if let Some(tx) = hub.probes.lock().unwrap_or_else(|e| e.into_inner()).remove(&id) {
                             let _ = tx.send(());
                         }
                     }
@@ -1330,9 +1330,10 @@ async fn dial_once(cfg: &Arc<DialConfig>) -> Result<(), String> {
                     // the VPS's minute lines (untrusted: size-capped, strictly parsed)
                     STATS if body.len() <= 512 * 1024 => {
                         if let Ok(v) = serde_json::from_slice::<serde_json::Value>(body) {
-                            let proc_ = v["proc"].as_str().unwrap_or("ap");
+                            // whatever the payload claims, these are the ap's lines (meter.rs ingest
+                            // checks their times and writes them off this runtime)
                             for line in v["lines"].as_array().into_iter().flatten().take(meter::RING) {
-                                if meter::ingest(proc_, line.clone()) {
+                                if meter::ingest("ap", line.clone()) {
                                     meter::inc(&MC.link_stats_in);
                                 }
                             }

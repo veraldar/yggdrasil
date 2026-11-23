@@ -8,8 +8,8 @@ revocations, cuts …). This script only reads them:
 
   day [--day YYYY-MM-DD] [--post]   the morning page: trunk-day-<day>.html in the artifacts
                                     folder (no scripts, phone width); --post files a one-line
-                                    report with the link in MAIN's inbox (an automation post:
-                                    no model turn). Also writes the hourly roll-ups (kept 400 d).
+                                    report with the link in MAIN's inbox. Also writes the hourly
+                                    roll-ups (kept 400 d).
   watch [--post]                    every 5 min: 2 failed test requests in a row, the channel
                                     down > 2 min, a stolen refresh token, a revocation that took
                                     > 5 s to cut → one line in MAIN's inbox (once per incident)
@@ -17,8 +17,11 @@ revocations, cuts …). This script only reads them:
                                     15 min after a deploy vs the hour before it (report only)
   json [--day …]                    the day's numbers as JSON (for MAIN or a test)
 
+Posts to MAIN are automation posts (meta.auto): filed in its inbox, never a transcript turn —
+but each one costs a digest call on the brain's own model, and an alert can wake MAIN. So: one
+morning line a day, and every incident is posted once.
 Times on the page are local (the machine's zone); files are named by UTC day.
-Content is never in these files; this script adds none.
+Content is never in these files; this script adds none. What it writes is the owner's only (0600).
 """
 import argparse
 import datetime as dt
@@ -452,7 +455,22 @@ footer{margin-top:16px;font-size:10.5px;color:var(--dim);border-top:1px solid va
 
 
 def esc(x):
-    return html.escape(str(x))
+    return html.escape(str(x), quote=True)
+
+
+def write_private(path, text):
+    """Write a file only its owner may read (0600), atomically."""
+    tmp = path + ".tmp"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as fh:
+        fh.write(text)
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, path)
+
+
+def private_dir(path):
+    os.makedirs(path, mode=0o700, exist_ok=True)
+    os.chmod(path, 0o700)
 
 
 def ms_s(ms):
@@ -482,7 +500,8 @@ def bars(values, color, title):
 
 
 def kv_rows(rows):
-    return "<table>" + "".join(f"<tr><td class=k>{esc(a)}</td><td>{b}</td></tr>" for a, b in rows) + "</table>"
+    # every value is text (some of it from the VPS): escaped, always
+    return "<table>" + "".join(f"<tr><td class=k>{esc(a)}</td><td>{esc(b)}</td></tr>" for a, b in rows) + "</table>"
 
 
 def page(day, R):
@@ -512,7 +531,7 @@ def page(day, R):
     # up time strip
     if P["strip"]:
         o.append("<details open><summary>Up time — every test request</summary><div class=body>")
-        o.append("<div class=strip>" + "".join(f"<i style='background:{'#72d19a' if ok else '#ec7c7c'}' title='{hhmm(t)} {'ok' if ok else 'failed'}'></i>" for t, ok in P["strip"]) + "</div>")
+        o.append("<div class=strip>" + "".join(f"<i style='background:{'#72d19a' if ok else '#ec7c7c'}' title='{esc(hhmm(t))} {'ok' if ok else 'failed'}'></i>" for t, ok in P["strip"]) + "</div>")
         rows = [("sent from home", f"{P['sent']} (every 5 min: home → VPS → bridge → back)"), ("answered", f"{P['ok']}"),
                 ("time", f"p50 {ms_s(P['p50_ms'])} · p95 {ms_s(P['p95_ms'])}")]
         if P["fails"]:
@@ -542,7 +561,7 @@ def page(day, R):
     o.append("<div class=k>requests per hour</div>" + bars(R["per_hour"]["streams"], "#7ab4e6", "requests per hour"))
     o.append("<table><tr><th>route</th><th>n</th><th>p50</th><th>p95</th><th>err</th></tr>")
     for rname, r in list(R["routes"].items())[:14]:
-        o.append(f"<tr><td>{esc(rname)}</td><td>{r['n']:,}</td><td>{ms_s(r['p50'])}</td><td>{ms_s(r['p95'])}</td><td>{r['5xx'] or ''}</td></tr>")
+        o.append(f"<tr><td>{esc(rname)}</td><td>{int(r['n']):,}</td><td>{esc(ms_s(r['p50']))}</td><td>{esc(ms_s(r['p95']))}</td><td>{int(r['5xx']) or ''}</td></tr>")
     o.append("</table>")
     if R["polling_pct"] is not None:
         o.append(f"<p class=k>{R['polling_pct']} % of the requests are the session list and transcript polls.</p>")
@@ -592,7 +611,7 @@ def page(day, R):
         ("wireguard", (f"peers {W['peers']} · up {', '.join(W['up']) or 'none'} · frames {W['frames_in']:,} in / {W['frames_out']:,} out · dropped {W['dropped'] or 0}") if W else "no minutes"),
         ("bridge process", f"cpu {R['bridge_proc']['cpu_s']} s · rss max {R['bridge_proc']['rss_max'] / 1e6:.0f} MB"),
     ]) + "</div></details>")
-    o.append(f"<footer>From {OBS.replace(HOME, '~')} (bridge {R['minutes']['bridge']} min · VPS {R['minutes']['ap']} min · wg {R['minutes']['wg']} min"
+    o.append(f"<footer>From {esc(OBS.replace(HOME, '~'))} (bridge {R['minutes']['bridge']} min · VPS {R['minutes']['ap']} min · wg {R['minutes']['wg']} min"
              f"{' · ' + str(R['dropped']) + ' meter lines dropped' if R['dropped'] else ''}). Made by scripts/trunk-report.py.</footer></main></body></html>")
     return "".join(o)
 
@@ -608,7 +627,8 @@ def rollup(obs, start, end):
         h = hours.setdefault(key, {})
         for k, v in (l.get("c") or {}).items():
             h[k] = h.get(k, 0) + v
-    os.makedirs(os.path.join(obs, "rollup"), exist_ok=True)
+    private_dir(obs)
+    private_dir(os.path.join(obs, "rollup"))
     by_month = {}
     for (proc, ts), c in hours.items():
         m = dt.datetime.fromtimestamp(ts / 1000, dt.timezone.utc).strftime("%Y-%m")
@@ -621,10 +641,7 @@ def rollup(obs, start, end):
             with open(f) as fh:
                 keep = [json.loads(x) for x in fh if x.strip()]
             keep = [r for r in keep if (r["proc"], r["ts"]) not in have]
-        with open(f + ".tmp", "w") as fh:
-            for r in sorted(keep + rows, key=lambda r: (r["ts"], r["proc"])):
-                fh.write(json.dumps(r) + "\n")
-        os.replace(f + ".tmp", f)
+        write_private(f, "".join(json.dumps(r) + "\n" for r in sorted(keep + rows, key=lambda r: (r["ts"], r["proc"]))))
     cutoff = (dt.date.today() - dt.timedelta(days=400)).strftime("%Y-%m")
     for f in glob.glob(os.path.join(obs, "rollup", "hour-*.jsonl")):
         if os.path.basename(f)[5:12] < cutoff:
@@ -643,7 +660,8 @@ def main_session():
 
 
 def post_main(text):
-    """An automation post to MAIN: filed in its inbox (meta.auto), never a model turn."""
+    """An automation post to MAIN: filed in its inbox (meta.auto), never a transcript turn; it costs
+    one digest call on the brain's model and may wake MAIN — callers post each incident once."""
     sid = main_session()
     if not sid:
         print("trunk-report: no MAIN session found", file=sys.stderr)
@@ -662,11 +680,13 @@ def cmd_day(a):
     R = analyze(a.obs, start, end)
     name = f"trunk-day-{day}.html"
     os.makedirs(a.out, exist_ok=True)
-    with open(os.path.join(a.out, name + ".tmp"), "w") as fh:
-        fh.write(page(day, R))
-    os.replace(os.path.join(a.out, name + ".tmp"), os.path.join(a.out, name))
-    rollup(a.obs, start, end)
+    write_private(os.path.join(a.out, name), page(day, R))
+    if os.path.isdir(a.obs):
+        rollup(a.obs, start, end)
     red, amber, green = flags(R)
+    if not any(R["minutes"].values()) and not R["streams"]["n"]:
+        print(f"[trunk] {day}: no meter data — nothing posted")
+        return
     head = red[0] if red else amber[0] if amber else green[0] if green else "no data"
     line = f"[trunk] {day}: {'✕ ' if red else '! ' if amber else '✓ '}{head} — /api/artifact/{name}"
     print(line)
@@ -683,6 +703,8 @@ def cmd_json(a):
 def cmd_watch(a):
     """The last 30 minutes: an incident is posted once (state in obs/.watch.json)."""
     now = int(dt.datetime.now().timestamp() * 1000)
+    if not os.path.isdir(a.obs):
+        return  # no meter yet: nothing to watch
     state_f = os.path.join(a.obs, ".watch.json")
     try:
         state = json.load(open(state_f))
@@ -735,9 +757,7 @@ def cmd_watch(a):
                 alerts.append(f"[trunk alert] a revocation took {e['revoke_ms'] / 1000:.1f} s to cut ({e.get('src')}, target ≤ 1.1 s)")
                 seen.add(key)
     state["seen"] = sorted(seen)[-200:]
-    with open(state_f + ".tmp", "w") as fh:
-        json.dump(state, fh)
-    os.replace(state_f + ".tmp", state_f)
+    write_private(state_f, json.dumps(state))
     for line in alerts:
         print(line)
         if a.post:
@@ -748,6 +768,13 @@ def cmd_release_check(a):
     t = int(a.deploy_ms)
     before = analyze(a.obs, t - 3600_000, t)
     after = analyze(a.obs, t, t + 15 * 60_000)
+    if before["minutes"]["bridge"] < 30:
+        line = (f"[trunk] release {a.release}: no baseline to compare with (the meter has "
+                f"{before['minutes']['bridge']} minutes from the hour before it) — report only")
+        print(line)
+        if a.post:
+            post_main(line)
+        return
 
     def per_min(R, key):
         return R[key]
