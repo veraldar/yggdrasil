@@ -117,3 +117,8 @@
 - Way back by hand: ~/Work/tree-next/scripts/hub-units.sh rollback 20261122-1747-1328b639 ~/.cache/root-sim/backups/20261122-214629 (loses what was written since 21:46; the migrated copy is kept as data/session.undone-<time>).
 - Seen: first /api/session after the restart took 10 s (cold: resends + reindex), then 2.8 s / cached 0.004 s. bridge.log: root-link dials refused "link-token: expired (>6h old)" — a joined root's tokens (P3's line).
 - Do NOT hand-edit state/devices.json while hub-app runs (memory note): test devices stay as revoked entries.
+
+## 11-23 14:1x badge fix (owner 13:13 "overlap with the end to end … does not match the design", 13:34 "was it pushed")
+- tree-next ff → 8e23d0dd (= 81ebc091 + hide-station-user-r1 83f31d2a (was live, not in tree-next) + fix-badge-overlap). Diff vs live: 4 app files. Fix session's gates on 8e23d0dd: cargo 153, tree-e2e 141, restart-e2e 22, pin-state-place 20/20×5. Mine: next build, trunk-rtc GREEN (P1 pinned PASS).
+- Deployed 20261123-1410-8e23d0dd, hub-app + hub-app-tailnet only, health 11/11.
+- live-door on ap: run 1 — every step passed incl. 360 px (pin t704–722 vs MAIN name t741), then Chromium "Target crashed" on the final :8447 screenshot (test browser); run 2 — 1 passed, all steps. Artifacts: 1b-home-end-to-end-360.png, live-door-1123-steps.txt.
