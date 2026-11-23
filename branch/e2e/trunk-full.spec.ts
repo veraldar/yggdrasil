@@ -1343,7 +1343,7 @@ test('trunk full: phone ↔ ap ↔ hub ↔ joined root — pair, talk, join, del
 
     await step(
       '7s',
-      'S10 · the roots sheet on the phone: every computer with its state; tap lab → its MAIN first, then its sessions; ＋ starts one there',
+      'S10 · the roots sheet on the phone: every computer with its state; tap lab → its page: its sessions, its MAIN as the bar below; ＋ starts one there',
       async () => {
         await phone.goto(`${AP}/`);
         await openSheet(phone);
@@ -1357,11 +1357,16 @@ test('trunk full: phone ↔ ap ↔ hub ↔ joined root — pair, talk, join, del
         }
         await phone.screenshot({ path: join(STATE, 'p3-s10-sheet.png') });
         await phone.locator('[data-testid="root-row"][data-root="lab"]').tap();
-        const view = phone.getByTestId('root-view');
+        // a computer opens on its own page now (root-detail, 11-23), not inside the sheet
+        await phone.waitForURL(/\/roots\/lab(\?|$)/, { timeout: 30_000 });
+        const view = phone.locator('body');
         await expect(view.getByTestId('root-main')).toBeVisible({ timeout: 30_000 });
         await expect(view.getByTestId('root-sess').filter({ hasText: 'lab ledger' })).toBeVisible();
-        const first = view.locator('[data-testid="root-main"], [data-testid="root-sess"]').first();
-        await expect(first).toHaveAttribute('data-testid', 'root-main');
+        // its MAIN is the page's bottom bar ("main · lab"), as MAIN is on the home screen (the
+        // owner-approved root page, 11-23) — below the sessions, not first in their list
+        const main = await view.getByTestId('root-main').boundingBox();
+        const sess = await view.getByTestId('root-sess').first().boundingBox();
+        expect(main && sess && main.y > sess.y, 'MAIN is the bottom bar').toBe(true);
         await phone.screenshot({ path: join(STATE, 'p3-s10-lab.png') });
         await phone.getByTestId('roots-new').tap();
         await phone.getByTestId('roots-new-name').fill('hi from the sheet');
