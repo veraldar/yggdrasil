@@ -102,6 +102,20 @@ test('v0.9 ladder: QR pair → P2P round-trip → revoke → kill-switch → re-
         expect(html, `${path}: ${m}`).not.toContain(m);
       }
     }
+    // the door behind a TLS end (the trunk, the live site): the hop hands the app https-flavored
+    // headers (X-Forwarded-Proto: https) against its plain-HTTP listener — exactly what the 11-21
+    // deploy choked on (the in-place rewrite then looked external and Next proxied it, TLS at a
+    // plain listener → EPROTO → 500). It must answer 200, the pair page, never a proxy error.
+    {
+      const r = await pixelCtx.request.get(`${LAN}/`, {
+        maxRedirects: 0,
+        headers: { 'x-forwarded-for': '192.168.77.9', 'x-forwarded-proto': 'https' },
+      });
+      expect(r.status(), 'https-flavored headers at the plain listener').toBe(200);
+      const html = await r.text();
+      expect(html, 'still the /pair page, not an error').toContain('chunks/app/pair/page-');
+      expect(html, 'never the app').not.toContain(appMark);
+    }
     // in the browser: the only page it is ever given is /pair, and nothing of the app is ever in its DOM
     const docs: string[] = [];
     pixel.on('response', async (r) => {
