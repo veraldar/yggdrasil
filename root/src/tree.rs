@@ -397,21 +397,11 @@ pub(crate) fn card_line(st: &AppState, id: &str, s: &Session, indent: usize) -> 
         .unwrap_or_default();
     // another root's MAIN (roots.rs): named as what it is, not by the stand-in agent here
     let who = if crate::roots::is_root_main(s) { "MAIN".to_string() } else { crate::profile_name_of(st, &s.info) };
-    // its serving engine (roles rework: a lead on Claude Code reads `lead·claude`; a fallback
-    // records both serving and original engine, e.g. `fix·root←claude`)
+    // its engine when it is not the root (roles rework: a lead on Claude Code reads `lead·claude`)
     let eng = card["engine"].as_str().or(s.info["engine"].as_str());
-    let who = if s.info["remote"].is_object() {
-        match (eng.filter(|e| *e != "root"), card["fallback_from"].as_str()) {
-            (_, Some(from)) => format!("{who}·{}←{from}", eng.unwrap_or("root")),
-            (Some(e), None) => format!("{who}·{e}"),
-            _ => who,
-        }
-    } else {
-        match (eng, card["fallback_from"].as_str()) {
-            (e, Some(from)) => format!("{who}·{}←{from}", e.unwrap_or("root")),
-            (Some(e), None) if e != "root" => format!("{who}·{e}"),
-            _ => who,
-        }
+    let who = match eng.filter(|e| *e != "root" && !s.info["remote"].is_object()) {
+        Some(e) => format!("{who}·{e}"),
+        None => who,
     };
     format!(
         "{}- \"{}\" [{}{on}, {}, {} ago] {}{} (id={id})",
@@ -672,9 +662,8 @@ pub(crate) fn read(st: &AppState, caller: &str, input: &Value) -> Out {
         .filter_map(|k| sessions.get(k).map(|ks| card_line(st, k, ks, 1)))
         .collect();
     let eng = card["engine"].as_str().or(s.info["engine"].as_str()).unwrap_or("root");
-    let fb = card["fallback_from"].as_str().map(|f| format!(" (fallback from {f})")).unwrap_or_default();
     let mut out = format!(
-        "\"{}\" (id={t}) profile={} engine={eng}{fb} model={} status={}{}\nbrief: {}\nsummary: {}\n",
+        "\"{}\" (id={t}) profile={} engine={eng} model={} status={}{}\nbrief: {}\nsummary: {}\n",
         title_of(s),
         crate::profile_name_of(st, &s.info),
         s.info["model"]["id"].as_str().unwrap_or("-"),
@@ -1024,7 +1013,7 @@ async fn digest(st: &AppState, sid: &str, f: &Facts) -> Value {
     if status != "blocked" && question.is_none() && relevance == "needs_you" && needs.is_empty() {
         relevance = "worth_knowing".into();
     }
-    let (served_engine, served_model, fallback_from, fallback_reason) = {
+    let (served_engine, served_model) = {
         let sessions = st.sessions.lock().unwrap();
         sessions
             .get(sid)
@@ -1033,11 +1022,9 @@ async fn digest(st: &AppState, sid: &str, f: &Facts) -> Value {
                 (
                     c["engine"].as_str().or(s.info["engine"].as_str()).map(String::from),
                     c["model"].as_str().or(s.info["model"]["id"].as_str()).map(String::from),
-                    c["fallback_from"].as_str().map(String::from),
-                    c["fallback_reason"].as_str().map(String::from),
                 )
             })
-            .unwrap_or((None, None, None, None))
+            .unwrap_or((None, None))
     };
     let mut ev = json!({
         "id": new_id("evt"), "at": now_ms(), "from": sid, "title": f.title, "profile": f.profile,
@@ -1049,12 +1036,6 @@ async fn digest(st: &AppState, sid: &str, f: &Facts) -> Value {
     }
     if let Some(m) = served_model {
         ev["model"] = json!(m);
-    }
-    if let Some(ff) = fallback_from {
-        ev["fallback_from"] = json!(ff);
-    }
-    if let Some(fr) = fallback_reason {
-        ev["fallback_reason"] = json!(fr);
     }
     ev
 }
@@ -1068,7 +1049,7 @@ fn write_card(st: &AppState, sid: &str, ev: &Value) {
         for k in ["status", "headline", "summary", "needs"] {
             card[k] = ev[k].clone();
         }
-        for k in ["engine", "model", "fallback_from", "fallback_reason"] {
+        for k in ["engine", "model"] {
             if !ev[k].is_null() {
                 card[k] = ev[k].clone();
             }

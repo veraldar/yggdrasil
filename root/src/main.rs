@@ -2275,8 +2275,6 @@ fn set_engine(st: &AppState, id: &str, engine: &str, model: Option<&str>) -> Res
         if let Some(card) = s.info["card"].as_object_mut() {
             card.insert("engine".into(), json!(name));
             card.insert("model".into(), json!(model_id));
-            card.remove("fallback_from");
-            card.remove("fallback_reason");
         }
         s.info.clone()
     })
@@ -3648,9 +3646,18 @@ fn apply_fallback(st: &AppState, id: &str, prof: &profiles::Profile, plan: &Fall
     updated
 }
 
+/// One-line system briefing for the harness/model taking over after a hard quota bounce.
+fn fallback_takeover_note(from: harness::Kind) -> String {
+    format!(
+        "Previous harness {} hit a hard quota before doing any work; you are taking over this session and its full context — continue the last request.",
+        from.name()
+    )
+}
+
 /// Records which harness/engine + model actually served the turn on the session's card (non-MAIN
-/// sessions only, so MAIN stays card-free), plus fallback provenance when a fallback served.
-fn record_serving_engine(st: &AppState, id: &str, served_engine: &str, served_model: &str, fallback: Option<&FallbackPlan>) {
+/// sessions only, so MAIN stays card-free). Fallback provenance stays on internal message metadata,
+/// never as user-facing card annotations.
+fn record_serving_engine(st: &AppState, id: &str, served_engine: &str, served_model: &str) {
     let updated = with_session(st, id, |s| {
         if is_main_title(s.info["title"].as_str().unwrap_or_default()) {
             return None;
@@ -3660,10 +3667,6 @@ fn record_serving_engine(st: &AppState, id: &str, served_engine: &str, served_mo
         }
         s.info["card"]["engine"] = json!(served_engine);
         s.info["card"]["model"] = json!(served_model);
-        if let Some(fb) = fallback {
-            s.info["card"]["fallback_from"] = json!(fb.from_engine.name());
-            s.info["card"]["fallback_reason"] = json!(fb.reason);
-        }
         Some(s.info.clone())
     })
     .flatten();
@@ -3744,7 +3747,7 @@ async fn run_turn(st: &AppState, id: &str, tx: &mpsc::Sender<Event>, queue_ms: u
             match harness {
                 Some(kind) => {
                     let prompt = harness_prompt(&history, turn_id, auto_class);
-                    match harness_loop(st, id, prompt.clone(), tx, &mut run, kind).await {
+                    match harness_loop(st, id, prompt.clone(), tx, &mut run, kind, None).await {
                         Ok(()) => Ok(()),
                         Err(e) => {
                             if let Some(plan) = plan_harness_fallback(st, &info, &prof, kind, &e, run.tool_count()) {
@@ -3767,9 +3770,10 @@ async fn run_turn(st: &AppState, id: &str, tx: &mpsc::Sender<Event>, queue_ms: u
                                 replace_message(st, id, &run.msg);
                                 served_engine = plan.to_engine;
                                 fallback_used = Some(plan.clone());
+                                let takeover = fallback_takeover_note(plan.from_engine);
                                 match plan.to_engine {
-                                    None => agent_loop(st, id, history, tx, &mut run).await,
-                                    Some(fb_kind) => harness_loop(st, id, prompt, tx, &mut run, fb_kind).await,
+                                    None => agent_loop(st, id, history, tx, &mut run, Some(&takeover)).await,
+                                    Some(fb_kind) => harness_loop(st, id, prompt, tx, &mut run, fb_kind, Some(&takeover)).await,
                                 }
                                 .map_err(|fb_err| format!("{fb_err} (fallback {}/{} after {} quota)", engine_word(plan.to_engine), plan.to_model, plan.from_engine.name()))
                             } else {
@@ -3778,7 +3782,7 @@ async fn run_turn(st: &AppState, id: &str, tx: &mpsc::Sender<Event>, queue_ms: u
                         }
                     }
                 }
-                None => agent_loop(st, id, history, tx, &mut run).await,
+                None => agent_loop(st, id, history, tx, &mut run, None).await,
             }
         };
         tokio::select! {
@@ -3832,7 +3836,7 @@ async fn run_turn(st: &AppState, id: &str, tx: &mpsc::Sender<Event>, queue_ms: u
                     "reason": fb.reason,
                 });
             }
-            record_serving_engine(st, id, served_name, &served_model, fallback_used.as_ref());
+            record_serving_engine(st, id, served_name, &served_model);
             replace_message(st, id, &run.msg);
             publish(st, "message.updated", json!({ "info": run.msg["info"] }));
             emit(st, tx, "message.completed", run.msg.clone()).await;
@@ -3843,8 +3847,8 @@ async fn run_turn(st: &AppState, id: &str, tx: &mpsc::Sender<Event>, queue_ms: u
             run.finish(&e);
             run.lat_log(&format!("error: {}", &e[..e.len().min(120)]));
             run.msg["info"]["error"] = json!({ "name": "UnknownError", "data": { "message": e } });
-            if let Some(ref fb) = fallback_used {
-                record_serving_engine(st, id, served_name, &served_model, Some(fb));
+            if fallback_used.is_some() {
+                record_serving_engine(st, id, served_name, &served_model);
             }
             replace_message(st, id, &run.msg);
             emit(st, tx, "error", json!({ "sessionID": id, "error": e })).await;
@@ -3900,7 +3904,15 @@ fn harness_prompt(history: &[Value], turn_id: &str, auto: bool) -> String {
 /// A harness session's turn: its message (`harness_prompt`) goes to the harness, which resumes its
 /// own session (`info.harness.id`). Its text streams as deltas, its tool calls land as completed
 /// tool parts, its final answer is the reply; the harness session id is kept for the next turn.
-async fn harness_loop(st: &AppState, id: &str, prompt: String, tx: &mpsc::Sender<Event>, run: &mut Run, kind: harness::Kind) -> Result<(), String> {
+async fn harness_loop(
+    st: &AppState,
+    id: &str,
+    prompt: String,
+    tx: &mpsc::Sender<Event>,
+    run: &mut Run,
+    kind: harness::Kind,
+    fallback_note: Option<&str>,
+) -> Result<(), String> {
     if prompt.trim().is_empty() {
         return Err("nothing to send".into());
     }
@@ -3947,7 +3959,22 @@ async fn harness_loop(st: &AppState, id: &str, prompt: String, tx: &mpsc::Sender
         None => st.tools.project_dir.clone(),
     };
     // the shared prompt + the agent's own instructions ride on top of the harness's (Claude Code)
-    let system = Some(harness_system(&shared_prompt_for(st, Some(&kind)), &session_profile(st, id)));
+    let mut sys = harness_system(&shared_prompt_for(st, Some(&kind)), &session_profile(st, id));
+    let mut prompt = prompt;
+    if let Some(note) = fallback_note {
+        match kind {
+            harness::Kind::Claude | harness::Kind::Antigravity => {
+                if !sys.is_empty() {
+                    sys.push_str("\n\n");
+                }
+                sys.push_str(note);
+            }
+            harness::Kind::Opencode | harness::Kind::Codex => {
+                prompt = format!("[system: {note}]\n\n{prompt}");
+            }
+        }
+    }
+    let system = Some(sys);
     // G1: a harness turn's context is the prompt + the system we hand it + its argv (secrets masked)
     let (argv, _) = kind.argv(model.as_deref(), resume.as_deref(), &cwd, &prompt, system.as_deref(), attach);
     context::capture_harness(st, id, run.upstream_calls as usize + 1, &prompt, system.as_deref().unwrap_or_default(), &argv);
@@ -4062,8 +4089,13 @@ async fn agent_loop(
     messages: Vec<Value>,
     tx: &mpsc::Sender<Event>,
     run: &mut Run,
+    fallback_note: Option<&str>,
 ) -> Result<(), String> {
     let (mut convo, dropped) = assemble(st, id, &messages, Mode::Live);
+    if let Some(note) = fallback_note {
+        let at = convo.iter().take_while(|m| m["role"] == "system").count();
+        convo.insert(at, json!({ "role": "system", "content": note }));
+    }
     run.dropped = dropped;
     let prof = session_profile(st, id);
     let max = step_cap(st, id, &prof);
@@ -7116,26 +7148,41 @@ mod fallback_tests {
     }
 
     /// End-to-end `run_turn` with fake `claude` + fake `agy` binaries and an in-process root upstream:
-    /// 1) 0 tools + quota -> retries once on root glm-5.3, succeeds, card records serving engine + fallback_from
+    /// 1) 0 tools + quota -> retries once on root glm-5.3, succeeds, card records serving engine (no
+    ///    user-facing fallback annotations), internal meta records fallback, root upstream receives
+    ///    the one-line takeover system briefing
     /// 2) 1 tool ran + quota -> does NOT fall back, fails with quota error, keeps claude
     /// 3) pinned role + 0 tools + quota -> does NOT fall back
     /// 4) P1 trunk integrator session + 0 tools + quota -> does NOT fall back
-    /// 5) double-quota (claude -> antigravity, both hit quota) -> retries ONCE, never loops
+    /// 5) double-quota (claude -> antigravity, both hit quota) -> retries ONCE, never loops, and
+    ///    agy receives the one-line takeover briefing
     #[tokio::test]
     async fn run_turn_fallback_end_to_end() {
         let _path_guard = harness::TEST_PATH_LOCK.lock().await;
         let orig_path = std::env::var("PATH").unwrap_or_default();
 
-        // in-process OpenAI-compatible mock root upstream that records requested models
+        // in-process OpenAI-compatible mock root upstream that records requested models + system msgs
         let seen_models: Arc<Mutex<Vec<String>>> = Arc::default();
+        let seen_systems: Arc<Mutex<Vec<String>>> = Arc::default();
         let sm = seen_models.clone();
+        let ss = seen_systems.clone();
         let mock_app = Router::new().route(
             "/chat/completions",
             post(move |Json(body): Json<Value>| {
                 let sm = sm.clone();
+                let ss = ss.clone();
                 async move {
                     let m = body["model"].as_str().unwrap_or_default().to_string();
                     sm.lock().unwrap().push(m.clone());
+                    let sys = body["messages"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter(|x| x["role"] == "system")
+                        .filter_map(|x| x["content"].as_str())
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    ss.lock().unwrap().push(sys);
                     Json(json!({
                         "choices": [{ "message": { "role": "assistant", "content": format!("SERVED-BY-ROOT:{m}") } }]
                     }))
@@ -7152,6 +7199,7 @@ mod fallback_tests {
         std::fs::create_dir_all(&bin_dir).unwrap();
         let claude_hits = tmp.join("claude.hits");
         let agy_hits = tmp.join("agy.hits");
+        let agy_stdin = tmp.join("agy.stdin");
 
         // fake `claude`: inspects prompt on stdin to decide behavior
         let claude_script = bin_dir.join("claude");
@@ -7183,18 +7231,19 @@ esac
             ),
         )
         .unwrap();
-        // fake `agy`: hits quota too (for double-quota single-retry proof)
+        // fake `agy`: records stdin and hits quota (for double-quota single-retry + takeover brief proof)
         let agy_script = bin_dir.join("agy");
         std::fs::write(
             &agy_script,
             format!(
                 r#"#!/bin/sh
 echo 1 >> '{hits}'
-cat >/dev/null
+cat > '{stdin}'
 echo '{{"event":"result","result":{{"status":"ERROR","error":"RESOURCE_EXHAUSTED: quota exceeded"}}}}'
 exit 1
 "#,
-                hits = agy_hits.display()
+                hits = agy_hits.display(),
+                stdin = agy_stdin.display(),
             ),
         )
         .unwrap();
@@ -7235,7 +7284,10 @@ exit 1
             (res, final_info)
         };
 
-        // 1. 0 tools + Claude 5-hour quota -> falls back once to root glm-5.3 and succeeds
+        let want_brief = fallback_takeover_note(harness::Kind::Claude);
+
+        // 1. 0 tools + Claude 5-hour quota -> falls back once to root glm-5.3, briefs the model,
+        //    records serving engine on card (without user-facing fallback annotations) and meta.fallback
         let (res, info) = run_one(st.clone(), "Fix auth", "fix", None, "QUOTA_BOUNCE please fix").await;
         let msg = res.expect("fallback to root must succeed");
         assert_eq!(message_text(&msg), "SERVED-BY-ROOT:glm-5.3");
@@ -7243,10 +7295,12 @@ exit 1
         assert_eq!(info["model"]["id"], "glm-5.3");
         assert_eq!(info["card"]["engine"], "root");
         assert_eq!(info["card"]["model"], "glm-5.3");
-        assert_eq!(info["card"]["fallback_from"], "claude");
+        assert!(info["card"].get("fallback_from").is_none(), "no user-facing fallback_from on card");
+        assert!(info["card"].get("fallback_reason").is_none(), "no user-facing fallback_reason on card");
         assert_eq!(msg["info"]["meta"]["fallback"]["from"], "claude");
         assert_eq!(msg["info"]["meta"]["fallback"]["to"], "root");
         assert_eq!(seen_models.lock().unwrap().as_slice(), &["glm-5.3"]);
+        assert!(seen_systems.lock().unwrap()[0].contains(&want_brief), "root model must receive takeover brief");
 
         // 2. 1 tool ran + quota -> NEVER falls back mid-work
         let (res, info) = run_one(st.clone(), "Midwork fix", "fix", None, "MIDWORK_QUOTA do work").await;
@@ -7269,13 +7323,15 @@ exit 1
         assert!(info["card"].get("fallback_from").is_none());
         assert_eq!(seen_models.lock().unwrap().len(), 1);
 
-        // 5. Double quota (claude -> antigravity, both hit quota) -> retries ONCE only
+        // 5. Double quota (claude -> antigravity, both hit quota) -> retries ONCE only, briefs agy
         let (res, info) = run_one(st.clone(), "Double quota", "double_q", None, "QUOTA_BOUNCE double").await;
         let err = res.expect_err("double quota must fail after one retry");
         assert!(err.contains("fallback antigravity/gemini-4-neon-high after claude quota"), "{err}");
-        assert_eq!(info["card"]["fallback_from"], "claude");
+        assert!(info["card"].get("fallback_from").is_none(), "no user-facing fallback_from on card");
         let agy_count = std::fs::read_to_string(&agy_hits).unwrap_or_default().lines().count();
         assert_eq!(agy_count, 1, "fallback harness must be tried exactly once");
+        let agy_in = std::fs::read_to_string(&agy_stdin).unwrap_or_default();
+        assert!(agy_in.contains(&want_brief), "taking-over harness must receive takeover brief: {agy_in}");
         assert_eq!(seen_models.lock().unwrap().len(), 1, "must not chain a third attempt to root");
 
         unsafe { std::env::set_var("PATH", orig_path) };

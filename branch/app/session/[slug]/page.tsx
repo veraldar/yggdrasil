@@ -3060,10 +3060,7 @@ export default function SessionView({
       {/* a managed session's card: who works it, on what, how it stands —
           its question for you, then the summary (tap: the whole of it) */}
       {me && card && (() => {
-        const servedEng = card.engine || me.engine || '';
-        const engText = card.fallback_from
-          ? `${servedEng === 'root' ? 'root' : engineWord(servedEng) || servedEng} (from ${engineWord(card.fallback_from) || card.fallback_from})`
-          : engineWord(servedEng);
+        const engText = engineWord(card.engine || me.engine || '');
         return (
           <button
             type="button"

@@ -4,9 +4,12 @@
 Boots a scratch yggdrasil brain binary + mock_upstream.py + fake `claude` and `agy` binaries on PATH
 and verifies every contract rule:
   1. Session start (via MAIN) bounces on Claude 5-hour quota with 0 tools -> retries once on root
-     GLM glm-5.3, succeeds, card records engine=root, model=glm-5.3, fallback_from=claude, MAIN woken.
+     GLM glm-5.3, briefs the taking-over model with a one-line system note, succeeds, card records
+     engine=root and model=glm-5.3 (no user-facing fallback annotations), internal meta records
+     fallback, MAIN woken.
   2. Follow-up turn bounces on Claude 5-hour quota with 0 tools on an override engine -> retries once
-     on the role's other default engine (antigravity / gemini-4-neon-high), card records it.
+     on the role's other default engine (antigravity / gemini-4-neon-high), briefs agy with the
+     one-line takeover note, card records serving engine without user-facing fallback annotations.
   3. Mid-work quota hit (1+ tools already ran) -> NEVER falls back, keeps claude + conversation id.
   4. Pinned role (`pinned: true`) with 0 tools + quota -> NEVER falls back.
   5. Trunk integrator session (`P1 · home root on the trunk (integrator)`) with 0 tools + quota ->
@@ -176,7 +179,7 @@ if len(sys.argv) > 1 and sys.argv[1] == "models":
     sys.exit(0)
 line = sys.stdin.read()
 with open({agy_log!r}, "a") as f:
-    f.write(json.dumps({{"argv": sys.argv[1:], "stdin": line[:120]}}) + "\\n")
+    f.write(json.dumps({{"argv": sys.argv[1:], "stdin": line}}) + "\\n")
 if "DOUBLE_QUOTA" in line:
     print(json.dumps({{"event": "result", "result": {{"conversation_id": "", "status": "ERROR", "error": "RESOURCE_EXHAUSTED: You have exhausted your capacity on this model."}}}}), flush=True)
     sys.exit(1)
@@ -247,6 +250,11 @@ print(json.dumps({{"event": "result", "result": {{"conversation_id": "agy-conv-1
             brain_port, "POST", f"/session/{main_id}/message", {"parts": [{"type": "text", "text": text}]}, 60
         )
 
+        want_brief = (
+            "Previous harness claude hit a hard quota before doing any work; "
+            "you are taking over this session and its full context — continue the last request."
+        )
+
         # ── Scenario 1: Session fails to start on Claude 5h quota (0 tools) -> root glm-5.3
         c0 = hit_count(claude_log)
         say(
@@ -271,7 +279,7 @@ print(json.dumps({{"event": "result", "result": {{"conversation_id": "agy-conv-1
         info = req(brain_port, "GET", f"/session/{row['id']}") if row else {}
         msgs = req(brain_port, "GET", f"/session/{row['id']}/message") if row else []
         last_reply = next((m for m in reversed(msgs) if m["info"]["role"] == "assistant"), {})
-        last_req = req(mock_port, "GET", "/last")
+        raw_ctx = req(brain_port, "GET", f"/session/{row['id']}/context?part=raw") if row else {}
         check(
             "S1: session start bounces on Claude 5h quota (0 tools) -> falls back once to root glm-5.3 and completes",
             bool(done)
@@ -280,15 +288,21 @@ print(json.dumps({{"event": "result", "result": {{"conversation_id": "agy-conv-1
             {"done": done, "reply": text_of(last_reply), "claude_hits": hit_count(claude_log) - c0},
         )
         check(
-            "S1: session + card record serving harness=root, model=glm-5.3, fallback_from=claude",
+            "S1: card records serving engine/model with NO user-facing fallback fields; internal meta.fallback kept",
             row.get("engine") == "root"
             and info.get("engine") == "root"
             and (info.get("model") or {}).get("id") == "glm-5.3"
             and (row.get("card") or {}).get("engine") == "root"
             and (row.get("card") or {}).get("model") == "glm-5.3"
-            and (row.get("card") or {}).get("fallback_from") == "claude"
+            and "fallback_from" not in (row.get("card") or {})
+            and "fallback_reason" not in (row.get("card") or {})
             and ((last_reply.get("info") or {}).get("meta") or {}).get("fallback", {}).get("from") == "claude",
             {"row_engine": row.get("engine"), "model": info.get("model"), "card": row.get("card")},
+        )
+        check(
+            "S1: taking-over root model received the one-line takeover system brief",
+            want_brief in json.dumps(raw_ctx, ensure_ascii=False),
+            json.dumps(raw_ctx, ensure_ascii=False)[-400:],
         )
         # Digest uses default model (glm-5.3-flash), so check transcript meta + session model for glm-5.3
         check(
@@ -300,8 +314,8 @@ print(json.dumps({{"event": "result", "result": {{"conversation_id": "agy-conv-1
         read_r = say(tool([["session_read", {"id": "quota start fix"}]]))
         read_out = [p for p in read_r["parts"] if p["type"] == "tool"][0]["state"]["output"]
         check(
-            "S1: session_read reports serving engine + fallback provenance",
-            "engine=root (fallback from claude)" in read_out,
+            "S1: session_read reports serving engine without user-facing fallback annotation",
+            "engine=root " in read_out and "fallback from" not in read_out,
             read_out[:240],
         )
 
@@ -319,15 +333,20 @@ print(json.dumps({{"event": "result", "result": {{"conversation_id": "agy-conv-1
             {"parts": [{"type": "text", "text": "QUOTA_BOUNCE turn 2"}]},
         )
         s2_info = req(brain_port, "GET", f"/session/{s2['id']}")
+        agy_entries = [json.loads(l) for l in open(agy_log)] if os.path.exists(agy_log) else []
         check(
-            "S2: turn 2 bounces on claude quota (0 tools) -> falls back to build's default engine (antigravity)",
+            "S2: turn 2 bounces on claude quota (0 tools) -> falls back to build's default engine (antigravity), briefed, no card fallback fields",
             t2_code == 200
             and "AGY-FALLBACK-OK" in text_of(t2)
             and hit_count(agy_log) == a0 + 1
             and s2_info.get("engine") == "antigravity"
             and (s2_info.get("model") or {}).get("id") == "gemini-4-neon-high"
             and (s2_info.get("card") or {}).get("engine") == "antigravity"
-            and (s2_info.get("card") or {}).get("fallback_from") == "claude",
+            and "fallback_from" not in (s2_info.get("card") or {})
+            and "fallback_reason" not in (s2_info.get("card") or {})
+            and ((t2.get("info") or {}).get("meta") or {}).get("fallback", {}).get("from") == "claude"
+            and bool(agy_entries)
+            and want_brief in agy_entries[-1].get("stdin", ""),
             {"code": t2_code, "reply": text_of(t2), "engine": s2_info.get("engine"), "card": s2_info.get("card")},
         )
 
@@ -412,7 +431,8 @@ print(json.dumps({{"event": "result", "result": {{"conversation_id": "agy-conv-1
             c5b == 200
             and "P2-ROOT-OK" in text_of(b5b)
             and p2_info.get("engine") == "root"
-            and (p2_info.get("card") or {}).get("fallback_from") == "claude",
+            and "fallback_from" not in (p2_info.get("card") or {})
+            and ((b5b.get("info") or {}).get("meta") or {}).get("fallback", {}).get("from") == "claude",
             {"code": c5b, "reply": text_of(b5b), "engine": p2_info.get("engine"), "card": p2_info.get("card")},
         )
 
