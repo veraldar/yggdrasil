@@ -224,6 +224,7 @@ export default function SessionsPage() {
   // computer carries its name as a tag; unknown ('') = every row with a computer carries it
   const [rootsOpen, setRootsOpen] = useState(false);
   const [homeRoot, setHomeRoot] = useState('');
+  const [pendingJoins, setPendingJoins] = useState(0);
   const [loading, setLoading] = useState(true);
   const loadInFlightRef = useRef(false);
   // undo window: row (and its sub-tree) vanishes instantly, but the DELETE
@@ -428,6 +429,7 @@ export default function SessionsPage() {
   }, []);
 
   const onTree = useCallback((t: Tree) => {
+    setPendingJoins(t.joins?.length ?? 0);
     const n = t.home?.name || '';
     if (!n) return;
     setHomeRoot(n);
@@ -745,10 +747,15 @@ export default function SessionsPage() {
             <button
               onClick={() => setRootsOpen(true)}
               aria-label="roots"
-              className="oz-k sm"
+              className={`oz-k sm ${pendingJoins > 0 ? 'text-[var(--oz-text)]' : ''}`}
               data-testid="roots-key"
             >
               <LineIcon name="roots" size={15} />
+              {pendingJoins > 0 && (
+                <span data-testid="joins-badge" className="oz-badge">
+                  {pendingJoins}
+                </span>
+              )}
             </button>
             <Link
               href="/artifacts"

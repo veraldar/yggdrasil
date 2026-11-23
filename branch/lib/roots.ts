@@ -46,7 +46,7 @@
  */
 import { execFile } from 'child_process';
 import { createHash, randomBytes, randomInt, timingSafeEqual } from 'crypto';
-import { readFileSync } from 'fs';
+import { readFileSync, statSync } from 'fs';
 import { chmod, readFile, rename, writeFile } from 'fs/promises';
 import { dirname, join } from 'path';
 import { fetch as undiciFetch } from 'undici';
@@ -119,6 +119,8 @@ type JoinReq = {
   wgPub?: string;
   /** "Same as the home root": the machine asks for the home root's model settings (L15) */
   model?: 'home';
+  /** public approve link (no secrets) so a second origin (e.g. :8447 tailnet) can hand off to the paired door */
+  approveUrl?: string;
   created: number;
   exp: number;
   status: 'pending' | 'approved' | 'refused' | 'delivered';
@@ -134,8 +136,9 @@ type State = {
   joins: Map<string, JoinReq>;
   windows: Map<string, number[]>;
   chain: Promise<unknown>;
-  /** joins-pending.json was read (once, at first use) */
+  /** joins-pending.json was read (and its last seen mtime, so a sibling process sees writes) */
   loaded?: boolean;
+  loadedMtime?: number;
 };
 
 // globalThis: every route bundle in this one server process sees ONE store
@@ -178,11 +181,17 @@ function serialize<T>(fn: () => Promise<T>): Promise<T> {
 /* ---------------- pending joins on disk (joins-pending.json, mode 600) ---------------- */
 
 export const JOINS_FILE = join(dirname(ROOTS_FILE), 'joins-pending.json');
-/** a join outlives an app restart this long from its creation (10 min, or the TTL if longer) */
-const JOIN_KEEP_MS = Math.max(600, JOIN_TTL_S) * 1000;
+/** how long a join lingers after exp/holdUntil (for honest 410s and in-place renewal across restarts) */
+const JOIN_LINGER_MS = 3600_000;
 const JOIN_STATES = new Set(['pending', 'approved', 'refused', 'delivered']);
 
 const str = (v: unknown) => (typeof v === 'string' ? v : '');
+const httpUrl = (v: unknown) => {
+  const s = str(v);
+  return /^https?:\/\/\S+$/.test(s) ? s : '';
+};
+const joinLiveOnDisk = (j: JoinReq, now: number) =>
+  Math.max(j.exp, j.holdUntil ?? 0) >= now - JOIN_LINGER_MS;
 
 /** one record off the disk, or null when it is not one this module wrote */
 function joinOf(v: unknown): JoinReq | null {
@@ -201,6 +210,7 @@ function joinOf(v: unknown): JoinReq | null {
     return null;
   }
   const holdUntil = Number(o.holdUntil);
+  const approveUrl = httpUrl(o.approveUrl);
   return {
     req,
     secretHash,
@@ -211,6 +221,7 @@ function joinOf(v: unknown): JoinReq | null {
     peer: str(o.peer),
     ...(wgKey(o.wgPub) ? { wgPub: wgKey(o.wgPub) } : {}),
     ...(o.model === 'home' ? { model: 'home' as const } : {}),
+    ...(approveUrl ? { approveUrl } : {}),
     created,
     exp,
     status: o.status as JoinReq['status'],
@@ -221,39 +232,79 @@ function joinOf(v: unknown): JoinReq | null {
   };
 }
 
-/** Once per process, at first use: the joins an earlier run left (older than JOIN_KEEP_MS dropped). */
+/** Sync from joins-pending.json at startup and whenever another process updates it (e.g. hub-app
+ *  writing joins that hub-app-tailnet lists). Never clobbers live in-memory approval secrets. */
 function loadJoins() {
-  if (S.loaded) return;
-  S.loaded = true;
+  let mtime = 0;
+  try {
+    mtime = statSync(JOINS_FILE).mtimeMs;
+  } catch {
+    S.loaded = true;
+    return; // none yet, or unreadable
+  }
+  if (S.loaded && S.loadedMtime === mtime) return;
+  const firstLoad = !S.loaded;
   let list: unknown;
   try {
     list = (JSON.parse(readFileSync(JOINS_FILE, 'utf8')) as { joins?: unknown })?.joins;
   } catch {
-    return; // none yet, or unreadable: memory starts empty as before
+    return;
   }
+  S.loaded = true;
+  S.loadedMtime = mtime;
   if (!Array.isArray(list)) return;
   const now = Date.now();
+  const seen = new Set<string>();
   for (const v of list) {
     const j = joinOf(v);
-    if (!j || j.created < now - JOIN_KEEP_MS || S.joins.has(j.req)) continue;
-    // approved before the restart, not collected: the raw result was memory only
-    if (j.status === 'approved') j.why = 'undelivered';
-    S.joins.set(j.req, j);
+    if (!j || !joinLiveOnDisk(j, now)) continue;
+    seen.add(j.req);
+    const cur = S.joins.get(j.req);
+    if (!cur) {
+      // approved before a restart, not collected: the raw result was memory only
+      if (firstLoad && j.status === 'approved') j.why = 'undelivered';
+      S.joins.set(j.req, j);
+    } else if (
+      !cur.result &&
+      (j.created > cur.created ||
+        j.exp > cur.exp ||
+        j.status !== cur.status ||
+        j.secretHash !== cur.secretHash)
+    ) {
+      S.joins.set(j.req, j);
+    }
+  }
+  if (!firstLoad) {
+    for (const [k, cur] of S.joins) {
+      if (!seen.has(k) && !cur.result && cur.created < mtime - 2000) S.joins.delete(k);
+    }
   }
 }
 
-/** Write the joins (never `result`) — queued on the registry chain, atomic, mode 600. */
-function saveJoins() {
-  void serialize(async () => {
+/** Write the joins (never `result`) — atomic, mode 600. Call directly inside `serialize(...)`
+ *  so mutations hit disk before HTTP 200 returns; outside `serialize`, use `saveJoins()`. */
+async function writeJoins() {
+  try {
     const now = Date.now();
     const joins = [...S.joins.values()]
-      .filter((j) => j.created >= now - JOIN_KEEP_MS)
+      .filter((j) => joinLiveOnDisk(j, now))
       .map((j) => ({ ...j, result: undefined })); // the raw secrets: memory only
     const tmp = `${JOINS_FILE}.${process.pid}.tmp`;
     await writeFile(tmp, JSON.stringify({ version: 1, joins }, null, 2) + '\n', { mode: 0o600 });
     await chmod(tmp, 0o600).catch(() => {});
     await rename(tmp, JOINS_FILE);
-  }).catch((e) => console.warn(`join: ${JOINS_FILE} not written: ${(e as Error).message}`));
+    try {
+      S.loadedMtime = statSync(JOINS_FILE).mtimeMs;
+    } catch {
+      /* ignore */
+    }
+  } catch (e) {
+    console.warn(`join: ${JOINS_FILE} not written: ${(e as Error).message}`);
+  }
+}
+
+function saveJoins() {
+  void serialize(writeJoins);
 }
 
 function prune() {
@@ -262,12 +313,12 @@ function prune() {
   for (const [k, j] of S.joins) {
     // an undelivered approval is dropped after its hold window (raw secrets
     // never outlive it); every record lingers an hour so a late poll gets an
-    // honest 410 instead of a 404
+    // honest 410 instead of a 404 (and a renewing rig keeps the same req id)
     if (j.result && j.holdUntil && j.holdUntil < now) {
       j.result = undefined;
       j.why = 'undelivered';
     }
-    if (Math.max(j.exp, j.holdUntil ?? 0) < now - 3600_000) S.joins.delete(k);
+    if (Math.max(j.exp, j.holdUntil ?? 0) < now - JOIN_LINGER_MS) S.joins.delete(k);
   }
 }
 
@@ -414,7 +465,9 @@ async function brainShareModel(root: string): Promise<boolean> {
     if (r.ok) return true;
     console.warn(`join: the brain did not take the model sharing for ${root}: ${r.status}`);
   } catch (e) {
-    console.warn(`join: the brain did not take the model sharing for ${root}: ${(e as Error).message}`);
+    console.warn(
+      `join: the brain did not take the model sharing for ${root}: ${(e as Error).message}`
+    );
   }
   return false;
 }
@@ -517,17 +570,59 @@ export function clean(v: unknown, max: number): string {
 }
 
 export function createJoin(
-  input: { name: string; os: string; host: string; wgPub?: string; model?: 'home' },
+  input: {
+    name: string;
+    os: string;
+    host: string;
+    wgPub?: string;
+    model?: 'home';
+    approveBase?: string;
+  },
   peer: string
 ) {
   prune();
   const now0 = Date.now();
+  // In-place renewal: when the same rig re-asks (same WireGuard public key, or an expired
+  // request from the same peer/name/host/os), refresh the existing pending record in place so
+  // its req id, /join?r=<id> link, and comparison code stay stable across renewal cycles.
+  let existing: JoinReq | undefined;
+  for (const j of S.joins.values()) {
+    if (j.status !== 'pending') continue;
+    const sameRig = input.wgPub
+      ? j.wgPub === input.wgPub
+      : !j.wgPub &&
+        j.peer === peer &&
+        j.name === input.name &&
+        j.host === input.host &&
+        j.os === input.os &&
+        j.exp <= now0;
+    if (sameRig && (!existing || j.created > existing.created)) existing = j;
+  }
+
   let pending = 0;
-  for (const j of S.joins.values()) if (j.status === 'pending' && j.exp > now0) pending += 1;
+  for (const j of S.joins.values()) {
+    if (j !== existing && j.status === 'pending' && j.exp > now0) pending += 1;
+  }
   if (pending >= JOIN_MAX_PENDING) return null;
-  const req = randomBytes(18).toString('base64url');
+
   const secret = randomBytes(16).toString('hex');
   const now = Date.now();
+  if (existing) {
+    existing.secretHash = sha256(secret);
+    existing.name = input.name;
+    existing.os = input.os;
+    existing.host = input.host;
+    existing.peer = peer;
+    if (input.model === 'home') existing.model = 'home';
+    else delete existing.model;
+    if (input.approveBase) existing.approveUrl = `${input.approveBase}/join?r=${existing.req}`;
+    existing.created = now;
+    existing.exp = now + JOIN_TTL_S * 1000;
+    saveJoins();
+    return { req: existing.req, secret, code: existing.code, expires_in: JOIN_TTL_S };
+  }
+
+  const req = randomBytes(18).toString('base64url');
   const j: JoinReq = {
     req,
     secretHash: sha256(secret),
@@ -538,6 +633,7 @@ export function createJoin(
     peer,
     ...(input.wgPub ? { wgPub: input.wgPub } : {}),
     ...(input.model === 'home' ? { model: 'home' as const } : {}),
+    ...(input.approveBase ? { approveUrl: `${input.approveBase}/join?r=${req}` } : {}),
     created: now,
     exp: now + JOIN_TTL_S * 1000,
     status: 'pending',
@@ -571,7 +667,26 @@ export function viewJoin(req: string) {
     status: statusOf(j),
     expires_at: new Date(j.exp).toISOString(),
     root_id: j.root_id ?? null,
+    ...(j.approveUrl ? { approve_url: j.approveUrl } : {}),
   };
+}
+
+/** The newest still-pending join per machine (by WireGuard key when present, else name) — what
+ *  the roots sheet lists on both origins. No secrets. */
+export function listPendingJoins(): NonNullable<ReturnType<typeof viewJoin>>[] {
+  prune();
+  const newest = new Map<string, JoinReq>();
+  const now = Date.now();
+  for (const j of S.joins.values()) {
+    if (j.status !== 'pending' || j.exp < now) continue;
+    const key = j.wgPub ? `wg:${j.wgPub}` : `name:${j.name}`;
+    const old = newest.get(key);
+    if (!old || j.created > old.created) newest.set(key, j);
+  }
+  return [...newest.values()]
+    .sort((a, b) => b.created - a.created)
+    .map((j) => viewJoin(j.req))
+    .filter((v): v is NonNullable<ReturnType<typeof viewJoin>> => !!v);
 }
 
 export type PollOut =
@@ -599,7 +714,7 @@ export function pollJoin(req: string, secret: string): Promise<PollOut> {
     const result = j.result;
     j.result = undefined; // ONCE: the raw secrets leave memory with this response
     j.status = 'delivered';
-    saveJoins();
+    await writeJoins();
     const f = await readRoots();
     const rec = f.roots.find((r) => r.id === result.root_id);
     if (rec) {
@@ -624,7 +739,7 @@ export function refuseJoin(req: string, device: string): Promise<Decision> {
     if (st !== 'pending') return { http: 409, body: { error: `already ${st}`, status: st } };
     j.status = 'refused';
     j.by = device;
-    saveJoins();
+    await writeJoins();
     return { http: 200, body: { status: 'refused' } };
   });
 }
@@ -718,7 +833,7 @@ export async function approveJoin(req: string, device: string): Promise<Decision
         : {}),
       ...(shared ? { model: 'home' as const } : {}),
     };
-    saveJoins();
+    await writeJoins();
     return {
       http: 200,
       body: { status: 'approved', root_id, name: j.name, os: j.os, host: j.host },

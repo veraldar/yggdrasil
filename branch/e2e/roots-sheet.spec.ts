@@ -191,6 +191,36 @@ test('roots sheet: rows with state → lab: MAIN, sessions, ＋ there → tag at
     await openSheet(page);
     await expect(page.getByTestId('root-row')).toHaveCount(1);
   });
+
+  await test.step('pending joins show in the roots sheet with code & countdown and can be refused', async () => {
+    const wg = Buffer.alloc(32, 0x55).toString('base64');
+    const res = await request.post(`${base.origin}/api/roots/join`, {
+      data: { name: 'debian-box', os: 'linux', host: 'debian-box', wg_pub: wg },
+    });
+    expect(res.status()).toBe(201);
+    const j = (await res.json()) as { req: string; secret: string; code: string };
+    // renewal keeps the exact same req id
+    const res2 = await request.post(`${base.origin}/api/roots/join`, {
+      data: { name: 'debian-box', os: 'linux', host: 'debian-box', wg_pub: wg },
+    });
+    expect(res2.status()).toBe(201);
+    const j2 = (await res2.json()) as { req: string; secret: string; code: string };
+    expect(j2.req).toBe(j.req);
+    expect(j2.code).toBe(j.code);
+
+    const row = page.locator('[data-testid="join-row"][data-join="debian-box"]');
+    await expect(row).toBeVisible({ timeout: 15_000 });
+    await expect(row.getByTestId('join-code')).toHaveText(j.code);
+    await expect(row.getByTestId('join-left')).toContainText(':');
+    await expect(row.getByTestId('join-add')).toBeVisible();
+    await row.getByTestId('join-refuse').tap();
+    await expect(row).toHaveCount(0, { timeout: 10_000 });
+    const poll = await request.get(`${base.origin}/api/roots/join/${j2.req}`, {
+      headers: { 'x-join-secret': j2.secret },
+    });
+    expect(poll.status()).toBe(410);
+    expect((await poll.json()).status).toBe('refused');
+  });
 });
 
 test.describe('away', () => {

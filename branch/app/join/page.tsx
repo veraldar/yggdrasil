@@ -73,6 +73,17 @@ export default function JoinPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Poll while pending or expired: an in-place renewal revives this same req id automatically.
+  const viewStatus = view?.status;
+  useEffect(() => {
+    if (!req || busy || (viewStatus !== 'pending' && viewStatus !== 'expired')) return;
+    const t = setInterval(() => {
+      if (!document.hidden) void load(req);
+    }, 5000);
+    return () => clearInterval(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [req, busy, viewStatus]);
+
   async function decide(what: 'approve' | 'refuse') {
     setBusy(true);
     setStatus(what === 'approve' ? 'adding…' : 'refusing…');
