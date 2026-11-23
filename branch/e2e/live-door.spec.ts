@@ -132,6 +132,40 @@ test('ap.veraldar.org on a phone: pair, end to end, type, talk, hear, same turns
       const probe = await phone.evaluate(async () => (await fetch('/api/token')).status);
       expect(probe, 'voice is available to this device').toBe(200);
       await shot(phone, '1-home-end-to-end');
+      // ---- the word at the owner's width (S22, 360 px): inside the roots, off MAIN's name and
+      // words (11-23 it sat across MAIN's box; e2e/pin-state-place.spec.ts holds every state)
+      await phone.setViewportSize({ width: 360, height: 780 });
+      await phone.waitForTimeout(400);
+      const place = await phone.evaluate(() => {
+        const r = (s: string) => {
+          const b = document.querySelector(s)!.getBoundingClientRect();
+          return { l: b.left, t: b.top, r: b.right, b: b.bottom };
+        };
+        const pin = document.querySelector('[data-testid="pin-state"]')!;
+        return {
+          pin: r('[data-testid="pin-state"]'),
+          name: r('[data-testid="roots-name"]'),
+          say: r('[data-testid="roots-say"]'),
+          roots: r('[data-testid="roots"]'),
+          words: pin.textContent,
+          radius: getComputedStyle(pin).borderTopLeftRadius,
+        };
+      });
+      type Box = { l: number; t: number; r: number; b: number };
+      const apart = (a: Box, b: Box) => a.r <= b.l || b.r <= a.l || a.b <= b.t || b.b <= a.t;
+      note(`end to end at 360 px: ${JSON.stringify(place)}`);
+      await shot(phone, '1b-home-end-to-end-360');
+      expect(place.words).toBe('end to end');
+      expect(apart(place.pin, place.name), "360 px: the word is off MAIN's name").toBe(true);
+      expect(apart(place.pin, place.say), '360 px: the word is off the words line').toBe(true);
+      const inRoots =
+        place.pin.l >= place.roots.l &&
+        place.pin.r <= place.roots.r &&
+        place.pin.t >= place.roots.t &&
+        place.pin.b <= place.roots.b;
+      expect(inRoots, '360 px: inside the roots').toBe(true);
+      expect(place.radius, '360 px: square, like every tag').toBe('0px');
+      await phone.setViewportSize(devices['Pixel 7'].viewport);
 
     } else {
       await phone.goto(`${AP}/`);
