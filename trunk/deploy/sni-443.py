@@ -21,15 +21,77 @@ Config, one directive per line (# starts a comment):
     stun    127.0.0.1:3478               optional
     ice     127.0.0.1:4479               optional (ap.toml [[ap.tcp]] listen of the ICE forward)
 Names match without case and without a trailing dot. trunk/deploy/sni-443-test.py is its test.
+
+The meter (trunk observability): once a minute, connections and bytes per route and failures by
+kind go to the journal as one `sni-443: minute {…}` line, and to the access point as one UDP
+datagram on loopback (SNI443_STATS, default 127.0.0.1:4481): the ap folds it into the minute line
+it sends home. Counts only — never a name or an address. SNI443_STATS=off: neither.
 """
 import ipaddress
+import json
+import os
 import socket
 import sys
 import threading
+import time
 
 MAGIC = b"\x21\x12\xa4\x42"
 PEEK_SECS = 10
 MAX_CONNS = 1024
+STATS_TO = os.environ.get("SNI443_STATS", "127.0.0.1:4481")
+
+
+class Stats:
+    """This minute's counts: conns and bytes per route kind, failures by kind (never a name)."""
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.reset()
+
+    def reset(self):
+        self.conns, self.bytes, self.errors = {}, {}, {}
+
+    def conn(self, route):
+        with self.lock:
+            self.conns[route] = self.conns.get(route, 0) + 1
+
+    def add_bytes(self, route, n):
+        with self.lock:
+            self.bytes[route] = self.bytes.get(route, 0) + n
+
+    def error(self, kind):
+        with self.lock:
+            self.errors[kind] = self.errors.get(kind, 0) + 1
+
+    def take(self):
+        with self.lock:
+            out = {"conns": self.conns, "bytes": self.bytes, "errors": self.errors}
+            self.reset()
+        return out
+
+
+STATS = Stats()
+
+
+def stats_loop():
+    if STATS_TO == "off":
+        return
+    try:
+        to = parse_addr(STATS_TO)
+    except ValueError:
+        return
+    udp = socket.socket(socket.AF_INET6 if ":" in to[0] else socket.AF_INET, socket.SOCK_DGRAM)
+    while True:
+        time.sleep(60 - time.time() % 60 + 0.2)
+        m = STATS.take()
+        m["ts"] = int(time.time() // 60 * 60 * 1000)
+        line = json.dumps(m, separators=(",", ":"), sort_keys=True)
+        if m["conns"] or m["errors"]:
+            print(f"sni-443: minute {line}", file=sys.stderr, flush=True)
+        try:
+            udp.sendto(line.encode(), to)
+        except OSError:
+            pass
 
 
 def parse_addr(text):
@@ -66,6 +128,17 @@ def load(path):
     if not cfg["listen"]:
         cfg["listen"].append(("0.0.0.0", 443))
     return cfg
+
+
+def route_kind(cfg, backend, proxy):
+    """A route's kind for the counts: the proxied trunk name, another name, the website, STUN, ICE."""
+    if backend == cfg["stun"]:
+        return "stun"
+    if backend == cfg["ice"]:
+        return "ice"
+    if backend == cfg["default"]:
+        return "default"
+    return "trunk" if proxy else "named"
 
 
 def route_of(cfg, name):
@@ -138,13 +211,15 @@ def proxy_line(client):
     return f"PROXY TCP{a.version} {a} {b} {sport} {dport}\r\n".encode()
 
 
-def pipe(a, b):
+def pipe(a, b, route=None):
     try:
         while True:
             d = a.recv(65536)
             if not d:
                 break
             b.sendall(d)
+            if route:
+                STATS.add_bytes(route, len(d))
     except OSError:
         pass
     for s in (a, b):
@@ -158,12 +233,15 @@ def pipe(a, b):
 def handle(cfg, client):
     """One connection: peek, pick the backend, forward both ways until either side closes."""
     client.settimeout(PEEK_SECS)
+    route, stage = None, "peek"
     try:
         peek = recv_exact(client, b"", 8)
         if not peek:
+            STATS.error("empty")
             client.close()
             return
         prefix = b""
+        proxy = False
         if cfg["ice"] and framed_stun_head(peek):
             peek = recv_exact(client, peek, 10)
         if len(peek) >= 8 and peek[4:8] == MAGIC and cfg["stun"]:
@@ -177,8 +255,11 @@ def handle(cfg, client):
                 prefix = proxy_line(client)
         else:
             backend = cfg["default"]
+        route, stage = route_kind(cfg, backend, proxy), "upstream"
+        STATS.conn(route)
         upstream = socket.create_connection(backend, timeout=5)
     except OSError:
+        STATS.error(f"{stage}" + (f".{route}" if route else ""))
         try:
             client.close()
         except OSError:
@@ -194,8 +275,8 @@ def handle(cfg, client):
         upstream.close()
         client.close()
         return
-    threading.Thread(target=pipe, args=(client, upstream), daemon=True).start()
-    pipe(upstream, client)
+    threading.Thread(target=pipe, args=(client, upstream, route), daemon=True).start()
+    pipe(upstream, client, route)
 
 
 def serve(cfg, ready=None):
@@ -224,6 +305,7 @@ def serve(cfg, ready=None):
             except OSError:
                 continue
             if not slots.acquire(blocking=False):
+                STATS.error("slots")
                 c.close()
                 continue
 
@@ -234,6 +316,7 @@ def serve(cfg, ready=None):
                     slots.release()
             threading.Thread(target=run, daemon=True).start()
 
+    threading.Thread(target=stats_loop, daemon=True).start()
     for s in socks[1:]:
         threading.Thread(target=accept, args=(s,), daemon=True).start()
     accept(socks[0])

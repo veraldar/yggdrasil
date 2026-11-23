@@ -608,3 +608,43 @@ that join (each its brain on its own mock, its node from the ROOT build, root-di
   owner's own dispatcher test, unmodified, against it (9/9 PASS); the ported cases + 4 ICE cases
   pass too. Difference outside every test: a connection that closes before 8 bytes goes to the
   website instead of being dropped.
+
+## The trunk meter (trunk-obs, 2026-11-23) — proposal v2, accepted by the owner 11-23 13:48
+
+Passive counts and timings, never content, kept at home. One module (`src/meter.rs`) in every
+`bifrost-net` process: counters/peaks/levels/latency histograms as statics (an atomic add once per
+connection, nothing per packet), one minute line per process, event lines behind a bounded queue
+(full = dropped and counted). No config key (every config is `deny_unknown_fields`, a rollback must
+keep starting): on by default; `BIFROST_OBS=off`, `BIFROST_OBS_DIR`. Files beside the device
+registry's folder (hub: `~/.local/share/yggdrasil/hub/obs/`): `bridge-min-…`, `wg-min-…`,
+`ap-min-…` (the VPS's, sent home), `bridge-/wg-/app-events-…`; deleted after 14 days by the writer.
+
+- **The VPS keeps nothing on disk.** The ap's minute lines (with totals since start) go home over
+  the channel as mux kind 16 `STATS` (a backlog of 60 after a reconnect); older bridges ignore it.
+  `sni-443.py` sends its per-route counts to the ap on udp 127.0.0.1:4481 → inside the ap's line.
+- **The 5-minute test request.** From home (the bridge: `https://<ap>/_probe` with a per-process
+  key → back to the same bridge, which answers 204 itself) and from the VPS (the ap → its own
+  front door → mux kind 17 `PROBE` → the bridge answers). A stranger's `/_probe` gets the `/_root`
+  404. `BIFROST_PROBE=off`, `BIFROST_PROBE_EVERY_S` (the rigs).
+- **Reasons where there were none:** the channel's down (silent / error / closed / taken over),
+  the edge's TLS/PROXY/head failures, "bridge offline" answers, refused bridges, root-link refusals.
+- **Tokens:** `branch/lib/obs.ts` (+ taps in `devices.ts`, `gate.ts`): pairing, refresh (ok / why /
+  seconds before expiry / region changed), reuse (race vs theft), revoke, kill, refusals with their
+  hint and device. The bridge: `auth.refresh` and the tunnel's AUTH (same fields), cuts with
+  revoke → cut from `revokedAt` / `killedAt`; hub-wg: root cuts with the same timing.
+- **The log:** a repeating str0m/dimpl warning prints once a minute + "N more"; every one is
+  counted (`peer.dtls.rxq_full` = DTLS "Receive queue full", 1,406 lines on 11-22).
+- **Reading it:** `GET http://127.0.0.1:<bridge http>/_obs` (loopback, the `/_root` guards);
+  `scripts/trunk-report.py day|watch|release-check|json` — the morning page
+  `trunk-day-<date>.html` (artifacts, filed in MAIN's inbox at 07:00), alerts every 5 min into
+  MAIN's inbox (an outage, a theft signal, a revoke slower than 5 s, the channel down > 2 min), the
+  release check 16 min after a deploy (report only). Units: `hub-trunk-{report,watch}.timer`.
+- **Cost:** `sim/trunk-obs-bench.py` (1,500 requests × 3, rounds interleaved): meter on p50 2.68 ms /
+  p95 3.57 ms / bridge 0.57 ms cpu per request; off 3.08 / 4.27 / 0.59 — within noise.
+- **Tests:** `cargo test` (meter units: buckets, percentiles, iso, route classes never carry ids,
+  sweep; `parse_iso_ms`), `sim/trunk-obs-e2e.sh` (17 checks: records, refusals with device + hint,
+  both probes, ping RTT, the ap's minutes home, `/_obs` + its guard, a cut channel's reason, the
+  page, the watcher once, `BIFROST_OBS=off`), `node --test branch/lib/obs.test.mjs` (pairing,
+  refresh lead, race vs theft, re-pair `from`, kill; no secret in the lines).
+- **Not done here:** phone push (the hub has no VAPID keys: alerts go to MAIN's inbox); the sim load
+  profile from observed shapes (needs a week of data); step 4 (content capture: not asked for).

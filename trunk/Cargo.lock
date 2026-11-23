@@ -177,6 +177,7 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "toml",
+ "tracing",
  "tracing-subscriber",
  "ureq",
 ]

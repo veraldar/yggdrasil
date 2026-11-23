@@ -73,6 +73,8 @@ release() {
   cp -a "$TREE/root/extensions/librarian" "$r/librarian"
   cp -a "$TREE/root/cc-live" "$r/cc-live"
   (cd "$TREE" && git ls-files -z branch/voice | tar --null -cf - -T -) | tar -xf - -C "$r" && mv "$r/branch/voice" "$r/voice" && rmdir "$r/branch"
+  # the trunk meter's reader (morning page, alerts, release check): run from the release
+  install -D -m755 "$TREE/scripts/trunk-report.py" "$r/scripts/trunk-report.py"
   printf 'id=%s\ncommit=%s\nbuilt=%s\napp_build_id=%s\n' "$id" "$(git -C "$TREE" rev-parse HEAD)" "$(date -Is)" "$(cat "$b/.next/BUILD_ID")" >"$r/BUILD"
   chmod -R go-w "$r"
   echo "$id"
@@ -219,8 +221,41 @@ StandardError=append:$HOME/.cache/root-sim/cc-live-preview.log
 [Install]
 WantedBy=default.target
 EOF
+  # the trunk meter's reader (trunk observability, proposal v2): the morning page at 07:00 (filed in
+  # MAIN's inbox as one line + the link) and a watcher every 5 min (an outage, a theft signal, a slow
+  # revoke -> one line in MAIN's inbox). Read-only on the meter's files; posts never start a model turn.
+  local t cmd when
+  for t in report watch; do
+    cmd="day --post"; when="OnCalendar=*-*-* 07:00:00"
+    [ "$t" = watch ] && cmd="watch --post" && when="OnCalendar=*:0/5"
+    cat >"$UNITS/hub-trunk-$t.service" <<EOF
+[Unit]
+Description=yggdrasil home root: the trunk meter's $t (scripts/trunk-report.py $cmd)
+
+[Service]
+Type=oneshot
+Environment=TRUNK_REPORT_ART=$ART
+ExecStart=/usr/bin/python3 $HUB/current/scripts/trunk-report.py $cmd
+StandardOutput=append:$LOGS/trunk-report.log
+StandardError=append:$LOGS/trunk-report.log
+EOF
+    cat >"$UNITS/hub-trunk-$t.timer" <<EOF
+[Unit]
+Description=yggdrasil home root: the trunk meter's $t
+
+[Timer]
+$when
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
+  done
   systemctl --user daemon-reload
-  echo "rendered: hub-brain hub-librarian hub-cclive hub-voice-agent hub-app hub-app-tailnet hub-bridge"
+  if [ -f "$HUB/current/scripts/trunk-report.py" ]; then
+    systemctl --user enable -q --now hub-trunk-report.timer hub-trunk-watch.timer || true
+  fi
+  echo "rendered: hub-brain hub-librarian hub-cclive hub-voice-agent hub-app hub-app-tailnet hub-bridge hub-trunk-{report,watch}.timer"
 }
 
 wait_http() { for _ in $(seq 1 60); do curl -sf -m 2 -o /dev/null "$1" && return 0; sleep 0.5; done; return 1; }
@@ -410,6 +445,8 @@ deploy() {
     echo "-- the way back for the data: $bk"
   fi
   ln -sfn "$HUB/releases/$id" "$HUB/current"
+  local t_deploy
+  t_deploy=$(date +%s%3N)
   render
   # the brain drains in its ExecStop; the others restart at once
   for u in $running; do systemctl --user restart "$u" || bad=1; done
@@ -428,6 +465,11 @@ deploy() {
     exit 1
   fi
   echo "== deploy $id: done"
+  # the release check (report only): its first 15 minutes against the hour before, into MAIN's inbox
+  if [ -f "$HUB/current/scripts/trunk-report.py" ]; then
+    systemd-run --user -q --on-active=16min --unit="hub-trunk-release-check-$(date +%s)" \
+      /usr/bin/python3 "$HUB/current/scripts/trunk-report.py" release-check "$id" "$t_deploy" --post || true
+  fi
   status || true
 }
 

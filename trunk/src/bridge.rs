@@ -49,6 +49,7 @@ use crate::roots::{resolve_root, root_allowed, RootSel};
 use crate::speech::{resample_to_48k, Pcm, SpeechClient};
 use crate::region::region_of;
 use crate::ws;
+use crate::meter::{self, C as MC, H as MH, L as ML, P as MP};
 use crate::tokens::{bearer, now_ms, Grant, TokenStore};
 
 pub struct BridgeConfig {
@@ -172,6 +173,50 @@ struct Peer {
     tun_streams: HashMap<u32, tokio::sync::mpsc::UnboundedSender<Option<Vec<u8>>>>,
     tun_out: (crate::ap::Frames, tokio::sync::mpsc::UnboundedReceiver<(u8, Vec<u8>)>),
     tun_pending: VecDeque<Vec<u8>>,
+    /// the meter: when it was admitted, when its first channel opened, and which path its
+    /// packets came by (datagrams over UDP vs ICE-TCP frames via the ap's :443)
+    admitted: Instant,
+    opened: bool,
+    in_udp: u64,
+    in_tcp: u64,
+}
+
+impl Peer {
+    fn path(&self) -> &'static str {
+        match (self.in_udp, self.in_tcp) {
+            (0, 0) => "none",
+            (u, t) if t > u => "tcp",
+            _ => "udp",
+        }
+    }
+}
+
+/// A refresh on the pinned channel (`auth.refresh`, or the tunnel's AUTH frame): ok or why
+/// not, and how early it came — seconds the old access token still had (negative = after it
+/// expired). Counted and written as an event; never the token.
+fn note_refresh(via: &str, p: &Peer, old_exp: u64, res: Result<(), &str>) {
+    let lead_ms = if old_exp == crate::tokens::NO_EXPIRY { None } else { Some(old_exp as i64 - now_ms() as i64) };
+    match res {
+        Ok(()) => {
+            meter::inc(&MC.refresh_ok);
+            if let Some(l) = lead_ms {
+                if l < 0 {
+                    meter::inc(&MC.refresh_late);
+                } else {
+                    MH.refresh_lead.us(l as u64 * 1000);
+                }
+            }
+        }
+        Err(why) => {
+            meter::inc(&MC.refresh_denied);
+            meter::inc_named(&format!("peer.refresh.denied.{why}"));
+        }
+    }
+    meter::event(
+        "refresh",
+        serde_json::json!({ "src": "bridge", "via": via, "device": p.device, "ok": res.is_ok(), "why": res.err(),
+                            "lead_s": lead_ms.map(|l| l / 1000), "region": p.region }),
+    );
 }
 
 /// One ICE-TCP connection (RFC 4571 framing) handed over by the ap dial-out.
@@ -515,6 +560,16 @@ pub fn start(cfg: BridgeConfig) -> Result<BridgeHandle, String> {
                 Ok(None) => continue,
                 Err(_) => break,
             };
+            // the meter (trunk observability): this process's last hour, its totals, and the
+            // minutes the VPS sent home — loopback only, the same guards as /_root/
+            if request.url() == "/_obs" || request.url().starts_with("/_obs?") {
+                let r = match root_call_guard(&request) {
+                    Ok(()) => json_response(200, meter::snapshot().to_string()),
+                    Err(e) => json_response(403, serde_json::json!({ "error": e.replace("/_root", "/_obs") }).to_string()),
+                };
+                let _ = request.respond(r);
+                continue;
+            }
             // the box's own brain learns which roots are linked (loopback
             // only, same guards as /_root/; answered inline, never blocks)
             if is_roots_list_url(request.url()) {
@@ -586,6 +641,7 @@ pub fn start(cfg: BridgeConfig) -> Result<BridgeHandle, String> {
                     return;
                 }
                 let now = Instant::now();
+                let mut n_in = 0u64;
 
                 // worker outcomes
                 loop {
@@ -654,6 +710,7 @@ pub fn start(cfg: BridgeConfig) -> Result<BridgeHandle, String> {
 
                 // admit peers
                 while let Ok(adm) = admit_rx.try_recv() {
+                    meter::inc(&MC.peer_admit);
                     let id = next_id;
                     next_id += 1;
                     peers.insert(
@@ -669,6 +726,10 @@ pub fn start(cfg: BridgeConfig) -> Result<BridgeHandle, String> {
                                 (tx, rx)
                             },
                             tun_pending: VecDeque::new(),
+                            admitted: Instant::now(),
+                            opened: false,
+                            in_udp: 0,
+                            in_tcp: 0,
                             rtc: adm.rtc,
                             mid: None,
                             pt: None,
@@ -728,9 +789,11 @@ pub fn start(cfg: BridgeConfig) -> Result<BridgeHandle, String> {
                                 Some(id) => Some(id),
                                 None => peers.iter().find(|(_, p)| p.rtc.accepts(&input)).map(|(id, _)| *id),
                             };
+                            n_in += 1;
                             if let Some(id) = owner {
                                 c.peer = Some(id);
                                 if let Some(p) = peers.get_mut(&id) {
+                                    p.in_tcp += 1;
                                     let _ = p.rtc.handle_input(input);
                                 }
                             }
@@ -762,9 +825,11 @@ pub fn start(cfg: BridgeConfig) -> Result<BridgeHandle, String> {
                                     contents: (&buf[..n]).try_into().expect("contents"),
                                 },
                             );
+                            n_in += 1;
                             if let Some((_, p)) =
                                 peers.iter_mut().find(|(_, p)| p.rtc.accepts(&input))
                             {
+                                p.in_udp += 1;
                                 let _ = p.rtc.handle_input(input);
                             }
                         }
@@ -812,6 +877,18 @@ pub fn start(cfg: BridgeConfig) -> Result<BridgeHandle, String> {
                                     room_audio.push((*id, d));
                                 }
                                 Event::ChannelOpen(cid, label) => {
+                                    if !p.opened {
+                                        p.opened = true;
+                                        meter::inc(&MC.peer_open);
+                                        MH.peer_open_ms.since(p.admitted);
+                                        let path = p.path();
+                                        meter::inc(if path == "tcp" { &MC.peer_path_tcp } else { &MC.peer_path_udp });
+                                        meter::event(
+                                            "peer.open",
+                                            serde_json::json!({ "device": p.device, "path": path,
+                                                                "ms": p.admitted.elapsed().as_millis() as u64 }),
+                                        );
+                                    }
                                     if label == "tun" && tunnel.is_some() {
                                         p.tun = Some(cid);
                                     } else {
@@ -875,6 +952,7 @@ pub fn start(cfg: BridgeConfig) -> Result<BridgeHandle, String> {
                             _ => break,
                         }
                     }
+                    meter::peak(&MP.tun_backlog, p.tun_pending.len() as u64);
                 }
                 for c in ice_conns.iter_mut() {
                     while !c.wbuf.is_empty() && !c.dead {
@@ -936,10 +1014,17 @@ pub fn start(cfg: BridgeConfig) -> Result<BridgeHandle, String> {
                             if why != "gone" {
                                 println!("  bridge: severed peer {} ({}) — {why}", id, p.device);
                             }
+                            note_cut(&tokens, &p, why);
                         }
                     }
+                    meter::set(&ML.peers, peers.len() as u64);
                 }
 
+                // the loop's own health: how long this turn took, how much it was handed
+                meter::peak(&MP.loop_inputs, n_in);
+                let iter = now.elapsed();
+                MH.loop_iter.dur(iter);
+                meter::peak(&MP.loop_lag_us, iter.as_micros() as u64);
                 std::thread::sleep(Duration::from_millis(2));
             }
         });
@@ -974,6 +1059,7 @@ fn tunnel_frame(
     let Some((kind, id, body)) = crate::ap::unmux(data) else { return };
     match kind {
         crate::ap::OPEN => {
+            meter::inc(&MC.tun_streams);
             let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
             p.tun_streams.insert(id, tx);
             rt.spawn(crate::ap::tunnel_stream(
@@ -998,11 +1084,15 @@ fn tunnel_frame(
         }
         AUTH => {
             let raw = String::from_utf8_lossy(body).trim().to_string();
-            if let Ok(g) = tokens.check(&raw, &p.region) {
-                if g.device == p.device {
+            let old = p.exp_ms;
+            match tokens.check(&raw, &p.region) {
+                Ok(g) if g.device == p.device => {
                     p.token = raw;
                     p.exp_ms = g.exp_ms;
+                    note_refresh("tunnel", p, old, Ok(()));
                 }
+                Ok(_) => note_refresh("tunnel", p, old, Err("other-device")),
+                Err(d) => note_refresh("tunnel", p, old, Err(d.why())),
             }
         }
         _ => {}
@@ -1038,17 +1128,48 @@ fn auth_refresh(tokens: &TokenStore, p: &mut Peer, txt: &str) -> Option<String> 
     }
     let req = v.get("req").and_then(|r| r.as_u64()).unwrap_or(0);
     let token = v.get("token").and_then(|t| t.as_str()).unwrap_or_default();
+    let old = p.exp_ms;
     Some(
         match tokens.check(token, &p.region) {
             Ok(g) if g.device == p.device => {
                 p.exp_ms = g.exp_ms;
+                note_refresh("channel", p, old, Ok(()));
                 serde_json::json!({ "req": req, "ok": true, "exp": g.exp_ms })
             }
-            Ok(_) => serde_json::json!({ "req": req, "ok": false, "err": "token belongs to another device" }),
-            Err(d) => serde_json::json!({ "req": req, "ok": false, "err": d.why(), "reauth": d.reauth() }),
+            Ok(_) => {
+                note_refresh("channel", p, old, Err("other-device"));
+                serde_json::json!({ "req": req, "ok": false, "err": "token belongs to another device" })
+            }
+            Err(d) => {
+                note_refresh("channel", p, old, Err(d.why()));
+                serde_json::json!({ "req": req, "ok": false, "err": d.why(), "reauth": d.reauth() })
+            }
         }
         .to_string(),
     )
+}
+
+/// A peer cut (or gone): counted by reason; a revocation also measures revoke → cut, from
+/// the app's `revokedAt` to now (the sims' target: about a second).
+fn note_cut(tokens: &TokenStore, p: &Peer, why: &str) {
+    let life = p.admitted.elapsed().as_secs();
+    let mut ev = serde_json::json!({ "src": "bridge", "device": p.device, "why": why, "path": p.path(), "life_s": life });
+    match why {
+        "kill-switch" | "revoked" => {
+            meter::inc(if why == "revoked" { &MC.peer_cut_revoked } else { &MC.peer_cut_kill });
+            let at = if why == "revoked" { tokens.revoked_at(&p.device) } else { tokens.killed_at() };
+            if let Some(at) = at {
+                let ms = now_ms().saturating_sub(at);
+                if ms < 86_400_000 {
+                    MH.revoke_cut.us(ms * 1000);
+                    ev["revoke_ms"] = ms.into();
+                }
+            }
+        }
+        "token expired" => meter::inc(&MC.peer_cut_expired),
+        _ => meter::inc(&MC.peer_gone),
+    }
+    meter::event(if why == "gone" { "peer.end" } else { "cut" }, ev);
 }
 
 /// CORS: the token IS the gate (no cookies are ever read), so the bridge is
@@ -1259,9 +1380,14 @@ fn handle_signaling_request(
         let _ = request.respond(cors(tiny_http::Response::from_string("bifrost bridge")));
         return;
     }
+    let t_offer = Instant::now();
+    meter::inc(&MC.offer);
     let grant = match authorize_offer(&request, tokens) {
         Ok(g) => g,
         Err(d) => {
+            meter::inc(&MC.offer_denied);
+            let device = tokens.device_of(&raw_credential(&request));
+            crate::ap::count_deny(d, "offer", "offer", device.as_deref(), &request_region(&request));
             let _ = request.respond(deny_response(d.why(), d.reauth()));
             return;
         }
@@ -1272,7 +1398,10 @@ fn handle_signaling_request(
         return;
     };
     let epoch = tokens.kill_epoch();
-    let bad = |msg: String| json_response(400, serde_json::json!({ "error": msg }).to_string());
+    let bad = |msg: String| {
+        meter::inc(&MC.offer_bad);
+        json_response(400, serde_json::json!({ "error": msg }).to_string())
+    };
     let mut body = String::new();
     let _ = request.as_reader().read_to_string(&mut body);
     // Chrome is trickle-only: the offer SDP carries NO candidates; they
@@ -1387,9 +1516,13 @@ fn handle_signaling_request(
     if !ufrag.is_empty() {
         ufrags.lock().unwrap().insert(ufrag.clone());
     }
+    let device = grant.device.clone();
     if admit_tx.send(Admit { rtc, grant, epoch, token: raw_token, ip: client_ip, ufrag }).is_err() {
         return;
     }
+    meter::inc(&MC.offer_ok);
+    MH.offer_answer.since(t_offer);
+    meter::event("offer", serde_json::json!({ "device": device, "ms": t_offer.elapsed().as_millis() as u64 }));
     let _ = request.respond(json_response(200, body));
 }
 

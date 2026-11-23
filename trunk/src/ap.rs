@@ -42,6 +42,7 @@ use tokio::sync::{mpsc, watch};
 use tokio::time::timeout;
 use tokio_rustls::{TlsAcceptor, TlsConnector};
 
+use crate::meter::{self, C as MC, H as MH, L as ML, P as MP};
 use crate::region::region_of;
 use crate::tokens::{bearer, hash_token, Deny, TokenStore};
 
@@ -57,6 +58,14 @@ pub(crate) const OPEN: u8 = 1;
 pub(crate) const DATA: u8 = 2;
 pub(crate) const CLOSE: u8 = 3;
 const OPEN_RAW: u8 = 4;
+/// the ap's minute lines, home over the channel (meter.rs): {"proc":"ap","lines":[…]}
+pub(crate) const STATS: u8 = 16;
+/// the 5-minute test request: the ap asks, the bridge answers itself (same id, same payload)
+pub(crate) const PROBE: u8 = 17;
+/// how often the test request goes (± PROBE_JITTER), and how long it may take
+const PROBE_EVERY_DEFAULT: u64 = 300;
+const PROBE_JITTER: u64 = 30;
+const PROBE_WAIT: Duration = Duration::from_secs(10);
 const PING_EVERY: Duration = Duration::from_secs(15);
 const SILENT: Duration = Duration::from_secs(45);
 
@@ -525,11 +534,26 @@ struct Hub {
     link: Mutex<Option<Link>>,
     gens: AtomicU64,
     ids: AtomicU32,
+    /// the ap's own test requests waiting for the bridge's answer
+    probes: Mutex<HashMap<u32, tokio::sync::oneshot::Sender<()>>>,
+}
+
+/// A per-process secret on this process's own test requests (`X-Bifrost-Probe`): the
+/// process that sent a probe is the one that answers it, and nobody else's `/_probe` is.
+pub(crate) fn probe_key() -> &'static str {
+    static KEY: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    KEY.get_or_init(|| {
+        let mut b = [0u8; 16];
+        OsRng.fill_bytes(&mut b);
+        b.iter().map(|x| format!("{x:02x}")).collect()
+    })
 }
 
 pub fn run(path: &str) -> Result<(), String> {
     let cfg = load(path)?;
     println!("bifrost-net ap (config: {path})");
+    // the VPS keeps nothing on disk: its minutes go home over the channel (STATS)
+    meter::init("ap", meter::dir_from_env(None));
     let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().map_err(|e| e.to_string())?;
     rt.block_on(serve(cfg, None))
 }
@@ -568,6 +592,58 @@ async fn serve(cfg: ApConfig, ready: Option<std::sync::mpsc::Sender<Result<(Sock
     println!("  ap: identity {pin}  (bridge.toml [ap] pin)");
     println!("  ap: bridge channel wss://<host>{} (Bearer, sha-256 admitted)", cfg.channel_path);
     let hub = Arc::new(Hub::default());
+    if meter::enabled() {
+        // every minute line goes home while the channel is up (the backlog follows a reconnect)
+        let h = hub.clone();
+        meter::on_minute(move |line| {
+            let link = h.link.lock().unwrap().clone();
+            if let Some(l) = link {
+                let body = serde_json::json!({ "proc": "ap", "lines": [line] }).to_string();
+                let _ = l.out.send(mux(STATS, 0, body.as_bytes()));
+            }
+        });
+        // behind the :443 dispatcher: its minute counts arrive here as one UDP datagram
+        // (sni-443.py SNI443_STATS) and ride home inside this process's minute line
+        if cfg.proxy_protocol {
+            let at = std::env::var("BIFROST_SNI_STATS").unwrap_or_else(|_| "127.0.0.1:4481".into());
+            if at != "off" {
+                match std::net::UdpSocket::bind(&at) {
+                    Ok(sock) => {
+                        let last: Arc<Mutex<Option<serde_json::Value>>> = Arc::default();
+                        let l2 = last.clone();
+                        std::thread::Builder::new()
+                            .name("sni-stats".into())
+                            .spawn(move || {
+                                let mut buf = vec![0u8; 16 * 1024];
+                                while let Ok((n, from)) = sock.recv_from(&mut buf) {
+                                    if !from.ip().is_loopback() {
+                                        continue;
+                                    }
+                                    if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&buf[..n]) {
+                                        if v.is_object() {
+                                            *l2.lock().unwrap() = Some(v);
+                                        }
+                                    }
+                                }
+                            })
+                            .ok();
+                        meter::add_source("sni", move || last.lock().unwrap().take());
+                        println!("  ap: the :443 dispatcher's minute counts on udp {at}");
+                    }
+                    Err(e) => println!("  ap: dispatcher counts not received (udp {at}: {e})"),
+                }
+            }
+        }
+        if !std::env::var("BIFROST_PROBE").is_ok_and(|v| v == "off") {
+            match probe_target(&cfg, certs_names(&cfg.cert_path)) {
+                Some((addr, name)) => {
+                    println!("  ap: test request every {}s → https://{name}/_probe via {addr} (answered by the bridge)", probe_every().as_secs());
+                    tokio::spawn(ap_prober(addr, name, pin.clone()));
+                }
+                None => println!("  ap: test request off (no DNS name in the certificate; BIFROST_PROBE_HOST=<name>)"),
+            }
+        }
+    }
     if let Some(name) = cfg.ice.as_ref().filter(|_| !cfg.proxy_protocol) {
         println!("  ap: ICE-TCP on this listener → raw stream '{name}' (RFC 4571-framed STUN is not TLS)");
     }
@@ -598,23 +674,39 @@ async fn serve(cfg: ApConfig, ready: Option<std::sync::mpsc::Sender<Result<(Sock
                 continue;
             }
         };
+        meter::inc(&MC.edge_conns);
         let (acceptor, hub, cfg) = (acceptor.clone(), hub.clone(), cfg.clone());
         tokio::spawn(async move {
             let _ = tcp.set_nodelay(true);
             if let Some(name) = cfg.ice.as_ref().filter(|_| !cfg.proxy_protocol) {
                 if peek_framed_stun(&tcp).await {
+                    meter::inc(&MC.edge_ice_peek_stun);
                     return raw_conn(tcp, peer, name.clone(), hub).await;
                 }
             }
             let peer = if cfg.proxy_protocol {
                 match timeout(Duration::from_secs(5), read_proxy_v1(&mut tcp, peer)).await {
                     Ok(Ok(p)) => p,
-                    _ => return,
+                    Ok(Err(_)) => return meter::inc(&MC.edge_proxy_bad),
+                    Err(_) => return meter::inc(&MC.edge_proxy_timeout),
                 }
             } else {
                 peer
             };
-            let Ok(Ok(tls)) = timeout(Duration::from_secs(10), acceptor.accept(tcp)).await else { return };
+            let t0 = Instant::now();
+            let tls = match timeout(Duration::from_secs(10), acceptor.accept(tcp)).await {
+                Ok(Ok(tls)) => {
+                    meter::inc(&MC.edge_tls_ok);
+                    MH.edge_tls.since(t0);
+                    tls
+                }
+                Ok(Err(e)) => {
+                    meter::inc(&MC.edge_tls_fail);
+                    meter::inc_named(&format!("edge.tls.fail.{}", tls_fail_kind(&e)));
+                    return;
+                }
+                Err(_) => return meter::inc(&MC.edge_tls_timeout),
+            };
             let _ = edge_conn(tls, peer, hub, cfg).await;
         });
     }
@@ -653,7 +745,8 @@ async fn peek_framed_stun(tcp: &TcpStream) -> bool {
 async fn raw_conn(tcp: TcpStream, peer: SocketAddr, name: String, hub: Arc<Hub>) {
     let _ = tcp.set_nodelay(true);
     let link = hub.link.lock().unwrap().clone();
-    let Some(link) = link else { return };
+    let Some(link) = link else { return meter::inc(&MC.edge_raw_nolink) };
+    meter::inc(&MC.edge_raw);
     let id = hub.ids.fetch_add(1, Ordering::Relaxed) + 1;
     let (tx, mut rx) = mpsc::unbounded_channel::<Option<Vec<u8>>>();
     link.streams.lock().unwrap().insert(id, tx);
@@ -709,19 +802,42 @@ async fn edge_conn(
     hub: Arc<Hub>,
     cfg: Arc<ApConfig>,
 ) -> io::Result<()> {
-    let Ok(Ok(Some((head, rest)))) = timeout(Duration::from_secs(30), read_head(&mut tls)).await else {
-        return Ok(());
+    let (head, rest) = match timeout(Duration::from_secs(30), read_head(&mut tls)).await {
+        Ok(Ok(Some(x))) => x,
+        Ok(Ok(None)) => return Ok(()),
+        Ok(Err(_)) => return Ok(meter::inc(&MC.edge_head_bad)),
+        Err(_) => return Ok(meter::inc(&MC.edge_head_timeout)),
     };
-    let path = parse_head(&head).map(|r| r.path).unwrap_or_default();
+    let req = parse_head(&head).ok();
+    let path = req.as_ref().map(|r| r.path.clone()).unwrap_or_default();
     if path == cfg.channel_path || path.starts_with(&format!("{}?", cfg.channel_path)) {
         return bridge_link(tls, peer, &head, hub, cfg).await;
+    }
+    // this process's own test request: the bridge answers it over the channel, nothing else does
+    if path == "/_probe" && req.as_ref().and_then(|r| r.header("x-bifrost-probe")) == Some(probe_key()) {
+        return own_probe(tls, hub).await;
     }
     let stamped = |b: Vec<u8>| stamp_hsts(&b, &cfg.hsts).unwrap_or(b);
     let link = hub.link.lock().unwrap().clone();
     let Some(link) = link else {
+        meter::inc(&MC.edge_offline);
         tls.write_all(&stamped(http_response(503, "Service Unavailable", "text/plain", "bifrost: the bridge is offline\n"))).await?;
         return tls.shutdown().await;
     };
+    let t0 = Instant::now();
+    meter::inc(&MC.edge_streams);
+    meter::inc_named(&format!("edge.route.{}", meter::route_class(&path)));
+    // open while this lives (every way out of edge_conn, `?` included)
+    struct Open(Instant);
+    impl Drop for Open {
+        fn drop(&mut self) {
+            ML.streams_now.fetch_sub(1, Ordering::Relaxed);
+            MH.edge_dur.since(self.0);
+        }
+    }
+    let open_now = ML.streams_now.fetch_add(1, Ordering::Relaxed) + 1;
+    meter::peak(&MP.streams_open, open_now);
+    let _open = Open(t0);
     let id = hub.ids.fetch_add(1, Ordering::Relaxed) + 1;
     let (tx, mut rx) = mpsc::unbounded_channel::<Option<Vec<u8>>>();
     link.streams.lock().unwrap().insert(id, tx);
@@ -739,6 +855,7 @@ async fn edge_conn(
             match rd.read(&mut buf).await {
                 Ok(0) | Err(_) => break,
                 Ok(n) => {
+                    meter::add(&MC.edge_bytes_in, n as u64);
                     if up.send(mux(DATA, id, &buf[..n])).is_err() {
                         break;
                     }
@@ -748,7 +865,13 @@ async fn edge_conn(
         let _ = up.send(mux(CLOSE, id, &[]));
     });
     let mut pending: Option<Vec<u8>> = Some(vec![]);
+    let mut first = true;
     while let Some(Some(chunk)) = rx.recv().await {
+        if first {
+            first = false;
+            MH.edge_ttfb.since(t0);
+        }
+        meter::add(&MC.edge_bytes_out, chunk.len() as u64);
         if let Some(mut hb) = pending.take() {
             hb.extend_from_slice(&chunk);
             match stamp_hsts(&hb, &cfg.hsts) {
@@ -772,6 +895,133 @@ async fn edge_conn(
     Ok(())
 }
 
+/// The ap's own test request arrived (through the :443 dispatcher and this TLS): ask the
+/// bridge over the channel and answer 204 when it answers — 503 when there is no bridge,
+/// 504 when it does not answer in time. The header says how long the channel's round took.
+async fn own_probe(mut tls: tokio_rustls::server::TlsStream<TcpStream>, hub: Arc<Hub>) -> io::Result<()> {
+    let link = hub.link.lock().unwrap().clone();
+    let Some(link) = link else {
+        tls.write_all(&http_response(503, "Service Unavailable", "text/plain", "bridge offline\n")).await?;
+        return tls.shutdown().await;
+    };
+    let id = hub.ids.fetch_add(1, Ordering::Relaxed) + 1;
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    hub.probes.lock().unwrap().insert(id, tx);
+    let t0 = Instant::now();
+    let _ = link.out.send(mux(PROBE, id, &[]));
+    let answer = match timeout(PROBE_WAIT, rx).await {
+        Ok(Ok(())) => {
+            MH.edge_probe_link.since(t0);
+            format!("HTTP/1.1 204 No Content\r\nX-Bifrost-Link-Us: {}\r\nConnection: close\r\n\r\n", t0.elapsed().as_micros())
+                .into_bytes()
+        }
+        _ => {
+            hub.probes.lock().unwrap().remove(&id);
+            http_response(504, "Gateway Timeout", "text/plain", "the bridge did not answer\n")
+        }
+    };
+    tls.write_all(&answer).await?;
+    tls.shutdown().await
+}
+
+/// What kind of TLS failure (counted, never logged per connection).
+fn tls_fail_kind(e: &io::Error) -> &'static str {
+    match e.kind() {
+        io::ErrorKind::UnexpectedEof | io::ErrorKind::ConnectionReset | io::ErrorKind::BrokenPipe => "gone",
+        io::ErrorKind::InvalidData => "protocol",
+        _ => "other",
+    }
+}
+
+/// The DNS names of the ap's certificate (the test request names the first).
+fn certs_names(cert_path: &str) -> Vec<String> {
+    let Ok(Some(Ok(cert))) = CertificateDer::pem_file_iter(cert_path).map(|mut it| it.next()) else { return vec![] };
+    match webpki::EndEntityCert::try_from(&cert) {
+        Ok(ee) => ee.valid_dns_names().map(str::to_string).collect(),
+        Err(_) => vec![],
+    }
+}
+
+/// Where the ap's test request goes: its own front door (the :443 dispatcher when the ap sits
+/// behind it, else its own listener), naming the certificate's first DNS name.
+/// BIFROST_PROBE_HOST / BIFROST_PROBE_ADDR override.
+fn probe_target(cfg: &ApConfig, names: Vec<String>) -> Option<(String, String)> {
+    let name = std::env::var("BIFROST_PROBE_HOST").ok().filter(|h| !h.is_empty()).or_else(|| names.into_iter().next())?;
+    let addr = std::env::var("BIFROST_PROBE_ADDR").ok().filter(|a| !a.is_empty()).unwrap_or_else(|| {
+        if cfg.proxy_protocol {
+            "127.0.0.1:443".to_string()
+        } else {
+            cfg.listen.replace("0.0.0.0", "127.0.0.1").replace("[::]", "[::1]")
+        }
+    });
+    Some((addr, name))
+}
+
+/// One test request: TCP + TLS (pinned to `pin`) to `addr` naming `host`, `GET /_probe` with
+/// this process's key. Ok = 204 within PROBE_WAIT. Err = where it failed.
+async fn probe_once(addr: &str, host: &str, pin: &str) -> Result<(), &'static str> {
+    let tcp = match timeout(PROBE_WAIT, TcpStream::connect(addr)).await {
+        Ok(Ok(t)) => t,
+        Ok(Err(_)) => return Err("connect"),
+        Err(_) => return Err("timeout"),
+    };
+    let _ = tcp.set_nodelay(true);
+    let name = ServerName::try_from(host.to_string()).map_err(|_| "name")?;
+    let mut tls = match timeout(PROBE_WAIT, pinned_client(pin).map_err(|_| "pin")?.connect(name, tcp)).await {
+        Ok(Ok(t)) => t,
+        Ok(Err(_)) => return Err("tls"),
+        Err(_) => return Err("timeout"),
+    };
+    let req = format!("GET /_probe HTTP/1.1\r\nHost: {host}\r\nX-Bifrost-Probe: {}\r\nConnection: close\r\n\r\n", probe_key());
+    tls.write_all(req.as_bytes()).await.map_err(|_| "write")?;
+    let head = match timeout(PROBE_WAIT, read_head(&mut tls)).await {
+        Ok(Ok(Some((h, _)))) => h,
+        Ok(_) => return Err("closed"),
+        Err(_) => return Err("timeout"),
+    };
+    let status = std::str::from_utf8(&head).ok().and_then(|t| t.split(' ').nth(1)).unwrap_or("");
+    match status {
+        "204" => Ok(()),
+        "503" => Err("offline"),
+        "504" => Err("no-answer"),
+        "404" => Err("refused"),
+        _ => Err("bad"),
+    }
+}
+
+/// The test request's period: 5 minutes (BIFROST_PROBE_EVERY_S for the sims).
+fn probe_every() -> Duration {
+    let s = std::env::var("BIFROST_PROBE_EVERY_S").ok().and_then(|v| v.parse::<u64>().ok()).filter(|s| *s >= 1);
+    Duration::from_secs(s.unwrap_or(PROBE_EVERY_DEFAULT))
+}
+
+fn jittered(every: Duration) -> Duration {
+    let jitter = PROBE_JITTER.min(every.as_secs() / 10);
+    let mut b = [0u8; 2];
+    OsRng.fill_bytes(&mut b);
+    let j = u16::from_be_bytes(b) as u64 % (2 * jitter + 1);
+    (every + Duration::from_secs(j)).saturating_sub(Duration::from_secs(jitter))
+}
+
+/// The VPS's test request, every PROBE_EVERY: dispatcher → TLS → ap → channel → bridge → back.
+async fn ap_prober(addr: String, host: String, pin: String) {
+    tokio::time::sleep(Duration::from_secs(60).min(probe_every())).await;
+    loop {
+        let t0 = Instant::now();
+        match probe_once(&addr, &host, &pin).await {
+            Ok(()) => {
+                meter::inc(&MC.edge_probe_ok);
+                MH.edge_probe.since(t0);
+            }
+            Err(why) => {
+                meter::inc(&MC.edge_probe_fail);
+                meter::inc_named(&format!("edge.probe.fail.{why}"));
+            }
+        }
+        tokio::time::sleep(jittered(probe_every())).await;
+    }
+}
+
 async fn bridge_link(
     mut tls: tokio_rustls::server::TlsStream<TcpStream>,
     peer: SocketAddr,
@@ -782,6 +1032,7 @@ async fn bridge_link(
     let req = parse_head(head).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
     let raw = req.header("authorization").and_then(bearer).unwrap_or("");
     if raw.len() < 16 || hash_token(raw) != cfg.bridge_token_sha256 {
+        meter::inc(&MC.edge_link_refused);
         eprintln!("  ap: bridge registration from {peer} REFUSED (bad pairing token)");
         tls.write_all(&http_response(401, "Unauthorized", "text/plain", "bridge token required\n")).await?;
         return tls.shutdown().await;
@@ -807,20 +1058,39 @@ async fn bridge_link(
         let _ = old.out.send((OP_CLOSE, vec![]));
     }
     println!("  ap: bridge registered from {peer} (link #{epoch}) — serving");
+    meter::inc(&MC.edge_link_up);
+    meter::set(&ML.edge_link, 1);
+    let since = Instant::now();
+    // the minutes the bridge has not seen yet (it drops the ones it has)
+    let (backlog, _) = meter::backlog();
+    if !backlog.is_empty() {
+        let body = serde_json::json!({ "proc": "ap", "lines": backlog }).to_string();
+        let _ = out.send(mux(STATS, 0, body.as_bytes()));
+    }
     let writer = tokio::spawn(async move {
         while let Some((op, p)) = out_rx.recv().await {
+            meter::peak(&MP.edge_queue_bytes, out_rx.len() as u64);
             if ws_send(&mut wr, op, &p, false).await.is_err() || op == OP_CLOSE {
                 break;
             }
         }
         let _ = wr.shutdown().await;
     });
-    loop {
-        let Ok(Ok((op, p))) = timeout(SILENT, ws_recv(&mut rd)).await else { break };
+    let mut why = loop {
+        let (op, p) = match timeout(SILENT, ws_recv(&mut rd)).await {
+            Ok(Ok(x)) => x,
+            Ok(Err(_)) => break "error",
+            Err(_) => break "silent",
+        };
         match op {
             OP_BIN => {
                 let Some((kind, id, body)) = unmux(&p) else { continue };
                 match kind {
+                    PROBE => {
+                        if let Some(tx) = hub.probes.lock().unwrap().remove(&id) {
+                            let _ = tx.send(());
+                        }
+                    }
                     DATA => {
                         let tx = streams.lock().unwrap().get(&id).cloned();
                         if let Some(tx) = tx {
@@ -838,20 +1108,29 @@ async fn bridge_link(
             OP_PING => {
                 let _ = out.send((OP_PONG, p));
             }
-            OP_CLOSE => break,
+            OP_CLOSE => break "closed",
             _ => {}
         }
-    }
+    };
     {
         let mut l = hub.link.lock().unwrap();
         if l.as_ref().map(|x| x.epoch) == Some(epoch) {
             *l = None;
+            meter::set(&ML.edge_link, 0);
+        } else {
+            why = "taken over"; // a newer registration replaced this one
         }
     }
+    meter::inc(match why {
+        "silent" => &MC.edge_link_down_silent,
+        "error" => &MC.edge_link_down_error,
+        "closed" => &MC.edge_link_down_closed,
+        _ => &MC.edge_link_down_taken,
+    });
     streams.lock().unwrap().clear();
     let _ = out.send((OP_CLOSE, vec![]));
     let _ = timeout(Duration::from_secs(2), writer).await;
-    println!("  ap: bridge link #{epoch} down");
+    println!("  ap: bridge link #{epoch} down ({why}, up {}s)", since.elapsed().as_secs());
     Ok(())
 }
 
@@ -863,16 +1142,74 @@ pub fn spawn_dialer(cfg: DialConfig) {
         .name("ap-dialer".into())
         .spawn(move || {
             let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().expect("tokio");
-            rt.block_on(dial_forever(Arc::new(cfg)));
+            let cfg = Arc::new(cfg);
+            if meter::enabled() && !std::env::var("BIFROST_PROBE").is_ok_and(|v| v == "off") {
+                rt.spawn(home_prober(cfg.clone()));
+            }
+            rt.block_on(dial_forever(cfg));
         })
         .expect("ap dialer thread");
+}
+
+/// The home's test request, every PROBE_EVERY (half a period after the VPS's own): out from
+/// home to the public name, through the VPS's dispatcher, TLS, the ap, the channel, to this
+/// bridge, and back. It needs nothing new on the VPS: the ap passes `/_probe` like any stream,
+/// and this bridge answers it (serve_stream) when it carries this process's key.
+async fn home_prober(cfg: Arc<DialConfig>) {
+    let Ok((host, port, _)) = parse_wss(&cfg.url) else { return };
+    let addr = format!("{host}:{port}");
+    println!("  ap: test request every {}s → https://{addr}/_probe (answered by this bridge)", probe_every().as_secs());
+    tokio::time::sleep(Duration::from_secs(90.min(probe_every().as_secs()) + probe_every().as_secs() / 2)).await;
+    loop {
+        let t0 = Instant::now();
+        let r = probe_once(&addr, &host, &cfg.pin).await;
+        let ms = t0.elapsed().as_millis() as u64;
+        match r {
+            Ok(()) => {
+                meter::inc(&MC.probe_home_ok);
+                MH.probe_home.since(t0);
+            }
+            Err(why) => {
+                meter::inc(&MC.probe_home_fail);
+                meter::inc_named(&format!("probe.home.fail.{why}"));
+            }
+        }
+        meter::event("probe", serde_json::json!({ "from": "home", "ok": r.is_ok(), "why": r.err(), "ms": ms }));
+        tokio::time::sleep(jittered(probe_every())).await;
+    }
+}
+
+/// Microseconds since this process's first call: the ping payload (the pong echoes it).
+fn mono_us() -> u64 {
+    static T0: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+    T0.get_or_init(Instant::now).elapsed().as_micros() as u64
 }
 
 async fn dial_forever(cfg: Arc<DialConfig>) {
     let mut backoff = 1u64;
     loop {
         let t0 = Instant::now();
-        match dial_once(&cfg).await {
+        let r = dial_once(&cfg).await;
+        let up = meter::L.link.swap(0, Ordering::Relaxed) == 1;
+        let why = match (&r, up) {
+            (Ok(()), _) => "closed",
+            (Err(e), true) if e.contains("silent") => "silent",
+            (Err(_), true) => "error",
+            (Err(e), false) if e.starts_with("connect") => "connect",
+            (Err(e), false) if e.starts_with("tls") => "tls",
+            (Err(_), false) => "upgrade",
+        };
+        meter::inc(match why {
+            "closed" => &MC.link_down_closed,
+            "silent" => &MC.link_down_silent,
+            "error" => &MC.link_down_error,
+            "connect" => &MC.link_fail_connect,
+            "tls" => &MC.link_fail_tls,
+            _ => &MC.link_fail_upgrade,
+        });
+        let kind = if up { "link.down" } else { "link.fail" };
+        meter::event(kind, serde_json::json!({ "why": why, "up_s": if up { t0.elapsed().as_secs() } else { 0 } }));
+        match r {
             Ok(()) => eprintln!("  ap: channel closed by the ap"),
             Err(e) => eprintln!("  ap: {e}"),
         }
@@ -895,6 +1232,7 @@ fn parse_wss(url: &str) -> Result<(String, u16, String), String> {
 }
 
 async fn dial_once(cfg: &Arc<DialConfig>) -> Result<(), String> {
+    let t_dial = Instant::now();
     let (host, port, path) = parse_wss(&cfg.url)?;
     let tcp = timeout(Duration::from_secs(10), TcpStream::connect((host.as_str(), port)))
         .await
@@ -927,10 +1265,15 @@ async fn dial_once(cfg: &Arc<DialConfig>) -> Result<(), String> {
         return Err("ap upgrade answer has the wrong Sec-WebSocket-Accept".into());
     }
     println!("  ap: channel up — {} (pinned {})", cfg.url, cfg.pin);
+    meter::inc(&MC.link_up);
+    meter::set(&ML.link, 1);
+    MH.link_connect.since(t_dial);
+    meter::event("link.up", serde_json::json!({ "connect_ms": t_dial.elapsed().as_millis() as u64 }));
     let (mut rd, mut wr) = tokio::io::split(tls);
     let (out, mut out_rx) = mpsc::unbounded_channel::<(u8, Vec<u8>)>();
     let writer = tokio::spawn(async move {
         while let Some((op, p)) = out_rx.recv().await {
+            meter::peak(&MP.link_queue_bytes, out_rx.len() as u64);
             if ws_send(&mut wr, op, &p, true).await.is_err() {
                 break;
             }
@@ -941,7 +1284,8 @@ async fn dial_once(cfg: &Arc<DialConfig>) -> Result<(), String> {
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(PING_EVERY).await;
-                if out.send((OP_PING, vec![])).is_err() {
+                // the pong echoes the payload: the round trip, every 15 s, with or without traffic
+                if out.send((OP_PING, mono_us().to_be_bytes().to_vec())).is_err() {
                     break;
                 }
             }
@@ -978,12 +1322,34 @@ async fn dial_once(cfg: &Arc<DialConfig>) -> Result<(), String> {
                             let _ = tx.send(None);
                         }
                     }
+                    // the VPS's test request: answered here, at once, never by the app or the brain
+                    PROBE => {
+                        meter::inc(&MC.probe_answered);
+                        let _ = out.send(mux(PROBE, id, body));
+                    }
+                    // the VPS's minute lines (untrusted: size-capped, strictly parsed)
+                    STATS if body.len() <= 512 * 1024 => {
+                        if let Ok(v) = serde_json::from_slice::<serde_json::Value>(body) {
+                            let proc_ = v["proc"].as_str().unwrap_or("ap");
+                            for line in v["lines"].as_array().into_iter().flatten().take(meter::RING) {
+                                if meter::ingest(proc_, line.clone()) {
+                                    meter::inc(&MC.link_stats_in);
+                                }
+                            }
+                        }
+                    }
                     _ => {}
                 }
                 streams.retain(|_, tx| !tx.is_closed());
             }
             OP_PING => {
                 let _ = out.send((OP_PONG, p));
+            }
+            OP_PONG => {
+                if let Ok(b) = <[u8; 8]>::try_from(p.as_slice()) {
+                    let sent = u64::from_be_bytes(b);
+                    MH.link_rtt.us(mono_us().saturating_sub(sent));
+                }
             }
             OP_CLOSE => break Ok(()),
             _ => {}
@@ -1041,21 +1407,42 @@ fn normalize_path(raw: &str) -> String {
 
 /// The S1 gate, on the bridge: /api/* needs a live device token issued in the
 /// region of the client's REAL address (as the ap saw it). /api/pair mints.
-fn gate(tokens: &TokenStore, req: &Req, ip: IpAddr) -> Result<(), Deny> {
+/// Ok(true) = gated and allowed, Ok(false) = not a gated path.
+fn gate(tokens: &TokenStore, req: &Req, ip: IpAddr) -> Result<bool, Deny> {
     if join_exempt(&req.method, &req.path) {
-        return Ok(());
+        return Ok(false);
     }
     let p = normalize_path(&req.path);
     if !(p == "/api" || p.starts_with("/api/")) || p == "/api/pair" || p.starts_with("/api/pair/") {
-        return Ok(());
+        return Ok(false);
     }
-    let raw = req
-        .header("authorization")
-        .and_then(bearer)
-        .map(str::to_string)
-        .or_else(|| req.cookie("bifrost_device"))
-        .unwrap_or_default();
-    tokens.check(&raw, &region_of(ip)).map(|_| ())
+    let raw = credential(req).unwrap_or_default();
+    tokens.check(&raw, &region_of(ip)).map(|_| true)
+}
+
+/// The device credential a request carries (Bearer, else the device cookie).
+fn credential(req: &Req) -> Option<String> {
+    req.header("authorization").and_then(bearer).map(str::to_string).or_else(|| req.cookie("bifrost_device"))
+}
+
+/// A refusal at a gate, counted by reason and by the hint the client gets back; an event
+/// carries the device (when the token is known) and the region — what the report needs to
+/// follow a roam from its refusal to how it ended. Never the token.
+pub(crate) fn count_deny(d: Deny, src: &str, route: &str, device: Option<&str>, region: &str) {
+    meter::inc(match d {
+        Deny::Missing => &MC.gate_missing,
+        Deny::Invalid => &MC.gate_invalid,
+        Deny::Expired => &MC.gate_expired,
+        Deny::Region => &MC.gate_region,
+        Deny::Revoked => &MC.gate_revoked,
+    });
+    meter::inc(if d.reauth() == "refresh" { &MC.gate_hint_refresh } else { &MC.gate_hint_pair });
+    if d != Deny::Missing {
+        meter::event(
+            "deny",
+            serde_json::json!({ "src": src, "why": d.why(), "hint": d.reauth(), "route": route, "device": device, "region": region }),
+        );
+    }
 }
 
 /// The join contract's three calls that carry their own credential (or none, for
@@ -1105,42 +1492,175 @@ fn rewrite_head(req: &Req, ip: IpAddr, upgrade: bool, edge: bool) -> Vec<u8> {
     s.into_bytes()
 }
 
+/// One stream's record (meter.rs): filled in as the stream goes, counted when it ends.
+struct StreamRec {
+    t0: Instant,
+    via: &'static str,
+    route: &'static str,
+    target: &'static str,
+    gate: &'static str,
+    device: Option<String>,
+    shared: Arc<StreamShared>,
+}
+
+#[derive(Default)]
+struct StreamShared {
+    status: std::sync::atomic::AtomicU16,
+    first_us: AtomicU64,
+    bytes_in: AtomicU64,
+    bytes_out: AtomicU64,
+}
+
+impl StreamShared {
+    /// The upstream's first bytes: its status line, and the time to them.
+    fn first(&self, t0: Instant, chunk: &[u8]) {
+        if self.first_us.load(Ordering::Relaxed) == 0 {
+            self.first_us.store(t0.elapsed().as_micros().max(1) as u64, Ordering::Relaxed);
+            if let Some(code) = status_of(chunk) {
+                self.status.store(code, Ordering::Relaxed);
+            }
+        }
+    }
+}
+
+/// The status code of an HTTP/1.x response head (`HTTP/1.1 200 …`, `HTTP/1.0 503 …`).
+fn status_of(head: &[u8]) -> Option<u16> {
+    let rest = head.strip_prefix(b"HTTP/1.")?;
+    std::str::from_utf8(rest.get(2..5)?).ok()?.parse().ok()
+}
+
+impl StreamRec {
+    fn new(via: &'static str) -> StreamRec {
+        meter::inc(&MC.streams);
+        if via == "tunnel" {
+            meter::inc(&MC.streams_tunnel);
+        }
+        let n = ML.streams_now.fetch_add(1, Ordering::Relaxed) + 1;
+        meter::peak(&MP.streams_open, n);
+        StreamRec { t0: Instant::now(), via, route: "page", target: "app", gate: "", device: None, shared: Arc::default() }
+    }
+
+    /// An answer the bridge gave itself (refusals, 404s, the probe's 204).
+    fn answered(&self, status: u16) {
+        self.shared.status.store(status, Ordering::Relaxed);
+        self.shared.first_us.store(self.t0.elapsed().as_micros().max(1) as u64, Ordering::Relaxed);
+    }
+}
+
+impl Drop for StreamRec {
+    fn drop(&mut self) {
+        ML.streams_now.fetch_sub(1, Ordering::Relaxed);
+        let s = &self.shared;
+        let status = s.status.load(Ordering::Relaxed);
+        let (bin, bout) = (s.bytes_in.load(Ordering::Relaxed), s.bytes_out.load(Ordering::Relaxed));
+        let first = s.first_us.load(Ordering::Relaxed);
+        meter::add(&MC.bytes_in, bin);
+        meter::add(&MC.bytes_out, bout);
+        meter::inc(match status {
+            101 => &MC.status_101,
+            200..=299 => &MC.status_2xx,
+            300..=399 => &MC.status_3xx,
+            400..=499 => &MC.status_4xx,
+            _ => &MC.status_5xx,
+        });
+        if first > 0 {
+            if self.via == "tunnel" { &MH.ttfb_tunnel } else { &MH.ttfb }.us(first);
+        }
+        let dur = self.t0.elapsed();
+        if status != 101 && self.route != "api.run-events" {
+            MH.dur.dur(dur); // websockets and event streams live for minutes: not a latency
+        }
+        if self.route == "probe" {
+            return; // the test requests are their own plane
+        }
+        let mut ev = serde_json::json!({
+            "via": self.via, "route": self.route, "target": self.target, "st": status,
+            "in": bin, "out": bout, "ttfb_ms": first / 1000, "ms": dur.as_millis() as u64,
+        });
+        if !self.gate.is_empty() {
+            ev["gate"] = self.gate.into();
+        }
+        if let Some(d) = &self.device {
+            ev["device"] = d.clone().into();
+        }
+        meter::event("stream", ev);
+    }
+}
+
 async fn serve_stream(
+    cfg: Arc<DialConfig>,
+    id: u32,
+    open: Vec<u8>,
+    rx: mpsc::UnboundedReceiver<Option<Vec<u8>>>,
+    out: Frames,
+) {
+    serve_stream_via(cfg, id, open, rx, out, "edge").await
+}
+
+async fn serve_stream_via(
     cfg: Arc<DialConfig>,
     id: u32,
     open: Vec<u8>,
     mut rx: mpsc::UnboundedReceiver<Option<Vec<u8>>>,
     out: Frames,
+    via: &'static str,
 ) {
-    let reply = |bytes: Vec<u8>| {
+    let mut rec = StreamRec::new(via);
+    let reply = |rec: &StreamRec, bytes: Vec<u8>| {
+        let code = status_of(&bytes).unwrap_or(0);
+        rec.answered(code);
         let _ = out.send(mux(DATA, id, &bytes));
         let _ = out.send(mux(CLOSE, id, &[]));
     };
-    let Some(nl) = open.iter().position(|&b| b == b'\n') else { return reply(vec![]) };
+    let Some(nl) = open.iter().position(|&b| b == b'\n') else { return reply(&rec, vec![]) };
     let Some(ip) = std::str::from_utf8(&open[..nl]).ok().and_then(|s| s.parse::<IpAddr>().ok()) else {
-        return reply(vec![]);
+        return reply(&rec, vec![]);
     };
     let req = match parse_head(&open[nl + 1..]) {
         Ok(r) => r,
-        Err(e) => return reply(http_response(400, "Bad Request", "text/plain", &format!("{e}\n"))),
+        Err(e) => return reply(&rec, http_response(400, "Bad Request", "text/plain", &format!("{e}\n"))),
     };
     let p = req.path.split('?').next().unwrap_or("");
+    rec.route = meter::route_class(&req.path);
+    // a test request: this bridge's own (home → VPS → here) is answered at once; anyone
+    // else's `/_probe` learns nothing
+    if normalize_path(&req.path) == "/_probe" {
+        return if req.header("x-bifrost-probe") == Some(probe_key()) {
+            meter::inc(&MC.probe_answered);
+            reply(&rec, b"HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n".to_vec())
+        } else {
+            meter::inc(&MC.probe_refused);
+            reply(&rec, http_response(404, "Not Found", "text/plain", "not here\n"))
+        };
+    }
     // a remote root dialing in: its stream goes to the root-link listener,
     // which authenticates by link token (first ws frame) — the /api device
     // gate is for browsers and does not apply
     let rootlink = cfg.rootlink.as_ref().filter(|_| p == "/rootlink");
     if rootlink.is_some() && req.header("upgrade").is_none_or(|u| !u.eq_ignore_ascii_case("websocket")) {
-        return reply(http_response(426, "Upgrade Required", "text/plain", "/rootlink is a websocket\n"));
+        return reply(&rec, http_response(426, "Upgrade Required", "text/plain", "/rootlink is a websocket\n"));
     }
     // the switchboard's hub end is the box's own business: never from the edge
     let np = normalize_path(&req.path);
     if np == "/_root" || np.starts_with("/_root/") || np == "/_roots" || np.starts_with("/_roots/") {
-        return reply(http_response(404, "Not Found", "text/plain", "not here\n"));
+        return reply(&rec, http_response(404, "Not Found", "text/plain", "not here\n"));
     }
     if rootlink.is_none() {
-        if let Err(d) = gate(&cfg.tokens, &req, ip) {
-            let body = serde_json::json!({ "error": "device token required", "why": d.why(), "reauth": d.reauth() }).to_string();
-            return reply(http_response(401, "Unauthorized", "application/json", &body));
+        match gate(&cfg.tokens, &req, ip) {
+            Ok(true) => {
+                meter::inc(&MC.gate_ok);
+                rec.gate = "ok";
+                rec.device = credential(&req).and_then(|raw| cfg.tokens.device_of(&raw));
+            }
+            Ok(false) => {}
+            Err(d) => {
+                rec.gate = d.why();
+                let device = credential(&req).and_then(|raw| cfg.tokens.device_of(&raw));
+                count_deny(d, "bridge", rec.route, device.as_deref(), &region_of(ip));
+                rec.device = device;
+                let body = serde_json::json!({ "error": "device token required", "why": d.why(), "reauth": d.reauth() }).to_string();
+                return reply(&rec, http_response(401, "Unauthorized", "application/json", &body));
+            }
         }
     }
     // the voice path's signaling (LiveKit /rtc): a paired device only — its
@@ -1154,8 +1674,9 @@ async fn serve_stream(
             match cfg.tokens.check(&raw, &region_of(ip)) {
                 Ok(g) => Some((g, cfg.tokens.kill_epoch())),
                 Err(d) => {
+                    count_deny(d, "bridge", rec.route, cfg.tokens.device_of(&raw).as_deref(), &region_of(ip));
                     let body = serde_json::json!({ "error": "device token required", "why": d.why(), "reauth": d.reauth() }).to_string();
-                    return reply(http_response(401, "Unauthorized", "application/json", &body));
+                    return reply(&rec, http_response(401, "Unauthorized", "application/json", &body));
                 }
             }
         }
@@ -1163,14 +1684,14 @@ async fn serve_stream(
     // one request per connection: only the declared body passes (no pipelined
     // request can ride past the gate); chunked request bodies are refused
     if req.header("transfer-encoding").is_some() {
-        return reply(http_response(411, "Length Required", "text/plain", "chunked request bodies are not proxied\n"));
+        return reply(&rec, http_response(411, "Length Required", "text/plain", "chunked request bodies are not proxied\n"));
     }
     let lens: Vec<&str> = req.headers.iter().filter(|(k, _)| k.eq_ignore_ascii_case("content-length")).map(|(_, v)| v.as_str()).collect();
     if lens.len() > 1 && lens.iter().any(|l| *l != lens[0]) {
-        return reply(http_response(400, "Bad Request", "text/plain", "conflicting content-length\n"));
+        return reply(&rec, http_response(400, "Bad Request", "text/plain", "conflicting content-length\n"));
     }
     let Ok(mut budget) = lens.first().map(|l| l.parse::<u64>()).unwrap_or(Ok(0)) else {
-        return reply(http_response(400, "Bad Request", "text/plain", "bad content-length\n"));
+        return reply(&rec, http_response(400, "Bad Request", "text/plain", "bad content-length\n"));
     };
     let upgrade = req.header("upgrade").is_some();
     // a phone naming a root: the bridge's own /branch (it authenticates the
@@ -1187,17 +1708,29 @@ async fn serve_stream(
         (None, Some(lk)) => lk.clone(),
         _ => cfg.upstream.clone(),
     };
+    rec.target = match (rootlink, livekit) {
+        (Some(_), _) => "rootlink",
+        (None, _) if branch.is_some() => "bridge",
+        (None, Some(_)) => "livekit",
+        _ => "app",
+    };
+    let t_up = Instant::now();
     let up = match TcpStream::connect(&target).await {
         Ok(s) => s,
-        Err(e) => return reply(http_response(502, "Bad Gateway", "text/plain", &format!("bifrost: upstream {target}: {e}\n"))),
+        Err(e) => {
+            meter::inc(&MC.up_connect_fail);
+            return reply(&rec, http_response(502, "Bad Gateway", "text/plain", &format!("bifrost: upstream {target}: {e}\n")));
+        }
     };
+    MH.up_connect.since(t_up);
     let _ = up.set_nodelay(true);
     let (mut ur, mut uw) = up.into_split();
     if uw.write_all(&rewrite_head(&req, ip, upgrade, branch.is_some())).await.is_err() {
-        return reply(vec![]);
+        return reply(&rec, vec![]);
     }
     let (switched_tx, mut switched) = watch::channel(false);
     let out2 = out.clone();
+    let (shared, t0) = (rec.shared.clone(), rec.t0);
     let pump = tokio::spawn(async move {
         let mut buf = vec![0u8; 16384];
         let mut first = true;
@@ -1205,6 +1738,8 @@ async fn serve_stream(
             match ur.read(&mut buf).await {
                 Ok(0) | Err(_) => break,
                 Ok(n) => {
+                    shared.first(t0, &buf[..n]);
+                    shared.bytes_out.fetch_add(n as u64, Ordering::Relaxed);
                     if first && buf[..n].starts_with(b"HTTP/1.1 101") {
                         let _ = switched_tx.send(true);
                     }
@@ -1249,6 +1784,7 @@ async fn serve_stream(
         if take > 0 && uw.write_all(&chunk[..take]).await.is_err() {
             break;
         }
+        rec.shared.bytes_in.fetch_add(take as u64, Ordering::Relaxed);
     }
     let _ = uw.shutdown().await;
     pump.abort();
@@ -1288,7 +1824,7 @@ pub(crate) async fn tunnel_stream(
     }
     let mut open = format!("{ip}\n").into_bytes();
     open.extend_from_slice(&h);
-    serve_stream(cfg, id, open, rx, out).await
+    serve_stream_via(cfg, id, open, rx, out, "tunnel").await
 }
 
 /// A raw forward on the bridge: only targets named in bridge.toml [ap.tcp].

@@ -224,6 +224,7 @@ impl Switchboard {
                 };
                 for (_, e) in expired {
                     eprintln!("switch: root '{}' did not answer in {}s — 504", e.target, sw.wait.as_secs());
+                    crate::meter::inc(&crate::meter::C.root_calls_504);
                     let msg = format!("root '{}' did not answer in {}s", e.target, sw.wait.as_secs());
                     sw.deliver(e.waiter, HttpReply::error(504, &msg));
                 }

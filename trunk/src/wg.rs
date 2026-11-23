@@ -710,6 +710,7 @@ impl Engine {
                 let ip = p.spec.ip;
                 let n = self.reset_streams(ip, "the peer was revoked");
                 eprintln!("wg: peer '{id}' REVOKED — {n} stream(s) reset; it is told, then cut (≤ {} s)", LEAVE_GRACE.as_secs());
+                self.note_revoked(&id);
             }
         }
         self.finish_leaving();
@@ -1087,6 +1088,30 @@ impl Engine {
             .collect();
         roots.sort_by(|a, b| a["id"].as_str().cmp(&b["id"].as_str()));
         Some(json!({ "net": format!("{net}/{len}"), "roots": roots }))
+    }
+
+    /// The meter: a root cut because it was revoked (or its approving device was) — counted,
+    /// and timed from the app's `revokedAt` when the approving device is the reason.
+    fn note_revoked(&self, id: &str) {
+        crate::meter::inc(&crate::meter::C.wg_cut_revoked);
+        let dev = self
+            .source
+            .roots_file
+            .as_ref()
+            .and_then(|f| std::fs::read_to_string(f).ok())
+            .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+            .and_then(|v| v["roots"].as_array()?.iter().find(|r| r["id"] == id).and_then(|r| r["dev"].as_str().map(str::to_string)));
+        let mut ev = json!({ "src": "wg", "root": id, "why": "revoked", "device": dev });
+        if let (Some(d), Some(store)) = (dev.as_deref(), self.source.devices.as_ref()) {
+            if let Some(at) = store.revoked_at(d) {
+                let ms = now_ms().saturating_sub(at);
+                if ms < 86_400_000 {
+                    crate::meter::H.revoke_cut.us(ms * 1000);
+                    ev["revoke_ms"] = ms.into();
+                }
+            }
+        }
+        crate::meter::event("cut", ev);
     }
 
     fn stats(&self) -> (Value, Value) {
@@ -1864,8 +1889,29 @@ pub fn run(path: &str) -> Result<(), String> {
     let text = std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?;
     let f: NodeFile = toml::from_str(&text).map_err(|e| format!("{path}: {e}"))?;
     let cfg = f.wg;
+    // the meter: beside the devices file (the hub) or the key (a joined root); BIFROST_OBS…
+    let beside = cfg.devices_file.as_deref().unwrap_or(&cfg.key_file).to_string();
+    crate::meter::init("wg", crate::meter::dir_from_env(crate::meter::dir_beside(std::path::Path::new(&beside))));
     let h = start(cfg.clone())?;
     println!("bifrost-net wg (config: {path})");
+    // its own counters (frames, drops by kind, peers up) go into the minute line as they are
+    // (cumulative since start; the report takes the differences)
+    let front = h.http;
+    crate::meter::add_source("wg", move || {
+        let get = |p: &str| ureq::get(&format!("http://{front}{p}")).timeout(Duration::from_secs(2)).call().ok()?.into_json::<Value>().ok();
+        let mut node = get("/_wg/_node")?;
+        node.as_object_mut()?.remove("public_key");
+        let peers = get("/_wg").unwrap_or(Value::Null);
+        node["peer_list"] = Value::Array(
+            peers
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|p| json!({ "id": p["id"], "up": p["up"], "tx": p["tx"], "rx": p["rx"], "handshakes": p["handshakes"] }))
+                .collect(),
+        );
+        Some(node)
+    });
     println!("  key {} (fp {}) — the private half stays in {}", B64.encode(h.public), fingerprint(&h.public), cfg.key_file);
     println!("  relay udp {} → {} (WireGuard datagrams in relay frames)", h.udp, cfg.relay);
     println!("  front door http://{}/_wg/<root>/<path> (loopback) · GET /_wg lists the peers", h.http);
