@@ -83,7 +83,9 @@ export const ARTIFACT_TYPES: Record<string, string> = {
   '.svg': 'image/svg+xml',
   '.html': 'text/html; charset=utf-8',
   '.txt': TEXT,
-  '.md': TEXT,
+  // md is its own type: the route renders it as a phone-readable page on
+  // navigation (the chat's viewer fetches and renders it either way)
+  '.md': 'text/markdown; charset=utf-8',
   '.json': 'application/json',
   '.csv': TEXT,
   '.log': TEXT,

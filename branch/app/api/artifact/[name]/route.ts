@@ -13,6 +13,7 @@ import path from 'path';
 import { ARTIFACT_TYPES, resolveArtifact, safeArtifactName } from '@/lib/artifacts';
 import { ROOT_RE } from '@/lib/file-ref';
 import { ocFetch, ocRaw } from '@/lib/oc';
+import { renderMdPage } from '@/lib/render-md';
 
 export const dynamic = 'force-dynamic';
 
@@ -37,14 +38,35 @@ async function serve(
   stream: (() => ReadableStream<Uint8Array>) | null,
   source: string
 ): Promise<Response> {
-  // top-level navigation (address bar / new tab) of a text artifact:
-  // browsers paint raw text white — wrap it in the app's black so an
-  // opened md reads like bifrost. Chat fetches (sec-fetch-dest: empty)
-  // still get the raw bytes they .text()   [port of main 547cb89].
-  // Html is NOT text to wrap (it is text/html too — opened, it showed
-  // its source): it goes out as itself, below
+  // top-level navigation (address bar / new tab / gallery corner button):
+  // md renders as a phone-readable page, other text wraps raw in the
+  // app's black — browsers paint raw text white, and an opened .log must
+  // still read like bifrost. Chat fetches (sec-fetch-dest: empty) get the
+  // raw bytes they .text() — the md viewer in the chat renders markdown
+  // itself.  [port of main 547cb89; md page 11-23: owner-facing .md is
+  // HTML by construction — the writer just drops the file]
   const doc = req.headers.get('sec-fetch-dest') === 'document';
   const html = type.startsWith('text/html');
+  const md = type.startsWith('text/markdown');
+  if (md && doc) {
+    try {
+      return new Response(renderMdPage(name, Buffer.from(await bytes()).toString('utf-8')), {
+        headers: {
+          'Content-Type': 'text/html; charset=utf-8',
+          'Cache-Control': 'no-store',
+          'X-Artifact-Source': source,
+          // as sandboxed as the chat's html frames: no scripts, no
+          // access to the app's origin
+          'Content-Security-Policy': 'sandbox',
+        },
+      });
+    } catch {
+      /* the parser refused the file: it still reads, below, as plain text */
+    }
+  }
+  // Html is NOT text to wrap (it is text/html too — opened, it showed
+  // its source): it goes out as itself, below. (An .md whose render threw
+  // lands here too — the source still reads, wrapped, never white.)
   if (type.startsWith('text/') && !html && doc) {
     const esc = Buffer.from(await bytes())
       .toString('utf-8')
