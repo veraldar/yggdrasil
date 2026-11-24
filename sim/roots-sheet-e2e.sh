@@ -48,6 +48,7 @@ brain lab "$LABP" "home=http://127.0.0.1:$HOMEP" YGG_ROOT_MAIN=1 YGG_HOME_ROOT=h
 # one paired phone (devices.json: an access token for its region — server.mjs stamps the peer: loopback),
 # and lab as a root this hub joined (roots.json — the remove marks it revoked)
 TOKEN=$(head -c 48 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 40)
+head -c 32 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 40 > "$STATE/root-link.secret"
 python3 - "$STATE" "$TOKEN" <<'PY'
 import hashlib, json, os, sys, time
 state, tok = sys.argv[1], sys.argv[2]
@@ -74,6 +75,8 @@ app_up() { # (re)start the app; its PID in $APP_PID
     cd "$B"
     exec env -i PATH="$PATH" HOME="$STATE/app" NODE_ENV=production \
       BIFROST_AUTH=devices BIFROST_DEVICES_FILE="$STATE/devices.json" \
+      BIFROST_ROOTLINK_SECRET_FILE="$STATE/root-link.secret" \
+      BIFROST_NET_BIN=${BIFROST_NET_BIN:-$ROOT/trunk/target/release/bifrost-net} \
       BIFROST_MAIN_TITLE='[MAIN]' OPENCODE_URL="http://127.0.0.1:$HOMEP" \
       ARTIFACTS_DIR="$STATE/artifacts-app" ARTIFACTS_MAIN_DIR= YGG_PEER_TOKEN="$PEER" \
       PORT="$APP" HOST=127.0.0.1 node server.mjs

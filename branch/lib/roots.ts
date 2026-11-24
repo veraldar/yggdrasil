@@ -414,7 +414,9 @@ async function brainShareModel(root: string): Promise<boolean> {
     if (r.ok) return true;
     console.warn(`join: the brain did not take the model sharing for ${root}: ${r.status}`);
   } catch (e) {
-    console.warn(`join: the brain did not take the model sharing for ${root}: ${(e as Error).message}`);
+    console.warn(
+      `join: the brain did not take the model sharing for ${root}: ${(e as Error).message}`
+    );
   }
   return false;
 }
@@ -579,6 +581,28 @@ export type PollOut =
   | { http: 202; body: { status: 'pending' } }
   | { http: 410; body: { status: 'refused' | 'expired'; why?: string } }
   | { http: 200; body: { status: 'approved' } & Approved };
+
+/** The newest join per machine name, shown only while it is still pending: a
+ *  machine re-asking replaces its older requests on the same machine, and once
+ *  its newest one is refused (or expired, or approved) the machine's older
+ *  twins — never polled by it — must not resurface. No secrets; the raw
+ *  request id is the only handle and it buys nothing without a paired device. */
+export function listPendingJoins(): ReturnType<typeof viewJoin>[] {
+  prune();
+  const newest = new Map<string, JoinReq>();
+  for (const j of S.joins.values()) {
+    const old = newest.get(j.name);
+    // >= : two requests minted in the same millisecond — the later one (the id
+    // the machine polls with) wins the row
+    if (!old || j.created >= old.created) newest.set(j.name, j);
+  }
+  const now = Date.now();
+  return [...newest.values()]
+    .filter((j) => j.status === 'pending' && j.exp >= now)
+    .sort((a, b) => b.created - a.created)
+    .map((j) => viewJoin(j.req))
+    .filter((v): v is NonNullable<ReturnType<typeof viewJoin>> => !!v);
+}
 
 /** The joiner's poll: its join secret, the result ONCE, then 410. */
 export function pollJoin(req: string, secret: string): Promise<PollOut> {

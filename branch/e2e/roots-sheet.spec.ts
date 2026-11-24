@@ -261,3 +261,111 @@ test.describe('away', () => {
     await shot(page, 'away-view');
   });
 });
+
+test.describe('pending joins', () => {
+  test.use({ serviceWorkers: 'block' });
+
+  /** the rig's one device cookie, for the API calls */
+  const CK = () => ({ headers: { cookie: `bifrost_device=${TOKEN}` } });
+
+  test('a machine asks to join: the row shows in the sheet, Add pins it (roots.json), the row goes', async ({
+    page,
+    context,
+    request,
+  }) => {
+    test.setTimeout(180_000);
+    const base = new URL(test.info().project.use.baseURL || 'http://127.0.0.1:18520');
+    await context.addCookies([
+      { name: 'bifrost_device', value: TOKEN, domain: base.hostname, path: '/', httpOnly: true },
+    ]);
+
+    await test.step('mint a join request (the machine side)', async () => {
+      const r = await request.post(`${base.origin}/api/roots/join`, {
+        data: { name: 'pad', os: 'ipados', host: 'pad.local' },
+      });
+      expect(r.status()).toBe(201);
+    });
+
+    await test.step('the sheet shows the row: name, system, code, countdown, Add/Refuse', async () => {
+      await page.goto('/');
+      await openSheet(page);
+      const row = page.getByTestId('join-row');
+      await expect(row).toHaveCount(1);
+      await expect(row).toHaveAttribute('data-join', 'pad');
+      await expect(row).toContainText('ipados');
+      await expect(row.getByTestId('join-left')).not.toHaveText('expired');
+      await expect(row.getByTestId('join-add')).toHaveText('Add to my tree');
+      await expect(row.getByTestId('join-refuse')).toBeVisible();
+      await shot(page, 'join-row');
+    });
+
+    await test.step('Add → the machine is pinned in roots.json, the row is gone', async () => {
+      await page.getByTestId('join-add').tap();
+      await expect(page.getByTestId('join-row')).toHaveCount(0, { timeout: 30_000 });
+      const rec = JSON.parse(readFileSync(join(STATE, 'roots.json'), 'utf8')).roots.find(
+        (r: { id: string }) => r.id === 'pad'
+      );
+      expect(rec).toBeTruthy();
+      expect(rec.revoked ?? false).toBe(false);
+      expect(Date.parse(rec.joined_at)).toBeGreaterThan(Date.now() - 120_000);
+    });
+
+    await test.step('the joined machine is a row in the list now (greyed: it has not dialed yet)', async () => {
+      await page.goto('/');
+      await openSheet(page);
+      const pad = page.locator('[data-testid="root-row"][data-root="pad"]');
+      await expect(pad).toBeVisible({ timeout: 30_000 });
+      await expect(page.getByTestId('root-row')).toHaveCount(2); // home + pad (lab was removed above)
+      await expect(pad.getByTestId('root-state')).toHaveText('off');
+      await shot(page, 'join-pinned');
+    });
+  });
+
+  test('re-minted ids replace dead ones; Refuse forgets a request', async ({
+    page,
+    context,
+    request,
+  }) => {
+    const base = new URL(test.info().project.use.baseURL || 'http://127.0.0.1:18520');
+    await context.addCookies([
+      { name: 'bifrost_device', value: TOKEN, domain: base.hostname, path: '/', httpOnly: true },
+    ]);
+
+    // the app is restarted between rig phases, so joins-pending.json is the truth:
+    // two requests for the same machine, the older minted first — the sheet must
+    // list only the newest (the id a re-minting machine polls with)
+    let oldId = '';
+    let newId = '';
+    await test.step('mint two requests for one machine, the second newer', async () => {
+      const a = await (
+        await request.post(`${base.origin}/api/roots/join`, {
+          data: { name: 'deck', os: 'linux', host: 'deck.local' },
+        })
+      ).json();
+      const b = await (
+        await request.post(`${base.origin}/api/roots/join`, {
+          data: { name: 'deck', os: 'linux', host: 'deck.local' },
+        })
+      ).json();
+      expect(a.req).not.toBe(b.req);
+      oldId = a.req;
+      newId = b.req;
+    });
+
+    await test.step('the sheet shows only the newest id', async () => {
+      await page.goto('/');
+      await openSheet(page);
+      const rows = page.getByTestId('join-row');
+      await expect(rows).toHaveCount(1);
+      await expect(rows).toHaveAttribute('data-join', 'deck');
+    });
+
+    await test.step('Refuse → the request is refused (the row is gone), only in the app', async () => {
+      await page.getByTestId('join-refuse').tap();
+      await expect(page.getByTestId('join-row')).toHaveCount(0, { timeout: 15_000 });
+      const v = await request.get(`${base.origin}/api/roots/join/${newId}/view`, CK());
+      expect((await v.json()).status).toBe('refused');
+      expect(oldId).not.toBe(newId);
+    });
+  });
+});

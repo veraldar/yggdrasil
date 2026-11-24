@@ -36,7 +36,20 @@ type Root = {
   main?: string | null;
   main_proxy?: string | null;
 };
-export type Tree = { home: Home | null; roots: Root[] };
+/** a join waiting for the owner's tap (the newest per machine, from GET /api/roots `joins`) */
+type Join = {
+  req: string;
+  name: string;
+  os: string;
+  host: string;
+  code: string;
+  wg_fp: string | null;
+  model?: 'home' | null;
+  status: string;
+  expires_at: string;
+  root_id?: string | null;
+};
+export type Tree = { home: Home | null; roots: Root[]; joins?: Join[] };
 type Row = Root & { home?: boolean };
 type RSess = {
   id: string;
@@ -106,6 +119,8 @@ export function RootsSheet({
   const [creating, setCreating] = useState(false);
   const [name, setName] = useState('');
   const [failed, setFailed] = useState('');
+  const [joins, setJoins] = useState<Join[]>([]);
+  const [now, setNow] = useState(() => Date.now());
   const hold = useRef<{ timer: ReturnType<typeof setTimeout>; x: number; y: number } | null>(null);
   const held = useRef(false);
   const treeCb = useRef(onTree);
@@ -121,10 +136,39 @@ export function RootsSheet({
       const t = (await r.json()) as Tree;
       setTree(t);
       treeCb.current?.(t);
+      setJoins(t.joins ?? []);
     } catch {
       /* transient — keep the last answer */
     }
   }, []);
+
+  /** a machine asked to join: Add → the /join page's own call; Refuse → forget it */
+  const decide = useCallback(
+    async (req: string, what: 'approve' | 'refuse') => {
+      setBusy(true);
+      setFailed('');
+      try {
+        const r = await fetch(`/api/roots/join/${encodeURIComponent(req)}/${what}`, {
+          method: 'POST',
+        });
+        const v = (await r.json().catch(() => ({}))) as { error?: string; status?: string };
+        if (!r.ok) {
+          setFailed(v.error || 'the request has run out — wait for the next one');
+        } else if (what === 'refuse') {
+          setJoins((js) => js.filter((j) => j.req !== req));
+        } else {
+          // approved: drop the row now; the poll brings the joined machine in as a root
+          setJoins((js) => js.filter((j) => j.req !== req));
+          void loadTree();
+        }
+      } catch {
+        setFailed('could not reach the box');
+      } finally {
+        setBusy(false);
+      }
+    },
+    [loadTree]
+  );
 
   const loadView = useCallback(async (id: string) => {
     try {
@@ -142,6 +186,14 @@ export function RootsSheet({
 
   useEffect(() => {
     void loadTree();
+    // the joins' countdowns tick while the sheet is open
+    if (joins.length) {
+      const c = setInterval(() => setNow(Date.now()), 1000);
+      return () => clearInterval(c);
+    }
+  }, [loadTree, joins.length]);
+
+  useEffect(() => {
     const t = setInterval(() => {
       if (!document.hidden) void loadTree();
     }, POLL_MS);
@@ -353,6 +405,71 @@ export function RootsSheet({
       </header>
 
       <div className="min-h-0 flex-1 overflow-y-auto px-3 py-2">
+        {!row && joins.length > 0 && (
+          <div className="mb-3" data-testid="joins-list">
+            <p className="px-1 pb-1 text-[10px]" style={dim}>
+              wants to join
+            </p>
+            <ul className="flex flex-col gap-1">
+              {joins.map((j) => {
+                const left = Math.max(0, Math.round((Date.parse(j.expires_at) - now) / 1000));
+                const mm = Math.floor(left / 60);
+                const ss = String(left % 60).padStart(2, '0');
+                return (
+                  <li
+                    key={j.req}
+                    className="oz-box p-2.5"
+                    data-testid="join-row"
+                    data-join={j.name}
+                  >
+                    <div className="oz-r1">
+                      <span aria-hidden="true" style={{ color: 'var(--oz-warn, #e6a23c)' }}>
+                        ●
+                      </span>
+                      <span className="t">{j.name}</span>
+                      <span
+                        className="oz-st"
+                        data-testid="join-left"
+                        style={{ color: left > 0 ? undefined : 'var(--oz-danger)' }}
+                      >
+                        {left > 0 ? `${mm}:${ss}` : 'expired'}
+                      </span>
+                    </div>
+                    <div className="oz-r2">{[j.os, j.host].filter(Boolean).join(' · ')}</div>
+                    <div className="flex items-center justify-between pt-1.5">
+                      <span className="font-mono text-[15px] tracking-[0.15em]">{j.code}</span>
+                      <span className="flex gap-1.5">
+                        <button
+                          type="button"
+                          className="oz-k"
+                          disabled={busy}
+                          data-testid="join-add"
+                          onClick={() => decide(j.req, 'approve')}
+                        >
+                          Add to my tree
+                        </button>
+                        <button
+                          type="button"
+                          className="oz-k red"
+                          disabled={busy}
+                          data-testid="join-refuse"
+                          onClick={() => decide(j.req, 'refuse')}
+                        >
+                          Refuse
+                        </button>
+                      </span>
+                    </div>
+                  </li>
+                );
+              })}
+            </ul>
+            {failed && (
+              <p role="alert" className="px-1 pt-1.5 text-[11px] text-[var(--oz-danger)]">
+                {failed}
+              </p>
+            )}
+          </div>
+        )}
         {!row && (
           <ul className="flex flex-col gap-1" data-testid="roots-list">
             {!tree && (

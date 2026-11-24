@@ -7,7 +7,7 @@
  */
 import { NextResponse } from 'next/server';
 import { NO_STORE } from '@/lib/pairing';
-import { rootsOverview } from '@/lib/roots';
+import { listPendingJoins, rootsOverview } from '@/lib/roots';
 import { gate } from '@/lib/roots-route';
 
 export const dynamic = 'force-dynamic';
@@ -16,5 +16,8 @@ export const runtime = 'nodejs';
 export async function GET(req: Request) {
   const no = await gate(req);
   if (no) return no;
-  return NextResponse.json(await rootsOverview(), { headers: NO_STORE });
+  return NextResponse.json(
+    { ...(await rootsOverview()), joins: listPendingJoins() },
+    { headers: NO_STORE }
+  );
 }
