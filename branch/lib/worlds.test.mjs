@@ -59,3 +59,21 @@ test('a picked world is cached, and forgotten when the computer comes back unpic
   cacheRootTheme('lab', null); // the pick failed → back to none
   assert.equal(cachedRootTheme('lab'), null);
 });
+
+// ROOT-PAGE-HOME-LAYOUT (11-24) — a world is saved for one computer, on that computer
+test('a pick for one computer is that computer’s only', () => {
+  cacheRootTheme('lab', 'terminus');
+  assert.equal(cachedRootTheme('lab'), 'terminus');
+  assert.equal(cachedRootTheme('debian-box'), null);
+  assert.equal(cachedRootTheme('omarchy'), null);
+});
+
+test('a pick a computer could not take (an older brain) leaves nothing behind', () => {
+  cacheRootTheme('debian-box', 'drift'); // painted while the save was on its way
+  cacheRootTheme('debian-box', null); // "debian-box needs an update for this": undone
+  assert.equal(cachedRootTheme('debian-box'), null);
+  // and had it stayed, the tree's word (no pick there: theme_rev 0) clears it
+  cacheRootTheme('debian-box', 'drift');
+  cacheTreeThemes(LIVE_TREE);
+  assert.equal(cachedRootTheme('debian-box'), null);
+});

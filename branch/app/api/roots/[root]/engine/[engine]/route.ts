@@ -2,7 +2,7 @@
  * PUT {model} → sets an engine's default model on a specific root (`PUT /root/<root>/engine/<engine>`).
  */
 import { NextResponse } from 'next/server';
-import { badRoot, brain, gate, rootParam } from '@/lib/roots-route';
+import { badRoot, brainSave, gate, rootParam } from '@/lib/roots-route';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -25,7 +25,7 @@ export async function PUT(
   if (!body || typeof body !== 'object' || !('model' in body)) {
     return NextResponse.json({ error: 'nothing to save: {model}' }, { status: 400 });
   }
-  return brain(`/root/${encodeURIComponent(root)}/engine/${encodeURIComponent(engine)}`, {
+  return brainSave(root, `/root/${encodeURIComponent(root)}/engine/${encodeURIComponent(engine)}`, {
     method: 'PUT',
     body: { model: body.model },
     timeoutMs: 12_000,

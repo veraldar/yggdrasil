@@ -3,15 +3,16 @@
 /** /roots/[root]/settings — one computer's settings, opened the way /settings opens from the
  *  home screen: a tap on the computer's name at the top of its own page (/roots/[root]), and
  *  `back` returns there. The /settings page's own header and blocks, scoped to that computer:
- *    world          the app's world list (components/world-picker), saved FOR that computer —
- *                   on it when its brain can take it, else kept by the home brain (an older
- *                   brain: root/src/roots.rs put_peer_theme); the home root's world is the app's
+ *    world          the app's world list (components/world-picker), saved ON that computer
+ *                   (each computer keeps its own); the home root's world is the app's
  *    roles          each role's engine and model there (inline editor)
  *    engines        each engine's default model there
  *    this computer  state, system, cpu, memory, models, joined
  *    remove         (not the home root; works while it is off too)
  *  A computer that is off keeps what home last knew of it, greyed and read-only. A save a
- *  computer cannot take says so in one line (the brain's own words), never a bare error. */
+ *  computer cannot take says so in one line, never a bare error: a computer whose brain is
+ *  older than the setting reads "<name> needs an update for this" (lib/root-outdated), and the
+ *  pick goes back to what it was. */
 import { use, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTheme } from 'next-themes';
 import Link from 'next/link';

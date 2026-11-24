@@ -4,6 +4,7 @@ import { fetch as undiciFetch } from 'undici';
 import { rootsGate } from '@/lib/admin';
 import { OC } from '@/lib/oc';
 import { NO_STORE } from '@/lib/pairing';
+import { needsUpdate, rootLacksRoute } from '@/lib/root-outdated';
 import { ROOT_NAME } from '@/lib/roots';
 
 /** null = go on; else the refusal to answer with */
@@ -56,4 +57,25 @@ export async function brain(
       { status: 502, headers: NO_STORE }
     );
   }
+}
+
+/** One save on `root` through the hub brain (its world, a role, an engine): the brain's answer
+ *  as it is — except when that computer's brain is too old to have the route: then one plain
+ *  line (409, `outdated`), never the bare "404 Not Found" (lib/root-outdated). */
+export async function brainSave(
+  root: string,
+  path: string,
+  init: { method?: string; body?: unknown; timeoutMs: number }
+): Promise<NextResponse> {
+  const res = await brain(path, init);
+  if (res.status !== 502) return res;
+  const d = (await res
+    .clone()
+    .json()
+    .catch(() => null)) as { error?: unknown } | null;
+  if (!rootLacksRoute(res.status, d?.error)) return res;
+  return NextResponse.json(
+    { error: needsUpdate(root), outdated: true },
+    { status: 409, headers: NO_STORE }
+  );
 }

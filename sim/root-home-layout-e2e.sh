@@ -9,16 +9,23 @@
 #   OLD_BIN=<an older yggdrasil>   default: the 20261123-2004-2044afb1 release's, when it is there;
 #                                  without one the rig has no "old" and the spec skips its steps.
 #   UP_ONLY=1                      bring the rig up, print its addresses, wait (Ctrl-C stops it).
-# Ports 18530-18540 (P3_PORT_BASE moves them). State under ~/.cache/p3-app-tmp (STATE=…: it is
-# wiped first — pass your own). Stops only what it started, by PID. SHOTS=<dir> keeps the shots.
+# Ports 18550-18560 (P3_PORT_BASE moves them; a port already taken stops the run — the spec
+# would drive somebody else's rig). State under ~/.cache/p3-app-tmp (STATE=…: it is wiped first
+# — pass your own). Stops only what it started, by PID. SHOTS=<dir> keeps the shots.
 set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 B="$ROOT/branch"
 YGG_BIN=${YGG_BIN:-$ROOT/root/target/release/yggdrasil}
 OLD_DEFAULT=$HOME/.local/share/yggdrasil/hub/releases/20261123-2004-2044afb1/bin/yggdrasil
 OLD_BIN=${OLD_BIN-$([ -x "$OLD_DEFAULT" ] && echo "$OLD_DEFAULT" || true)}
-P=${P3_PORT_BASE:-18530}
+P=${P3_PORT_BASE:-18550}
 MOCK=$P HOMEP=$((P + 1)) LABP=$((P + 2)) OLDP=$((P + 3)) APP=$((P + 10))
+for p in "$MOCK" "$HOMEP" "$LABP" "$OLDP" "$APP"; do
+  if (exec 3<>"/dev/tcp/127.0.0.1/$p") 2>/dev/null; then
+    echo "port $p is taken — another rig runs there (P3_PORT_BASE=… moves this one)" >&2
+    exit 1
+  fi
+done
 STATE=${STATE:-$HOME/.cache/p3-app-tmp/root-home-layout}
 SHOTS=${SHOTS:-$STATE/shots}
 rm -rf "$STATE" && mkdir -p "$STATE"/{home,lab,old}/work "$STATE"/{stub,app} "$SHOTS"

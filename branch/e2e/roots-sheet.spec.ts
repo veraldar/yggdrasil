@@ -3,13 +3,14 @@ import { join } from 'path';
 import { type APIRequestContext, type Locator, type Page, expect, test } from '@playwright/test';
 
 /**
- * THE ROOTS SHEET + ROOT DETAIL PAGE (E2 · the whole tree), driven like a person on a phone:
+ * THE ROOTS SHEET + A COMPUTER'S OWN PAGE (E2 · the whole tree), driven like a person on a phone:
  * home → the roots key → one row per computer with its world swatch & state → tap lab →
- * /roots/lab with 3 tabs (sessions · artifacts · settings), same rows as home, bottom MAIN bar →
+ * /roots/lab: the home screen of that computer (11-24: the home header — its name → its
+ * settings, roots, artifacts, refresh — no tab strip), same rows as home, bottom MAIN bar →
  * ＋ starts a session ON lab → back home: that session's row carries the [lab] tag + swatch →
- * settings tab: change lab's world (saved on lab, wears it on reload & in its session) →
- * hold lab in roots sheet → "Remove lab?" → Remove → gone (roots.json marks it revoked,
- * the home brain forgets it).
+ * its settings (/roots/lab/settings): change lab's world (saved on lab, wears it on reload & in
+ * its session) → hold lab in roots sheet → "Remove lab?" → Remove → gone (roots.json marks it
+ * revoked, the home brain forgets it).
  */
 const HOME = process.env.PW_HOME_BRAIN || '';
 const LAB = process.env.PW_LAB_BRAIN || '';
@@ -55,7 +56,7 @@ async function hold(page: Page, el: Locator) {
   await page.mouse.up();
 }
 
-test('roots sheet → root detail page: tabs, theme saved on lab, sessions, MAIN, hold → remove', async ({
+test('roots sheet → a computer\'s page: its settings, theme saved on lab, sessions, MAIN, hold → remove', async ({
   page,
   context,
   request,
@@ -107,15 +108,17 @@ test('roots sheet → root detail page: tabs, theme saved on lab, sessions, MAIN
     await shot(page, 'sheet');
   });
 
-  await test.step("tap lab → /roots/lab page with 3 tabs, lab's sessions, bottom MAIN bar", async () => {
+  await test.step("tap lab → /roots/lab: the home screen's header, lab's sessions, bottom MAIN bar", async () => {
     await page.getByTestId('root-row').nth(1).tap();
     await page.waitForURL(/\/roots\/lab$/, { timeout: 20_000 });
     const view = page.getByTestId('root-view');
     await expect(view).toHaveAttribute('data-root', 'lab');
-    await expect(page.getByTestId('roots-title')).toHaveText('lab');
-    await expect(page.getByTestId('tab-sessions')).toHaveAttribute('aria-pressed', 'true');
-    await expect(page.getByTestId('tab-artifacts')).toBeVisible();
-    await expect(page.getByTestId('tab-settings')).toBeVisible();
+    // 11-24: its name sits where BIFROST sits, with the home screen's three keys; no tab strip
+    await expect(page.getByTestId('home-title')).toHaveText('lab');
+    await expect(page.getByTestId('roots-key')).toBeVisible();
+    await expect(page.getByTestId('artifacts-key')).toBeVisible();
+    await expect(page.getByTestId('refresh-key')).toBeVisible();
+    await expect(page.locator('[data-testid^="tab-"], [data-testid="roots-back"]')).toHaveCount(0);
     await expect(page.getByTestId('root-main')).toBeVisible();
     await expect(view.getByTestId('root-sess').filter({ hasText: 'lab notes' })).toBeVisible({
       timeout: 15_000,
@@ -123,9 +126,11 @@ test('roots sheet → root detail page: tabs, theme saved on lab, sessions, MAIN
     await shot(page, 'lab');
   });
 
-  await test.step('settings tab: pick terminus on lab → saved on lab brain + page wears terminus', async () => {
-    await page.getByTestId('tab-settings').tap();
+  await test.step('its settings (its name): pick terminus on lab → saved on lab brain + page wears terminus', async () => {
+    await page.getByTestId('home-title').tap();
+    await page.waitForURL(/\/roots\/lab\/settings$/, { timeout: 20_000 });
     await expect(page.getByTestId('root-world-block')).toBeVisible();
+    await expect(page.getByTestId('roots-state')).toHaveText('on', { timeout: 20_000 });
     await page.locator('[data-testid="world-pick"][data-world="terminus"]').tap();
     await expect(page.locator('html')).toHaveAttribute('data-theme', 'terminus');
     await expect
@@ -134,7 +139,8 @@ test('roots sheet → root detail page: tabs, theme saved on lab, sessions, MAIN
       })
       .toBe('terminus');
     await shot(page, 'lab-settings');
-    await page.getByTestId('tab-sessions').tap();
+    await page.getByTestId('settings-back').tap();
+    await page.waitForURL(/\/roots\/lab$/, { timeout: 20_000 });
   });
 
   await test.step("tap lab's MAIN bar → opens its proxy wearing lab's terminus theme", async () => {
@@ -178,11 +184,13 @@ test('roots sheet → root detail page: tabs, theme saved on lab, sessions, MAIN
     await openSheet(page);
     const lab = page.locator('[data-testid="root-row"][data-root="lab"]');
     await expect(lab).toBeVisible();
-    // a hold on home asks nothing (opens /roots/home on release)
+    // a hold on home asks nothing: on release it opens home's page — the home screen itself
+    // (11-24: the home root's row leads to /, the way back from any computer's page)
     await hold(page, page.locator('[data-testid="root-row"][data-root="home"]'));
-    await page.waitForURL(/\/roots\/home$/, { timeout: 15_000 });
-    await page.getByTestId('roots-back').tap();
-    await expect(page.getByTestId('roots-sheet')).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByTestId('roots-sheet')).toHaveCount(0, { timeout: 15_000 });
+    await expect(page.getByTestId('root-confirm')).toHaveCount(0);
+    expect(new URL(page.url()).pathname).toBe('/');
+    await openSheet(page);
     await hold(page, lab);
     const ask = page.getByTestId('root-confirm');
     await expect(ask).toBeVisible();
@@ -324,7 +332,8 @@ test.describe('away', () => {
     await mac.tap();
     await page.waitForURL(/\/roots\/mac-studio$/, { timeout: 15_000 });
     await expect(page.locator('html')).toHaveAttribute('data-theme', 'terminus');
-    await expect(page.getByTestId('roots-state')).toContainText('last seen 5 min ago');
+    // when it was last seen: its MAIN bar says so (11-24: the header is the home screen's)
+    await expect(page.getByTestId('root-main')).toContainText('last seen 5 min ago');
     await expect(page.getByTestId('root-sess')).toHaveCount(2);
     await expect(page.getByTestId('root-sess').first()).toHaveCSS('opacity', '0.5');
     await expect(page.getByTestId('root-readonly-note')).toBeVisible();

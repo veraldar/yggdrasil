@@ -2,16 +2,22 @@ import { join } from 'path';
 import { type Page, expect, test } from '@playwright/test';
 
 /**
- * Root detail page E2E on a sim twin (sim/acceptance/twin-up.sh, :8250, tailnet mode)
+ * A computer's own page E2E on a sim twin (sim/acceptance/twin-up.sh, :8250, tailnet mode)
  * verified at 360px phone viewport (360×780).
  *
+ * Since 11-24 (owner: "the button should be at the same place … I want the same layout") the
+ * page is the home screen of that computer: the home header (its name → its settings, roots,
+ * artifacts, refresh), band and rows — no tab strip, no back arrow, no info line. Its settings
+ * and artifacts are pages of their own (/roots/<x>/settings, /roots/<x>/artifacts), as
+ * /settings and /artifacts are for the home screen. e2e/root-home-layout.spec.ts measures the
+ * boxes on a three-computer rig; this spec keeps the twin and the mocked states.
+ *
  * Covers:
- *  - roots sheet → world swatch + state → tap opens /roots/<home>
- *  - 360px zero horizontal overflow across all three tabs (sessions · artifacts · settings)
- *  - sessions tab: same rows as home screen, + new session, bottom MAIN bar
- *  - artifacts tab: lists artifacts, opens markdown inline
- *  - settings tab: per-root world saved on brain (persists across reload + fresh browser context),
- *    roles inline editor, engines inline editor, this computer info
+ *  - roots sheet → world swatch + state; the home root's row is the home screen itself
+ *  - 360px zero horizontal overflow on a computer's page, its artifacts and its settings
+ *  - its page: same rows as home screen, + new session, bottom MAIN bar
+ *  - its settings: the world saved on the brain (persists across reload + fresh browser
+ *    context), roles inline editor, this computer info
  *  - offline remote computer state: keeps world, last-seen, dimmed rows + read-only note,
  *    disabled controls, remove still enabled
  */
@@ -29,7 +35,7 @@ async function assertNoOverflow360(page: Page, label: string) {
   expect(scrollWidth, `${label}: horizontal overflow at 360px`).toBeLessThanOrEqual(clientWidth);
 }
 
-test('root detail page on sim twin at 360px: flow, 3 tabs, per-root theme persistence', async ({
+test('a computer\'s page on sim twin at 360px: page, artifacts, settings, per-root theme persistence', async ({
   page,
   browser,
   request,
@@ -41,7 +47,7 @@ test('root detail page on sim twin at 360px: flow, 3 tabs, per-root theme persis
   expect(tree.home?.name, 'twin brain must report home root name').toBeTruthy();
   const home = tree.home!.name;
 
-  // seed a session so the sessions tab has a real row to check
+  // seed a session so the page has a real row to check
   const seedTitle = `rd-check-${Date.now().toString(36)}`;
   const created = await (
     await request.post('/api/session', { data: { name: seedTitle } })
@@ -49,7 +55,9 @@ test('root detail page on sim twin at 360px: flow, 3 tabs, per-root theme persis
   expect(created.id).toBeTruthy();
 
   try {
-    // 1. Roots sheet → tap home → /roots/<home>
+    // 1. Roots sheet: home first, with its swatch and state. Its row is the home screen itself
+    //    (the tree's home screen IS the home root's page), so its own scoped page is reached
+    //    by address here.
     await page.goto('/');
     await expect(page.getByTestId('roots-key')).toBeVisible({ timeout: 15_000 });
     await page.getByTestId('roots-key').click();
@@ -61,29 +69,42 @@ test('root detail page on sim twin at 360px: flow, 3 tabs, per-root theme persis
     await shot(page, '1-roots-sheet');
 
     await homeRow.click();
-    await page.waitForURL(new RegExp(`/roots/${encodeURIComponent(home)}$`), { timeout: 15_000 });
-    await expect(page.getByTestId('roots-title')).toHaveText(home);
-    await expect(page.getByTestId('roots-state')).toContainText('on');
-    await expect(page.getByTestId('tab-sessions')).toHaveAttribute('aria-pressed', 'true');
+    await expect(page.getByTestId('roots-sheet')).toHaveCount(0);
+    expect(new URL(page.url()).pathname).toBe('/');
+
+    await page.goto(`/roots/${encodeURIComponent(home)}`);
+    await expect(page.getByTestId('home-title')).toHaveText(home);
+    await expect(page.getByTestId('root-view')).toHaveAttribute('data-reachable', 'on');
     await expect(page.getByTestId('root-sess').filter({ hasText: seedTitle })).toBeVisible({
       timeout: 15_000,
     });
     await expect(page.getByTestId('root-main')).toBeVisible();
-    await assertNoOverflow360(page, 'sessions tab');
+    await expect(page.locator('[data-testid^="tab-"], [data-testid="roots-back"], .oz-tabs')).toHaveCount(0);
+    await assertNoOverflow360(page, 'its page');
     await shot(page, '2-sessions');
 
-    // 2. Artifacts tab (zero overflow at 360px)
-    await page.getByTestId('tab-artifacts').click();
-    await expect(page.getByTestId('root-artifacts-tab')).toBeVisible();
-    await assertNoOverflow360(page, 'artifacts tab');
+    // 2. Its artifacts: the artifacts key → /roots/<home>/artifacts, back → its page
+    await page.getByTestId('artifacts-key').click();
+    await page.waitForURL(new RegExp(`/roots/${encodeURIComponent(home)}/artifacts$`), {
+      timeout: 15_000,
+    });
+    await expect(page.getByTestId('artifacts-view')).toBeVisible();
+    await assertNoOverflow360(page, 'its artifacts');
     await shot(page, '3-artifacts');
+    await page.getByTestId('artifacts-back').click();
+    await page.waitForURL(new RegExp(`/roots/${encodeURIComponent(home)}$`), { timeout: 15_000 });
 
-    // 3. Settings tab: pick terminus, verify saved on brain & seen by a fresh second phone
-    await page.getByTestId('tab-settings').click();
+    // 3. Its settings (its name → /roots/<home>/settings): pick terminus, verify saved on
+    //    brain & seen by a fresh second phone
+    await page.getByTestId('home-title').click();
+    await page.waitForURL(new RegExp(`/roots/${encodeURIComponent(home)}/settings$`), {
+      timeout: 15_000,
+    });
     await expect(page.getByTestId('root-world-block')).toBeVisible();
     await expect(page.getByTestId('root-roles-block')).toBeVisible();
     await expect(page.getByTestId('root-info-block')).toBeVisible();
-    await assertNoOverflow360(page, 'settings tab');
+    await expect(page.getByTestId('roots-state')).toHaveText('on');
+    await assertNoOverflow360(page, 'its settings');
 
     await page.locator('[data-testid="world-pick"][data-world="terminus"]').click();
     await expect(page.locator('html')).toHaveAttribute('data-theme', 'terminus');
@@ -131,8 +152,10 @@ test('root detail page on sim twin at 360px: flow, 3 tabs, per-root theme persis
     await page.locator('[data-testid="world-pick"][data-world="aether"]').click();
     await expect(page.locator('html')).toHaveAttribute('data-theme', 'aether');
 
-    // back ‹ goes back to the roots sheet on home
-    await page.getByTestId('roots-back').click();
+    // back returns to its page; the roots key there opens the sheet (every computer)
+    await page.getByTestId('settings-back').click();
+    await page.waitForURL(new RegExp(`/roots/${encodeURIComponent(home)}$`), { timeout: 15_000 });
+    await page.getByTestId('roots-key').click();
     await expect(page.getByTestId('roots-sheet')).toBeVisible({ timeout: 15_000 });
   } finally {
     await request.delete(`/api/session/${created.id}`).catch(() => {});
@@ -233,8 +256,10 @@ test.describe('offline remote root at 360px', () => {
 
     await page.goto('/roots/mac-studio');
     await expect(page.locator('html')).toHaveAttribute('data-theme', 'terminus');
-    await expect(page.getByTestId('roots-title')).toHaveText('mac-studio');
-    await expect(page.getByTestId('roots-state')).toContainText('last seen');
+    await expect(page.getByTestId('home-title')).toHaveText('mac-studio');
+    await expect(page.getByTestId('home-title')).toHaveClass(/\boz-gone\b/);
+    // when it was last seen: its MAIN bar says so (the header is the home screen's)
+    await expect(page.getByTestId('root-main')).toContainText('last seen');
     await expect(page.getByTestId('roots-new')).toBeDisabled();
     await expect(page.getByTestId('root-sess')).toHaveCount(2);
     await expect(page.getByTestId('root-sess').first()).toHaveCSS('opacity', '0.5');
@@ -243,7 +268,19 @@ test.describe('offline remote root at 360px', () => {
     await assertNoOverflow360(page, 'offline sessions');
     await shot(page, '5-offline-sessions');
 
-    await page.getByTestId('tab-settings').click();
+    // its artifacts: the last known list, greyed — nothing opens (html files as plain rows)
+    await page.getByTestId('artifacts-key').click();
+    await page.waitForURL(/\/roots\/mac-studio\/artifacts$/, { timeout: 15_000 });
+    const art = page.locator('[data-testid="artifact-row"][data-name="render-report.html"]');
+    await expect(art).toBeDisabled();
+    await expect(page.getByTestId('artifact-grid')).toHaveCount(0);
+    await assertNoOverflow360(page, 'offline artifacts');
+    await page.getByTestId('artifacts-back').click();
+    await page.waitForURL(/\/roots\/mac-studio$/, { timeout: 15_000 });
+
+    await page.getByTestId('home-title').click();
+    await page.waitForURL(/\/roots\/mac-studio\/settings$/, { timeout: 15_000 });
+    await expect(page.getByTestId('roots-state')).toContainText('last seen');
     await expect(page.getByTestId('root-world-block')).toHaveCSS('opacity', '0.5');
     await expect(page.locator('[data-testid="world-pick"]').first()).toBeDisabled();
     // remove still works when offline
@@ -333,6 +370,14 @@ test.describe('same design as the home screen at 360px', () => {
     await expect(page.getByTestId('roots-key')).toBeVisible({ timeout: 15_000 });
     const homeNew = page.getByRole('button', { name: 'new session' });
     const homeKey = await cssOf(homeNew);
+    // where the home screen's header keys sit
+    const keyBoxes = async () => {
+      await expect(page.getByTestId('refresh-key')).toHaveText('refresh');
+      return Promise.all(
+        ['roots-key', 'artifacts-key', 'refresh-key'].map((k) => page.getByTestId(k).boundingBox())
+      );
+    };
+    const homeKeys = await keyBoxes();
     await page.getByTestId('roots-key').click();
     const row = page.locator('[data-testid="root-row"][data-root="debian-box"]');
     await expect(row).toBeVisible();
@@ -345,17 +390,19 @@ test.describe('same design as the home screen at 360px', () => {
     // its page: the app's world, the home screen's parts
     await row.click();
     await page.waitForURL(/\/roots\/debian-box$/, { timeout: 15_000 });
-    await expect(page.getByTestId('roots-state')).toContainText('on');
+    await expect(page.getByTestId('root-view')).toHaveAttribute('data-reachable', 'on');
     await expect(page.getByTestId('root-sess')).toHaveCount(1);
     await expect(page.locator('html')).toHaveAttribute('data-theme', 'utopia');
     expect(await page.getByTestId('root-view').getAttribute('data-root-theme')).toBeNull();
     expect(await bgOf('[data-testid="root-view"]')).toBe(homeBg);
     expect(await page.evaluate(() => localStorage.getItem('oz-root-themes'))).toBeNull();
-    // the home screen's band and chip, the app's tab strip (as /artifacts), its new-session key
+    // the home screen's header (its keys in the same boxes), band and chip, its new-session
+    // key — and no tab strip (11-24: settings and artifacts are pages, as on home)
+    expect(await keyBoxes()).toEqual(homeKeys);
+    await expect(page.getByTestId('home-title')).toHaveText('debian-box');
     await expect(page.getByTestId('root-band')).toBeVisible();
     await expect(page.getByTestId('working-filter')).toHaveText('all quiet');
-    await expect(page.getByTestId('root-tabs')).toHaveClass(/\boz-tabs\b/);
-    await expect(page.locator('.oz-ptabs, .oz-worlds2, .oz-kind')).toHaveCount(0);
+    await expect(page.locator('.oz-tabs, .oz-ptabs, .oz-worlds2, .oz-kind')).toHaveCount(0);
     expect(await cssOf(page.getByTestId('roots-new'))).toEqual(homeKey);
     // the home screen's row: one status word, and only "working" — no "done"
     await expect(page.getByTestId('root-sess').locator('.oz-st')).toHaveCount(0);
@@ -363,7 +410,8 @@ test.describe('same design as the home screen at 360px', () => {
     await shot(page, '8-unpicked-sessions');
 
     // settings: the app's world list; current = the world it wears (the app's)
-    await page.getByTestId('tab-settings').click();
+    await page.getByTestId('home-title').click();
+    await page.waitForURL(/\/roots\/debian-box\/settings$/, { timeout: 15_000 });
     await expect(page.locator('.oz-world[data-testid="world-pick"]')).toHaveCount(8);
     await expect(
       page.locator('[data-testid="world-pick"][data-world="utopia"]')
