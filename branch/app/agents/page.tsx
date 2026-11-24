@@ -10,21 +10,33 @@ import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { LineIcon } from '@/components/line-icon';
+import { ProvidersBlock } from '@/components/providers-block';
 import {
   type AgentRow,
   ENGINE_NOTE,
   type EngineRow,
+  MAX_FALLBACK_CHAIN,
   MORE_ENGINES,
   byRole,
   engineLabel,
+  parseFallbackChain,
   roleTag,
 } from '@/lib/agents';
+import {
+  type ProvidersState,
+  type UsageState,
+  normalizeUsageResponse,
+  providerForModel,
+  usageTone,
+} from '@/lib/providers';
 
 export default function RolesPage() {
   const router = useRouter();
   const [agents, setAgents] = useState<AgentRow[] | null>(null);
   const [err, setErr] = useState('');
   const [engines, setEngines] = useState<EngineRow[] | null>(null);
+  const [usage, setUsage] = useState<UsageState | null>(null);
+  const [provState, setProvState] = useState<ProvidersState | null>(null);
   const [naming, setNaming] = useState(false);
   const [name, setName] = useState('');
 
@@ -49,14 +61,19 @@ export default function RolesPage() {
     };
   }, [agents]);
 
-  // the engines' default models (a role on its default engine without a model of its own runs on it)
+  // the engines' default models + live usage (graceful empty state on 404)
   useEffect(() => {
     fetch('/api/engines', { cache: 'no-store' })
       .then((r) => (r.ok ? r.json() : null))
       .then((d) => Array.isArray(d) && setEngines(d))
       .catch(() => {});
+    fetch('/api/usage', { cache: 'no-store' })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => d && setUsage(normalizeUsageResponse(d)))
+      .catch(() => {});
   }, []);
   const engineModel = (e: string) => engines?.find((x) => x.name === e)?.model || null;
+  const providers = provState?.providers || [];
 
   const ok = /^[A-Za-z0-9_-]+$/.test(name.trim());
   const create = () => {
@@ -82,7 +99,8 @@ export default function RolesPage() {
             const e = a.harness || 'root';
             const model = a.model || engineModel(e) || 'default';
             // the coordinator is MAIN's: always on the root (its model can still change)
-            const door = a.name === 'coordinator';
+            const door = a.name === 'coordinator' || a.pinned === true;
+            const chain = door ? [] : parseFallbackChain(a.fallback);
             return (
               <li key={a.name}>
                 <Link href={`/agents/${a.name}`} data-testid="agent-row" data-role={a.name}>
@@ -98,7 +116,32 @@ export default function RolesPage() {
                       {model} {door ? <span className="text-[10px]">locked</span> : '›'}
                     </span>
                   </span>
-                  {a.description && <span className="r2">{a.description}</span>}
+                  {door ? (
+                    <span className="oz-fb">locked · never falls back</span>
+                  ) : chain.length > 0 ? (
+                    <span className="oz-fb">
+                      fallback
+                      {chain.map((step, idx) => {
+                        const prov =
+                          step.engine === 'root' ? providerForModel(step.model, providers) : null;
+                        return (
+                          <span key={`${step.engine}/${step.model || ''}`} className="oz-fc">
+                            <b className="oz-badge">{idx + 1}</b>
+                            {engineLabel(step.engine)}
+                            {step.model && <em>{step.model}</em>}
+                            {prov?.noQuota && <span>· no quota</span>}
+                          </span>
+                        );
+                      })}
+                      {chain.length < MAX_FALLBACK_CHAIN && (
+                        <span className="oz-fc plus" aria-hidden="true">
+                          +
+                        </span>
+                      )}
+                    </span>
+                  ) : (
+                    a.description && <span className="r2">{a.description}</span>
+                  )}
                 </Link>
               </li>
             );
@@ -135,7 +178,8 @@ export default function RolesPage() {
           </div>
         )}
       </section>
-      {engines && <Engines engines={engines} onSaved={setEngines} />}
+      {engines && <Engines engines={engines} usage={usage} onSaved={setEngines} />}
+      <ProvidersBlock onChanged={setProvState} />
       <SharedPrompt />
     </main>
   );
@@ -145,9 +189,11 @@ export default function RolesPage() {
  *  and a pick saves at once (PUT /api/engines/:name). opencode and Codex sit in a fold. */
 function Engines({
   engines,
+  usage,
   onSaved,
 }: {
   engines: EngineRow[];
+  usage: UsageState | null;
   onSaved: (e: EngineRow[]) => void;
 }) {
   const [open, setOpen] = useState('');
@@ -191,6 +237,11 @@ function Engines({
         >
           <span className="r1">
             <span className="truncate">{label}</span>
+            {usage?.byEngine[e.name]?.pct != null && (
+              <span className={`tag ${usageTone(usage.byEngine[e.name].pct)}`}>
+                {usage.byEngine[e.name].pct}%
+              </span>
+            )}
             <span className="m">
               {e.model || 'its default'} {isOpen ? '▲' : '›'}
             </span>
