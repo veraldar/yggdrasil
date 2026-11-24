@@ -2,7 +2,8 @@
  * GET → the whole tree: `home` (this hub's own root: name, os, cpus, mem_gb, running, main — the
  * brain's GET /root) and `roots`, the others: the machines joined to this hub (id, name, os, host,
  * joined_at, delivered_at, wg_fp; removed ones left out) with the brain's word on each merged in
- * (reachable, seen, running, models, main, main_proxy), then the roots only the brain knows
+ * (reachable, seen, running, models, main, main_proxy, build, behind: it runs another build than
+ * the hub brain), then the roots only the brain knows
  * (static peers). The gate: lib/admin.ts rootsGate.
  */
 import { NextResponse } from 'next/server';

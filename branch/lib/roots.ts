@@ -917,9 +917,34 @@ export type RootLive = {
   arch?: string | null;
   cpus?: number | null;
   mem_gb?: number | null;
+  /** the build it runs, as its last answer said (null: an older brain, or it never answered) */
+  build?: RootBuild | null;
+  /** it runs another build than the hub brain (no build = an older brain = true; null: never answered) */
+  behind?: boolean | null;
+};
+
+/** a brain's build stamp (GET /root `build`, root/src/build_id.rs) */
+export type RootBuild = {
+  id: string;
+  commit: string;
+  epoch: number;
+  describe: string;
+  plat: string;
 };
 
 type BrainRoot = RootLive & { name: string; os: string | null };
+
+function rootBuild(v: unknown): RootBuild | null {
+  const o = (v && typeof v === 'object' ? v : null) as Record<string, unknown> | null;
+  if (!o || !str(o.id)) return null;
+  return {
+    id: str(o.id),
+    commit: str(o.commit),
+    epoch: num0(o.epoch) ?? 0,
+    describe: str(o.describe),
+    plat: str(o.plat),
+  };
+}
 
 const num0 = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
 const strN = (v: unknown) => (typeof v === 'string' && v ? v : null);
@@ -949,6 +974,8 @@ function brainRoot(v: unknown): BrainRoot | null {
     theme_rev: num0(o.theme_rev) ?? 0,
     main: strN(o.main),
     main_proxy: strN(o.main_proxy),
+    build: rootBuild(o.build),
+    behind: typeof o.behind === 'boolean' ? o.behind : null,
   };
 }
 
@@ -1023,6 +1050,8 @@ export async function rootsOverview() {
     arch: b.arch,
     cpus: b.cpus,
     mem_gb: b.mem_gb,
+    build: b.build,
+    behind: b.behind,
   });
   const roots: Array<Record<string, unknown> & { id: string; name: string }> = (
     await listRoots()
