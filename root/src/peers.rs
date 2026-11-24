@@ -293,7 +293,7 @@ pub async fn call(st: &AppState, root: &str, method: &str, path: &str, body: Opt
         }
         base = p.url(root);
     }
-    let base = base.ok_or_else(|| format!("unknown root {root:?} (known: {})", p.names().join(", ")))?;
+    let base = base.ok_or_else(|| unknown_root(root, &p.names()))?;
     let mut req = match method {
         "GET" => st.http.get(format!("{base}{path}")),
         "PUT" => st.http.put(format!("{base}{path}")),
@@ -359,7 +359,7 @@ pub const BUILD_ID: &str = env!("YGG_STAMP_ID");
 pub fn describe(st: &AppState) -> Value {
     let running = st.running.lock().unwrap().len();
     let sessions = st.sessions.lock().unwrap().len();
-    let models: Vec<Value> = st.config.models.iter().map(|m| json!({ "id": m, "tier": crate::model_tier(st, m) })).collect();
+    let models: Vec<Value> = crate::root_models(st).iter().map(|m| json!({ "id": m, "tier": crate::model_tier(st, m) })).collect();
     let profiles: Vec<Value> = st.config.profiles.read().unwrap().by_name.values().map(|p| json!({ "name": p.name, "description": p.description, "harness": p.harness })).collect();
     let (theme, theme_rev) = crate::roots::current_look(st);
     json!({
@@ -565,6 +565,13 @@ pub async fn report(st: &AppState, root: &str, proxy: &str, ev: Value) {
             }
         }
     }
+}
+
+/// A root this one does not know, said plainly: `no root named "lab" is known here (known roots:
+/// mac-studio, debian-box)`.
+pub fn unknown_root(root: &str, known: &[String]) -> String {
+    let known = if known.is_empty() { "none".to_string() } else { known.join(", ") };
+    format!("no root named {root:?} is known here (known roots: {known})")
 }
 
 #[cfg(test)]

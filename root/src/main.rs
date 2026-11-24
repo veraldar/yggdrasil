@@ -83,6 +83,9 @@ mod gate;
 mod harness;
 mod peers;
 mod profiles;
+// the provider layer's whole API (provider.rs): its stream-error classification and opencode
+// catalog have no brain caller yet
+#[allow(dead_code)]
 mod provider;
 mod relay;
 mod rollup;
@@ -554,6 +557,18 @@ fn root_serves(st: &AppState, m: &str) -> bool {
     st.config.models.iter().any(|x| x == m) || routed_provider(m).is_some()
 }
 
+/// Every model the root engine offers: the env upstream's (YGG_MODELS), then each provider's as
+/// `provider/model` (listed, or discovered for `models: "auto"`).
+pub(crate) fn root_models(st: &AppState) -> Vec<String> {
+    let mut out = st.config.models.clone();
+    if let Some(ps) = providers() {
+        for p in ps.current().providers.iter().filter(|p| p.id != provider::ENV_PROVIDER) {
+            out.extend(p.model_ids().into_iter().map(|m| format!("{}/{m}", p.id)));
+        }
+    }
+    out
+}
+
 /// `root` or the harness's name — the session's `engine` field.
 fn engine_word(kind: Option<harness::Kind>) -> &'static str {
     kind.map_or("root", harness::Kind::name)
@@ -568,7 +583,7 @@ fn engine_model(st: &AppState, role: Option<&profiles::Profile>, engine: Option<
     let default = st.config.profiles.read().unwrap().engine_model(engine_word(engine));
     match engine {
         None => {
-            let served = |m: &String| st.config.models.contains(m);
+            let served = |m: &String| root_serves(st, m);
             asked.map(String::from).filter(served).or(role_here.filter(served)).or(default.filter(served)).unwrap_or_else(|| st.config.model.clone())
         }
         Some(_) => asked.filter(|m| !m.is_empty()).map(String::from).or(role_here).or(default).unwrap_or_else(|| "default".into()),
@@ -2158,6 +2173,22 @@ async fn switch_model(State(st): State<AppState>, Path(id): Path<String>, Json(b
             None => not_found(&id),
         };
     }
+    // a provider's model (A3): `{id: "qwen3.8-27b", providerID: "mac-studio"}` or the routed id
+    // itself; the session keeps `mac-studio/qwen3.8-27b`, which relay() routes
+    let routed = [format!("{pid}/{mid}"), mid.to_string()].into_iter().find(|m| routed_provider(m).is_some());
+    if let Some(full) = routed {
+        let provider = full.split('/').next().unwrap_or_default().to_string();
+        return match with_session(&st, &id, |s| {
+            let variant = s.info["model"].get("variant").cloned();
+            s.info["model"] = json!({ "id": full, "providerID": provider });
+            if let Some(v) = variant {
+                s.info["model"]["variant"] = v;
+            }
+        }) {
+            Some(()) => StatusCode::NO_CONTENT.into_response(),
+            None => not_found(&id),
+        };
+    }
     let known = st.config.catalog["providers"]
         .as_array()
         .into_iter()
@@ -2316,7 +2347,7 @@ fn agent_model_stamp(st: &AppState, a: &profiles::Profile) -> Value {
     match &a.harness {
         Some(h) => json!({ "id": a.model.clone().unwrap_or_else(|| "default".into()), "providerID": h }),
         None => {
-            let model = a.model.clone().filter(|m| st.config.models.contains(m)).unwrap_or_else(|| st.config.model.clone());
+            let model = a.model.clone().filter(|m| root_serves(st, m)).unwrap_or_else(|| st.config.model.clone());
             let variant = a.variant.clone().unwrap_or_else(|| st.config.default_variant.clone());
             json!({ "id": model, "providerID": "yggdrasil", "variant": variant })
         }
@@ -2341,7 +2372,7 @@ async fn list_engines(State(st): State<AppState>) -> Json<Value> {
 fn engine_row(st: &AppState, name: &str) -> Value {
     let (_, label, more) = profiles::ENGINES.iter().find(|(n, _, _)| *n == name).copied().unwrap_or((name, name, true));
     let set = st.config.profiles.read().unwrap().engine_model(name);
-    let model = if name == "root" { Some(set.filter(|m| st.config.models.contains(m)).unwrap_or_else(|| st.config.model.clone())) } else { set };
+    let model = if name == "root" { Some(set.filter(|m| root_serves(st, m)).unwrap_or_else(|| st.config.model.clone())) } else { set };
     let word = match name {
         "root" => Value::Null,
         "antigravity" => json!("agy"),
@@ -2461,6 +2492,11 @@ async fn get_agent(State(st): State<AppState>, Path(name): Path<String>) -> Resp
             // every harness's list, so the editor's picker follows a harness change before saving
             d["models_by_harness"] = json!(["root", "claude", "opencode", "codex", "antigravity"].iter().map(|h| (h.to_string(), json!(models_for(&st, h)))).collect::<serde_json::Map<_, _>>());
             d["model_labels"] = json!(st.harness_labels.lock().unwrap().clone());
+            // what the chain resolves to on this root for a session on the role's own engine
+            // (an automatic chain's one entry; a root model this root lacks → its best one)
+            let own = prof.harness.as_deref().and_then(harness::Kind::parse);
+            let from = Target { engine: own, model: match own { None => prof.model.clone().filter(|m| root_serves(&st, m)).unwrap_or_else(|| st.config.model.clone()), Some(k) => harness_model_or_default(&st, k, prof.model.as_deref()) } };
+            d["fallback_effective"] = json!(if is_pinned_for_fallback(&json!({}), &prof) { Vec::new() } else { effective_chain(&st, &prof, &from).iter().map(Target::show).collect::<Vec<_>>() });
             Json(d).into_response()
         }
         None => (StatusCode::NOT_FOUND, Json(json!({ "error": format!("no agent {name}") }))).into_response(),
@@ -2480,6 +2516,21 @@ pub(crate) async fn put_agent(State(st): State<AppState>, Path(name): Path<Strin
             return bad_request(&format!("model {m} is not offered by {harness} ({})", offered.join(", ")));
         }
     }
+    // each NEW chain entry names a model its engine offers (an engine's own pick: no model); an
+    // entry the role already has stays (a root without glm-5.3 runs its best root model instead)
+    if let Some(fb) = body.get("fallback") {
+        if let Ok(Some(Some(chain))) = profiles::parse_fallback(fb) {
+            let had = agent(&st, &name).map(|a| a.fallback_chain).unwrap_or_default();
+            for (i, e) in chain.iter().enumerate() {
+                let Some(m) = e.model.as_deref().filter(|_| !had.contains(e)) else { continue };
+                let offered = models_for(&st, e.engine());
+                let open = offered.len() == 1 && offered[0] == "default";
+                if !open && !offered.iter().any(|x| x == m) {
+                    return bad_request(&format!("fallback {}: {} does not offer {m} ({})", i + 1, engine_label(e.engine()), offered.join(", ")));
+                }
+            }
+        }
+    }
     let res = st.config.profiles.write().unwrap().upsert(&name, &body);
     match res {
         Ok(()) => {
@@ -2494,7 +2545,7 @@ pub(crate) async fn put_agent(State(st): State<AppState>, Path(name): Path<Strin
 /// The models an agent on `harness` can use (root = what this upstream serves).
 fn models_for(st: &AppState, harness: &str) -> Vec<String> {
     if harness == "root" {
-        return st.config.models.clone();
+        return root_models(st);
     }
     st.harness_models.lock().unwrap().get(harness).cloned().unwrap_or_else(|| vec!["default".into()])
 }
@@ -3428,6 +3479,9 @@ struct Run {
     vision: bool,
     /// G1: what the assembly dropped this run (fold cap + roll-up range), captured with every step
     dropped: context::Dropped,
+    /// the provider route that answered the last call (`rig-b/m-b`) when provider.rs moved the
+    /// call off the session's own pick — the card names who served
+    served: Option<String>,
 }
 
 impl Run {
@@ -3703,6 +3757,111 @@ async fn get_usage(State(st): State<AppState>) -> Json<Value> {
     Json(Value::Object(rows))
 }
 
+/// `GET /provider` — the root's providers (harness chains A4): each one's type, base URL, key
+/// SOURCE (never the key), models (listed; `auto` ones asked again now), health (provider.rs:
+/// what it did last, cooling until when), reachability from THIS root (`{ok, ms}`: TCP + an HTTP
+/// answer inside 2 s, all at once) and locality (`local` | `lan` | `remote` — the picker's LAN
+/// chip; a root that only reaches outbound 443 sees its LAN providers unreachable, still listed),
+/// metered (`false` = no quota: local engines, this machine, its network); + the file's path, the
+/// default, the fallback list and a load error.
+async fn get_provider(State(st): State<AppState>) -> Response {
+    let Some(ps) = providers() else {
+        return (StatusCode::SERVICE_UNAVAILABLE, Json(json!({ "error": "no provider registry on this root" }))).into_response();
+    };
+    let reg = ps.current();
+    let now = provider::now_ms();
+    let health = ps.health.snapshot(&reg, now);
+    let probes = reg.providers.iter().cloned().map(|p| {
+        let http = st.http.clone();
+        async move {
+            let reach = provider::Registry::reachable(&http, &p.base_url).await;
+            let disc = if p.auto {
+                let r = provider::Registry::discover(&http, &p.base_url, &p.ptype, p.key.as_deref()).await;
+                if let Ok(l) = &r {
+                    provider::set_discovered(&p.id, l.clone());
+                }
+                Some(r)
+            } else {
+                None
+            };
+            (p.id.clone(), reach, disc)
+        }
+    });
+    let results: HashMap<String, (Option<u64>, Option<Result<Vec<String>, String>>)> =
+        futures::future::join_all(probes).await.into_iter().map(|(id, r, d)| (id, (r, d))).collect();
+    let mut desc = reg.describe();
+    for row in desc["providers"].as_array_mut().into_iter().flatten() {
+        let id = row["id"].as_str().unwrap_or_default().to_string();
+        row["health"] = health.get(&id).cloned().unwrap_or(json!({ "status": "unknown" }));
+        let (reach, disc) = results.get(&id).cloned().unwrap_or((None, None));
+        row["reachable"] = json!({ "ok": reach.is_some(), "ms": reach });
+        match disc {
+            Some(Ok(list)) => {
+                row["models"] = json!(list);
+                row["discovery"] = json!({ "ok": true, "count": list.len() });
+            }
+            Some(Err(e)) => row["discovery"] = json!({ "ok": false, "error": e }),
+            None => row["discovery"] = json!({ "ok": true, "manual": true }),
+        }
+        if row["env"] == true {
+            // the root's own upstream: set by the unit's environment, not editable here
+            row["name"] = json!(if row["type"] == "zai" { "z.ai" } else { "upstream" });
+            row["models"] = json!(st.config.models);
+        }
+    }
+    desc["path"] = json!(ps.path.display().to_string());
+    desc["types"] = json!(provider::TYPES);
+    desc["reload_error"] = json!(*ps.reload_error.lock().unwrap());
+    Json(desc).into_response()
+}
+
+/// `PUT /provider` `{name, type, baseURL, apiKey, models: "auto" | [ids], label?, remove?}` —
+/// add or edit one provider in this root's providers.json (provider.rs `edit_file`: validated
+/// before it is written, 0600, the key never answered back); answers GET /provider.
+async fn put_provider(State(st): State<AppState>, Json(body): Json<Value>) -> Response {
+    let Some(ps) = providers() else {
+        return (StatusCode::SERVICE_UNAVAILABLE, Json(json!({ "error": "no provider registry on this root" }))).into_response();
+    };
+    match provider::edit_file(&ps.path, &body) {
+        Ok(id) => {
+            let reg = ps.current();
+            if let Some(id) = &id {
+                ps.health.clear(id);
+                if let Some(p) = reg.provider(id).filter(|p| p.auto).cloned() {
+                    if let Ok(l) = provider::Registry::discover(&st.http, &p.base_url, &p.ptype, p.key.as_deref()).await {
+                        provider::set_discovered(&p.id, l);
+                    }
+                }
+            }
+            publish(&st, "provider.updated", json!({ "name": id.clone().or(body["name"].as_str().map(String::from)) }));
+            get_provider(State(st)).await
+        }
+        Err(e) => bad_request(&e),
+    }
+}
+
+/// `DELETE /provider/:name` — drops a provider from this root's providers.json.
+async fn delete_provider(State(st): State<AppState>, Path(name): Path<String>) -> Response {
+    put_provider(State(st), Json(json!({ "name": name, "remove": true }))).await
+}
+
+/// Asks every `models: "auto"` provider what it serves, once (boot): the pickers have names.
+fn spawn_discovery(st: &AppState) {
+    let Some(ps) = providers() else { return };
+    let http = st.http.clone();
+    tokio::spawn(async move {
+        for p in ps.current().providers.iter().filter(|p| p.auto) {
+            match provider::Registry::discover(&http, &p.base_url, &p.ptype, p.key.as_deref()).await {
+                Ok(l) => {
+                    eprintln!("providers: {} serves {} model(s)", p.id, l.len());
+                    provider::set_discovered(&p.id, l);
+                }
+                Err(e) => eprintln!("providers: {} — {e}", p.id),
+            }
+        }
+    });
+}
+
 /// What one walk of the chain found.
 #[derive(Debug, PartialEq)]
 enum Walk {
@@ -3956,6 +4115,7 @@ async fn run_turn(st: &AppState, id: &str, tx: &mpsc::Sender<Event>, queue_ms: u
         think: 0,
         think_off: false,
         dropped: context::Dropped::default(),
+        served: None,
         vision: history
             .iter()
             .rev()
@@ -4105,7 +4265,7 @@ async fn run_turn(st: &AppState, id: &str, tx: &mpsc::Sender<Event>, queue_ms: u
     }
     let served_name = engine_word(served_engine);
     let served_model = match served_engine {
-        None => session_upstream(st, id).0,
+        None => run.served.clone().unwrap_or_else(|| session_upstream(st, id).0),
         Some(_) => st
             .sessions
             .lock()
@@ -4838,7 +4998,7 @@ fn session_upstream(st: &AppState, id: &str) -> (String, String, Option<Value>) 
         .get(id)
         .map(|s| (s.info["model"]["id"].as_str().map(String::from), s.info["model"]["variant"].as_str().map(String::from)))
         .unwrap_or((None, None));
-    let model = model.filter(|m| st.config.models.iter().any(|x| x == m)).unwrap_or_else(|| st.config.model.clone());
+    let model = model.filter(|m| root_serves(st, m)).unwrap_or_else(|| st.config.model.clone());
     let variant = stamp.or(prof.variant.clone()).unwrap_or_else(|| st.config.default_variant.clone());
     let lite = model_tier(st, &model) == "lite";
     let tools = st.config.tools_enabled.then(|| {
@@ -4925,33 +5085,155 @@ async fn relay(
     tx: &mpsc::Sender<Event>,
     run: &mut Run,
 ) -> Result<Vec<ToolCall>, String> {
+    let (model, variant, tools) = session_upstream(st, session_id);
+    let model = vision_model(st, model, run.vision);
+    let ups = ups_for(st, &model)?;
+    let n = ups.len();
+    for (i, up) in ups.iter().enumerate() {
+        let r = match up.dialect {
+            Dialect::Anthropic => relay_anthropic(st, session_id, convo, tx, run, up, &variant, tools.as_ref()).await,
+            Dialect::OpenAi => relay_openai(st, session_id, convo, tx, run, up, &variant, tools.as_ref()).await,
+        };
+        let (Some(route), Some(ps)) = (&up.route, providers()) else { return r.map_err(|e| e.msg) };
+        let now = provider::now_ms();
+        match r {
+            Ok(calls) => {
+                if ps.health.ok(route, now) {
+                    eprintln!("providers: {} answers again", route.provider);
+                }
+                run.served = (route.show() != model).then(|| route.show());
+                return Ok(calls);
+            }
+            Err(RelayErr { msg, upstream: Some(err) }) => {
+                ps.health.fail(&err, now);
+                // another provider could answer this call (quota, limit, key, down…) and nothing
+                // reached the reply yet: the next one in the chain takes it
+                if err.kind.degrades() && i + 1 < n && run.text.is_empty() {
+                    eprintln!("PROVIDER degrade {} -> {}: {}", route.show(), ups[i + 1].show(), err.headline(now));
+                    continue;
+                }
+                return Err(msg);
+            }
+            Err(e) => return Err(e.msg),
+        }
+    }
+    Err(format!("no upstream serves {model}"))
+}
+
+/// Where one upstream call goes: the env upstream (`YGG_UPSTREAM_*`) or a provider's route.
+struct Up {
+    base_url: String,
+    key: Option<String>,
+    dialect: Dialect,
+    /// the model id on the wire (a routed id without its provider)
+    model: String,
+    max_tokens: u64,
+    route: Option<provider::Route>,
+}
+
+impl Up {
+    fn show(&self) -> String {
+        self.route.as_ref().map_or_else(|| self.model.clone(), provider::Route::show)
+    }
+}
+
+/// A failed call; `upstream` = classified (provider.rs) when it came from a provider route
+/// before any of the reply arrived — what the chain decides on.
+struct RelayErr {
+    msg: String,
+    upstream: Option<provider::UpstreamError>,
+}
+
+impl From<String> for RelayErr {
+    fn from(msg: String) -> Self {
+        RelayErr { msg, upstream: None }
+    }
+}
+
+/// The calls a turn's root model makes, in order (A3). A provider-routed id
+/// (`mac-studio/qwen3.8-27b`) walks provider.rs's chain — the pick, then the file's `fallback`
+/// list — past every provider cooling after a failure; all cooling = the first one's error, no
+/// call. Any other id goes to the env upstream, as before.
+fn ups_for(st: &AppState, model: &str) -> Result<Vec<Up>, String> {
+    let cfg = &st.config;
+    let env = || vec![Up { base_url: cfg.base_url.clone(), key: cfg.api_key.clone(), dialect: cfg.dialect, model: model.to_string(), max_tokens: cfg.max_tokens, route: None }];
+    if cfg.models.iter().any(|m| m == model) || routed_provider(model).is_none() {
+        return Ok(env());
+    }
+    let (Some(ps), Some(pick)) = (providers(), provider::Ref::parse(model)) else { return Ok(env()) };
+    let reg = ps.current();
+    let now = provider::now_ms();
+    let routes = reg.chain(Some(&pick));
+    let live: Vec<&provider::Route> = routes.iter().filter(|r| ps.health.cooling(&r.provider, now).is_none()).collect();
+    if live.is_empty() {
+        let first = routes.first().and_then(|r| ps.health.cooling(&r.provider, now));
+        return Err(match first {
+            Some(e) => format!("{} — {}", e.line(), e.headline(now)),
+            None => format!("no provider serves {model}"),
+        });
+    }
+    Ok(live
+        .into_iter()
+        .map(|r| Up {
+            base_url: r.base_url.clone(),
+            key: r.key.clone(),
+            dialect: match r.dialect {
+                provider::Dialect::Anthropic => Dialect::Anthropic,
+                provider::Dialect::OpenAi => Dialect::OpenAi,
+            },
+            model: r.model.clone(),
+            max_tokens: r.max_tokens.unwrap_or(cfg.max_tokens),
+            route: Some(r.clone()),
+        })
+        .collect())
+}
+
+/// A provider route's failure before the reply, classified; the env upstream's stays a line.
+fn classify(up: &Up, status: Option<(u16, &reqwest::header::HeaderMap, &str)>, line: &str) -> RelayErr {
+    let upstream = up.route.as_ref().map(|r| match status {
+        Some((code, headers, body)) => provider::UpstreamError::from_response(r, code, headers, body, provider::now_ms()),
+        None => match line.strip_prefix("upstream 429 Too Many Requests: ") {
+            Some(body) => provider::UpstreamError::from_response(r, 429, &reqwest::header::HeaderMap::new(), body, provider::now_ms()),
+            None => provider::UpstreamError::network(r, line),
+        },
+    });
+    RelayErr { msg: line.to_string(), upstream }
+}
+
+/// The OpenAI wire: `{base}/chat/completions`, the key as bearer.
+#[allow(clippy::too_many_arguments)]
+async fn relay_openai(
+    st: &AppState,
+    session_id: &str,
+    convo: &[Value],
+    tx: &mpsc::Sender<Event>,
+    run: &mut Run,
+    up: &Up,
+    variant: &str,
+    tools: Option<&Value>,
+) -> Result<Vec<ToolCall>, RelayErr> {
     let started = run.started;
     let first_delta_ms = &mut run.first_delta_ms;
     let full = &mut run.text;
-    let cfg = &st.config;
-    if cfg.dialect == Dialect::Anthropic {
-        return relay_anthropic(st, session_id, convo, tx, run).await;
-    }
-    let url = format!("{}/chat/completions", cfg.base_url.trim_end_matches('/'));
-    let (model, _variant, tools) = session_upstream(st, session_id);
-    let model = vision_model(st, model, run.vision);
+    let url = format!("{}/chat/completions", up.base_url.trim_end_matches('/'));
+    let model = &up.model;
     let mut body = json!({ "model": model, "messages": convo, "stream": true });
     if let Some(t) = tools {
-        body["tools"] = t;
+        body["tools"] = t.clone();
     }
     // G1: the exact wire body, captured before the key joins (the key rides headers, never here)
-    let (_, variant, _) = session_upstream(st, session_id);
-    context::capture(st, session_id, run.upstream_calls as usize + 1, &model, &variant, "openai", &body, run.dropped.clone());
+    context::capture(st, session_id, run.upstream_calls as usize + 1, model, variant, "openai", &body, run.dropped.clone());
     let _permit = st.upstream.acquire().await.map_err(|e| e.to_string())?;
     let mut req = st.http.post(&url).json(&body);
-    if let Some(key) = &cfg.api_key {
+    if let Some(key) = &up.key {
         req = req.bearer_auth(key);
     }
     let t_req = std::time::Instant::now();
-    let resp = send_with_retry(&req, &mut run.retries).await?;
+    let resp = send_with_retry(&req, &mut run.retries).await.map_err(|e| classify(up, None, &e))?;
     run.upstream_calls += 1;
     let status = resp.status();
     if !status.is_success() {
+        let headers = resp.headers().clone();
         let body = resp.text().await.unwrap_or_default();
         // SPEED LAW: a fast-failing upstream must be LOUD — a silent or
         // quiet fallback here was the 31s-every-commit bug's escape hatch.
@@ -4963,7 +5245,7 @@ async fn relay(
             status,
             body.chars().take(300).collect::<String>()
         );
-        return Err(format!("upstream {status}: {body}"));
+        return Err(classify(up, Some((status.as_u16(), &headers, &body)), &format!("upstream {status}: {body}")));
     }
 
     let mut calls: Vec<ToolCall> = Vec::new();
@@ -5043,12 +5325,12 @@ async fn relay(
 /// `x-api-key` and bearer (providers differ), `anthropic-version`.
 /// G1: the built body goes out as-is; the capture happens before this joins the key headers.
 fn post_anthropic(st: &AppState, body: Value) -> reqwest::RequestBuilder {
-    let mut req = st
-        .http
-        .post(anthropic::messages_url(&st.config.base_url))
-        .json(&body)
-        .header("anthropic-version", anthropic::VERSION);
-    if let Some(key) = &st.config.api_key {
+    post_anthropic_to(st, &st.config.base_url, st.config.api_key.as_deref(), body)
+}
+
+fn post_anthropic_to(st: &AppState, base_url: &str, key: Option<&str>, body: Value) -> reqwest::RequestBuilder {
+    let mut req = st.http.post(anthropic::messages_url(base_url)).json(&body).header("anthropic-version", anthropic::VERSION);
+    if let Some(key) = key {
         req = req.header("x-api-key", key).bearer_auth(key);
     }
     req
@@ -5070,33 +5352,37 @@ fn anthropic_request(
 /// into `full`, tool calls returned in block order. Tool-use ids are re-keyed to yggdrasil
 /// `call_` ids (consistent within the conversation we send back), so a stored transcript
 /// does not reveal which dialect served it.
+#[allow(clippy::too_many_arguments)]
 async fn relay_anthropic(
     st: &AppState,
     session_id: &str,
     convo: &[Value],
     tx: &mpsc::Sender<Event>,
     run: &mut Run,
-) -> Result<Vec<ToolCall>, String> {
+    up: &Up,
+    variant: &str,
+    tools: Option<&Value>,
+) -> Result<Vec<ToolCall>, RelayErr> {
     let cfg = &st.config;
     let started = run.started;
     let first_delta_ms = &mut run.first_delta_ms;
     let full = &mut run.text;
-    // model, thinking and tools: the session's stamps and profile (session_upstream)
-    let (model, variant, tools) = session_upstream(st, session_id);
-    let model = vision_model(st, model, run.vision);
-    let variant = if run.think_off { "off".to_string() } else { variant };
+    // model, thinking and tools: the session's stamps and profile (session_upstream, in relay)
+    let model = &up.model;
+    let variant = if run.think_off { "off".to_string() } else { variant.to_string() };
     let thinking = anthropic::thinking_for(Some(&variant), cfg.think_high);
     run.think = thinking.as_ref().and_then(|t| t["budget_tokens"].as_u64()).unwrap_or(0);
     // G1: capture the body Value (never the request — the key is a header), then send it unchanged
-    let body = anthropic::body(&model, cfg.max_tokens, convo, tools.as_ref(), true, thinking.as_ref());
-    context::capture(st, session_id, run.upstream_calls as usize + 1, &model, &variant, "anthropic", &body, run.dropped.clone());
-    let req = post_anthropic(st, body);
+    let body = anthropic::body(model, up.max_tokens, convo, tools, true, thinking.as_ref());
+    context::capture(st, session_id, run.upstream_calls as usize + 1, model, &variant, "anthropic", &body, run.dropped.clone());
+    let req = post_anthropic_to(st, &up.base_url, up.key.as_deref(), body);
     let _permit = st.upstream.acquire().await.map_err(|e| e.to_string())?;
     let t_req = std::time::Instant::now();
-    let resp = send_with_retry(&req, &mut run.retries).await?;
+    let resp = send_with_retry(&req, &mut run.retries).await.map_err(|e| classify(up, None, &e))?;
     run.upstream_calls += 1;
     let status = resp.status();
     if !status.is_success() {
+        let headers = resp.headers().clone();
         let body = resp.text().await.unwrap_or_default();
         // SPEED LAW: loud upstream failure (same contract as the OpenAI relay).
         eprintln!(
@@ -5107,7 +5393,7 @@ async fn relay_anthropic(
             status,
             body.chars().take(300).collect::<String>()
         );
-        return Err(format!("upstream {status}: {body}"));
+        return Err(classify(up, Some((status.as_u16(), &headers, &body)), &format!("upstream {status}: {body}")));
     }
     let rekey = |calls: Vec<anthropic::Call>| -> Vec<ToolCall> {
         calls.into_iter().map(|c| ToolCall { id: new_id("call"), name: c.name, arguments: c.args }).collect()
@@ -5120,7 +5406,7 @@ async fn relay_anthropic(
     if is_json {
         let v: Value = resp.json().await.map_err(|e| format!("bad json: {e}"))?;
         if v["type"] == "error" {
-            return Err(format!("upstream error: {}", v["error"]));
+            return Err(format!("upstream error: {}", v["error"]).into());
         }
         let (text, calls, stop) = anthropic::parse_message(&v);
         run.reasoning_chars += anthropic::reasoning_chars(&v);
@@ -5242,6 +5528,11 @@ fn load_catalog(model: &str) -> Value {
 
 #[tokio::main]
 async fn main() {
+    // `yggdrasil provider <list|check|status|use|fallback|add|remove>` (provider.rs)
+    let argv: Vec<String> = std::env::args().collect();
+    if argv.get(1).map(String::as_str) == Some("provider") {
+        std::process::exit(provider::cli(argv[2..].to_vec()).await);
+    }
     for k in ["YGG_CLOCK_EPOCH_MS", "YGG_CLOCK_SHIFT_SECS"] {
         if std::env::var_os(k).is_some() {
             eprintln!("WARNING: {k} is set — TEST/SIM ONLY; it writes synthetic times into stored message `created`. Unset it in production.");
@@ -5497,6 +5788,8 @@ async fn main() {
         .route("/engine", get(list_engines))
         .route("/engine/{name}", axum::routing::put(put_engine))
         .route("/usage", get(get_usage))
+        .route("/provider", get(get_provider).put(put_provider))
+        .route("/provider/{name}", axum::routing::delete(delete_provider))
         .route("/shared-prompt", get(get_shared).put(put_shared))
         .route("/extensions", get(|State(st): State<AppState>| async move { Json(st.config.ext.describe()) }))
         // B7b: a peer root runs this root's extension tool (peer token only; ext.rs)
@@ -5544,6 +5837,7 @@ async fn main() {
     peers::spawn_watch(&state);
     ext::spawn_watch(&state);
     spawn_harness_models(&state);
+    spawn_discovery(&state);
     eprintln!(
         "root {} · peers: {}{}",
         state.config.peers.me,
@@ -5789,6 +6083,7 @@ mod speed_law_tests {
     fn test_run() -> Run {
         Run {
             dropped: context::Dropped::default(),
+            served: None,
             msg: make_message("s", "assistant", vec![]),
             text: String::new(),
             started: std::time::Instant::now(),
@@ -6263,6 +6558,7 @@ mod voice_turn_tests {
     fn lat_row_reports_voice_note() {
         let mut run = Run {
             dropped: context::Dropped::default(),
+            served: None,
             msg: make_message("s", "assistant", vec![]),
             text: String::new(),
             started: std::time::Instant::now(),
@@ -7347,7 +7643,10 @@ mod c5_tests {
 #[cfg(test)]
 mod fallback_tests {
     use super::*;
-    use axum::{Router, routing::post};
+    use axum::{
+        Router,
+        routing::{get, post},
+    };
 
     fn fb_app(base_url: String, profiles: profiles::Profiles, models: Vec<String>) -> (AppState, PathBuf) {
         static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
@@ -7820,6 +8119,165 @@ echo '{{"event":"result","result":{{"conversation_id":"agy-conv-1","status":"SUC
         unsafe { std::env::set_var("PATH", orig_path) };
         srv.abort();
         let _ = std::fs::remove_dir_all(&tmp);
+        let _ = std::fs::remove_dir_all(&sdir);
+    }
+
+    /// A3 + A4: a root model on a provider (`rig-a/m-a`) goes through provider.rs: rig-a's z.ai-
+    /// style 1310 cools it and the file's fallback (rig-b, an auto vLLM) answers in the same
+    /// call; the next turn skips the cooling one; GET /provider shows health, reachability and
+    /// discovery, never a key; PUT /provider adds one; a session switches onto a provider model.
+    #[tokio::test]
+    async fn a_provider_model_routes_degrades_and_cools() {
+        let hits_a: Arc<Mutex<usize>> = Arc::default();
+        let seen_b: Arc<Mutex<Vec<String>>> = Arc::default();
+        let (ha, sb) = (hits_a.clone(), seen_b.clone());
+        let a = Router::new().route(
+            "/v1/chat/completions",
+            post(move || {
+                let ha = ha.clone();
+                async move {
+                    *ha.lock().unwrap() += 1;
+                    (
+                        StatusCode::TOO_MANY_REQUESTS,
+                        Json(json!({ "error": { "code": "1310", "message": "[1310][Weekly/Monthly Limit Exhausted. Your limit will reset at 2099-01-01 00:00:00][r1]" } })),
+                    )
+                }
+            }),
+        );
+        let b = Router::new()
+            .route(
+                "/v1/chat/completions",
+                post(move |Json(body): Json<Value>| {
+                    let sb = sb.clone();
+                    async move {
+                        let m = body["model"].as_str().unwrap_or_default().to_string();
+                        sb.lock().unwrap().push(m.clone());
+                        Json(json!({ "choices": [{ "message": { "role": "assistant", "content": format!("SERVED-B:{m}") } }] }))
+                    }
+                }),
+            )
+            .route("/v1/models", get(|| async { Json(json!({ "data": [{ "id": "m-b" }, { "id": "m-b2" }] })) }));
+        let la = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let lb = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let (aa, ab) = (la.local_addr().unwrap(), lb.local_addr().unwrap());
+        let sa = tokio::spawn(async move { axum::serve(la, a).await.unwrap() });
+        let sbv = tokio::spawn(async move { axum::serve(lb, b).await.unwrap() });
+
+        let dir = std::env::temp_dir().join(format!("ygg-route-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let pf = dir.join("providers.json");
+        std::fs::write(&pf, json!({ "provider": {
+            "rig-a": { "type": "openai-compatible", "options": { "baseURL": format!("http://{aa}/v1") }, "models": ["m-a"] },
+            "rig-b": { "type": "vllm", "options": { "baseURL": format!("http://{ab}"), "apiKey": "sk-rig-b-secret" }, "models": "auto" }
+        }, "fallback": ["rig-b/m-b"] }).to_string()).unwrap();
+        let env = |_: &str| None;
+        let ps = PROVIDERS.get_or_init(|| Some(provider::Providers::for_test(pf.clone(), &env))).as_ref().unwrap();
+        assert_eq!(ps.path, pf, "only this test sets the registry");
+
+        let (dir2, profs) = agents("route", r#"{"agent":{}}"#);
+        let (st, sdir) = fb_app("http://127.0.0.1:1".into(), profs, vec!["glm-5.3-flash".into(), "glm-5.3".into()]);
+        assert!(root_serves(&st, "rig-a/m-a") && root_serves(&st, "rig-b/anything") && !root_serves(&st, "rig-z/m"));
+        assert!(models_for(&st, "root").contains(&"rig-a/m-a".to_string()));
+        assert_eq!(usage_key(&t(None, "rig-a/m-a")), "root:rig-a");
+        assert_eq!(usage_key(&t(None, "glm-5.3")), "root");
+
+        let info = new_session_on(&st, "routed", None, Some("research"), Some("root"), Some("rig-a/m-a"), None);
+        let sid = info["id"].as_str().unwrap().to_string();
+        assert_eq!(info["model"]["id"], "rig-a/m-a", "a provider model is the session's own");
+        let ask = |st: AppState, sid: String, text: &'static str| async move {
+            let umsg = make_message(&sid, "user", vec![text_part(text)]);
+            let tid = umsg["info"]["id"].as_str().unwrap().to_string();
+            with_session(&st, &sid, |s| s.messages.push(umsg));
+            let (tx, _rx) = mpsc::channel(64);
+            run_turn(&st, &sid, &tx, 0, false, &tid).await
+        };
+        let msg = ask(st.clone(), sid.clone(), "hello").await.expect("rig-b answers");
+        assert_eq!(message_text(&msg), "SERVED-B:m-b");
+        assert_eq!(msg["info"]["meta"]["model"], "rig-b/m-b", "the reply names who answered");
+        assert_eq!((*hits_a.lock().unwrap(), seen_b.lock().unwrap().len()), (1, 1));
+        assert_eq!(ps.health.get("rig-a").unwrap().status, "exhausted");
+        // cooling until z.ai's printed reset: the next turn does not even ask rig-a
+        let msg = ask(st.clone(), sid.clone(), "again").await.expect("rig-b again");
+        assert_eq!(message_text(&msg), "SERVED-B:m-b");
+        assert_eq!((*hits_a.lock().unwrap(), seen_b.lock().unwrap().len()), (1, 2));
+
+        // GET /provider: health, reachability, discovery; keys only by source
+        let r = get_provider(State(st.clone())).await;
+        let body = axum::body::to_bytes(r.into_body(), 1 << 20).await.unwrap();
+        let v: Value = serde_json::from_slice(&body).unwrap();
+        assert!(!String::from_utf8_lossy(&body).contains("sk-rig-b-secret"), "a key is never answered");
+        let row = |id: &str| v["providers"].as_array().unwrap().iter().find(|p| p["id"] == id).cloned().unwrap();
+        assert_eq!(row("rig-a")["health"]["status"], "exhausted");
+        assert_eq!(row("rig-a")["reachable"]["ok"], true);
+        assert_eq!(row("rig-b")["models"], json!(["m-b", "m-b2"]));
+        assert_eq!(row("rig-b")["key"], json!({ "source": "inline", "resolved": true }));
+        assert_eq!((row("rig-b")["locality"].as_str(), row("rig-b")["metered"].as_bool()), (Some("local"), Some(false)));
+        // PUT /provider: a LAN Ollama nobody answers on — added, listed, unreachable
+        let closed = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap().local_addr().unwrap();
+        let r = put_provider(State(st.clone()), Json(json!({ "name": "rig-c", "type": "ollama", "baseURL": format!("http://{closed}"), "apiKey": "sk-c" }))).await;
+        assert_eq!(r.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(r.into_body(), 1 << 20).await.unwrap();
+        let v: Value = serde_json::from_slice(&body).unwrap();
+        assert!(!String::from_utf8_lossy(&body).contains("sk-c\""));
+        let c = v["providers"].as_array().unwrap().iter().find(|p| p["id"] == "rig-c").cloned().expect("rig-c listed");
+        assert_eq!((c["reachable"]["ok"].as_bool(), c["type"].as_str()), (Some(false), Some("ollama")));
+        assert_eq!(put_provider(State(st.clone()), Json(json!({ "name": "rig-d", "type": "emacs" }))).await.status(), StatusCode::BAD_REQUEST);
+        // a session switches onto a provider's model
+        let r = switch_model(State(st.clone()), Path(sid.clone()), Json(json!({ "model": { "id": "m-b2", "providerID": "rig-b" } }))).await;
+        assert_eq!(r.status(), StatusCode::NO_CONTENT);
+        assert_eq!(st.sessions.lock().unwrap().get(&sid).unwrap().info["model"]["id"], "rig-b/m-b2");
+        assert_eq!(delete_provider(State(st.clone()), Path("rig-c".into())).await.status(), StatusCode::OK);
+
+        sa.abort();
+        sbv.abort();
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&dir2);
+        let _ = std::fs::remove_dir_all(&sdir);
+    }
+
+    /// A4 (the app's contract): GET /agent/:name carries the chain, what it resolves to here and
+    /// the cap; PUT takes the array, refuses a 4th entry, a model its engine does not offer and a
+    /// chain on the coordinator; GET /agent lists every role's chain.
+    #[tokio::test]
+    async fn the_agent_api_speaks_chains() {
+        let (dir, ps) = agents("api", r#"{"agent":{"lead":{"harness":"claude","model":"opus"}}}"#);
+        let (st, sdir) = fb_app("http://127.0.0.1:1".into(), ps, vec!["glm-5.3-flash".into(), "glm-5.3".into()]);
+        st.harness_models.lock().unwrap().insert("antigravity".into(), vec!["gemini-4-neon-high".into(), "gemini-3.8-flash".into()]);
+        st.harness_models.lock().unwrap().insert("claude".into(), vec!["fable".into(), "opus".into(), "sonnet".into()]);
+        let body = |r: Response| async move { serde_json::from_slice::<Value>(&axum::body::to_bytes(r.into_body(), 1 << 20).await.unwrap()).unwrap() };
+        let d = body(get_agent(State(st.clone()), Path("lead".into())).await).await;
+        assert_eq!(d["fallback"], json!(["antigravity/gemini-4-neon-high", "root/glm-5.3"]));
+        assert_eq!(d["fallback_effective"], json!(["antigravity/gemini-4-neon-high", "root/glm-5.3"]));
+        assert_eq!(d["fallback_cap"], 3);
+        assert!(d["customizable"].as_array().unwrap().contains(&json!("fallback")));
+        let c = body(get_agent(State(st.clone()), Path("coordinator".into())).await).await;
+        assert!(c["locked"].as_array().unwrap().contains(&json!("fallback")));
+        assert_eq!(c["fallback_effective"], json!([]), "the coordinator never falls back");
+        // PUT the array (order kept)
+        let r = put_agent(State(st.clone()), Path("lead".into()), Json(json!({ "fallback": ["root/glm-5.3", "agy/gemini-3.8-flash", "claude/sonnet"] }))).await;
+        assert_eq!(r.status(), StatusCode::OK);
+        assert_eq!(body(r).await["fallback"], json!(["root/glm-5.3", "antigravity/gemini-3.8-flash", "claude/sonnet"]));
+        for (bad, why) in [
+            (json!(["agy", "root", "claude", "codex"]), "at most 3"),
+            (json!(["agy/gemini-9-imaginary"]), "Antigravity does not offer gemini-9-imaginary"),
+            (json!(["root/glm-9"]), "does not offer glm-9"),
+            (json!(["emacs/x"]), "unknown engine"),
+        ] {
+            let r = put_agent(State(st.clone()), Path("lead".into()), Json(json!({ "fallback": bad }))).await;
+            assert_eq!(r.status(), StatusCode::BAD_REQUEST, "{bad}");
+            let e = body(r).await;
+            assert!(e.to_string().contains(why), "{bad}: {e}");
+        }
+        let r = put_agent(State(st.clone()), Path("coordinator".into()), Json(json!({ "fallback": ["agy"] }))).await;
+        assert_eq!(r.status(), StatusCode::BAD_REQUEST);
+        // "none" and back to automatic
+        assert_eq!(body(put_agent(State(st.clone()), Path("lead".into()), Json(json!({ "fallback": "none" }))).await).await["fallback"], "none");
+        let d = body(put_agent(State(st.clone()), Path("lead".into()), Json(json!({ "fallback": [] }))).await).await;
+        assert_eq!((d["fallback"].clone(), d["fallback_effective"].clone()), (json!([]), json!(["root/glm-5.3"])), "automatic: Claude out -> the root");
+        let all = list_agents(State(st.clone())).await.0;
+        assert!(all.as_array().unwrap().iter().any(|a| a["name"] == "build" && a["fallback"] == json!(["root/glm-5.3", "claude/sonnet"])));
+        let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&sdir);
     }
 }

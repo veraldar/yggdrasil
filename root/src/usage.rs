@@ -318,6 +318,7 @@ pub fn last_error(key: &str) -> Option<String> {
 }
 
 /// The spec's view: the engine's fullest window — (pct, resets_at) — from the cache.
+#[allow(dead_code)]
 pub fn usage_pct(key: &str) -> Option<(u8, Option<u64>)> {
     let u = CACHE.lock().unwrap().read.get(key).cloned()?;
     u.binding(None).map(|(p, r, _)| (p, r))

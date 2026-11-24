@@ -984,7 +984,7 @@ pub async fn get_settings(State(st): State<AppState>, Path(name): Path<String>) 
         let (theme, theme_rev) = current_look(&st);
         let roles = st.config.profiles.read().unwrap().catalog();
         let engines = crate::engines_json(&st);
-        let models: Vec<String> = st.config.models.clone();
+        let models: Vec<String> = crate::root_models(&st);
         return Json(json!({
             "root": me,
             "home": true,

@@ -19,6 +19,11 @@ PATH + a fake usage endpoint (Claude's /api/oauth/usage and z.ai's quota/limit),
   S8. Proactive: the usage endpoint says Claude is at 95% -> the turn starts on the next entry,
       Claude never runs; GET /usage shows both plans (z.ai's key goes without "Bearer").
   S9. Everything out (Claude 100%, agy's error seen, root at 97%) -> one line, nothing runs.
+  S11. Any provider: a root model on a provider (`rig-out/mock`) whose plan is out degrades to the
+      providers file's fallback (`rig-ok`) in the same call and cools until its reset; GET /provider
+      shows type, health, reachability, discovery and locality, never a key; PUT/DELETE /provider.
+  S12. The role editor's API: GET /agent/:name {fallback, fallback_effective, fallback_cap}; PUT
+      the array (cap 3, the coordinator refused); GET /agent lists every chain.
   S10. A brain whose root upstream is out (z.ai 1310): a `research` session (root, chain ① agy)
       moves at once (no 76 s of rate-limit backoff); MAIN (the coordinator) does NOT; the next
       research turn starts on agy without asking z.ai (the 1310 is kept until z.ai's own reset).
@@ -262,6 +267,14 @@ print(json.dumps({{"event": "result", "result": {{"conversation_id": "agy-conv-1
                 },
                 f,
             )
+
+        # A3: two providers on the same mock: one out of quota (its key = z.ai's 1310), one fine
+        with open(os.path.join(tmp, "providers.json"), "w") as f:
+            json.dump({"provider": {
+                "rig-out": {"type": "openai-compatible", "options": {"baseURL": f"http://127.0.0.1:{mock_port}/v1",
+                            "apiKey": "mock-1310", "resetTimezone": "+08:00"}, "models": ["mock"]},
+                "rig-ok": {"type": "vllm", "options": {"baseURL": f"http://127.0.0.1:{mock_port}", "apiKey": "mock"}, "models": "auto"},
+            }, "fallback": ["rig-ok/mock-b"]}, f)
 
         mock_log = open(os.path.join(tmp, "mock.log"), "w")
         brain_log = open(os.path.join(tmp, "brain.log"), "w")
@@ -533,6 +546,74 @@ print(json.dumps({{"event": "result", "result": {{"conversation_id": "agy-conv-1
             "S10c: the root's 1310 is kept with z.ai's own reset time (printed in Beijing time)",
             ((u2.get("root") or {}).get("out") or {}).get("until", 0) > (time.time() + 1800) * 1000,
             u2.get("root"),
+        )
+
+        # ── S11. any provider (A3/A4): a root model on a provider, routed through provider.rs
+        pv = req(brain_port, "GET", "/provider")
+        rows = {r["id"]: r for r in pv.get("providers", [])}
+        raw = json.dumps(pv)
+        check(
+            "S11a: GET /provider lists the providers with type, health, reachability, discovery — keys by source only",
+            set(rows) >= {"yggdrasil", "rig-out", "rig-ok"}
+            and rows["rig-ok"].get("models") == ["mock", "mock-b"] and rows["rig-ok"].get("auto") is True
+            and rows["rig-ok"].get("reachable", {}).get("ok") is True and rows["rig-ok"].get("locality") == "local"
+            and rows["rig-ok"].get("metered") is False and rows["rig-out"].get("key") == {"source": "inline", "resolved": True}
+            and rows["yggdrasil"].get("env") is True and "mock-1310" not in raw and pv.get("types", [None])[0] == "zai",
+            {"rows": {k: {x: v.get(x) for x in ("type", "models", "reachable", "locality", "key")} for k, v in rows.items()}},
+        )
+        agent = req(brain_port, "GET", "/agent/research")
+        check(
+            "S11b: the root's model pickers offer provider models as provider/model",
+            "rig-ok/mock-b" in (agent.get("models_by_harness") or {}).get("root", []) and "rig-out/mock" in agent.get("models", []),
+            agent.get("models"),
+        )
+        k0 = (req(mock_port, "GET", "/keys") or {}).get("mock-1310", 0)
+        sid = req(brain_port, "POST", "/session", {"title": "on a provider", "agent": "research", "engine": "root", "model": "rig-out/mock"})["id"]
+        code, out = req_status(brain_port, "POST", f"/session/{sid}/message", {"parts": [{"type": "text", "text": "Reply with exactly: ROUTED-OK"}]})
+        info11 = req(brain_port, "GET", f"/session/{sid}")
+        pv = req(brain_port, "GET", "/provider")
+        rows = {r["id"]: r for r in pv.get("providers", [])}
+        check(
+            "S11c: rig-out answers 1310 -> rig-ok (the file's fallback) answers in the same call; the reply names who served",
+            code == 200 and "ROUTED-OK" in text_of(out) and (req(mock_port, "GET", "/keys") or {}).get("mock-1310", 0) == k0 + 1
+            and meta_of(out).get("model") == "rig-ok/mock-b" and (info11.get("model") or {}).get("id") == "rig-out/mock"
+            and (rows["rig-out"].get("health") or {}).get("status") == "exhausted",
+            {"code": code, "reply": text_of(out), "meta": meta_of(out), "health": rows["rig-out"].get("health")},
+        )
+        code, out = req_status(brain_port, "POST", f"/session/{sid}/message", {"parts": [{"type": "text", "text": "Reply with exactly: ROUTED-AGAIN"}]})
+        check(
+            "S11d: rig-out cools until its reset: the next turn does not ask it",
+            code == 200 and "ROUTED-AGAIN" in text_of(out) and (req(mock_port, "GET", "/keys") or {}).get("mock-1310", 0) == k0 + 1,
+            {"code": code, "reply": text_of(out)},
+        )
+        # a LAN Ollama nobody answers on (debian-box's view of the Mac): added, listed, unreachable
+        code, pv = req_status(brain_port, "PUT", "/provider", {"name": "mac-studio", "type": "Ollama", "baseURL": "http://10.255.255.1:11434", "apiKey": "sk-lan-secret"})
+        rows = {r["id"]: r for r in (pv or {}).get("providers", [])}
+        mac = rows.get("mac-studio") or {}
+        code_bad, bad = req_status(brain_port, "PUT", "/provider", {"name": "x", "type": "emacs", "baseURL": "http://x"})
+        code_del, _ = req_status(brain_port, "DELETE", "/provider/mac-studio")
+        check(
+            "S11e: PUT /provider adds a LAN Ollama (listed, unreachable, LAN, no quota, key never answered); a bad one is refused; DELETE drops it",
+            code == 200 and mac.get("type") == "ollama" and mac.get("reachable", {}).get("ok") is False and mac.get("locality") == "lan"
+            and mac.get("metered") is False and "sk-lan-secret" not in json.dumps(pv)
+            and code_bad == 400 and "unknown type" in json.dumps(bad) and code_del == 200,
+            {"code": code, "mac": mac, "bad": (code_bad, bad), "del": code_del},
+        )
+
+        # ── S12. the role editor's API (the app builds on it)
+        d = req(brain_port, "GET", "/agent/review")
+        code, put = req_status(brain_port, "PUT", "/agent/review", {"fallback": ["agy/gemini-4-neon-high", "root/rig-ok/mock-b", "claude/sonnet"]})
+        code4, too_many = req_status(brain_port, "PUT", "/agent/review", {"fallback": ["agy", "root", "claude", "codex"]})
+        codec, _ = req_status(brain_port, "PUT", "/agent/coordinator", {"fallback": ["agy"]})
+        listed = {a["name"]: a for a in req(brain_port, "GET", "/agent")}
+        check(
+            "S12: GET /agent/:name has the chain (+ resolved, cap); PUT takes the array (any provider's root model), refuses a 4th and the coordinator",
+            d.get("fallback") == ["root/glm-5.3", "claude/sonnet"] and d.get("fallback_cap") == 3
+            and code == 200 and put.get("fallback") == ["antigravity/gemini-4-neon-high", "root/rig-ok/mock-b", "claude/sonnet"]
+            and put.get("fallback_effective") == ["antigravity/gemini-4-neon-high", "root/rig-ok/mock-b", "claude/sonnet"]
+            and code4 == 400 and "at most 3" in json.dumps(too_many) and codec == 400
+            and listed["review"].get("fallback") == put.get("fallback") and listed["coordinator"].get("fallback") == [],
+            {"get": d.get("fallback"), "put": (code, put.get("fallback"), put.get("fallback_effective")), "4": (code4, too_many), "coord": codec},
         )
 
     finally:

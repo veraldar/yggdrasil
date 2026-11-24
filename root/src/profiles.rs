@@ -848,9 +848,10 @@ impl Profiles {
             // pattern rules (bash allowlists…) are shown, not flattened, until the user edits tools
             "rules": if simple { Value::Null } else { json!(p.rules.iter().map(|r| json!({ "permission": r.permission, "pattern": r.pattern,
                 "action": if r.allow { "allow" } else { "deny" } })).collect::<Vec<_>>()) },
-            "locked": if p.name == "coordinator" { json!(["tools", "harness", "sessions", "fold"]) } else { json!([]) },
-            "customizable": if root { json!(["description", "model", "variant", "prompt", "prompt_lite", "tools", "steps", "sessions"]) }
-                else if p.harness.as_deref() == Some("claude") { json!(["description", "model", "prompt"]) } else { json!(["description", "model"]) },
+            "locked": if p.name == "coordinator" { json!(["tools", "harness", "sessions", "fold", "fallback"]) } else { json!([]) },
+            "customizable": if root { json!(["description", "model", "variant", "prompt", "prompt_lite", "tools", "steps", "sessions", "fallback"]) }
+                else if p.harness.as_deref() == Some("claude") { json!(["description", "model", "prompt", "fallback"]) } else { json!(["description", "model", "fallback"]) },
+            "fallback_cap": FALLBACK_CAP,
         }))
     }
 
