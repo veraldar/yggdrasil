@@ -181,7 +181,7 @@ if [ $BUILD = 1 ]; then
   EPOCH=$(git -C "$ROOT" log -1 --format=%ct); printf '%s\n' "$EPOCH" >"$CACHE/epoch"
   # the brain's build stamp (root/build.rs): the copies below have no git, so it comes in by env. A
   # --dirty tree whose root part has changes is no commit's build: dev (never a clean id)
-  RP="root/build.rs root/src root/Cargo.toml root/Cargo.lock trunk/src trunk/Cargo.toml trunk/Cargo.lock root/install/join.sh root/install/rootjoin.py trunk/scripts/root-dial.py"
+  RP=$("$ROOT/scripts/root-part-id.sh" --paths)
   # shellcheck disable=SC2086
   if [ $DIRTY = 0 ] || [ -z "$(git -C "$ROOT" status --porcelain --untracked-files=all -- $RP)" ]; then
     "$ROOT/scripts/root-part-id.sh" --env HEAD >"$CACHE/build-env"

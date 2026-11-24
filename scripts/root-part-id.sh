@@ -6,9 +6,11 @@
 #   scripts/root-part-id.sh --env [COMMIT]  YGG_BUILD_ID/_COMMIT/_EPOCH/_DESCRIBE, one per line: what a
 #       build without git needs (release.sh's Debian-11 container and macOS builds compile a
 #       `git archive` copy), e.g. docker run --env-file <(scripts/root-part-id.sh --env <sha>) …
+#   scripts/root-part-id.sh --paths         the paths it covers (word list)
 # A commit is clean by definition: build a tree with changes in a checkout (build.rs gives it dirty-…).
 set -euo pipefail
 PATHS="root/build.rs root/src root/Cargo.toml root/Cargo.lock trunk/src trunk/Cargo.toml trunk/Cargo.lock root/install/join.sh root/install/rootjoin.py trunk/scripts/root-dial.py"
+[ "${1:-}" = --paths ] && { echo "$PATHS"; exit 0; }
 ENV=0
 [ "${1:-}" = --env ] && { ENV=1; shift; }
 REPO=$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)

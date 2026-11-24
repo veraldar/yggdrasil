@@ -62,6 +62,8 @@ fn git(top: &Path, args: &[&str]) -> Option<Vec<u8>> {
         .env_remove("GIT_DIR")
         .env_remove("GIT_WORK_TREE")
         .env_remove("GIT_INDEX_FILE")
+        // a build only reads: `git status` must not rewrite the index of a checkout someone works in
+        .env("GIT_OPTIONAL_LOCKS", "0")
         .output()
         .ok()?;
     out.status.success().then_some(out.stdout)
@@ -212,7 +214,7 @@ mod tests {
         }
         fn commit(&self, m: &str) -> String {
             self.git(&["add", "-A"]);
-            self.git(&["commit", "-q", "--allow-empty", "-m", m]);
+            self.git(&["commit", "-q", "--no-verify", "--allow-empty", "-m", m]);
             self.git(&["rev-parse", "HEAD"])
         }
         fn stamp(&self) -> Stamp {
