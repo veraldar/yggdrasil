@@ -232,18 +232,34 @@ export async function mintPairCode(name = 'phone'): Promise<{ code: string; exp:
   return { code, exp };
 }
 
+/** Re-pair: point everything `from` approved at `to` (lib/roots.ts handOverRoots — passed in,
+ *  so this module never loads the roots registry). */
+export type HandOver = (from: string, to: string) => Promise<unknown>;
+
+const union = (a?: string[], b?: string[]) => [...new Set([...(a ?? []), ...(b ?? [])])];
+
 /**
  * Phone: redeem a pairing code. Single use (replay → 'used'), expiring
  * ('expired'). `prevRefresh` = the phone's old refresh credential, if it still
  * holds one: revoke-on-repair retires the device it belonged to.
+ *
+ * A re-pair is the same phone, so the old device's trust passes to the new one
+ * before it is retired: its `roots` allowlist, and (`handOver`) the roots it
+ * approved — the hub pins a joined root only while its approving device is
+ * live (trunk/src/wg.rs). Order, so the hub never sees a root without a live
+ * approver: the new device is written live, then roots.json names it, then the
+ * old device is revoked (the wg node reads roots.json, then devices.json). A
+ * device already revoked (device list, theft signal) hands nothing over.
  */
-export function claimPairCode(
+export async function claimPairCode(
   code: string,
   name: string,
   region: string,
-  prevRefresh?: string
+  prevRefresh?: string,
+  handOver?: HandOver
 ): Promise<({ ok: true } & Issued) | { ok: false; why: Deny }> {
-  return mutate((reg) => {
+  let heir: { from: string; to: string } | undefined;
+  const out = await mutate((reg) => {
     const no = (why: Deny) => {
       obsEvent('pair.claim', { ok: false, why, region });
       return { ok: false as const, why };
@@ -252,21 +268,36 @@ export function claimPairCode(
     if (!c || (code || '').length < 16) return no('invalid');
     if (c.used) return no('used');
     if (c.exp < Date.now()) return no('expired');
-    let from: string | undefined;
-    if (prevRefresh) {
-      const h = hashToken(prevRefresh);
-      const old = reg.devices.find((d) => d.refreshHash === h);
-      if (old) {
-        from = old.id;
-        revokeIn(old, 're-paired');
-      }
-    }
+    const old = prevRefresh
+      ? reg.devices.find((d) => d.refreshHash === hashToken(prevRefresh))
+      : undefined;
     const d = newDevice(reg, name || c.name, region);
     c.used = d.id;
+    if (old && !old.revoked) {
+      if (old.roots) d.roots = [...old.roots];
+      heir = { from: old.id, to: d.id };
+    }
     // `from`: the phone's previous device — this claim was a QR reconnect, not a first pairing
-    obsEvent('pair.claim', { ok: true, device: d.id, from, region });
+    obsEvent('pair.claim', { ok: true, device: d.id, from: old?.id, region });
     return { ok: true as const, ...issue(d, region) };
   });
+  if (!heir) return out;
+  const { from, to } = heir;
+  try {
+    await handOver?.(from, to);
+  } catch (e) {
+    // the old device is retired all the same: revoke-on-repair never waits on the roots registry
+    console.error(`re-pair ${from} → ${to}: roots not handed over: ${(e as Error).message}`);
+  }
+  await mutate((reg) => {
+    const o = reg.devices.find((x) => x.id === from);
+    const n = reg.devices.find((x) => x.id === to);
+    if (!o) return;
+    // a join the old device approved meanwhile rides along too
+    if (n && !n.revoked && o.roots?.length) n.roots = union(n.roots, o.roots);
+    revokeIn(o, 're-paired');
+  });
+  return out;
 }
 
 /** Rotate: old refresh dies, new access is bound to the CURRENT region. */

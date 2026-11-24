@@ -3,7 +3,8 @@
  * the QR). Single use — a replay answers 410 why=used; expired 410
  * why=expired; unknown 401. On success: device cookies set + the access token
  * returned for the P2P transport. Revoke-on-repair: if this browser still
- * holds an old refresh cookie, the device it belonged to is retired.
+ * holds an old refresh cookie, the device it belonged to is retired — after
+ * handing its roots to the new device (the joined roots it approved stay pinned).
  * `main` = the MAIN brain session (created on first pair) — the door's destination;
  * the phone itself lands on home (the door, or the list once it walked it).
  */
@@ -12,6 +13,7 @@ import { cookieOf } from '@/lib/admin';
 import { claimPairCode } from '@/lib/devices';
 import { NO_STORE, ensureMain, setDeviceCookies } from '@/lib/pairing';
 import { regionOfReq } from '@/lib/region';
+import { handOverRoots } from '@/lib/roots';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -22,7 +24,8 @@ export async function POST(req: Request) {
     String(body?.code || ''),
     String(body?.name || 'phone'),
     regionOfReq(req),
-    cookieOf(req, 'bifrost_refresh') || undefined
+    cookieOf(req, 'bifrost_refresh') || undefined,
+    handOverRoots
   );
   if (!r.ok) {
     return NextResponse.json(

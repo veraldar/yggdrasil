@@ -412,6 +412,24 @@ async function writeRoots(f: RootsFile): Promise<void> {
   await rename(tmp, ROOTS_FILE);
 }
 
+/**
+ * A phone re-paired (lib/devices.ts claimPairCode): every root the retiring device `from`
+ * approved, and that is still in the tree, now names the new device `to` as its approver. The
+ * hub's WireGuard node pins a root only while that device is live, refill mints link tokens with
+ * its dev claim, and the bridge refuses a dial whose dev is revoked — so without this a re-pair
+ * cut every root the phone had approved (mac-studio, 2026-11-23). Returns the moved ids.
+ */
+export function handOverRoots(from: string, to: string): Promise<string[]> {
+  return serialize(async () => {
+    const f = await readRoots();
+    const moved = f.roots.filter((r) => r.dev === from && !r.revoked);
+    if (!moved.length) return [];
+    for (const r of moved) r.dev = to;
+    await writeRoots(f);
+    return moved.map((r) => r.id);
+  });
+}
+
 /** The joined roots, removed ones left out. */
 export async function listRoots() {
   const f = await readRoots();
