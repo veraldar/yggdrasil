@@ -282,8 +282,34 @@ pub fn proves_line_up(status: u16) -> bool {
     !matches!(status, 502..=504)
 }
 
+/// Why a call to a peer root failed: `msg` is the plain sentence (what `call` returns), `status`
+/// and `body` what the root itself answered (none: it was not reached).
+#[derive(Debug)]
+pub struct CallErr {
+    pub status: Option<u16>,
+    pub body: String,
+    pub msg: String,
+}
+
+impl CallErr {
+    fn plain(msg: String) -> Self {
+        CallErr { status: None, body: String::new(), msg }
+    }
+
+    /// The root's brain has no such route at all — it runs a version from before that route (a
+    /// router's own 404/405 carries no body; a handler that says "not found" names what).
+    pub fn no_route(&self) -> bool {
+        matches!(self.status, Some(404 | 405)) && self.body.trim().is_empty()
+    }
+}
+
 /// One call to a peer root. `timeout` covers the whole exchange.
 pub async fn call(st: &AppState, root: &str, method: &str, path: &str, body: Option<Value>, timeout: u64) -> Result<Value, String> {
+    call_full(st, root, method, path, body, timeout).await.map_err(|e| e.msg)
+}
+
+/// `call`, with what the root answered when it refused (`CallErr`).
+pub async fn call_full(st: &AppState, root: &str, method: &str, path: &str, body: Option<Value>, timeout: u64) -> Result<Value, CallErr> {
     let p = &st.config.peers;
     let mut base = p.url(root);
     if base.is_none() && p.from.is_some() {
@@ -293,7 +319,7 @@ pub async fn call(st: &AppState, root: &str, method: &str, path: &str, body: Opt
         }
         base = p.url(root);
     }
-    let base = base.ok_or_else(|| format!("unknown root {root:?} (known: {})", p.names().join(", ")))?;
+    let base = base.ok_or_else(|| CallErr::plain(format!("unknown root {root:?} (known: {})", p.names().join(", "))))?;
     let mut req = match method {
         "GET" => st.http.get(format!("{base}{path}")),
         "PUT" => st.http.put(format!("{base}{path}")),
@@ -312,7 +338,7 @@ pub async fn call(st: &AppState, root: &str, method: &str, path: &str, body: Opt
         Ok(r) => r,
         Err(e) => {
             p.failed.lock().unwrap().insert(root.to_string(), now_ms());
-            return Err(format!("root {root} unreachable: {e}"));
+            return Err(CallErr::plain(format!("root {root} unreachable: {e}")));
         }
     };
     let status = resp.status();
@@ -324,9 +350,10 @@ pub async fn call(st: &AppState, root: &str, method: &str, path: &str, body: Opt
     } else {
         p.failed.lock().unwrap().insert(root.to_string(), now_ms());
     }
-    let text = resp.text().await.map_err(|e| e.to_string())?;
+    let text = resp.text().await.map_err(|e| CallErr::plain(e.to_string()))?;
     if !status.is_success() {
-        return Err(format!("root {root}: {status} {}", text.chars().take(200).collect::<String>()));
+        let msg = format!("root {root}: {status} {}", text.chars().take(200).collect::<String>());
+        return Err(CallErr { status: Some(status.as_u16()), body: text, msg });
     }
     Ok(serde_json::from_str(&text).unwrap_or(Value::Null))
 }
