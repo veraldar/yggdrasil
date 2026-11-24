@@ -175,3 +175,4 @@
 - Green on 6636fc0e: cargo 169, tree-e2e GREEN, root-behind rig 2/2, root-home-layout rig 6/6, roots-sheet 2/2, repair-keeps-roots 13/13, v09-ladder 10 passed 1 skipped, app unit 36/36. Scratch brain: build.id 30f529639d40 = root-part-id.sh for 6636fc0e.
 - DEPLOY (cuts my turn): ~/Work/tree-next/scripts/hub-units.sh deploy <id> hub-brain hub-app hub-app-tailnet (detaches itself when run from the brain; log switch.log).
 - AFTER (the resent turn does this): switch.log → health, no rollback; GET :4101/root build.id == 30f529639d40; live 360 px look on ap (paired test device, revoked after): omarchy-lab, debian-box, mac-studio rows "not up to date" + mark on the roots key on / and on a root page; live-door AP + tailnet; report MAIN (all three marked = correct: none can update itself yet); ff tree-next; remove worktree ~/Work/p1-ship-marker.
+release 20261124-1912-cafba036
