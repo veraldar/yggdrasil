@@ -4,9 +4,10 @@ import { type Locator, type Page, expect, test } from '@playwright/test';
 /**
  * ROOT UPDATES, STAGE 1 — THE "NOT UP TO DATE" MARKER, on a phone (360×780, touch):
  * home and lab run this tree's brain, old runs an older one (no `build` in its GET /root).
- * Home reports its build; old is behind, lab is not → the home screen's roots key carries the
- * mark → the roots sheet's row for old says "not up to date" in --oz-active, lab's and home's
- * do not → old stops: it is off and keeps the marker → old removed: the mark is gone.
+ * Home reports its build; old is behind, lab is not → the roots key carries the mark, on the
+ * home screen and on a root's own page (the same header, HomeHead) → the roots sheet's row for
+ * old says "not up to date" in --oz-active, lab's and home's do not → old stops: it is off and
+ * keeps the marker → old removed: the mark is gone.
  */
 const HOME = process.env.PW_HOME_BRAIN || '';
 const LAB = process.env.PW_LAB_BRAIN || '';
@@ -118,6 +119,24 @@ test('a root on an older brain is marked "not up to date"; one on this build is 
     await shot(page, '1-home-key-mark');
   });
 
+  await test.step('a root page wears the same header: its roots key has the mark too', async () => {
+    for (const id of ['lab', 'old']) {
+      await page.goto(`/roots/${id}`);
+      await expect(page.getByTestId('root-view')).toHaveAttribute('data-root', id, {
+        timeout: 15_000,
+      });
+      const key = page.getByTestId('roots-key');
+      await expect(key).toHaveClass(/\bmark\b/, { timeout: 15_000 });
+      await expect(key).toHaveAttribute('data-behind', '1');
+      expect(await key.evaluate((el) => getComputedStyle(el, '::after').backgroundColor)).toBe(
+        await activeColor(page)
+      );
+      await shot(page, `1b-root-${id}-key-mark`);
+    }
+    await page.goto('/');
+    await expect(page.getByTestId('roots-key')).toBeVisible({ timeout: 15_000 });
+  });
+
   await test.step('the roots sheet: old says "not up to date" in --oz-active; lab and home do not', async () => {
     await openSheet(page);
     await expect(row(page, 'old')).toHaveAttribute('data-state', 'on', { timeout: 15_000 });
@@ -154,5 +173,10 @@ test('a root on an older brain is marked "not up to date"; one on this build is 
     await expect(key).not.toHaveClass(/\bmark\b/, { timeout: 15_000 });
     expect(await key.evaluate((el) => getComputedStyle(el, '::after').content)).toBe('none');
     await shot(page, '4-home-key-no-mark');
+    await page.goto('/roots/lab');
+    await expect(page.getByTestId('root-view')).toHaveAttribute('data-root', 'lab', {
+      timeout: 15_000,
+    });
+    await expect(page.getByTestId('roots-key')).not.toHaveClass(/\bmark\b/, { timeout: 15_000 });
   });
 });

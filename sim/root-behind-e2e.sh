@@ -5,10 +5,11 @@
 #   this tree's app (next start, BIFROST_AUTH=devices, one seeded device; roots.json names lab and
 #   old as joined roots) → Playwright at 360×780 Android touch: branch/e2e/root-behind.spec.ts.
 #   It checks: home's GET /root reports its build; old is behind, lab is not; the row says
-#   "not up to date" in --oz-active and the home screen's roots key has the mark; old stops →
+#   "not up to date" in --oz-active and the roots key has the mark (the home screen and a root's own
+#   page: one header, HomeHead); old stops →
 #   it is off and keeps the marker.
 # Needs: root/target/release/yggdrasil and branch/.next (npm run build) of this tree.
-# Ports 18530-18540 (P3_PORT_BASE moves them). State under ~/.cache/p3-app-tmp/root-behind (STATE=…).
+# Ports 18530-18540 (P3_PORT_BASE moves them; a port already taken stops the run). State under ~/.cache/p3-app-tmp/root-behind (STATE=…).
 # Stops only what it started, by PID. SHOTS=<dir> keeps the screenshots.
 set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
@@ -17,6 +18,12 @@ YGG_BIN=${YGG_BIN:-$ROOT/root/target/release/yggdrasil}
 OLD_BIN=${OLD_BIN:-$HOME/.local/share/yggdrasil/hub/releases/20261123-2004-2044afb1/bin/yggdrasil}
 P=${P3_PORT_BASE:-18530}
 MOCK=$P HOMEP=$((P + 1)) LABP=$((P + 2)) OLDP=$((P + 3)) APP=$((P + 10))
+for p in "$MOCK" "$HOMEP" "$LABP" "$OLDP" "$APP"; do
+  if (exec 3<>"/dev/tcp/127.0.0.1/$p") 2>/dev/null; then
+    echo "port $p is taken — another rig runs there (P3_PORT_BASE=… moves this one)" >&2
+    exit 1
+  fi
+done
 STATE=${STATE:-$HOME/.cache/p3-app-tmp/root-behind}
 SHOTS=${SHOTS:-$STATE/shots}
 rm -rf "$STATE" && mkdir -p "$STATE"/{home,lab,old}/work "$STATE"/{stub,app,bin} "$SHOTS"
