@@ -12,7 +12,7 @@ use crate::meter;
 
 /// Warnings and errors from str0m/dimpl, counted per target (the meter); the DTLS engine's
 /// "Receive queue full" — packets thrown away inside the bridge — gets its own counter.
-struct CountWarnings;
+pub(crate) struct CountWarnings;
 
 impl<S: tracing::Subscriber> Layer<S> for CountWarnings {
     fn on_event(&self, ev: &tracing::Event<'_>, _: Context<'_, S>) {

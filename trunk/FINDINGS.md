@@ -648,3 +648,48 @@ registry's folder (hub: `~/.local/share/yggdrasil/hub/obs/`): `bridge-min-…`, 
   refresh lead, race vs theft, re-pair `from`, kill; no secret in the lines).
 - **Not done here:** phone push (the hub has no VAPID keys: alerts go to MAIN's inbox); the sim load
   profile from observed shapes (needs a week of data); step 4 (content capture: not asked for).
+
+## DTLS receive queue under load (dtls-queue-fix, 2026-11-24)
+
+**What the meter showed (11-23):** the phone channel threw DTLS records away in bursts. The bridge
+log had dimpl's `Receive queue full (max 30)` 1,406 times on 11-22, and the meter counted 1,162 in
+39 minutes on 11-23, 155 in the worst minute (16:47, tunnel backlog 156 frames). That happened on
+both paths, UDP and ICE-TCP via :443.
+
+**Cause.** str0m's `Rtc::handle_input` only *queues* an incoming DTLS record in dimpl's receive
+queue (30 records; str0m builds dimpl with its default config, so the size is not ours to set).
+The queue is drained into SCTP only by `Rtc::poll_output`. The bridge's main loop first handed
+each peer everything its sockets held, then polled the peers, then slept 2 ms:
+- a UDP drain until `WouldBlock`;
+- an ICE-TCP read of many RFC 4571 frames at once.
+
+Any burst of more than ~30 records for one phone between two polls had the rest refused
+(`ReceiveQueueFull`, ignored by the bridge). SCTP then had to notice and resend them: a stall the
+user sees as a slow page or upload.
+
+**Fix (design call: drain, not size).** The input phase now only *routes* each datagram or frame to
+its peer (`Peer.inbound`). Each peer is then fed `FEED_BATCH` = 8 datagrams at a time, with a full
+`poll_output` after each batch, so dimpl's queue stays near empty. A datagram carries 1–3 records,
+so 8 stays far below 30.
+- Raising the queue size would need our own str0m DTLS provider, and would only move the cliff:
+  the queue filled because it was not drained, not because it was small.
+- There was no backpressure to add: everything read in a turn is fed in that same turn.
+
+**Proof.** `cargo test dtls_load -- --nocapture` (`bridge.rs` `mod dtls_load`): a real str0m phone
+on the "tun" channel, 8 MB through the pinned tunnel to a counting upstream; every byte checked, and
+dimpl's refusals counted by the bridge's own warning layer. The test phone batches too (a browser's
+DTLS is not dimpl), so every refusal counted is the bridge's. Three runs each:
+
+| case | before (tree-next b14118aa) | after |
+|---|---|---|
+| upload over UDP | 104 refused · 1.95 s (4.3 MB/s) | **0** · 1.57–1.60 s (5.3 MB/s) |
+| upload over ICE-TCP | 104 refused · 1.97 s (4.3 MB/s) | **0** · 0.25 s (33 MB/s) |
+| download over UDP | 4–12 refused · 0.40 s | **0** · 0.40–0.44 s |
+
+**Gates:** `cargo test` 52/52 (the three load cases included, in the parallel suite); `selftest`
+v9, ap, m1 and m0 GREEN; `sim/trunk-obs-e2e.sh` 17/17.
+
+**Next limit (not this fix):** at loopback speed the bridge's UDP socket buffer (the kernel default,
+208 KB) also overflows during the 2 ms sleep: 24 `RcvbufErrors` in the UDP upload. A phone's real
+path is far slower, and on the carrier it is ICE-TCP, so this is not a live problem. A larger
+`SO_RCVBUF` is the knob if it ever becomes one.
