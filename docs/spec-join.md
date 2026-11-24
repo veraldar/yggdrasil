@@ -367,6 +367,14 @@ node as `bifrost-wg.service` (door `127.0.0.1:7893`, udp 7894, the bridge's rela
 - **Link tokens hang on the approving device.** The tokens' `dev` claim is that device. If
   it is revoked (or the kill-switch is pulled), the bridge refuses new dials, refills answer
   409, and the machine must join again.
+- **A phone re-pair hands its roots on.** Scanning a fresh QR with the old refresh cookie
+  (`POST /api/pair/claim`) retires the old device, but first the new device takes its `roots`
+  allowlist and every root it approved (`roots.json` `dev`), in that order, so the hub's node
+  never sees a root without a live approver. Refill then mints with the new device. Link
+  tokens the machine already holds still name the old device: after its next link drop the
+  bridge refuses those, one dial each, until the machine's refill (below 5 left) brings new
+  ones. Before fix-repair-keeps-roots a re-pair cut them all (mac-studio, 11-23); `scripts/root-regrant.py`
+  gives such a root its approval back, on the owner's own yes.
 - **Single use resets on a bridge restart.** The bridge remembers spent tokens in memory
   (trunk/src/rootlink.rs). After a restart, a spent token can be replayed within its 6 h
   lifetime. Root links that are already up are not cut on revoke (trunk FINDINGS).
