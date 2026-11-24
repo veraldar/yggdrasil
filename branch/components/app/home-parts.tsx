@@ -4,7 +4,8 @@
  *  be at the same place … I want the same layout"): `/` is the home screen of the tree, and
  *  `/roots/<name>` is the home screen of that computer — the same header and the same band,
  *  from here, so they cannot drift apart.
- *    HomeHead  the name (tap → its settings) · roots · artifacts (unseen count) · refresh
+ *    HomeHead  the name (tap → its settings) · roots (a mark: a computer is not up to date) ·
+ *              artifacts (unseen count) · refresh
  *    HomeBand  the tree as a quiet band; its chip counts the working and filters to them */
 import Link from 'next/link';
 import { LineIcon } from '@/components/line-icon';
@@ -16,6 +17,7 @@ export function HomeHead({
   artifactsHref,
   unseen,
   joins,
+  behind = 0,
   loading,
   gone = false,
   onRoots,
@@ -29,6 +31,8 @@ export function HomeHead({
   unseen: number;
   /** computers waiting to join (the badge on the roots key) */
   joins: number;
+  /** computers that run another build than home (a square mark on the roots key) */
+  behind?: number;
   loading: boolean;
   /** that computer is off: its name greys */
   gone?: boolean;
@@ -50,8 +54,9 @@ export function HomeHead({
         <button
           onClick={onRoots}
           aria-label="roots"
-          className={`oz-k sm ${joins > 0 ? 'text-[var(--oz-text)]' : ''}`}
+          className={`oz-k sm ${joins > 0 ? 'text-[var(--oz-text)]' : ''} ${behind > 0 ? 'mark' : ''}`}
           data-testid="roots-key"
+          data-behind={behind || undefined}
         >
           <LineIcon name="roots" size={15} />
           {joins > 0 && (

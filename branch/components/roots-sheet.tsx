@@ -2,7 +2,7 @@
 
 /** The roots sheet (E2 · the whole tree): every computer of the tree, this one first.
  *    list   one row per computer: name, home tag, world swatch, state (on · last seen … · off),
- *           os, how many run
+ *           os, how many run, "not up to date" (it runs another build than home)
  *    tap    opens that computer's home screen: `/` for the home root (the tree's home screen
  *           IS its page), /roots/<id> for another — the sheet opens from every one of them
  *    hold   (not home) → "Remove <name>?" · Remove / Keep
@@ -44,6 +44,8 @@ type Root = {
   theme_rev?: number;
   main?: string | null;
   main_proxy?: string | null;
+  /** it runs another build than home (an older brain too); null: never answered */
+  behind?: boolean | null;
 };
 /** a pending machine join waiting for the owner's tap (from GET /api/roots `joins`) */
 export type PendingJoin = {
@@ -420,7 +422,15 @@ export function RootsSheet({
                   <div className="oz-r2">
                     {[r.os, on && r.running ? `${r.running} running` : '']
                       .filter(Boolean)
-                      .join(' · ') || '\u00a0'}
+                      .join(' · ') || (r.behind ? '' : '\u00a0')}
+                    {r.behind && (
+                      <>
+                        {r.os || (on && r.running) ? ' · ' : ''}
+                        <span data-testid="root-behind" style={{ color: 'var(--oz-active)' }}>
+                          not up to date
+                        </span>
+                      </>
+                    )}
                   </div>
                 </button>
               </li>

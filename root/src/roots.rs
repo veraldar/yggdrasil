@@ -208,6 +208,7 @@ pub fn load_snapshots(st: &AppState) {
                 "load": { "running": 0, "sessions": snap["sessions"].as_array().map_or(0, |a| a.len()) },
                 "main": snap["main"],
                 "profiles": snap["roles"],
+                "build": snap["build"],
             });
             st.config.peers.seen.lock().unwrap().insert(name.clone(), (seen_at, synth));
             // mark as not yet answered in this process: reachable stays false until a live poll succeeds,
@@ -270,7 +271,16 @@ pub fn record_peer_root(st: &AppState, name: &str, at: u64, v: &Value) {
         if v["profiles"].is_array() && snap["roles"].is_null() {
             snap["roles"] = v["profiles"].clone();
         }
+        // the build it runs; null: it answered without one (a brain older than the stamp)
+        snap["build"] = if v["build"].is_object() { v["build"].clone() } else { Value::Null };
     });
+}
+
+/// Whether a root runs another build than this brain (`mine`: this brain's root-part id): its
+/// last answer named another id, or none (a brain older than the stamp). None: it never answered,
+/// so nobody knows. An offline root keeps what its last answer said.
+pub fn behind(build: &Value, answered: bool, mine: &str) -> Option<bool> {
+    answered.then(|| build["id"].as_str() != Some(mine))
 }
 
 /// Each peer's health for `GET /root`: reachable (answered in the last 3 minutes), when last
@@ -299,6 +309,9 @@ pub fn health(st: &AppState) -> Vec<Value> {
                 .or_else(|| snap.and_then(|s| s["theme_rev"].as_u64()))
                 .unwrap_or(0);
             let seen_ms = if at > 0 { at } else { snap.and_then(|s| s["seen"].as_u64()).unwrap_or(0) };
+            // its last answer's build (`r`: this process's, or the one loaded from data/roots)
+            let build = if r.is_object() { r["build"].clone() } else { snap.map(|s| s["build"].clone()).unwrap_or(Value::Null) };
+            let build = if build.is_object() { build } else { Value::Null };
             let reachable = at > 0 && now.saturating_sub(at) < 180_000 && failed.get(name).is_none_or(|f| *f < at);
             let models: Vec<&str> = if let Some(arr) = r["models"].as_array() {
                 arr.iter().filter_map(|m| m.as_str().or_else(|| m["id"].as_str())).collect()
@@ -320,6 +333,9 @@ pub fn health(st: &AppState) -> Vec<Value> {
                 "models": models,
                 "main": r["main"].as_str().or_else(|| snap.and_then(|s| s["main"].as_str())),
                 "main_proxy": main_proxy_in(&sessions, name),
+                "build": build,
+                // runs another build than this brain (null: never answered)
+                "behind": behind(&build, seen_ms > 0, crate::peers::BUILD_ID),
             })
         })
         .collect()
@@ -1398,6 +1414,55 @@ mod tests {
         // it answers again: on
         st.config.peers.seen.lock().unwrap().insert("lab".into(), (now_ms() + 1, json!({ "name": "lab" })));
         assert_eq!(on(&st), Some(true));
+    }
+
+    #[test]
+    fn a_root_on_another_build_is_behind_and_stays_so_offline() {
+        let mine = crate::peers::BUILD_ID;
+        let st = state("behind", peers_of("home", "same=http://127.0.0.1:1,old=http://127.0.0.1:1,other=http://127.0.0.1:1,never=http://127.0.0.1:1", None));
+        let at = now_ms();
+        let b = |id: &str| json!({ "id": id, "commit": "c", "epoch": 1, "describe": "d", "plat": "linux-x86_64" });
+        record_peer_root(&st, "same", at, &json!({ "name": "same", "build": b(mine) }));
+        record_peer_root(&st, "old", at, &json!({ "name": "old" })); // a brain older than the stamp
+        record_peer_root(&st, "other", at, &json!({ "name": "other", "build": b("000000000000") }));
+        let by = |st: &AppState| -> HashMap<String, Value> { health(st).into_iter().map(|r| (r["name"].as_str().unwrap().to_string(), r)).collect() };
+        let h = by(&st);
+        assert_eq!(h["same"]["behind"], false);
+        assert_eq!(h["same"]["build"]["id"], mine);
+        assert_eq!(h["old"]["behind"], true, "no build field = an old brain");
+        assert!(h["old"]["build"].is_null());
+        assert_eq!(h["other"]["behind"], true);
+        assert!(h["never"]["behind"].is_null(), "never answered: nobody knows");
+        // the brain restarts, every root is off: each keeps what its last answer said
+        let st2 = state("behind-restart", peers_of("home", "same=http://127.0.0.1:1,old=http://127.0.0.1:1,other=http://127.0.0.1:1,never=http://127.0.0.1:1", None));
+        std::fs::create_dir_all(st2.data_dir.join("roots")).unwrap();
+        for n in ["same", "old", "other"] {
+            std::fs::copy(st.data_dir.join(format!("roots/{n}.json")), st2.data_dir.join(format!("roots/{n}.json"))).unwrap();
+        }
+        load_snapshots(&st2);
+        let h2 = by(&st2);
+        for n in ["same", "old", "other", "never"] {
+            assert_eq!(h2[n]["reachable"], false, "{n}");
+            assert_eq!(h2[n]["behind"], h[n]["behind"], "{n}");
+            assert_eq!(h2[n]["build"], h[n]["build"], "{n}");
+        }
+        // updated: it answers with this build → no longer behind; rolled back to an old brain → behind again
+        record_peer_root(&st2, "old", at + 1, &json!({ "name": "old", "build": b(mine) }));
+        assert_eq!(by(&st2)["old"]["behind"], false);
+        record_peer_root(&st2, "old", at + 2, &json!({ "name": "old" }));
+        assert_eq!(by(&st2)["old"]["behind"], true);
+        assert!(by(&st2)["old"]["build"].is_null());
+    }
+
+    #[test]
+    fn this_brain_reports_its_build() {
+        let b = crate::peers::build_info();
+        let id = b["id"].as_str().unwrap();
+        assert!(id == "dev" || id.len() == 12 || id.starts_with("dirty-"), "{id}");
+        assert_eq!(b["plat"], format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH));
+        assert!(b["epoch"].is_u64() && b["commit"].is_string() && b["describe"].is_string());
+        let st = state("describe-build", peers_of("home", "", None));
+        assert_eq!(crate::peers::describe(&st)["build"], b);
     }
 
     #[test]

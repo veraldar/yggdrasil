@@ -73,6 +73,9 @@ use tokio::sync::{Notify, broadcast, mpsc, oneshot};
 use tokio_stream::wrappers::{BroadcastStream, ReceiverStream, UnboundedReceiverStream};
 
 mod anthropic;
+// the root-part id is computed by build.rs (it includes the same file); here only its tests run
+#[cfg(test)]
+mod build_id;
 mod context;
 mod ext;
 mod files;
