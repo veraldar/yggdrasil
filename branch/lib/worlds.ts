@@ -12,7 +12,7 @@
  *  answers — server always wins. */
 'use client';
 
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
 
 export const WORLDS = [
   { id: 'aether', desc: 'deep-space terminal · plain hairlines' },
@@ -128,4 +128,30 @@ export function useScopedTheme(theme: WorldId | null | undefined) {
       if (meta && (restored || prevMeta)) meta.setAttribute('content', restored || prevMeta || '');
     };
   }, [theme]);
+}
+
+/** The world a computer's own pages wear (its settings, its artifacts): the one picked for it —
+ *  the paint cache first, then the tree's word (`GET /api/roots`, server always wins) — or null,
+ *  the app's world: nobody picked one for it, or it is the home root (its world IS the app's).
+ *  Paints it while the page is up (useScopedTheme). */
+export function useRootWorld(root: string): WorldId | null {
+  const [world, setWorld] = useState<WorldId | null>(null);
+  useEffect(() => {
+    setWorld(cachedRootTheme(root));
+    let live = true;
+    fetch('/api/roots', { cache: 'no-store', signal: AbortSignal.timeout(10_000) })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((t: Parameters<typeof cacheTreeThemes>[0] | null) => {
+        if (!t || !live) return;
+        cacheTreeThemes(t);
+        const r = (t.roots ?? []).find((x) => (x.id || x.name) === root);
+        setWorld(t.home?.name === root || !r ? null : chosenWorld(r.theme, r.theme_rev));
+      })
+      .catch(() => {});
+    return () => {
+      live = false;
+    };
+  }, [root]);
+  useScopedTheme(world);
+  return world;
 }

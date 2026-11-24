@@ -3,7 +3,8 @@
 /** The roots sheet (E2 · the whole tree): every computer of the tree, this one first.
  *    list   one row per computer: name, home tag, world swatch, state (on · last seen … · off),
  *           os, how many run
- *    tap    opens that computer's own page (/roots/<id>)
+ *    tap    opens that computer's home screen: `/` for the home root (the tree's home screen
+ *           IS its page), /roots/<id> for another — the sheet opens from every one of them
  *    hold   (not home) → "Remove <name>?" · Remove / Keep
  *  Labels and state only (the owner's rule: no help text). */
 import { useCallback, useEffect, useRef, useState } from 'react';
@@ -386,7 +387,7 @@ export function RootsSheet({
                       return;
                     }
                     onClose();
-                    router.push(`/roots/${encodeURIComponent(r.id)}`);
+                    router.push(r.home ? '/' : `/roots/${encodeURIComponent(r.id)}`);
                   }}
                 >
                   <div className="oz-r1">

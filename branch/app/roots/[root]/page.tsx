@@ -1,54 +1,37 @@
 'use client';
 
-/** /roots/[root] — A page for every computer (root-detail-proposal.html & root-detail-mockup.html).
- *  The home screen, scoped to one computer — its design, not a look of its own (owner 11-23
- *  22:19: "keep the same design, the ux should be the same between root as is our current
- *  root"): the app's world (a computer wears its own only once one was picked for it,
- *  lib/worlds.ts), the home screen's band, new-session key and rows, the app's tab strip
- *  (.oz-tabs, as /artifacts), its artifact rows and its world list (components/world-picker).
- *    header   ‹ (back to roots list) · name (+ home tag) · ● on / ○ last seen … / ○ off
- *    sub      os · arch · cpus · mem · N running
+/** /roots/[root] — the home screen of one computer (owner 11-24: "the button should be at the
+ *  same place … I want the same layout"). The tree's home screen (`/`) and this page are built
+ *  from the same parts (components/app/home-parts), in the same places:
+ *    header   the computer's name where BIFROST sits (tap → its settings, /roots/[root]/settings,
+ *             as BIFROST → /settings) · roots (the sheet: every computer) · artifacts (its own,
+ *             /roots/[root]/artifacts, as /artifacts) · refresh
  *    band     the home screen's tree band; its chip filters to the working rows
- *    tabs     sessions · artifacts · settings
- *    sessions ＋ new session + the exact same rows as the home screen (nested sub-sessions, role
- *             badges, status dots + "working", engine words, asks/headline/preview)
- *    artifacts files made on that computer (inline viewer for non-html, direct open for html)
- *    settings world (the app's world list, saved on that computer) · roles (inline runs-on +
- *             model editor) ·
- *             engines · this computer · remove (non-home, works offline too)
- *    bottom   its MAIN bar (home: full MainBar with hold-to-talk; remote: tap opens its MAIN)
- *  When offline: keeps its world, last-seen time, last known rows, artifacts, and settings from
- *  home's persisted snapshot, dimmed and read-only. Nothing is queued. Remove still works. */
-
+ *    rows     ＋ new session (made on that computer) and the home screen's rows (nested
+ *             sub-sessions, role badges, status dots + "working", engine words)
+ *    bottom   its MAIN bar (home: the full MainBar with hold-to-talk; another computer: a tap
+ *             opens its MAIN)
+ *  No tab strip, no line of its own: settings and artifacts are pages, as on home. It wears
+ *  the app's world unless one was picked for this computer (lib/worlds.ts).
+ *  A computer that is off keeps its world, its last known rows (greyed, read-only) and says
+ *  when it was last seen in its MAIN bar. Nothing is queued. */
 import { use, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTheme } from 'next-themes';
 import { useRouter } from 'next/navigation';
-import { Streamdown } from 'streamdown';
+import { HomeBand, HomeHead } from '@/components/app/home-parts';
 import { LineIcon } from '@/components/line-icon';
 import { MainBar, type MainBarRow } from '@/components/main-bar';
-import { HOME_ROOT_KEY, type Tree } from '@/components/roots-sheet';
-import { WorldPicker } from '@/components/world-picker';
-import { BAND_VIEWBOX, YggRoots, YggTree } from '@/components/ygg';
-import {
-  type AgentRow,
-  ENGINE_NOTE,
-  type EngineRow,
-  MORE_ENGINES,
-  byRole,
-  engineLabel,
-  engineWord,
-  roleOf,
-  roleTag,
-  sessionTag,
-} from '@/lib/agents';
-import { glyphOf, kindOf } from '@/lib/artifact-kind';
+import { HOME_ROOT_KEY, RootsSheet, type Tree } from '@/components/roots-sheet';
+import { YggRoots } from '@/components/ygg';
+import { engineWord, roleOf, sessionTag } from '@/lib/agents';
+import { countUnseen, forRoot, seenInit } from '@/lib/artifact-read';
 import { CARD_ST, type Card } from '@/lib/card';
 import { lastRead } from '@/lib/read';
+import { rootOfParam } from '@/lib/root-param';
 import { slugify } from '@/lib/slug';
 import { MAIN_SLUG, isMainSlug, isOnboardPrompt } from '@/lib/tree-first';
 import {
   type WorldId,
-  cacheRootTheme,
   cacheTreeThemes,
   cachedRootTheme,
   chosenWorld,
@@ -58,8 +41,6 @@ import {
 const POLL_MS = 5000;
 const OPEN_QUESTION_TTL_MS = 48 * 60 * 60 * 1000;
 const TREE_OPEN_KEY = 'oz-tree-open';
-
-type Tab = 'sessions' | 'artifacts' | 'settings';
 
 type RootSess = {
   id: string;
@@ -107,25 +88,6 @@ type RootArtifact = {
   source?: string;
 };
 
-type RootSettingsResp = {
-  root: string;
-  home?: boolean;
-  reachable?: boolean;
-  seen?: number | null;
-  theme?: string | null;
-  theme_rev?: number;
-  hardware?: {
-    os?: string | null;
-    arch?: string | null;
-    cpus?: number | null;
-    mem_gb?: number | null;
-  };
-  models?: string[];
-  roles?: AgentRow[];
-  engines?: EngineRow[];
-  joined_at?: string | null;
-};
-
 const msOf = (t?: number | null) => (!t ? 0 : t < 1e12 ? t * 1000 : t);
 
 function fmtListTime(t?: number | null): string {
@@ -135,19 +97,6 @@ function fmtListTime(t?: number | null): string {
   return d.toDateString() === new Date().toDateString()
     ? d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })
     : d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
-}
-
-function fmtSize(n: number): string {
-  if (n >= 1024 * 1024) return `${(n / 1024 / 1024).toFixed(1)} MB`;
-  if (n >= 1024) return `${Math.round(n / 1024)} kB`;
-  return `${n} B`;
-}
-
-function fmtJoined(iso?: string | null): string {
-  if (!iso) return '';
-  const m = Date.parse(iso);
-  if (!Number.isFinite(m)) return '';
-  return new Date(m).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
 }
 
 function ago(t: number): string {
@@ -164,103 +113,31 @@ const byOwner = (s: { userAt?: number | null; updated?: number | null }) =>
 const isWorking = (s: RootSess) =>
   !!s.busy || !!s.pending || s.status === 'working' || s.card?.status === 'working';
 
-function ArtifactViewer({
-  file,
-  root,
-  isHome,
-}: {
-  file: RootArtifact;
-  root: string;
-  isHome: boolean;
-}) {
-  const kind = kindOf(file.name);
-  const src = `/api/artifact/${encodeURIComponent(file.name)}${
-    isHome ? '' : `?root=${encodeURIComponent(root)}`
-  }`;
-  const [text, setText] = useState<string | null>(null);
-  const needsText = kind === 'md' || kind === 'text';
-
-  useEffect(() => {
-    if (!needsText) return;
-    let live = true;
-    fetch(src)
-      .then((r) => (r.ok ? r.text() : Promise.reject(new Error(String(r.status)))))
-      .then((t) => live && setText(t))
-      .catch(() => live && setText(null));
-    return () => {
-      live = false;
-    };
-  }, [src, needsText]);
-
-  if (kind === 'image') {
-    return (
-      // eslint-disable-next-line @next/next/no-img-element
-      <img
-        src={src}
-        alt={file.name}
-        className="max-h-[calc(100dvh-14rem)] w-full border border-[var(--oz-border)] object-contain"
-      />
-    );
-  }
-  if (kind === 'audio') return <audio controls src={src} className="w-full" preload="metadata" />;
-  if (kind === 'pdf') {
-    return (
-      <a href={src} target="_blank" rel="noreferrer" className="oz-chip text-[var(--oz-info)]">
-        <LineIcon name="artifact" size={13} />
-        {file.name} — tap to view
-      </a>
-    );
-  }
-  if (text === null) return <div className="text-xs text-[var(--oz-dim)]">loading…</div>;
-  const body = text.length > 20000 ? `${text.slice(0, 20000)}…` : text;
-  return (
-    <div className="oz-box max-h-[calc(100dvh-14rem)] overflow-auto px-2 py-1">
-      {kind === 'md' ? (
-        <div className="text-sm">
-          <Streamdown>{body}</Streamdown>
-        </div>
-      ) : (
-        <pre className="whitespace-pre-wrap break-words text-xs text-[var(--oz-text)]/85">
-          {body}
-        </pre>
-      )}
-    </div>
-  );
+export default function RootPage({ params }: { params: Promise<{ root: string }> }) {
+  const root = rootOfParam(use(params).root);
+  // another computer (the roots sheet, from here) is another page: nothing of this one stays
+  return <RootHome key={root} rootId={root} />;
 }
 
-export default function RootDetailPage({ params }: { params: Promise<{ root: string }> }) {
-  const { root: rawRoot } = use(params);
-  const rootId = useMemo(() => {
-    try {
-      return decodeURIComponent(rawRoot);
-    } catch {
-      return rawRoot;
-    }
-  }, [rawRoot]);
-
+function RootHome({ rootId }: { rootId: string }) {
   const router = useRouter();
-  const { theme: appTheme, setTheme: setHomeTheme } = useTheme();
+  const enc = encodeURIComponent(rootId);
+  const { setTheme: setHomeTheme } = useTheme();
 
-  const [tab, setTab] = useState<Tab>('sessions');
   const [tree, setTree] = useState<Tree | null>(null);
   const [sessView, setSessView] = useState<RootSessionsResp | null>(null);
   const [homeSessions, setHomeSessions] = useState<RootSess[] | null>(null);
-  const [settings, setSettings] = useState<RootSettingsResp | null>(null);
-  const [artifacts, setArtifacts] = useState<RootArtifact[] | null>(null);
-  const [openArt, setOpenArt] = useState<RootArtifact | null>(null);
+  // artifacts made there that this phone has not opened — the header key's badge, as on home
+  const [unseenArts, setUnseenArts] = useState(0);
+  const [rootsOpen, setRootsOpen] = useState(false);
+  // the refresh key reads "…" for the first load and a tap, never for the quiet poll
+  const [loading, setLoading] = useState(true);
   const [creating, setCreating] = useState(false);
   const [newName, setNewName] = useState('');
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState('');
-  const [askRemove, setAskRemove] = useState(false);
   // the band's chip: only the working rows (and the parents they hang from), as on home
   const [onlyWorking, setOnlyWorking] = useState(false);
-
-  // inline role & engine editor state in Settings tab
-  const [openRole, setOpenRole] = useState('');
-  const [openEng, setOpenEng] = useState('');
-  const [engText, setEngText] = useState('');
-  const [saveErr, setSaveErr] = useState('');
 
   // determine home vs remote
   const [cachedHome, setCachedHome] = useState('');
@@ -272,7 +149,7 @@ export default function RootDetailPage({ params }: { params: Promise<{ root: str
     }
   }, []);
   const homeName = tree?.home?.name || cachedHome;
-  const isHome = settings?.home === true || (!!homeName && homeName === rootId);
+  const isHome = !!homeName && homeName === rootId;
 
   // this computer's own world: only one picked for it (paint cache first, server always wins);
   // null = none picked → the page wears the app's world like every other page. Home's world
@@ -303,26 +180,43 @@ export default function RootDetailPage({ params }: { params: Promise<{ root: str
     });
   }
 
+  // the tree's word, from the poll here and from the roots sheet while it is open
+  const onTree = useCallback(
+    (t: Tree) => {
+      setTree(t);
+      cacheTreeThemes(t);
+      if (t.home?.name) {
+        try {
+          localStorage.setItem(HOME_ROOT_KEY, t.home.name);
+        } catch {
+          /* private mode */
+        }
+      }
+      if (t.home?.name === rootId) {
+        // home's world is the app's: a world picked for it (on another phone too) is adopted
+        // as the app's, exactly as the home screen does — an unpicked one never is
+        const hw = chosenWorld(t.home.theme, t.home.theme_rev);
+        if (hw) setHomeTheme(hw);
+      } else {
+        const r = t.roots.find((x) => x.id === rootId);
+        if (r) setWorld(chosenWorld(r.theme, r.theme_rev));
+      }
+    },
+    [rootId, setHomeTheme]
+  );
+
   const loadInFlight = useRef(false);
-  // bumped by every world pick: a load that started before it must not undo it
-  const pickSeq = useRef(0);
   const loadAll = useCallback(async () => {
     if (loadInFlight.current) return;
     loadInFlight.current = true;
-    const seq = pickSeq.current;
-    const enc = encodeURIComponent(rootId);
     try {
-      const [rTree, rSess, rSet, rArt] = await Promise.all([
+      const [rTree, rSess, rArt] = await Promise.all([
         fetch('/api/roots', { cache: 'no-store', signal: AbortSignal.timeout(10_000) }).catch(
           () => null
         ),
         fetch(`/api/roots/${enc}/sessions`, {
           cache: 'no-store',
           signal: AbortSignal.timeout(12_000),
-        }).catch(() => null),
-        fetch(`/api/roots/${enc}/settings`, {
-          cache: 'no-store',
-          signal: AbortSignal.timeout(10_000),
         }).catch(() => null),
         fetch(`/api/roots/${enc}/artifacts`, {
           cache: 'no-store',
@@ -334,27 +228,8 @@ export default function RootDetailPage({ params }: { params: Promise<{ root: str
       if (rTree?.ok) {
         const t = (await rTree.json().catch(() => null)) as Tree | null;
         if (t) {
-          setTree(t);
-          cacheTreeThemes(t);
-          if (t.home?.name) {
-            detectedHome = t.home.name;
-            try {
-              localStorage.setItem(HOME_ROOT_KEY, t.home.name);
-            } catch {
-              /* private mode */
-            }
-          }
-          if (seq !== pickSeq.current) {
-            /* a pick landed meanwhile: this answer predates it */
-          } else if (t.home?.name === rootId) {
-            // home's world is the app's: a world picked for it (on another phone too) is adopted
-            // as the app's, exactly as the home screen does — an unpicked one never is
-            const hw = chosenWorld(t.home.theme, t.home.theme_rev);
-            if (hw) setHomeTheme(hw);
-          } else {
-            const r = t.roots.find((x) => x.id === rootId);
-            if (r) setWorld(chosenWorld(r.theme, r.theme_rev));
-          }
+          onTree(t);
+          if (t.home?.name) detectedHome = t.home.name;
         }
       }
 
@@ -365,23 +240,18 @@ export default function RootDetailPage({ params }: { params: Promise<{ root: str
         setSessView((old) => old ?? { root: rootId, reachable: false, main: null, sessions: [] });
       }
 
-      if (rSet?.ok) {
-        const s = (await rSet.json().catch(() => null)) as RootSettingsResp | null;
-        if (s) {
-          setSettings(s);
-          if (!s.home && seq === pickSeq.current) {
-            const w = chosenWorld(s.theme, s.theme_rev);
-            setWorld(w);
-            cacheRootTheme(rootId, w);
-          }
-        }
-      }
-
+      // the artifacts key's badge: what this phone has not opened of that computer's files
+      // (the first meeting counts everything there as seen — lib/artifact-read)
       if (rArt?.ok) {
-        const a = (await rArt.json().catch(() => null)) as { artifacts?: RootArtifact[] } | null;
-        if (a && Array.isArray(a.artifacts)) setArtifacts(a.artifacts);
-      } else {
-        setArtifacts((old) => old ?? []);
+        const a = (await rArt.json().catch(() => null)) as {
+          home?: boolean;
+          artifacts?: RootArtifact[];
+        } | null;
+        if (a && Array.isArray(a.artifacts)) {
+          const seen = forRoot(a.home === true ? null : rootId, a.artifacts);
+          seenInit(seen);
+          setUnseenArts(countUnseen(seen));
+        }
       }
 
       // for home root, also read the enriched /api/session list so rows & MAIN bar carry full
@@ -405,8 +275,9 @@ export default function RootDetailPage({ params }: { params: Promise<{ root: str
       }
     } finally {
       loadInFlight.current = false;
+      setLoading(false);
     }
-  }, [rootId, homeName, setHomeTheme]);
+  }, [enc, rootId, homeName, onTree]);
 
   useEffect(() => {
     void loadAll();
@@ -453,16 +324,8 @@ export default function RootDetailPage({ params }: { params: Promise<{ root: str
     };
   }, [isHome, tree, rootId]);
 
-  const reachable = isHome
-    ? true
-    : settings?.reachable ?? sessView?.reachable ?? treeEntry?.reachable ?? false;
-  const seenMs = msOf(settings?.seen ?? treeEntry?.seen);
-  const hw = {
-    os: settings?.hardware?.os ?? treeEntry?.os ?? null,
-    arch: settings?.hardware?.arch ?? treeEntry?.arch ?? null,
-    cpus: settings?.hardware?.cpus ?? treeEntry?.cpus ?? null,
-    mem_gb: settings?.hardware?.mem_gb ?? treeEntry?.mem_gb ?? null,
-  };
+  const reachable = isHome ? true : (sessView?.reachable ?? treeEntry?.reachable ?? false);
+  const seenMs = msOf(treeEntry?.seen);
 
   // sessions list for this computer (excluding MAIN, which lives in the bottom MAIN bar)
   const rawSessions: RootSess[] = useMemo(() => {
@@ -490,7 +353,8 @@ export default function RootDetailPage({ params }: { params: Promise<{ root: str
   const displaySessions = useMemo(
     () =>
       rawSessions.filter(
-        (s) => s.id !== mainId && !isMainSlug(slugify(s.title || '')) && s.card?.kind !== 'root-main'
+        (s) =>
+          s.id !== mainId && !isMainSlug(slugify(s.title || '')) && s.card?.kind !== 'root-main'
       ),
     [rawSessions, mainId]
   );
@@ -535,10 +399,6 @@ export default function RootDetailPage({ params }: { params: Promise<{ root: str
     [displaySessions, byId]
   );
 
-  const openCount = useMemo(
-    () => displaySessions.filter((s) => !s.archived).length,
-    [displaySessions]
-  );
   const runningCount = useMemo(() => {
     if (!reachable) return 0;
     const fromRows = displaySessions.filter(isWorking).length + (sessView?.main?.busy ? 1 : 0);
@@ -625,7 +485,11 @@ export default function RootDetailPage({ params }: { params: Promise<{ root: str
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(isHome ? { name: title } : { name: title, root: rootId }),
       });
-      const s = (await res.json().catch(() => ({}))) as { id?: string; title?: string; error?: string };
+      const s = (await res.json().catch(() => ({}))) as {
+        id?: string;
+        title?: string;
+        error?: string;
+      };
       if (!s.id) return setErr(s.error || 'failed');
       setCreating(false);
       setNewName('');
@@ -633,126 +497,9 @@ export default function RootDetailPage({ params }: { params: Promise<{ root: str
     });
   };
 
-  // home: the app's world (as /settings does); another computer: its own world
-  const pickWorld = async (next: WorldId) => {
-    if (!reachable || busy) return;
-    setSaveErr('');
-    pickSeq.current += 1;
-    const prev = world;
-    const prevApp = appTheme;
-    const undo = () => {
-      if (isHome) {
-        if (prevApp) setHomeTheme(prevApp);
-        return;
-      }
-      setWorld(prev);
-      cacheRootTheme(rootId, prev);
-    };
-    if (isHome) setHomeTheme(next);
-    else {
-      setWorld(next);
-      cacheRootTheme(rootId, next);
-    }
-    try {
-      const r = await fetch(`/api/roots/${encodeURIComponent(rootId)}/theme`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ theme: next }),
-      });
-      const d = (await r.json().catch(() => ({}))) as { theme?: string; rev?: number; error?: string };
-      if (!r.ok) {
-        undo();
-        setSaveErr(d.error || `save failed (${r.status})`);
-      } else {
-        setSettings((cur) =>
-          cur ? { ...cur, theme: next, theme_rev: d.rev ?? (cur.theme_rev ?? 0) + 1 } : cur
-        );
-      }
-    } catch {
-      undo();
-      setSaveErr('could not reach computer');
-    }
-  };
-
-  const saveRole = async (roleName: string, patch: { harness?: string; model?: string | null }) => {
-    if (!reachable) return;
-    setSaveErr('');
-    const r = await fetch(
-      `/api/roots/${encodeURIComponent(rootId)}/agent/${encodeURIComponent(roleName)}`,
-      {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(patch),
-      }
-    ).catch(() => null);
-    const d = (await r?.json().catch(() => null)) as { error?: string; harness?: string; model?: string | null } | null;
-    if (!r?.ok) {
-      setSaveErr(d?.error || `save failed (${r?.status ?? 'offline'})`);
-      return;
-    }
-    setSettings((cur) =>
-      cur
-        ? {
-            ...cur,
-            roles: (cur.roles ?? []).map((x) =>
-              x.name === roleName
-                ? {
-                    ...x,
-                    ...(patch.harness !== undefined
-                      ? { harness: patch.harness === 'root' ? null : patch.harness }
-                      : {}),
-                    ...(patch.model !== undefined ? { model: patch.model } : {}),
-                  }
-                : x
-            ),
-          }
-        : cur
-    );
-  };
-
-  const saveEngine = async (engName: string, model: string | null) => {
-    if (!reachable) return;
-    setSaveErr('');
-    const r = await fetch(
-      `/api/roots/${encodeURIComponent(rootId)}/engine/${encodeURIComponent(engName)}`,
-      {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ model }),
-      }
-    ).catch(() => null);
-    const d = (await r?.json().catch(() => null)) as (EngineRow & { error?: string }) | null;
-    if (!r?.ok) {
-      setSaveErr(d?.error || `save failed (${r?.status ?? 'offline'})`);
-      return;
-    }
-    setSettings((cur) =>
-      cur
-        ? {
-            ...cur,
-            engines: (cur.engines ?? []).map((x) =>
-              x.name === engName ? { ...x, ...(d?.name === engName ? d : { model }) } : x
-            ),
-          }
-        : cur
-    );
-    setOpenEng('');
-  };
-
-  const removeThisRoot = () =>
-    runAction(async () => {
-      const r = await fetch(`/api/roots/${encodeURIComponent(rootId)}/remove`, {
-        method: 'POST',
-      });
-      if (!r.ok) return setErr('failed');
-      router.push('/?roots=1');
-    });
-
   // ── session row renderer (same rows as the home screen) ──────────────────
   const isUnread = (s: RootSess) =>
-    isHome &&
-    s.lastRole === 'assistant' &&
-    (s.lastAt || 0) > lastRead(slugify(s.title || s.id));
+    isHome && s.lastRole === 'assistant' && (s.lastAt || 0) > lastRead(slugify(s.title || s.id));
 
   function renderBranch(s: RootSess, depth: number) {
     const kids = kidsById.get(s.id) || [];
@@ -784,7 +531,7 @@ export default function RootDetailPage({ params }: { params: Promise<{ root: str
     const eng = engineWord(s.engine);
 
     return (
-      <div key={s.id}>
+      <>
         <button
           type="button"
           className={`oz-row ${depth > 0 ? 'compact' : ''} ${unread ? 'unread' : ''}`}
@@ -851,9 +598,11 @@ export default function RootDetailPage({ params }: { params: Promise<{ root: str
           {(sub || !depth) && <div className="oz-r2">{sub || '\u00a0'}</div>}
         </button>
         {isOpen && (
-          <div className="oz-kids">{renderGroup(kids, `root-closed:${rootId}:${s.id}`, depth + 1, !liveKids)}</div>
+          <div className="oz-kids">
+            {renderGroup(kids, `root-closed:${rootId}:${s.id}`, depth + 1, !liveKids)}
+          </div>
         )}
-      </div>
+      </>
     );
   }
 
@@ -861,11 +610,15 @@ export default function RootDetailPage({ params }: { params: Promise<{ root: str
     const open = list.filter((s) => !s.archived);
     const closed = list.filter((s) => s.archived);
     const shown = showClosed || !!subsOpen[key];
+    // as on home: top level rows are <li>s; nested ones sit in their parent's .oz-kids
+    const Item = depth ? 'div' : 'li';
     return (
       <>
-        {open.map((s) => renderBranch(s, depth))}
+        {open.map((s) => (
+          <Item key={s.id}>{renderBranch(s, depth)}</Item>
+        ))}
         {closed.length > 0 && !showClosed && (
-          <div>
+          <Item>
             <button
               type="button"
               aria-expanded={shown}
@@ -874,49 +627,24 @@ export default function RootDetailPage({ params }: { params: Promise<{ root: str
             >
               {closed.length} closed
             </button>
-          </div>
+          </Item>
         )}
-        {shown && closed.map((s) => renderBranch(s, depth))}
+        {shown && closed.map((s) => <Item key={s.id}>{renderBranch(s, depth)}</Item>)}
       </>
     );
   }
 
-  // state text & subtitle
-  const stateText = reachable
-    ? '● on'
-    : seenMs
-      ? `○ last seen ${
-          Date.now() - seenMs < 6 * 3600_000 ? ago(seenMs) : fmtListTime(seenMs)
-        }`
-      : '○ off';
-
-  const subtitle = [
-    hw.os,
-    hw.arch,
-    hw.cpus ? `${hw.cpus} cpu` : '',
-    hw.mem_gb ? `${hw.mem_gb} GB` : '',
-    reachable && runningCount ? `${runningCount} running` : '',
-  ]
-    .filter(Boolean)
-    .join(' · ');
-
-  const roles = useMemo(
-    () => [...(settings?.roles ?? [])].sort(byRole),
-    [settings?.roles]
-  );
-  const engines = useMemo(() => settings?.engines ?? [], [settings?.engines]);
-  const mainEngines = useMemo(
-    () => engines.filter((e) => !(e.more ?? MORE_ENGINES.has(e.name))),
-    [engines]
-  );
-  const moreEngines = useMemo(
-    () => engines.filter((e) => e.more ?? MORE_ENGINES.has(e.name)),
-    [engines]
-  );
-  const engineModel = (e: string) => engines.find((x) => x.name === e)?.model || null;
+  const refresh = () => {
+    setLoading(true);
+    void loadAll();
+  };
 
   return (
-    <div data-theme={world ?? undefined} className="min-h-dvh bg-[var(--oz-bg)] text-[var(--oz-text)]">
+    <div
+      data-theme={world ?? undefined}
+      className="min-h-dvh bg-[var(--oz-bg)] text-[var(--oz-text)]"
+    >
+      {/* the last row scrolls clear of the roots (84 px + the safe area) */}
       <main
         className="relative mx-auto flex min-h-dvh max-w-md flex-col px-3"
         style={{ paddingBottom: 'calc(var(--oz-roots-h) + 16px + env(safe-area-inset-bottom))' }}
@@ -925,106 +653,70 @@ export default function RootDetailPage({ params }: { params: Promise<{ root: str
         data-root-theme={world ?? undefined}
         data-reachable={reachable ? 'on' : 'off'}
       >
-        {/* header: ‹ · computer name (+ home) · status */}
-        <header className="oz-head justify-start gap-2">
+        {/* the home screen's header and band, for this computer: its name is the way into
+            its settings, the artifacts key opens its own files, the roots key every computer */}
+        <HomeHead
+          title={rootId}
+          settingsHref={`/roots/${enc}/settings`}
+          artifactsHref={`/roots/${enc}/artifacts`}
+          unseen={unseenArts}
+          joins={tree?.joins?.length ?? 0}
+          loading={loading}
+          gone={!!tree && !reachable}
+          onRoots={() => setRootsOpen(true)}
+          onRefresh={refresh}
+        />
+        <HomeBand
+          name={rootId}
+          working={runningCount}
+          walk={branchWorking}
+          only={onlyWorking}
+          onToggle={() => setOnlyWorking((v) => !v)}
+          testId="root-band"
+        />
+
+        {/* the home screen's new-session key: the session is made on this computer */}
+        <div className="mb-2 flex items-stretch gap-1.5">
           <button
             type="button"
-            className="oz-k sm"
-            aria-label="back to roots"
-            data-testid="roots-back"
-            onClick={() => router.push('/?roots=1')}
-          >
-            <LineIcon name="back" size={14} />
-          </button>
-          <h1
-            className={`min-w-0 truncate text-[13px] font-bold tracking-[.04em] ${
+            className={`oz-k ok h-11 flex-1 justify-start px-3 text-[13px] ${
               reachable ? '' : 'oz-gone'
             }`}
-            data-testid="roots-title"
+            disabled={!reachable || busy}
+            data-testid="roots-new"
+            onClick={() => setCreating((c) => !c)}
           >
-            {rootId}
-          </h1>
-          {isHome && <span className="oz-subs">home</span>}
-          <span
-            className="ml-auto flex-none text-[10px] tracking-[.02em]"
-            style={{ color: reachable ? 'var(--oz-success)' : 'var(--oz-dim)' }}
-            data-testid="roots-state"
-          >
-            {stateText}
-          </span>
-        </header>
-
-        {subtitle && (
-          <p
-            className={`-mt-1.5 mb-2.5 truncate text-[11px] text-[var(--oz-dim)] ${reachable ? '' : 'oz-gone'}`}
-            data-testid="root-sub"
-          >
-            {subtitle}
-          </p>
-        )}
-
-        {/* the home screen's band, for this computer: still unless something works there; the
-            chip taps to a working-only list, again to clear */}
-        <figure
-          className={`oz-band oz-ygg -mx-3 mb-2.5 ${runningCount ? 'live' : ''} ${branchWorking ? 'walk' : ''}`}
-          aria-label={
-            runningCount ? `${rootId} — ${runningCount} working` : `${rootId} — nothing working`
-          }
-          data-testid="root-band"
-        >
-          <YggTree viewBox={BAND_VIEWBOX} slice />
-          <button
-            type="button"
-            onClick={() => runningCount > 0 && setOnlyWorking((v) => !v)}
-            aria-pressed={onlyWorking}
-            aria-label={
-              runningCount
-                ? `${runningCount} working — ${onlyWorking ? 'show every session' : 'show only the working'}`
-                : `${rootId} — nothing working`
-            }
-            data-testid="working-filter"
-            className={`oz-cap ${onlyWorking ? 'on' : ''}`}
-          >
-            <i />
-            {runningCount ? `${runningCount} working` : 'all quiet'}
+            <LineIcon name="plus" size={14} /> new session
           </button>
-        </figure>
-
-        {/* three tabs: sessions · artifacts · settings — the app's tab strip (as /artifacts) */}
-        <div className="mb-2 flex items-center gap-2">
-          <div className="oz-tabs" role="tablist" aria-label={`${rootId} sections`} data-testid="root-tabs">
-            <button
-              type="button"
-              aria-pressed={tab === 'sessions'}
-              data-testid="tab-sessions"
-              onClick={() => {
-                setTab('sessions');
-                setOpenArt(null);
-              }}
-            >
-              sessions{openCount > 0 && ` ${openCount}`}
-            </button>
-            <button
-              type="button"
-              aria-pressed={tab === 'artifacts'}
-              data-testid="tab-artifacts"
-              onClick={() => setTab('artifacts')}
-            >
-              artifacts{artifacts && artifacts.length > 0 && ` ${artifacts.length}`}
-            </button>
-            <button
-              type="button"
-              aria-pressed={tab === 'settings'}
-              data-testid="tab-settings"
-              onClick={() => {
-                setTab('settings');
-                setOpenArt(null);
-              }}
-            >
-              settings
-            </button>
-          </div>
         </div>
+
+        {creating && reachable && (
+          <div className="oz-box mb-2 p-3">
+            <input
+              autoFocus
+              value={newName}
+              onChange={(e) => setNewName(e.target.value)}
+              onKeyDown={(e) => e.key === 'Enter' && createSession()}
+              placeholder="session name…"
+              className="oz-field mb-2.5"
+              data-testid="roots-new-name"
+            />
+            <div className="flex gap-1.5">
+              <button
+                type="button"
+                onClick={createSession}
+                className="oz-k ok flex-1"
+                disabled={busy}
+                data-testid="roots-create"
+              >
+                create & open
+              </button>
+              <button type="button" onClick={() => setCreating(false)} className="oz-k px-4">
+                cancel
+              </button>
+            </div>
+          </div>
+        )}
 
         {err && (
           <p role="alert" className="pb-2 text-[11px] text-[var(--oz-danger)]">
@@ -1032,465 +724,24 @@ export default function RootDetailPage({ params }: { params: Promise<{ root: str
           </p>
         )}
 
-        {/* ── TAB 1: SESSIONS ── */}
-        {tab === 'sessions' && (
-          <section className="flex flex-col gap-2" data-testid="root-sessions-tab">
-            {/* the home screen's new-session key */}
-            <div className="flex items-stretch gap-1.5">
-              <button
-                type="button"
-                className={`oz-k ok h-11 flex-1 justify-start px-3 text-[13px] ${
-                  reachable ? '' : 'oz-gone'
-                }`}
-                disabled={!reachable || busy}
-                data-testid="roots-new"
-                onClick={() => setCreating((c) => !c)}
-              >
-                <LineIcon name="plus" size={14} /> new session
-              </button>
-            </div>
-
-            {creating && reachable && (
-              <div className="oz-box p-3">
-                <input
-                  autoFocus
-                  value={newName}
-                  onChange={(e) => setNewName(e.target.value)}
-                  onKeyDown={(e) => e.key === 'Enter' && createSession()}
-                  placeholder="session name…"
-                  className="oz-field mb-2.5"
-                  data-testid="roots-new-name"
-                />
-                <div className="flex gap-1.5">
-                  <button
-                    type="button"
-                    onClick={createSession}
-                    className="oz-k ok flex-1"
-                    disabled={busy}
-                    data-testid="roots-create"
-                  >
-                    create & open
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setCreating(false)}
-                    className="oz-k px-4"
-                  >
-                    cancel
-                  </button>
-                </div>
-              </div>
-            )}
-
-            <div className="flex flex-col gap-1" data-testid="root-sessions-list">
-              {!sessView && !(isHome && homeSessions) ? (
-                <p className="pt-6 text-center text-xs text-[var(--oz-dim)]">…</p>
-              ) : shownTops.length === 0 ? (
-                <p className="pt-6 text-center text-xs text-[var(--oz-dim)]">
-                  {reachable ? 'no sessions yet' : 'offline · no cached sessions'}
-                </p>
-              ) : (
-                renderGroup(shownTops, `root-closed:${rootId}:top`)
-              )}
-              {!reachable && topSessions.length > 0 && (
-                <div
-                  className="mt-1 border border-dashed border-[var(--oz-border)] py-1.5 text-center text-[11px] text-[var(--oz-dim)]"
-                  data-testid="root-readonly-note"
-                >
-                  read-only
-                </div>
-              )}
-            </div>
-          </section>
+        {!sessView && !(isHome && homeSessions) ? (
+          <p className="pt-6 text-center text-xs text-[var(--oz-dim)]">…</p>
+        ) : shownTops.length === 0 ? (
+          <p className="pt-6 text-center text-xs text-[var(--oz-dim)]">
+            {reachable ? 'no sessions yet' : 'no sessions'}
+          </p>
+        ) : (
+          <ul className="flex flex-col gap-1" data-testid="root-sessions-list">
+            {renderGroup(shownTops, `root-closed:${rootId}:top`)}
+          </ul>
         )}
-
-        {/* ── TAB 2: ARTIFACTS ── */}
-        {tab === 'artifacts' && (
-          <section className="flex flex-col gap-2" data-testid="root-artifacts-tab">
-            {openArt ? (
-              <div className="flex flex-col gap-2">
-                <button
-                  type="button"
-                  onClick={() => setOpenArt(null)}
-                  className="oz-k sm w-fit"
-                  data-testid="artifact-back"
-                >
-                  <LineIcon name="back" size={11} /> back to list
-                </button>
-                <div className="truncate px-0.5 text-xs text-[var(--oz-dim)]">
-                  {openArt.name} · {fmtListTime(openArt.mtime)} · {fmtSize(openArt.size)}
-                </div>
-                <ArtifactViewer file={openArt} root={rootId} isHome={isHome} />
-              </div>
-            ) : !artifacts ? (
-              <p className="pt-6 text-center text-xs text-[var(--oz-dim)]">…</p>
-            ) : artifacts.length === 0 ? (
-              <p className="pt-6 text-center text-xs text-[var(--oz-dim)]">
-                {reachable ? 'no artifacts yet' : 'offline · no cached artifacts'}
-              </p>
-            ) : (
-              <ul className="flex flex-col gap-1" data-testid="root-artifacts-list">
-                {artifacts.map((a) => {
-                  const canOpen = reachable || isHome;
-                  return (
-                    <li key={a.name}>
-                      <button
-                        type="button"
-                        className={`oz-row ${canOpen ? '' : 'oz-gone'}`}
-                        disabled={!canOpen}
-                        data-testid="root-artifact"
-                        data-name={a.name}
-                        onClick={() => {
-                          if (!canOpen) return;
-                          if (kindOf(a.name) === 'html') {
-                            window.location.assign(
-                              `/api/artifact/${encodeURIComponent(a.name)}${
-                                isHome ? '' : `?root=${encodeURIComponent(rootId)}`
-                              }`
-                            );
-                          } else {
-                            setOpenArt(a);
-                          }
-                        }}
-                      >
-                        {/* the artifacts page's row: glyph · name · provenance · time · size */}
-                        <div className="oz-r1">
-                          <span
-                            className="w-4 shrink-0 text-center text-[var(--oz-dim)]"
-                            aria-hidden="true"
-                          >
-                            {glyphOf(a.name)}
-                          </span>
-                          <span className="t opacity-80">{a.name}</span>
-                          {a.source && a.source !== 'local' && (
-                            <span className="shrink-0 text-[10px] text-[var(--oz-dim)]">
-                              {a.source}
-                            </span>
-                          )}
-                          <time>
-                            {fmtListTime(a.mtime)} · {fmtSize(a.size)}
-                          </time>
-                        </div>
-                      </button>
-                    </li>
-                  );
-                })}
-              </ul>
-            )}
-          </section>
-        )}
-
-        {/* ── TAB 3: SETTINGS ── */}
-        {tab === 'settings' && (
-          <section className="flex flex-col" data-testid="root-settings-tab">
-            {saveErr && (
-              <p role="alert" className="pb-2 text-[11px] text-[var(--oz-danger)]">
-                {saveErr}
-              </p>
-            )}
-
-            {/* World picker (saved on that computer) */}
-            <section className={`oz-blk ${reachable ? '' : 'oz-gone'}`} data-testid="root-world-block">
-              <h2>world</h2>
-              <WorldPicker
-                current={isHome ? appTheme : world ?? appTheme}
-                disabled={!reachable}
-                onPick={(w) => void pickWorld(w)}
-              />
-            </section>
-
-            {/* Roles (saved on that computer) */}
-            <section className={`oz-blk ${reachable ? '' : 'oz-gone'}`} data-testid="root-roles-block">
-              <h2>roles</h2>
-              {roles.length === 0 ? (
-                <p className="text-[11px] text-[var(--oz-dim)]">
-                  {settings ? 'no roles reported' : 'loading…'}
-                </p>
-              ) : (
-                <ul className="oz-alist">
-                  {roles.map((r) => {
-                    const eng = r.harness || 'root';
-                    const model = r.model || engineModel(eng) || 'default';
-                    const locked = r.name === 'coordinator';
-                    const isOpen = reachable && !locked && openRole === r.name;
-                    const engRow = engines.find((e) => e.name === eng);
-                    const offered =
-                      eng === 'root'
-                        ? settings?.models?.length
-                          ? settings.models
-                          : engRow?.models ?? []
-                        : engRow?.models ?? [];
-                    const mainEngChoices = mainEngines.length
-                      ? mainEngines
-                      : [
-                          { name: 'root', label: 'root', model: null, models: [] },
-                          { name: 'claude', label: 'Claude Code', model: null, models: [] },
-                          { name: 'antigravity', label: 'Antigravity', model: null, models: [] },
-                        ];
-                    return (
-                      <li
-                        key={r.name}
-                        className="eng"
-                        data-testid="root-role"
-                        data-role={r.name}
-                      >
-                        <button
-                          type="button"
-                          disabled={!reachable || locked}
-                          aria-expanded={isOpen}
-                          onClick={() => setOpenRole(isOpen ? '' : r.name)}
-                        >
-                          <span className="r1">
-                            <span className="truncate">
-                              <span className="mr-1 opacity-60" aria-hidden="true">
-                                [{roleTag(r.name)}]
-                              </span>
-                              {r.name === 'coordinator' ? 'main' : r.name}
-                            </span>
-                            <span className="tag">{engineLabel(eng)}</span>
-                            <span className="m">
-                              {model} {!locked && reachable ? (isOpen ? '▲' : '›') : ''}
-                            </span>
-                          </span>
-                        </button>
-                        {isOpen && (
-                          <div className="pb-2.5 pt-1">
-                            <div className="mb-1 text-[10px] tracking-[.1em] text-[var(--oz-dim)]">
-                              runs on
-                            </div>
-                            <div className="oz-chips mb-2.5">
-                              {mainEngChoices.map((e) => (
-                                <button
-                                  key={e.name}
-                                  type="button"
-                                  aria-pressed={eng === e.name}
-                                  data-testid={`role-${r.name}-eng-${e.name}`}
-                                  onClick={() =>
-                                    void saveRole(r.name, { harness: e.name, model: null })
-                                  }
-                                >
-                                  {e.label || engineLabel(e.name)}
-                                </button>
-                              ))}
-                            </div>
-                            {offered.length > 0 && !(offered.length === 1 && offered[0] === 'default') && (
-                              <>
-                                <div className="mb-1 text-[10px] tracking-[.1em] text-[var(--oz-dim)]">
-                                  model
-                                </div>
-                                <div className="oz-chips">
-                                  {offered.slice(0, 8).map((m) => (
-                                    <button
-                                      key={m}
-                                      type="button"
-                                      aria-pressed={model === m}
-                                      data-testid={`role-${r.name}-model-${m}`}
-                                      onClick={() =>
-                                        void saveRole(r.name, {
-                                          harness: eng,
-                                          model: m === 'default' ? null : m,
-                                        })
-                                      }
-                                    >
-                                      {m}
-                                    </button>
-                                  ))}
-                                </div>
-                              </>
-                            )}
-                          </div>
-                        )}
-                      </li>
-                    );
-                  })}
-                </ul>
-              )}
-            </section>
-
-            {/* Engines */}
-            {engines.length > 0 && (
-              <section
-                className={`oz-blk ${reachable ? '' : 'oz-gone'}`}
-                data-testid="root-engines-block"
-              >
-                <h2>engines</h2>
-                <ul className="oz-alist">
-                  {mainEngines.map((e) => {
-                    const label = e.label || engineLabel(e.name);
-                    const isOpen = reachable && openEng === e.name;
-                    const cur = e.model || 'default';
-                    const free =
-                      !e.models?.length || (e.models.length === 1 && e.models[0] === 'default');
-                    return (
-                      <li
-                        key={e.name}
-                        className="eng"
-                        data-testid="root-engine"
-                        data-engine={e.name}
-                      >
-                        <button
-                          type="button"
-                          disabled={!reachable}
-                          aria-expanded={isOpen}
-                          onClick={() => {
-                            setOpenEng(isOpen ? '' : e.name);
-                            setEngText(e.model || '');
-                          }}
-                        >
-                          <span className="r1">
-                            <span className="truncate">{label}</span>
-                            <span className="m">
-                              {e.model || 'its default'} {reachable ? (isOpen ? '▲' : '›') : ''}
-                            </span>
-                          </span>
-                          {ENGINE_NOTE[e.name] && <span className="r2">{ENGINE_NOTE[e.name]}</span>}
-                        </button>
-                        {isOpen &&
-                          (free ? (
-                            <div className="flex gap-1.5 pb-2">
-                              <input
-                                value={engText}
-                                onChange={(x) => setEngText(x.target.value)}
-                                onKeyDown={(x) =>
-                                  x.key === 'Enter' &&
-                                  void saveEngine(e.name, engText.trim() || null)
-                                }
-                                placeholder="empty = its default"
-                                className="oz-field"
-                              />
-                              <button
-                                type="button"
-                                onClick={() => void saveEngine(e.name, engText.trim() || null)}
-                                className="oz-k ok px-3"
-                              >
-                                save
-                              </button>
-                            </div>
-                          ) : (
-                            <div className="oz-chips pb-2">
-                              {e.models.slice(0, 8).map((m) => (
-                                <button
-                                  key={m}
-                                  type="button"
-                                  aria-pressed={cur === m}
-                                  onClick={() =>
-                                    void saveEngine(e.name, m === 'default' ? null : m)
-                                  }
-                                >
-                                  {m}
-                                </button>
-                              ))}
-                            </div>
-                          ))}
-                      </li>
-                    );
-                  })}
-                </ul>
-                {moreEngines.length > 0 && reachable && (
-                  <details className="pt-0">
-                    <summary className="cursor-pointer text-[11px] text-[var(--oz-dim)]">
-                      more engines
-                    </summary>
-                    <ul className="oz-alist mt-1">
-                      {moreEngines.map((e) => (
-                        <li key={e.name} className="eng">
-                          <div className="py-2 text-[12px]">
-                            <span className="r1">
-                              <span className="truncate">{e.label || engineLabel(e.name)}</span>
-                              <span className="m">{e.model || 'its default'}</span>
-                            </span>
-                          </div>
-                        </li>
-                      ))}
-                    </ul>
-                  </details>
-                )}
-              </section>
-            )}
-
-            {/* This computer */}
-            <section className="oz-blk" data-testid="root-info-block">
-              <h2>this computer</h2>
-              <ul className="oz-kv">
-                {(hw.os || hw.arch) && (
-                  <li>
-                    <span>system</span>
-                    <span>{[hw.os, hw.arch].filter(Boolean).join(' · ')}</span>
-                    <span />
-                  </li>
-                )}
-                {hw.cpus ? (
-                  <li>
-                    <span>cpu</span>
-                    <span>{hw.cpus}</span>
-                    <span />
-                  </li>
-                ) : null}
-                {hw.mem_gb ? (
-                  <li>
-                    <span>memory</span>
-                    <span>{hw.mem_gb} GB</span>
-                    <span />
-                  </li>
-                ) : null}
-                {settings?.models && settings.models.length > 0 && (
-                  <li>
-                    <span>models</span>
-                    <span className="break-words">{settings.models.join(' · ')}</span>
-                    <span />
-                  </li>
-                )}
-                {!isHome && settings?.joined_at && (
-                  <li>
-                    <span>joined</span>
-                    <span>{fmtJoined(settings.joined_at)}</span>
-                    <span />
-                  </li>
-                )}
-              </ul>
-            </section>
-
-            {/* Danger zone: non-home roots only (works offline too) */}
-            {!isHome && (
-              <section className="oz-blk danger" data-testid="root-danger-block">
-                {askRemove ? (
-                  <div className="flex flex-col gap-2" role="alertdialog" aria-label={`Remove ${rootId}?`}>
-                    <p className="text-[12.5px]">Remove {rootId}?</p>
-                    <div className="flex gap-1.5">
-                      <button
-                        type="button"
-                        className="oz-k red flex-1"
-                        disabled={busy}
-                        data-testid="root-remove"
-                        onClick={() => void removeThisRoot()}
-                      >
-                        Remove
-                      </button>
-                      <button
-                        type="button"
-                        className="oz-k flex-1"
-                        data-testid="root-keep"
-                        onClick={() => setAskRemove(false)}
-                      >
-                        Keep
-                      </button>
-                    </div>
-                  </div>
-                ) : (
-                  <div>
-                    <button
-                      type="button"
-                      className="oz-k red h-11 w-full"
-                      data-testid="root-remove-btn"
-                      onClick={() => setAskRemove(true)}
-                    >
-                      remove {rootId}
-                    </button>
-                  </div>
-                )}
-              </section>
-            )}
-          </section>
+        {!reachable && topSessions.length > 0 && (
+          <div
+            className="mt-1 border border-dashed border-[var(--oz-border)] py-1.5 text-center text-[11px] text-[var(--oz-dim)]"
+            data-testid="root-readonly-note"
+          >
+            read-only
+          </div>
         )}
       </main>
 
@@ -1512,9 +763,7 @@ export default function RootDetailPage({ params }: { params: Promise<{ root: str
             type="button"
             className="oz-roots-hit"
             disabled={!reachable || busy}
-            aria-label={
-              reachable ? `main · ${rootId} — tap to open` : `main · ${rootId} — offline`
-            }
+            aria-label={reachable ? `main · ${rootId} — tap to open` : `main · ${rootId} — offline`}
             onClick={openRemoteMain}
             style={!reachable ? { cursor: 'default' } : undefined}
           >
@@ -1542,6 +791,8 @@ export default function RootDetailPage({ params }: { params: Promise<{ root: str
           </button>
         </div>
       )}
+
+      {rootsOpen && <RootsSheet onClose={() => setRootsOpen(false)} onTree={onTree} />}
     </div>
   );
 }

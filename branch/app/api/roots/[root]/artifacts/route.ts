@@ -1,6 +1,6 @@
 /**
  * GET → files made on one root. For the home root, serves the exact local gallery
- * (`lib/artifacts.ts listArtifacts`); for another root, asks the hub brain (`GET /root/<root>/artifacts`,
+ * (`lib/artifacts.ts listArtifacts`, marked `home: true`); for another root, asks the hub brain (`GET /root/<root>/artifacts`,
  * which caches the list for when that computer is off).
  */
 import { NextResponse } from 'next/server';
@@ -23,6 +23,7 @@ export async function GET(req: Request, ctx: { params: Promise<{ root: string }>
     return NextResponse.json(
       {
         root,
+        home: true,
         reachable: true,
         artifacts: list.map((a) => ({
           name: a.name,

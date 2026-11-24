@@ -2,15 +2,14 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTheme } from 'next-themes';
-import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { ContinueTerminal } from '@/components/app/continue-claude';
+import { HomeBand, HomeHead } from '@/components/app/home-parts';
 import { LineIcon } from '@/components/line-icon';
 import { MainBar } from '@/components/main-bar';
 import { Marked } from '@/components/marked';
 import { HOME_ROOT_KEY, RootsSheet, type Tree } from '@/components/roots-sheet';
 import { Door } from '@/components/tree-door';
-import { BAND_VIEWBOX, YggTree } from '@/components/ygg';
 import { engineWord, roleOf, sessionTag } from '@/lib/agents';
 import { countUnseen, seenInit } from '@/lib/artifact-read';
 import type { ArtifactEntry } from '@/lib/artifacts';
@@ -783,74 +782,27 @@ export default function SessionsPage() {
         className="relative mx-auto flex min-h-dvh max-w-md flex-col px-3"
         style={{ paddingBottom: 'calc(var(--oz-roots-h) + 16px + env(safe-area-inset-bottom))' }}
       >
-        {/* the wordmark alone, full caps, no sign before it — it is the way
-            into settings; the artifact runestone counts what you haven't seen */}
-        <header className="oz-head">
-          <Link href="/settings" className="oz-brand" aria-label="BIFROST — settings">
-            <h1 className="oz-brand">BIFROST</h1>
-          </Link>
-          <div className="flex items-center gap-1.5">
-            <button
-              onClick={() => setRootsOpen(true)}
-              aria-label="roots"
-              className={`oz-k sm ${pendingJoins > 0 ? 'text-[var(--oz-text)]' : ''}`}
-              data-testid="roots-key"
-            >
-              <LineIcon name="roots" size={15} />
-              {pendingJoins > 0 && (
-                <span data-testid="joins-badge" className="oz-badge">
-                  {pendingJoins}
-                </span>
-              )}
-            </button>
-            <Link
-              href="/artifacts"
-              aria-label={`artifacts — ${unseenArts} unseen`}
-              className={`oz-k sm ${unseenArts > 0 ? 'text-[var(--oz-text)]' : ''}`}
-            >
-              <LineIcon name="artifact" size={15} />
-              {unseenArts > 0 && (
-                <span data-testid="artifact-badge" className="oz-badge">
-                  {unseenArts}
-                </span>
-              )}
-            </Link>
-            <button
-              onClick={load}
-              aria-label="refresh sessions"
-              className={`oz-k sm ${loading ? 'ok' : ''}`}
-            >
-              {loading ? '…' : 'refresh'}
-            </button>
-          </div>
-        </header>
-
-        {/* the tree, once, as a quiet band — one thought walks it at a time
-            while something works; it falls still when nothing does. The chip
-            in its corner taps to a working-only list, again to clear (11-23);
-            with the filter on the band's square goes amber — a held state. */}
-        <figure
-          className={`oz-band oz-ygg -mx-3 mb-2.5 ${working ? 'live' : ''} ${branchWorking ? 'walk' : ''}`}
-          data-shared={branchWorking && rootsWorking ? '' : undefined}
-          aria-label={working ? `your box — ${working} working` : 'your box — nothing working'}
-        >
-          <YggTree viewBox={BAND_VIEWBOX} slice />
-          <button
-            type="button"
-            onClick={() => working > 0 && setOnlyWorking((v) => !v)}
-            aria-pressed={onlyWorking}
-            aria-label={
-              working
-                ? `${working} working — ${onlyWorking ? 'show every session' : 'show only the working'}`
-                : 'your box — nothing working'
-            }
-            data-testid="working-filter"
-            className={`oz-cap ${onlyWorking ? 'on' : ''}`}
-          >
-            <i />
-            {working ? `${working} working` : 'all quiet'}
-          </button>
-        </figure>
+        {/* the wordmark (the way into settings), the roots, the artifact runestone (it counts
+            what you haven't seen), refresh — then the tree as a quiet band. Both are the home
+            screen's parts every computer's own page is built from (components/app/home-parts) */}
+        <HomeHead
+          title="BIFROST"
+          settingsHref="/settings"
+          artifactsHref="/artifacts"
+          unseen={unseenArts}
+          joins={pendingJoins}
+          loading={loading}
+          onRoots={() => setRootsOpen(true)}
+          onRefresh={load}
+        />
+        <HomeBand
+          name="your box"
+          working={working}
+          walk={branchWorking}
+          shared={branchWorking && rootsWorking}
+          only={onlyWorking}
+          onToggle={() => setOnlyWorking((v) => !v)}
+        />
 
         <div className="mb-2 flex items-stretch gap-1.5">
           <button
