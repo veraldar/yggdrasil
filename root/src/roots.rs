@@ -243,31 +243,16 @@ fn update_snapshot(st: &AppState, name: &str, f: impl FnOnce(&mut Value)) {
 /// Records a fresh `GET /root` answer from peer `name` in memory and in `data/roots/<name>.json`.
 pub fn record_peer_root(st: &AppState, name: &str, at: u64, v: &Value) {
     st.config.peers.seen.lock().unwrap().insert(name.to_string(), (at, v.clone()));
-    let mut hand_over = None;
     update_snapshot(st, name, |snap| {
         snap["name"] = json!(name);
         snap["seen"] = json!(at);
-        // a world home keeps for this root (`theme_held`, put_peer_theme): the root says nothing
-        // about worlds, or — its brain was updated since — none was picked on it yet
-        let held = snap["theme_held"] == true && snap["theme"].as_str().is_some_and(is_valid_theme);
-        match v["theme_rev"].as_u64() {
-            // a world was picked on the root itself: it owns its world, home's copy ends
-            Some(rev) if held && rev > 0 => clear_held(snap),
-            // its brain knows worlds now and has none of its own: it gets the one kept for it
-            Some(_) if held => hand_over = snap["theme"].as_str().map(String::from),
-            _ => {}
+        if let Some(t) = v["theme"].as_str().filter(|s| is_valid_theme(s)) {
+            snap["theme"] = json!(t);
+        } else if snap["theme"].as_str().is_none_or(|s| !is_valid_theme(s)) {
+            snap["theme"] = json!(default_theme_for(name, false));
         }
-        if snap["theme_held"] == true && held {
-            // home's kept pick stays what the tree shows
-        } else {
-            if let Some(t) = v["theme"].as_str().filter(|s| is_valid_theme(s)) {
-                snap["theme"] = json!(t);
-            } else if snap["theme"].as_str().is_none_or(|s| !is_valid_theme(s)) {
-                snap["theme"] = json!(default_theme_for(name, false));
-            }
-            if let Some(rev) = v["theme_rev"].as_u64() {
-                snap["theme_rev"] = json!(rev);
-            }
+        if let Some(rev) = v["theme_rev"].as_u64() {
+            snap["theme_rev"] = json!(rev);
         }
         if v["hardware"].is_object() {
             snap["hardware"] = v["hardware"].clone();
@@ -285,83 +270,6 @@ pub fn record_peer_root(st: &AppState, name: &str, at: u64, v: &Value) {
         if v["profiles"].is_array() && snap["roles"].is_null() {
             snap["roles"] = v["profiles"].clone();
         }
-    });
-    if let Some(theme) = hand_over {
-        hand_over_theme(st, name, theme);
-    }
-}
-
-fn clear_held(snap: &mut Value) {
-    if let Some(o) = snap.as_object_mut() {
-        o.remove("theme_held");
-    }
-}
-
-/// The world `name` wears and how often one was picked for it (0: nobody picked, the world is
-/// only its name-hashed default). `live` is the root's own `GET /root` answer, `snap` home's
-/// snapshot of it. A root whose brain is older than `PUT /root/theme` names no world: the pick
-/// home keeps for it (`theme_held`) is its world — until a world is picked on the root itself.
-fn peer_look(name: &str, live: &Value, snap: Option<&Value>) -> (String, u64) {
-    let snap_theme = snap.and_then(|s| s["theme"].as_str()).filter(|t| is_valid_theme(t));
-    let snap_rev = snap.and_then(|s| s["theme_rev"].as_u64());
-    if snap.is_some_and(|s| s["theme_held"] == true) && live["theme_rev"].as_u64().unwrap_or(0) == 0 {
-        if let Some(t) = snap_theme {
-            return (t.to_string(), snap_rev.unwrap_or(1).max(1));
-        }
-    }
-    let theme = live["theme"].as_str().filter(|t| is_valid_theme(t)).or(snap_theme).unwrap_or_else(|| default_theme_for(name, false));
-    (theme.to_string(), live["theme_rev"].as_u64().or(snap_rev).unwrap_or(0))
-}
-
-/// Home keeps `theme` as `name`'s world itself (`data/roots/<name>.json`): that root's brain
-/// has no `PUT /root/theme` yet. Counted like any pick (`theme_rev` > 0), so the tree shows it.
-fn hold_theme(st: &AppState, name: &str, theme: &str) -> u64 {
-    let mut rev = 1;
-    update_snapshot(st, name, |snap| {
-        rev = snap["theme_rev"].as_u64().unwrap_or(0).saturating_add(1);
-        snap["theme"] = json!(theme);
-        snap["theme_rev"] = json!(rev);
-        snap["theme_held"] = json!(true);
-    });
-    rev
-}
-
-/// A root whose brain was updated gets the world home kept for it, once: from then on it owns
-/// it (`data/root.json` there). One attempt at a time per root; a failure is tried again at the
-/// next answer of that root.
-fn hand_over_theme(st: &AppState, name: &str, theme: String) {
-    static BUSY: std::sync::Mutex<Vec<(String, String)>> = std::sync::Mutex::new(Vec::new());
-    let Ok(rt) = tokio::runtime::Handle::try_current() else { return };
-    let key = (st.config.peers.me.clone(), name.to_string());
-    {
-        let mut busy = BUSY.lock().unwrap();
-        if busy.contains(&key) {
-            return;
-        }
-        busy.push(key.clone());
-    }
-    let st = st.clone();
-    rt.spawn(async move {
-        let name = key.1.clone();
-        match peers::call(&st, &name, "PUT", "/root/theme", Some(json!({ "theme": theme })), 10).await {
-            Ok(v) => {
-                let rev = v["rev"].as_u64().unwrap_or(1).max(1);
-                // only if home still keeps this very world (a newer pick went its own way)
-                update_snapshot(&st, &name, |snap| {
-                    if snap["theme_held"] == true && snap["theme"] == theme.as_str() {
-                        snap["theme_rev"] = json!(rev);
-                        clear_held(snap);
-                    }
-                });
-                if let Some((_, seen_val)) = st.config.peers.seen.lock().unwrap().get_mut(&name) {
-                    seen_val["theme"] = json!(theme);
-                    seen_val["theme_rev"] = json!(rev);
-                }
-                eprintln!("root {}: {name} was updated — the world kept for it ({theme}) is its own now", st.config.peers.me);
-            }
-            Err(e) => eprintln!("root {}: handing {name} its world failed: {e}", st.config.peers.me),
-        }
-        BUSY.lock().unwrap().retain(|k| *k != key);
     });
 }
 
@@ -381,7 +289,15 @@ pub fn health(st: &AppState) -> Vec<Value> {
             let (at, r) = seen.get(name).cloned().unwrap_or((0, Value::Null));
             let snap = snaps.get(name);
             let hw = if r["hardware"].is_object() { &r["hardware"] } else if let Some(s) = snap { &s["hardware"] } else { &Value::Null };
-            let (theme, theme_rev) = peer_look(name, &r, snap);
+            let theme = r["theme"]
+                .as_str()
+                .filter(|t| is_valid_theme(t))
+                .or_else(|| snap.and_then(|s| s["theme"].as_str()).filter(|t| is_valid_theme(t)))
+                .unwrap_or_else(|| default_theme_for(name, false));
+            let theme_rev = r["theme_rev"]
+                .as_u64()
+                .or_else(|| snap.and_then(|s| s["theme_rev"].as_u64()))
+                .unwrap_or(0);
             let seen_ms = if at > 0 { at } else { snap.and_then(|s| s["seen"].as_u64()).unwrap_or(0) };
             let reachable = at > 0 && now.saturating_sub(at) < 180_000 && failed.get(name).is_none_or(|f| *f < at);
             let models: Vec<&str> = if let Some(arr) = r["models"].as_array() {
@@ -1025,7 +941,7 @@ pub async fn put_peer_theme(
             Err(e) => err(StatusCode::BAD_REQUEST, &e),
         };
     }
-    match peers::call_full(&st, &name, "PUT", "/root/theme", Some(json!({ "theme": theme })), 10).await {
+    match peers::call(&st, &name, "PUT", "/root/theme", Some(json!({ "theme": theme })), 10).await {
         Ok(v) => {
             let rev = v["rev"].as_u64().unwrap_or(1);
             if let Some((_, seen_val)) = st.config.peers.seen.lock().unwrap().get_mut(&name) {
@@ -1035,28 +951,12 @@ pub async fn put_peer_theme(
             update_snapshot(&st, &name, |snap| {
                 snap["theme"] = json!(theme);
                 snap["theme_rev"] = json!(rev);
-                clear_held(snap);
             });
             publish(&st, "root.updated", json!({ "root": name, "theme": theme, "rev": rev }));
             Json(json!({ "root": name, "theme": theme, "rev": rev })).into_response()
         }
-        // that computer's brain is from before PUT /root/theme (the owner's debian-box, 11-24:
-        // every pick answered 502 "root debian-box: 404 Not Found"): home keeps the pick for it
-        // and the tree shows it; the root gets it once its brain is updated (record_peer_root)
-        Err(e) if e.no_route() => {
-            let rev = hold_theme(&st, &name, theme);
-            eprintln!("root {}: {name} has no PUT /root/theme (an older brain) — its world {theme} is kept here", st.config.peers.me);
-            publish(&st, "root.updated", json!({ "root": name, "theme": theme, "rev": rev }));
-            Json(json!({ "root": name, "theme": theme, "rev": rev, "held": true })).into_response()
-        }
-        Err(e) => err(StatusCode::BAD_GATEWAY, &e.msg),
+        Err(e) => err(StatusCode::BAD_GATEWAY, &e),
     }
-}
-
-/// What a save answers when `name`'s brain is too old to take it: one plain line, never the
-/// router's bare 404.
-fn outdated(name: &str) -> Response {
-    (StatusCode::CONFLICT, Json(json!({ "error": format!("{name} runs an older version: update it to change this"), "outdated": true }))).into_response()
 }
 
 /// `GET /root/{name}/settings` — theme, hardware, models, roles and engines of `name` (live when
@@ -1108,7 +1008,12 @@ pub async fn get_settings(State(st): State<AppState>, Path(name): Path<String>) 
             }
         });
         let snap = st.config.peers.snapshots.lock().unwrap().get(&name).cloned().unwrap_or(Value::Null);
-        let (theme, theme_rev) = peer_look(&name, &v, Some(&snap));
+        let theme = v["theme"]
+            .as_str()
+            .filter(|t| is_valid_theme(t))
+            .or_else(|| snap["theme"].as_str().filter(|t| is_valid_theme(t)))
+            .unwrap_or_else(|| default_theme_for(&name, false));
+        let theme_rev = v["theme_rev"].as_u64().or_else(|| snap["theme_rev"].as_u64()).unwrap_or(0);
         let models: Vec<String> = v["models"]
             .as_array()
             .into_iter()
@@ -1130,14 +1035,17 @@ pub async fn get_settings(State(st): State<AppState>, Path(name): Path<String>) 
         .into_response();
     }
     let snap = st.config.peers.snapshots.lock().unwrap().get(&name).cloned().unwrap_or(Value::Null);
-    let (theme, theme_rev) = peer_look(&name, &Value::Null, Some(&snap));
+    let theme = snap["theme"]
+        .as_str()
+        .filter(|t| is_valid_theme(t))
+        .unwrap_or_else(|| default_theme_for(&name, false));
     Json(json!({
         "root": name,
         "home": false,
         "reachable": false,
         "seen": snap["seen"].as_u64(),
         "theme": theme,
-        "theme_rev": theme_rev,
+        "theme_rev": snap["theme_rev"].as_u64().unwrap_or(0),
         "hardware": if snap["hardware"].is_object() { snap["hardware"].clone() } else { json!({}) },
         "models": if snap["models"].is_array() { snap["models"].clone() } else { json!([]) },
         "roles": if snap["roles"].is_array() { snap["roles"].clone() } else { json!([]) },
@@ -1163,7 +1071,7 @@ pub async fn put_root_agent(
     if !peers::valid_id(&agent) {
         return err(StatusCode::BAD_REQUEST, "bad role name");
     }
-    match peers::call_full(&st, &name, "PUT", &format!("/agent/{agent}"), Some(body), 10).await {
+    match peers::call(&st, &name, "PUT", &format!("/agent/{agent}"), Some(body), 10).await {
         Ok(v) => {
             if let Ok(roles) = peers::call(&st, &name, "GET", "/agent", None, 5).await {
                 if roles.is_array() {
@@ -1172,9 +1080,8 @@ pub async fn put_root_agent(
             }
             Json(v).into_response()
         }
-        Err(e) if e.no_route() => outdated(&name),
-        Err(e) if e.status == Some(400) => err(StatusCode::BAD_REQUEST, &e.msg),
-        Err(e) => err(StatusCode::BAD_GATEWAY, &e.msg),
+        Err(e) if e.contains(" 400 ") => err(StatusCode::BAD_REQUEST, &e),
+        Err(e) => err(StatusCode::BAD_GATEWAY, &e),
     }
 }
 
@@ -1195,7 +1102,7 @@ pub async fn put_root_engine(
     if !peers::valid_id(&engine) {
         return err(StatusCode::BAD_REQUEST, "bad engine name");
     }
-    match peers::call_full(&st, &name, "PUT", &format!("/engine/{engine}"), Some(body), 10).await {
+    match peers::call(&st, &name, "PUT", &format!("/engine/{engine}"), Some(body), 10).await {
         Ok(v) => {
             if let Ok(engines) = peers::call(&st, &name, "GET", "/engine", None, 5).await {
                 if engines.is_array() {
@@ -1204,10 +1111,8 @@ pub async fn put_root_engine(
             }
             Json(v).into_response()
         }
-        // a brain from before the engines (11-22) has no such route
-        Err(e) if e.no_route() => outdated(&name),
-        Err(e) if e.status == Some(400) => err(StatusCode::BAD_REQUEST, &e.msg),
-        Err(e) => err(StatusCode::BAD_GATEWAY, &e.msg),
+        Err(e) if e.contains(" 400 ") => err(StatusCode::BAD_REQUEST, &e),
+        Err(e) => err(StatusCode::BAD_GATEWAY, &e),
     }
 }
 
@@ -1847,179 +1752,5 @@ mod tests {
         // removing lab deletes its snapshot too
         remove(&home2, "lab");
         assert!(!home2.data_dir.join("roots/lab.json").exists());
-    }
-
-    /// A root as an older brain serves it (the owner's debian-box until 11-24: a binary from
-    /// 11-20): `GET /root` names no world, there is no `PUT /root/theme` and no `/engine` — the
-    /// router's own bare 404. `updated` flips it to today's brain at the same address.
-    async fn serve_older(l: tokio::net::TcpListener, st: AppState, updated: Arc<std::sync::atomic::AtomicBool>) {
-        use std::sync::atomic::Ordering::SeqCst;
-        let (u1, u2, u3) = (updated.clone(), updated.clone(), updated);
-        let app = axum::Router::new()
-            .route(
-                "/root",
-                get(move |State(st): State<AppState>| {
-                    let u = u1.clone();
-                    async move {
-                        let mut v = json!({ "name": st.config.peers.me, "home": st.config.peers.home, "hardware": { "os": "linux", "arch": "x86_64", "cpus": 4, "mem_gb": 8 },
-                            "load": { "running": 0, "sessions": 0 }, "main": Value::Null, "models": [{ "id": "glm-5.3", "tier": "full" }], "profiles": [] });
-                        if u.load(SeqCst) {
-                            let (theme, rev) = current_look(&st);
-                            v["theme"] = json!(theme);
-                            v["theme_rev"] = json!(rev);
-                        }
-                        Json(v)
-                    }
-                }),
-            )
-            .route(
-                "/root/theme",
-                axum::routing::put(move |s: State<AppState>, h: HeaderMap, b: Json<Value>| {
-                    let u = u2.clone();
-                    async move { if u.load(SeqCst) { put_self_theme(s, h, b).await } else { StatusCode::NOT_FOUND.into_response() } }
-                }),
-            )
-            .route(
-                "/engine/{name}",
-                axum::routing::put(move |s: State<AppState>, p: Path<String>, b: Json<Value>| {
-                    let u = u3.clone();
-                    async move { if u.load(SeqCst) { crate::put_engine(s, p, b).await } else { StatusCode::NOT_FOUND.into_response() } }
-                }),
-            )
-            .route("/agent", get(crate::list_agents))
-            .route("/agent/{name}", get(crate::get_agent).put(crate::put_agent))
-            .layer(axum::middleware::from_fn_with_state(st.clone(), peers::gate))
-            .with_state(st);
-        tokio::spawn(async move { axum::serve(l, app.into_make_service_with_connect_info::<SocketAddr>()).await.unwrap() });
-    }
-
-    /// what the poll loop does with one answer of `name`
-    async fn poll(home: &AppState, name: &str) {
-        let v = peers::call(home, name, "GET", "/root", None, 5).await.unwrap();
-        record_peer_root(home, name, now_ms(), &v);
-    }
-
-    fn look_in_tree(home: &AppState, name: &str) -> (String, u64) {
-        let h = health(home);
-        let r = h.iter().find(|r| r["name"] == name).unwrap();
-        (r["theme"].as_str().unwrap().to_string(), r["theme_rev"].as_u64().unwrap())
-    }
-
-    /// Owner 11-24: every world picked for debian-box answered 502 "root debian-box: 404 Not
-    /// Found" — its brain was older than `PUT /root/theme`. A pick must work for such a root too:
-    /// home keeps it, the tree shows it (theme_rev > 0), another root keeps its own, a restart of
-    /// home keeps it, and once that root's brain is updated the pick becomes its own.
-    #[tokio::test]
-    async fn a_world_picked_for_a_root_on_an_older_brain_is_kept_by_home_then_handed_over() {
-        let ((hl, hurl), (ol, ourl), (ll, lurl)) = (bind().await, bind().await, bind().await);
-        let home = state("held-home", peers_of("home", &format!("old={ourl},lab={lurl}"), Some(TOKEN)));
-        let mk = |name: &str| {
-            let mut p = peers_of(name, &format!("home={hurl}"), Some(TOKEN));
-            p.home = Some("home".into());
-            p
-        };
-        let (old, lab) = (state("held-old", mk("old")), state("held-lab", mk("lab")));
-        for st in [&home, &old, &lab] {
-            load_look(st);
-        }
-        let updated = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        serve(hl, home.clone()).await;
-        serve(ll, lab.clone()).await;
-        serve_older(ol, old.clone(), updated.clone()).await;
-        poll(&home, "old").await;
-        poll(&home, "lab").await;
-        let lab_default = look_in_tree(&home, "lab");
-        assert_eq!(look_in_tree(&home, "old").1, 0, "nobody picked a world for it yet");
-
-        // the pick that answered 502 on 11-24: saved, counted as a pick, kept by home
-        let r = req("PUT", &format!("{hurl}/root/old/theme"), &[], Some(json!({ "theme": "terminus" }))).await;
-        assert_eq!(r.0, 200, "{:?}", r.1);
-        assert_eq!((r.1["theme"].as_str(), r.1["rev"].as_u64(), r.1["held"].as_bool()), (Some("terminus"), Some(1), Some(true)));
-        assert_eq!(look_in_tree(&home, "old"), ("terminus".into(), 1));
-        assert!(!old.data_dir.join("root.json").exists(), "the older root itself was not touched");
-        let s = req("GET", &format!("{hurl}/root/old/settings"), &[], None).await;
-        assert_eq!((s.1["theme"].as_str(), s.1["theme_rev"].as_u64(), s.1["reachable"].as_bool()), (Some("terminus"), Some(1), Some(true)));
-        // that root only: lab keeps its own (unpicked) world, home its own
-        assert_eq!(look_in_tree(&home, "lab"), lab_default);
-        assert_eq!(current_look(&home), ("aether".into(), 0));
-        // an unknown world is refused as for any root
-        assert_eq!(req("PUT", &format!("{hurl}/root/old/theme"), &[], Some(json!({ "theme": "neon" }))).await.0, 400);
-
-        // picked again; the root's next answers (no world in them) do not undo it
-        let r = req("PUT", &format!("{hurl}/root/old/theme"), &[], Some(json!({ "theme": "drift" }))).await;
-        assert_eq!((r.0, r.1["rev"].as_u64()), (200, Some(2)));
-        poll(&home, "old").await;
-        assert_eq!(look_in_tree(&home, "old"), ("drift".into(), 2));
-
-        // an engine on a brain from before the engines: one plain line, not the router's 404
-        let e = req("PUT", &format!("{hurl}/root/old/engine/claude"), &[], Some(json!({ "model": "opus" }))).await;
-        assert_eq!(e.0, 409, "{:?}", e.1);
-        assert_eq!(e.1["error"], "old runs an older version: update it to change this");
-        assert_eq!(e.1["outdated"], true);
-        // a role saves there as on any root
-        let a = req("PUT", &format!("{hurl}/root/old/agent/lead"), &[], Some(json!({ "harness": "claude" }))).await;
-        assert_eq!(a.0, 200, "{:?}", a.1);
-        assert_eq!(old.config.profiles.read().unwrap().get("lead").unwrap().harness.as_deref(), Some("claude"));
-
-        // home restarts while that root is off: the kept pick is still its world
-        let home2 = state("held-home-restart", peers_of("home", "old=http://127.0.0.1:1", Some(TOKEN)));
-        std::fs::create_dir_all(home2.data_dir.join("roots")).unwrap();
-        std::fs::copy(home.data_dir.join("roots/old.json"), home2.data_dir.join("roots/old.json")).unwrap();
-        load_snapshots(&home2);
-        assert_eq!(look_in_tree(&home2, "old"), ("drift".into(), 2));
-
-        // that root's brain is updated: its next answer names a world nobody picked there, so it
-        // is handed the kept one and owns it from then on
-        updated.store(true, std::sync::atomic::Ordering::SeqCst);
-        poll(&home, "old").await;
-        assert_eq!(look_in_tree(&home, "old").0, "drift", "never the root's unpicked default in between");
-        for _ in 0..100 {
-            if current_look(&old) == ("drift".into(), 1) && home.config.peers.snapshots.lock().unwrap()["old"]["theme_held"].is_null() {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-        assert_eq!(current_look(&old), ("drift".into(), 1));
-        assert!(old.data_dir.join("root.json").exists());
-        assert!(home.config.peers.snapshots.lock().unwrap()["old"]["theme_held"].is_null());
-        poll(&home, "old").await;
-        assert_eq!(look_in_tree(&home, "old"), ("drift".into(), 1));
-
-        // from now on a pick goes to the root itself, as for any root on today's brain
-        let r = req("PUT", &format!("{hurl}/root/old/theme"), &[], Some(json!({ "theme": "control" }))).await;
-        assert_eq!((r.0, r.1["rev"].as_u64(), r.1["held"].is_null()), (200, Some(2), true), "{:?}", r.1);
-        assert_eq!(current_look(&old), ("control".into(), 2));
-        assert_eq!(look_in_tree(&home, "old"), ("control".into(), 2));
-        let e = req("PUT", &format!("{hurl}/root/old/engine/claude"), &[], Some(json!({ "model": "opus" }))).await;
-        assert_eq!(e.0, 200, "{:?}", e.1);
-    }
-
-    /// A world picked on the root itself (its brain updated, then someone chose there) wins over
-    /// the one home kept for it: the root owns its world.
-    #[test]
-    fn a_world_picked_on_the_root_itself_ends_the_one_home_kept() {
-        let home = state("held-wins", peers_of("home", "old=http://127.0.0.1:1", Some(TOKEN)));
-        record_peer_root(&home, "old", now_ms(), &json!({ "name": "old" }));
-        assert_eq!(hold_theme(&home, "old", "drift"), 1);
-        assert_eq!(look_in_tree(&home, "old"), ("drift".into(), 1));
-        record_peer_root(&home, "old", now_ms(), &json!({ "name": "old", "theme": "control", "theme_rev": 3 }));
-        assert_eq!(look_in_tree(&home, "old"), ("control".into(), 3));
-        assert!(home.config.peers.snapshots.lock().unwrap()["old"]["theme_held"].is_null());
-        // and a root that was never held follows its own answers as before
-        record_peer_root(&home, "old", now_ms(), &json!({ "name": "old", "theme": "utopia", "theme_rev": 4 }));
-        assert_eq!(look_in_tree(&home, "old"), ("utopia".into(), 4));
-    }
-
-    #[test]
-    fn only_a_bare_404_or_405_means_the_root_has_no_such_route() {
-        let e = |status: Option<u16>, body: &str| peers::CallErr { status, body: body.into(), msg: String::new() };
-        assert!(e(Some(404), "").no_route());
-        assert!(e(Some(404), " \n").no_route());
-        assert!(e(Some(405), "").no_route());
-        // a handler that says "not found" names what: the route is there
-        assert!(!e(Some(404), r#"{"error":"unknown engine nope"}"#).no_route());
-        assert!(!e(Some(400), "").no_route());
-        assert!(!e(Some(502), "").no_route());
-        assert!(!e(None, "").no_route());
     }
 }
