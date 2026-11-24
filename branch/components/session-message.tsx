@@ -255,6 +255,8 @@ export function SessionMessage({
     <div
       ref={swipeRef}
       data-mi={mi}
+      // the message's id: the transcript keeps a scrolled-up reader's place by it
+      data-mid={m.id}
       style={{ touchAction: 'pan-y' }}
       data-from={isUser ? (m.from ? m.from.session : m.auto ? 'auto' : 'you') : undefined}
       className={`scroll-mt-24 text-[13.5px] leading-relaxed break-words ${hit ? 'oz-hit' : ''} ${m.internal ? 'oz-internal' : ''} ${isUser && m.from ? 'oz-from' : ''} ${isUser && m.auto && !m.from ? 'oz-auto' : ''}`}

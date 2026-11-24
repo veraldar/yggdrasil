@@ -4,6 +4,7 @@ import {
   type RefObject,
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -17,6 +18,7 @@ import { ContextSheet } from '@/components/context-sheet';
 import { type Msg, SessionMessage, senderName, userProse } from '@/components/session-message';
 import { MessageHistory } from '@/components/message-history';
 import { useSwipeX } from '@/lib/use-swipe-x';
+import { type Anchor, anchorShift, atBottom, lastKey, msgKey, pickAnchor } from '@/lib/scroll-follow';
 import { ErrorBox } from '@/components/app/error-box';
 import {
   getSpeech,
@@ -663,6 +665,36 @@ export default function SessionView({
   // auto-scroll only while the user is parked at (or near) the bottom;
   // scrolling up to read history must not be fought by the poller
   const stickRef = useRef(true);
+  // scrolled up (owner 11-24): the reader's place, taken just before a poll swaps the list in and
+  // put back before paint — the text being read never moves, even as the 60-message window slides
+  const anchorRef = useRef<Anchor | null>(null);
+  // the newest message's key: a change while scrolled up shows the "new messages ↓" pill
+  const lastKeyRef = useRef('');
+  const [newBelow, setNewBelow] = useState(false);
+  // the transcript height at the last follow-snap: a poll that changed nothing (every poll hands
+  // over a new list) must not pull a reader a few px up back down
+  const snapHRef = useRef(0);
+  const keepPlace = () => {
+    const sc = scrollRef.current;
+    anchorRef.current = null;
+    if (!sc || stickRef.current) return;
+    const els = sc.querySelectorAll<HTMLElement>('[data-mid]');
+    anchorRef.current = pickAnchor(
+      (function* () {
+        for (const el of els) {
+          const r = el.getBoundingClientRect();
+          yield { id: el.dataset.mid || '', top: r.top, bottom: r.bottom };
+        }
+      })(),
+      sc.getBoundingClientRect().top
+    );
+  };
+  const jumpToNewest = () => {
+    const sc = scrollRef.current;
+    stickRef.current = true;
+    setNewBelow(false);
+    if (sc) sc.scrollTop = sc.scrollHeight;
+  };
 
   useEffect(() => {
     Promise.all([params, searchParams]).then(([p, sp]) => {
@@ -678,6 +710,11 @@ export default function SessionView({
       setSlug(p.slug);
       echoesRef.current = [];
       seenRef.current = 0;
+      stickRef.current = true;
+      anchorRef.current = null;
+      lastKeyRef.current = '';
+      snapHRef.current = 0;
+      setNewBelow(false);
       setLimit(60);
       // composer recall resets with the session: no history position, no
       // parked draft leaking across sessions
@@ -955,6 +992,7 @@ export default function SessionView({
           }
           // keep optimistic echoes until the server transcript catches up
           const echoes = echoesRef.current.filter((e) => !fresh.some((m) => echoLanded(e, m)));
+          keepPlace();
           setMsgs([...fresh, ...echoes]);
           try {
             if (JSON.stringify(fresh).length < 300_000) {
@@ -1008,16 +1046,39 @@ export default function SessionView({
     // everything on screen counts as read — the list drops its unread badge
     const lastT = msgs.length ? msgs[msgs.length - 1].time : 0;
     if (slug && lastT) markRead(slug, lastT);
-    if (!stickRef.current) return;
-    // hard snap (scrollIntoView races late layout from images/fonts)
-    const snap = () => {
+    const last = lastKey(msgs);
+    const arrived = !!lastKeyRef.current && !!last && last !== lastKeyRef.current;
+    lastKeyRef.current = last;
+    if (!stickRef.current) {
+      if (arrived) setNewBelow(true);
+      return;
+    }
+    // hard snap (scrollIntoView races late layout from images/fonts). Each one asks again: the
+    // reader may have scrolled up since this list landed (a late snap yanked them back down).
+    // Only for something new — a message arrived, or the transcript grew (a reply streaming in,
+    // an image laid out): a poll that changed nothing leaves the reader where they are
+    const snap = (force = false) => {
       const el = scrollRef.current;
-      if (el) el.scrollTop = el.scrollHeight;
+      if (!el || !stickRef.current) return;
+      if (!force && el.scrollHeight === snapHRef.current) return;
+      el.scrollTop = el.scrollHeight;
+      snapHRef.current = el.scrollHeight;
     };
-    snap();
-    requestAnimationFrame(snap);
-    const t = setTimeout(snap, 300);
+    snap(arrived || !snapHRef.current);
+    requestAnimationFrame(() => snap());
+    const t = setTimeout(() => snap(), 300);
     return () => clearTimeout(t);
+  }, [msgs]);
+  // scrolled up: the message the reader was on goes back to the exact spot, before paint
+  useLayoutEffect(() => {
+    const a = anchorRef.current;
+    anchorRef.current = null;
+    const sc = scrollRef.current;
+    if (!a || !sc || stickRef.current) return;
+    const el = sc.querySelector<HTMLElement>(`[data-mid="${CSS.escape(a.id)}"]`);
+    if (!el) return;
+    const shift = anchorShift(a, el.getBoundingClientRect().top - sc.getBoundingClientRect().top);
+    if (Math.abs(shift) >= 1) sc.scrollTop += shift;
   }, [msgs]);
   // the full log follows the bottom the same way while you sit there
   useEffect(() => {
@@ -3233,7 +3294,8 @@ export default function SessionView({
         ref={scrollRef}
         onScroll={(e) => {
           const el = e.currentTarget;
-          stickRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 120;
+          stickRef.current = atBottom(el);
+          if (stickRef.current && newBelow) setNewBelow(false);
           if (el.scrollTop <= 2) void loadOlder();
         }}
         className="min-h-0 flex-1 space-y-3.5 overflow-x-hidden overflow-y-auto overscroll-contain pt-3.5 pb-2"
@@ -3252,7 +3314,7 @@ export default function SessionView({
           logMsgs?.map((m, i) => <SessionMessage key={`log${i}`} m={m} routes={routes} />)}
         {!(logOn && logMsgs) && msgs.map((m, i) => whoOn !== 'all' && writers.keys[i] !== whoOn ? null : (
           <SessionMessage
-            key={i}
+            key={msgKey(m, i)}
             m={m}
             mi={i}
             hit={searchOpen && !!query.trim() && hitSet.has(i)}
@@ -3312,6 +3374,19 @@ export default function SessionView({
               <LineIcon name="volume" size={13} /> listen
             </button>
           )}
+        {/* scrolled up and something arrived: a quiet pill at the bottom edge, tap = the newest
+            (sticky in a zero-height row: it adds nothing to the transcript's own height) */}
+        {newBelow && (
+          <div className="pointer-events-none sticky bottom-2 z-10 mt-0! flex h-0 justify-center">
+            <button
+              onClick={jumpToNewest}
+              data-testid="new-below"
+              className="oz-chip pointer-events-auto -translate-y-full bg-[var(--oz-bg)] text-[var(--oz-text)]"
+            >
+              new messages ↓
+            </button>
+          </div>
+        )}
       </div>
 
       {/* swipe-history browser — fixed overlay, one message at a time */}
