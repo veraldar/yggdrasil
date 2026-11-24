@@ -8,8 +8,9 @@
  *  from that root (POST /file/artifact) and its bytes go out with the same headers a local
  *  artifact of that extension gets. No root, or the home root's own name: the local file. */
 import { NextResponse } from 'next/server';
-import { readFile } from 'fs/promises';
+import { readFile, stat } from 'fs/promises';
 import path from 'path';
+import { gzipSync } from 'zlib';
 import { ARTIFACT_TYPES, resolveArtifact, safeArtifactName } from '@/lib/artifacts';
 import { ROOT_RE } from '@/lib/file-ref';
 import { ocFetch, ocRaw } from '@/lib/oc';
@@ -29,6 +30,36 @@ async function homeRoot(): Promise<string | null> {
   return name;
 }
 
+/** gzipped copy, kept until the file changes (first-open fix 2, 11-24): the
+ *  phone asks for text artifacts with Accept-Encoding: gzip and got raw bytes
+ *  (measured 11-24) — md shrinks 51–58%, html 26–67%. Cache key: name+mtime+size
+ *  from the entry the gallery lists, so a rewrite invalidates it; caps: only
+ *  text-ish types, and files small enough that gzipSync stays off the event
+ *  loop's critical path (bigger text would stream better uncompressed than
+ *  block the app). */
+const GZIP_MAX = 512 * 1024;
+const gzCache = new Map<string, { at: string; bytes: Uint8Array }>();
+
+function gzipFor(
+  req: Request,
+  name: string,
+  type: string,
+  raw: Uint8Array,
+  tag: string
+): Uint8Array | null {
+  if (!/(^|; )gzip(;|$)/.test(req.headers.get('accept-encoding') || '')) return null;
+  if (!type.startsWith('text/') && type !== 'application/json' && type !== 'application/xml')
+    return null;
+  if (raw.length > GZIP_MAX || raw.length < 1024) return null; // under 1 KB the framing eats the win
+  const key = `${name}:${tag}`;
+  const hit = gzCache.get(key);
+  if (hit && hit.at === tag) return hit.bytes;
+  const bytes = gzipSync(raw, { level: 6 });
+  if (gzCache.size > 64) gzCache.clear(); // simple bound: 64 live artifacts is plenty
+  gzCache.set(key, { at: tag, bytes });
+  return bytes;
+}
+
 /** One artifact's answer, wherever its bytes came from (local file or another root). */
 async function serve(
   req: Request,
@@ -36,7 +67,8 @@ async function serve(
   type: string,
   bytes: () => Promise<Uint8Array>,
   stream: (() => ReadableStream<Uint8Array>) | null,
-  source: string
+  source: string,
+  tag = `${name}:${source}`
 ): Promise<Response> {
   // top-level navigation (address bar / new tab / gallery corner button):
   // md renders as a phone-readable page, other text wraps raw in the
@@ -85,6 +117,18 @@ async function serve(
       headers: { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' },
     });
   }
+  const gz = stream ? null : gzipFor(req, name, type, await bytes(), tag);
+  if (gz) {
+    return new Response(new Uint8Array(gz).buffer as ArrayBuffer, {
+      headers: {
+        'Content-Type': type,
+        'Cache-Control': 'no-store',
+        'Content-Encoding': 'gzip',
+        'X-Artifact-Source': source,
+        ...(html && doc ? { 'Content-Security-Policy': 'sandbox' } : {}),
+      },
+    });
+  }
   return new Response(stream ? stream() : new Uint8Array(await bytes()), {
     headers: {
       'Content-Type': type,
@@ -92,7 +136,8 @@ async function serve(
       'Cache-Control': 'no-store',
       'X-Artifact-Source': source,
       // an html page opened on its own (gallery tap, new tab) renders
-      // as sandboxed as the chat's frame (sandbox=""): no scripts, no
+      // as sandboxed as the chat's frame (sandbox="" — allow-same-origin
+      // in the app's own frames, 11-24): no scripts, no
       // access to the app's origin
       ...(html && doc ? { 'Content-Security-Policy': 'sandbox' } : {}),
     },
@@ -142,7 +187,10 @@ export async function GET(req: Request, ctx: { params: Promise<{ name: string }>
   // that never existed, 10-24 /api/artifact/the-tree-film)
   if (!ext) {
     return NextResponse.json(
-      { error: 'not found — artifact names carry their extension (the door films: door-tree.html, far-vision.html)' },
+      {
+        error:
+          'not found — artifact names carry their extension (the door films: door-tree.html, far-vision.html)',
+      },
       { status: 404 }
     );
   }
@@ -160,7 +208,9 @@ export async function GET(req: Request, ctx: { params: Promise<{ name: string }>
   if (hit) {
     try {
       const data = await readFile(hit.file);
-      return await serve(req, name, hit.type, async () => data, null, hit.source);
+      const st = await stat(hit.file).catch(() => null);
+      const tag = st ? `${st.mtimeMs}:${st.size}` : `${data.length}`;
+      return await serve(req, name, hit.type, async () => data, null, hit.source, tag);
     } catch {
       /* raced a delete */
     }

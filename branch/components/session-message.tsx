@@ -81,13 +81,36 @@ function htmlBlocks(text: string): string[] {
 const VIEWER_KIND: Record<string, 'html' | 'md' | 'text' | 'pdf' | 'audio'> = {
   html: 'html',
   md: 'md',
-  txt: 'text', json: 'text', csv: 'text', log: 'text', xml: 'text',
-  yaml: 'text', yml: 'text', toml: 'text', ini: 'text', conf: 'text',
-  css: 'text', js: 'text', mjs: 'text', ts: 'text', tsx: 'text', jsx: 'text',
-  py: 'text', sh: 'text', rb: 'text', go: 'text', rs: 'text', java: 'text',
-  c: 'text', h: 'text', cpp: 'text', diff: 'text', patch: 'text',
+  txt: 'text',
+  json: 'text',
+  csv: 'text',
+  log: 'text',
+  xml: 'text',
+  yaml: 'text',
+  yml: 'text',
+  toml: 'text',
+  ini: 'text',
+  conf: 'text',
+  css: 'text',
+  js: 'text',
+  mjs: 'text',
+  ts: 'text',
+  tsx: 'text',
+  jsx: 'text',
+  py: 'text',
+  sh: 'text',
+  rb: 'text',
+  go: 'text',
+  rs: 'text',
+  java: 'text',
+  c: 'text',
+  h: 'text',
+  cpp: 'text',
+  diff: 'text',
+  patch: 'text',
   pdf: 'pdf',
-  wav: 'audio', mp3: 'audio',
+  wav: 'audio',
+  mp3: 'audio',
 };
 
 function artifactRefs(text: string): { src: string; kind: string }[] {
@@ -130,7 +153,10 @@ function ArtifactView({ src, kind }: { src: string; kind: string }) {
   if (kind === 'html') {
     return (
       <iframe
-        sandbox=""
+        // allow-same-origin (11-24): the load must ride the pinned channel —
+        // a fully sandboxed iframe is opaque-origin, invisible to sw.js, and
+        // went straight to the edge relay. allow-scripts stays off.
+        sandbox="allow-same-origin"
         src={src}
         title={name}
         className="mt-1 h-64 w-full border border-[var(--oz-border)] bg-white"
@@ -142,12 +168,7 @@ function ArtifactView({ src, kind }: { src: string; kind: string }) {
   }
   if (kind === 'pdf') {
     return (
-      <a
-        href={src}
-        target="_blank"
-        rel="noreferrer"
-        className="oz-chip mt-1 text-[var(--oz-info)]"
-      >
+      <a href={src} target="_blank" rel="noreferrer" className="oz-chip mt-1 text-[var(--oz-info)]">
         <LineIcon name="artifact" size={13} />
         {name} — tap to view
       </a>
@@ -293,7 +314,9 @@ export function SessionMessage({
           </span>
         )}
         {stamp && <time>{stamp}</time>}
-        {queued && <span className="oz-breathe text-[10px] text-[var(--oz-success)]">● queued</span>}
+        {queued && (
+          <span className="oz-breathe text-[10px] text-[var(--oz-success)]">● queued</span>
+        )}
       </div>
       {isUser ? (
         fileChunks(m.text).map((c, i) =>
@@ -302,10 +325,7 @@ export function SessionMessage({
               <Marked text={c.body} q={q} />
             </span>
           ) : (
-            <details
-              key={i}
-              className="oz-box my-1 px-2 py-1 text-xs"
-            >
+            <details key={i} className="oz-box my-1 px-2 py-1 text-xs">
               <summary className="flex cursor-pointer items-center gap-1.5 text-[var(--oz-dim)]">
                 <LineIcon name="attach" size={11} />
                 {c.name}
@@ -331,13 +351,11 @@ export function SessionMessage({
       ) : null}
 
       {/* html blocks render inline by default (sandbox="" — no scripts, no
-          forms, no same-origin); tap toggles the raw code view */}
+          forms, no origin: srcDoc carries its own bytes, nothing to tunnel);
+          tap toggles the raw code view */}
       {htmls.map((src, i) => (
         <div key={`h${i}`} className="mt-1">
-          <button
-            onClick={() => setRawIdx(rawIdx === i ? -1 : i)}
-            className="oz-k sm"
-          >
+          <button onClick={() => setRawIdx(rawIdx === i ? -1 : i)} className="oz-k sm">
             {rawIdx === i ? 'show rendered' : 'show code'}
           </button>
           {rawIdx === i ? (

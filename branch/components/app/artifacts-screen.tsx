@@ -15,7 +15,6 @@
  *  — the same page, its list from GET /api/roots/<name>/artifacts, its files fetched from that
  *  computer (`?root=`), back to that computer's own page. A computer that is off keeps its
  *  last known list, greyed: nothing opens. */
-
 import { useCallback, useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
 import { Streamdown } from 'streamdown';
@@ -108,12 +107,7 @@ function Viewer({ file, src }: { file: Entry; src: string }) {
   }
   if (kind === 'pdf') {
     return (
-      <a
-        href={src}
-        target="_blank"
-        rel="noreferrer"
-        className="oz-chip text-[var(--oz-info)]"
-      >
+      <a href={src} target="_blank" rel="noreferrer" className="oz-chip text-[var(--oz-info)]">
         <LineIcon name="artifact" size={13} />
         {file.name} — tap to view
       </a>
@@ -128,7 +122,9 @@ function Viewer({ file, src }: { file: Entry; src: string }) {
           <Streamdown>{body}</Streamdown>
         </div>
       ) : (
-        <pre className="whitespace-pre-wrap break-words text-xs text-[var(--oz-text)]/85">{body}</pre>
+        <pre className="text-xs break-words whitespace-pre-wrap text-[var(--oz-text)]/85">
+          {body}
+        </pre>
       )}
     </div>
   );
@@ -138,19 +134,26 @@ function Viewer({ file, src }: { file: Entry; src: string }) {
  *  iframe, scaled into a 3:2 card (top-left corner at 25%). Lazy —
  *  offscreen cards don't load their page until scrolled to. The iframe is
  *  pointer-transparent: a thumbnail must never steal a scroll — on the
- *  phone the embedded page would swallow the swipe and scroll itself. */
+ *  phone the embedded page would swallow the swipe and scroll itself.
+ *
+ *  sandbox="allow-same-origin" (first-open fix, 11-24): a fully sandboxed
+ *  iframe is an opaque origin, no service worker controls it, and its
+ *  request bypassed the pinned channel straight to the edge relay (measured:
+ *  api.artifact ran 1032 edge vs 196 tunnel while every other route rode the
+ *  tunnel). Scripts stay off — allow-scripts is a separate flag — but the
+ *  document is same-origin, so sw.js carries its load end-to-end. */
 function HtmlThumb({ name, src }: { name: string; src: string }) {
   return (
     <div className="relative aspect-[3/2] w-full overflow-hidden bg-[var(--oz-surface-hover)]">
       <iframe
-        sandbox=""
+        sandbox="allow-same-origin"
         loading="lazy"
         scrolling="no"
         aria-hidden="true"
         tabIndex={-1}
         src={src}
         title={`${name} preview`}
-        className="pointer-events-none absolute left-0 top-0 h-[400%] w-[400%] origin-top-left scale-[.25] border-0 bg-white"
+        className="pointer-events-none absolute top-0 left-0 h-[400%] w-[400%] origin-top-left scale-[.25] border-0 bg-white"
       />
     </div>
   );
@@ -209,8 +212,7 @@ function Gallery({ root }: { root: string }) {
         }
       );
       const d = (await r.json()) as
-        | Entry[]
-        | { home?: boolean; reachable?: boolean; artifacts?: Entry[] };
+        Entry[] | { home?: boolean; reachable?: boolean; artifacts?: Entry[] };
       if (!r.ok) return;
       const list = Array.isArray(d) ? d : (d.artifacts ?? []);
       const isRemote = !!root && !Array.isArray(d) && d.home !== true;
@@ -401,7 +403,10 @@ function Gallery({ root }: { root: string }) {
                     className={`oz-row ${isUnread ? 'unread' : ''} ${off ? 'oz-gone' : ''}`}
                   >
                     <div className="oz-r1">
-                      <span className="w-4 shrink-0 text-center text-[var(--oz-dim)]" aria-hidden="true">
+                      <span
+                        className="w-4 shrink-0 text-center text-[var(--oz-dim)]"
+                        aria-hidden="true"
+                      >
                         {glyphOf(f.name)}
                       </span>
                       {isUnread && <span aria-label="unseen">●</span>}

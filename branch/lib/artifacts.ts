@@ -31,7 +31,10 @@ function mainTreeArtifactsDir(): string | null {
     const m = /^gitdir:\s*(.+)$/m.exec(readFileSync(path.join(root, '.git'), 'utf8'));
     if (!m) return null;
     const gitdir = path.resolve(root, m[1].trim());
-    const common = path.resolve(gitdir, readFileSync(path.join(gitdir, 'commondir'), 'utf8').trim());
+    const common = path.resolve(
+      gitdir,
+      readFileSync(path.join(gitdir, 'commondir'), 'utf8').trim()
+    );
     return path.join(path.dirname(common), 'artifacts');
   } catch {
     return null;
@@ -115,6 +118,9 @@ export const ARTIFACT_TYPES: Record<string, string> = {
   '.pdf': 'application/pdf',
   '.wav': 'audio/wav',
   '.mp3': 'audio/mpeg',
+  // a film a writer splits out of a page (11-24 first-open fix 1): the page
+  // links it; it serves like any other artifact — same gate, same headers
+  '.mp4': 'video/mp4',
 };
 
 export type ArtifactEntry = {
@@ -129,7 +135,10 @@ export type ArtifactEntry = {
  *  otherwise the newest write wins wherever it landed — a hand copy in the
  *  sandbox can't shadow a newer original in the main tree; a tie stays
  *  with the earlier source (local). */
-function outranks(cand: { mtime: number }, prev: { mtime: number; source: ArtifactSource }): boolean {
+function outranks(
+  cand: { mtime: number },
+  prev: { mtime: number; source: ArtifactSource }
+): boolean {
   return prev.source !== 'builtin' && cand.mtime > prev.mtime;
 }
 

@@ -1,7 +1,7 @@
 /** What an artifact is, by its extension, and the one glyph its row shows — shared by the
  *  artifacts page and a computer's artifacts tab (/roots/[root]) so both lists read alike. */
 
-export type ArtifactKind = 'image' | 'html' | 'md' | 'text' | 'pdf' | 'audio';
+export type ArtifactKind = 'image' | 'html' | 'md' | 'text' | 'pdf' | 'audio' | 'video';
 
 // prettier-ignore
 const KIND: Record<string, ArtifactKind> = {
@@ -15,6 +15,7 @@ const KIND: Record<string, ArtifactKind> = {
   c: 'text', h: 'text', cpp: 'text', diff: 'text', patch: 'text',
   pdf: 'pdf',
   wav: 'audio', mp3: 'audio',
+  mp4: 'video',
 };
 
 export function kindOf(name: string): ArtifactKind {
@@ -26,6 +27,7 @@ export function glyphOf(name: string): string {
   if (k === 'image') return '▣';
   if (k === 'html') return '▤';
   if (k === 'audio') return '♪';
+  if (k === 'video') return '♪';
   if (k === 'pdf') return '▦';
   if (k === 'md') return '¶';
   return '·';
