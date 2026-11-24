@@ -42,12 +42,12 @@ const FIELDS = ['description', 'model', 'variant', 'prompt', 'tools', 'steps', '
 const draftOf = (d: AgentDetail): Draft => ({
   description: d.description || '',
   harness: d.harness || 'root',
-  model: d.model,
-  variant: d.variant,
+  model: d.model ?? null,
+  variant: d.variant ?? null,
   prompt: d.prompt || '',
-  steps: d.steps,
-  sessions: d.sessions,
-  tools: { ...d.tools },
+  steps: d.steps ?? null,
+  sessions: Boolean(d.sessions),
+  tools: d.tools && typeof d.tools === 'object' ? { ...d.tools } : {},
   fallback: parseFallbackChain(d.fallback),
 });
 
@@ -90,7 +90,7 @@ export default function AgentEditor() {
       if (r?.ok && d) {
         setDetail(d);
         setDraft(draftOf(d));
-        setModels(d.models || []);
+        setModels(Array.isArray(d.models) ? d.models : []);
         setByHarness(d.models_by_harness || {});
         setLabels(d.model_labels || {});
         return;
@@ -126,11 +126,12 @@ export default function AgentEditor() {
 
   const h = draft?.harness || 'root';
   // the fields follow the harness picked: the brain's answer is for the saved one
+  // (older brains without `customizable` / `locked` fall back safely instead of crashing)
   const custom =
     detail && !isNew && h === (detail.harness || 'root')
-      ? detail.customizable
-      : CUSTOMIZABLE[h] || [];
-  const locked = detail?.locked || [];
+      ? (Array.isArray(detail.customizable) ? detail.customizable : CUSTOMIZABLE[h] ?? [])
+      : CUSTOMIZABLE[h] ?? [];
+  const locked = Array.isArray(detail?.locked) ? detail.locked : [];
   const shows = (f: string) => custom.includes(f) || locked.includes(f);
   const can = (f: string) => custom.includes(f) && !locked.includes(f);
   const lockNote = (f: string) => (
