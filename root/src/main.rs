@@ -83,11 +83,13 @@ mod gate;
 mod harness;
 mod peers;
 mod profiles;
+mod provider;
 mod relay;
 mod rollup;
 mod roots;
 mod tools;
 mod tree;
+mod usage;
 
 // ── TIME-AWARENESS (owner ADD to the 200k context-cap slice, 11-05) ─────────
 // Every turn carries a compact clock header to the upstream model: current
@@ -527,6 +529,29 @@ pub(crate) fn engine_of(st: &AppState, info: &Value) -> Option<harness::Kind> {
         return harness::Kind::parse(e);
     }
     profile_of(st, info).harness.as_deref().and_then(harness::Kind::parse)
+}
+
+/// The root's provider registry (provider.rs: `YGG_PROVIDERS`, default
+/// `~/.config/yggdrasil/providers.json`, + the `YGG_UPSTREAM_*` env provider), set once at boot.
+/// `None` in tests and when it could not load (the env upstream alone serves then).
+static PROVIDERS: std::sync::OnceLock<Option<provider::Providers>> = std::sync::OnceLock::new();
+
+fn providers() -> Option<&'static provider::Providers> {
+    PROVIDERS.get().and_then(Option::as_ref)
+}
+
+/// A root model id that names a provider of the registry (`mac-studio/qwen3.8-27b`,
+/// `openrouter/anthropic/claude-…`): that provider's id. The env upstream's own ids stay bare.
+fn routed_provider(model: &str) -> Option<String> {
+    let r = provider::Ref::parse(model)?;
+    let reg = providers()?.current();
+    let p = reg.provider(&r.provider)?;
+    (p.id != provider::ENV_PROVIDER && p.serves(&r.model)).then(|| p.id.clone())
+}
+
+/// A model the root engine can run: one the env upstream serves (YGG_MODELS), or a provider's.
+fn root_serves(st: &AppState, m: &str) -> bool {
+    st.config.models.iter().any(|x| x == m) || routed_provider(m).is_some()
 }
 
 /// `root` or the harness's name — the session's `engine` field.
@@ -3487,45 +3512,38 @@ impl Run {
     }
 }
 
+/// One engine a turn runs on: the engine (`None` = the root) and its model.
+#[derive(Clone, Debug, PartialEq)]
+struct Target {
+    engine: Option<harness::Kind>,
+    model: String,
+}
+
+impl Target {
+    fn show(&self) -> String {
+        format!("{}/{}", engine_word(self.engine), self.model)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 struct FallbackPlan {
-    from_engine: harness::Kind,
+    from_engine: Option<harness::Kind>,
     from_model: String,
     to_engine: Option<harness::Kind>,
     to_model: String,
     reason: String,
 }
 
-/// The trunk integrator session (P1, lead-review.md L2): pinned by deploy rules, never falls back.
-/// Recognised by its live id on omarchy, by a title opening with `P1` (the integrator package),
-/// or by naming `(integrator)` / `trunk integrator`.
-fn is_integrator_session(info: &Value) -> bool {
-    if info["id"].as_str() == Some("ses_82772a463f1a495791a851d1d3386d4c") {
-        return true;
-    }
-    let lower = info["title"].as_str().unwrap_or_default().trim().to_ascii_lowercase();
-    lower == "p1"
-        || lower.starts_with("p1 ")
-        || lower.starts_with("p1·")
-        || lower.starts_with("p1:")
-        || lower.starts_with("p1-")
-        || lower.starts_with("p1_")
-        || lower.contains("(integrator)")
-        || lower.contains("trunk integrator")
-}
-
-/// True when a session or its role is pinned and must never automatically fall back to another
-/// harness on quota exhaustion: pinned role (`agents.json`), `coordinator` / `integrator`, the
-/// trunk integrator session (P1), an explicitly pinned session (`info.pinned`), an attached
-/// terminal conversation, or a role named in `YGG_PINNED_ROLES`.
+/// True when a session must never move to another engine by itself: the coordinator (MAIN's
+/// role — owner v10: "only the coordinator never falls back"; if its engine is out, its next turn
+/// waits for the reset), a role marked `pinned`, an explicitly pinned session (`info.pinned`), a
+/// conversation continued from a terminal (it is the owner's own, in their harness), or a role
+/// named in `YGG_PINNED_ROLES`.
 fn is_pinned_for_fallback(info: &Value, prof: &profiles::Profile) -> bool {
-    if prof.pinned || matches!(prof.name.as_str(), "coordinator" | "integrator") {
+    if prof.pinned || prof.name == "coordinator" {
         return true;
     }
     if info["pinned"] == true || info["harness"]["attached"] == true {
-        return true;
-    }
-    if is_main_title(info["title"].as_str().unwrap_or_default()) || is_integrator_session(info) {
         return true;
     }
     if let Ok(extra) = std::env::var("YGG_PINNED_ROLES") {
@@ -3536,13 +3554,10 @@ fn is_pinned_for_fallback(info: &Value, prof: &profiles::Profile) -> bool {
     false
 }
 
-/// Best root model for fallback: role's explicit fallback model → role's root model → `engines.root`
-/// default → full non-flash model (e.g. `glm-5.3` over `glm-5.3-flash`) → the root's default model.
+/// Best root model for fallback: role's root model → `engines.root` default → full non-flash model
+/// (e.g. `glm-5.3` over `glm-5.3-flash`) → the root's default model.
 fn fallback_root_model(st: &AppState, prof: &profiles::Profile) -> String {
-    let served = |m: &String| st.config.models.contains(m);
-    if let Some(m) = prof.fallback_model.clone().filter(served) {
-        return m;
-    }
+    let served = |m: &String| root_serves(st, m);
     if prof.harness.is_none() {
         if let Some(m) = prof.model.clone().filter(served) {
             return m;
@@ -3565,66 +3580,169 @@ fn fallback_root_model(st: &AppState, prof: &profiles::Profile) -> String {
     st.config.model.clone()
 }
 
-/// Resolves the single fallback `(engine, model)` for `prof` when `failed` hit a hard quota:
-/// 1. Explicit `prof.fallback_harness` (`"none"` = opt out; else that engine if != `failed`).
-/// 2. The role's own default engine (`prof.harness`) when the session was running on an override
-///    engine different from the role's default.
-/// 3. The `root` engine on this same root (preferring full GLM e.g. `glm-5.3`).
-fn resolve_fallback_target(st: &AppState, prof: &profiles::Profile, failed: harness::Kind) -> Option<(Option<harness::Kind>, String)> {
-    let model_for_harness = |k: harness::Kind, preferred: Option<&str>| -> String {
-        preferred
-            .map(str::trim)
-            .filter(|m| !m.is_empty())
-            .map(String::from)
-            .or_else(|| st.config.profiles.read().unwrap().engine_model(k.name()))
-            .unwrap_or_else(|| "default".into())
-    };
-    if let Some(fb) = prof.fallback_harness.as_deref() {
-        if fb == "none" {
-            return None;
-        }
-        let fb_kind = harness::Kind::parse(fb);
-        if fb_kind != Some(failed) {
-            let model = match fb_kind {
-                None => fallback_root_model(st, prof),
-                Some(k) => model_for_harness(k, prof.fallback_model.as_deref()),
-            };
-            return Some((fb_kind, model));
-        }
-    }
+/// A harness engine's model: the one asked for, else the engine's default, else its own pick.
+fn harness_model_or_default(st: &AppState, k: harness::Kind, preferred: Option<&str>) -> String {
+    preferred
+        .map(str::trim)
+        .filter(|m| !m.is_empty())
+        .map(String::from)
+        .or_else(|| st.config.profiles.read().unwrap().engine_model(k.name()))
+        .unwrap_or_else(|| "default".into())
+}
+
+/// The AUTOMATIC fallback (a role with an empty chain — the shipped single slot): the role's own
+/// default engine when the session ran on another one, else the root (full GLM, e.g. `glm-5.3`).
+/// A root session on a root role has nothing automatic.
+fn resolve_fallback_target(st: &AppState, prof: &profiles::Profile, failed: Option<harness::Kind>) -> Option<Target> {
     let role_default = prof.harness.as_deref().and_then(harness::Kind::parse);
-    if role_default != Some(failed) {
+    if role_default != failed {
         let model = match role_default {
             None => fallback_root_model(st, prof),
-            Some(k) => model_for_harness(k, prof.model.as_deref()),
+            Some(k) => harness_model_or_default(st, k, prof.model.as_deref()),
         };
-        return Some((role_default, model));
+        return Some(Target { engine: role_default, model });
     }
-    Some((None, fallback_root_model(st, prof)))
+    failed.map(|_| Target { engine: None, model: fallback_root_model(st, prof) })
 }
 
-/// Decides whether a failed harness attempt should retry once on the role's fallback harness+model:
-/// ONLY when 0 tools ran (no work done), the failure is a hard quota error, and neither the role
-/// nor the session is pinned by deploy rules.
-fn plan_harness_fallback(st: &AppState, info: &Value, prof: &profiles::Profile, failed: harness::Kind, err: &str, tools_ran: usize) -> Option<FallbackPlan> {
-    if tools_ran > 0 || !harness::is_quota_error(err) || is_pinned_for_fallback(info, prof) {
-        return None;
+/// One chain entry as the turn runs it: a root model this root does not serve (another root's
+/// chain, a provider gone) takes the best root model instead.
+fn resolve_entry(st: &AppState, prof: &profiles::Profile, e: &profiles::FallbackEntry) -> Target {
+    match e.harness {
+        None => Target { engine: None, model: e.model.clone().filter(|m| root_serves(st, m)).unwrap_or_else(|| fallback_root_model(st, prof)) },
+        Some(k) => Target { engine: Some(k), model: harness_model_or_default(st, k, e.model.as_deref()) },
     }
-    let (to_engine, to_model) = resolve_fallback_target(st, prof, failed)?;
-    let from_model = if info["model"]["providerID"] == failed.name() {
-        info["model"]["id"].as_str().unwrap_or("default").to_string()
-    } else {
-        st.config.profiles.read().unwrap().engine_model(failed.name()).unwrap_or_else(|| "default".into())
+}
+
+/// The chain a turn walks when `from` is out: the role's own (at most 3), the automatic one when
+/// it has none, nothing when the role says `"none"`.
+fn effective_chain(st: &AppState, prof: &profiles::Profile, from: &Target) -> Vec<Target> {
+    if prof.fallback_off {
+        return Vec::new();
+    }
+    if prof.fallback_chain.is_empty() {
+        return resolve_fallback_target(st, prof, from.engine).into_iter().collect();
+    }
+    prof.fallback_chain.iter().take(profiles::FALLBACK_CAP).map(|e| resolve_entry(st, prof, e)).collect()
+}
+
+/// The engine + model a session's next turn runs on.
+fn current_target(st: &AppState, id: &str, info: &Value) -> Target {
+    let engine = engine_of(st, info);
+    let model = match engine {
+        None => session_upstream(st, id).0,
+        Some(k) => {
+            let own = if info["model"]["providerID"] == k.name() { info["model"]["id"].as_str() } else { None };
+            harness_model_or_default(st, k, own)
+        }
     };
-    Some(FallbackPlan { from_engine: failed, from_model, to_engine, to_model, reason: err.chars().take(240).collect() })
+    Target { engine, model }
 }
 
-/// Switches `id` onto the fallback engine + model so the retry (and subsequent turns) run there.
-fn apply_fallback(st: &AppState, id: &str, prof: &profiles::Profile, plan: &FallbackPlan) -> Option<Value> {
-    let to_name = engine_word(plan.to_engine);
+/// Whose plan a target spends: the harness's, the root's upstream (`root`), or a provider's
+/// (`root:<provider>`, provider.rs).
+fn usage_key(t: &Target) -> String {
+    match t.engine {
+        Some(k) => k.name().to_string(),
+        None => match routed_provider(&t.model) {
+            Some(p) => format!("root:{p}"),
+            None => "root".into(),
+        },
+    }
+}
+
+fn usage_source(st: &AppState, key: &str) -> usage::Source {
+    match key {
+        "claude" => usage::claude_source(),
+        "root" => usage::zai_source(&st.config.base_url, st.config.api_key.as_deref(), true),
+        k => match k.strip_prefix("root:").and_then(|p| providers().map(|ps| (ps.current(), p))) {
+            Some((reg, p)) => match reg.provider(p) {
+                Some(pv) => usage::zai_source(&pv.base_url, pv.key.as_deref(), false),
+                None => usage::Source::None,
+            },
+            None => usage::Source::None,
+        },
+    }
+}
+
+/// What the usage check says about `t` right now (cached numbers + quota errors seen; never waits).
+fn target_avail(st: &AppState, t: &Target) -> usage::Avail {
+    let key = usage_key(t);
+    usage::avail(&st.http, &key, &usage_source(st, &key), Some(&t.model))
+}
+
+/// Minutes east of UTC for reset times the root's upstream prints without a zone (z.ai: +08:00;
+/// `YGG_UPSTREAM_RESET_TZ` wins).
+fn root_reset_offset(st: &AppState) -> i32 {
+    if let Some(p) = providers().and_then(|ps| ps.current().provider(provider::ENV_PROVIDER).map(|p| p.reset_offset_min)) {
+        return p;
+    }
+    let b = st.config.base_url.to_ascii_lowercase();
+    if b.contains("z.ai") || b.contains("bigmodel.cn") { 8 * 60 } else { 0 }
+}
+
+/// `GET /usage` — each engine's plan as the walk sees it (harness chains A4): `{pct, resets_at,
+/// window, windows, source, out?, error?}` per engine — `claude`, `antigravity`, `opencode`,
+/// `codex`, `root` (the env upstream) and `root:<provider>` for each provider of providers.json.
+/// What is older than the cache's 5 minutes is read now (read-only calls).
+async fn get_usage(State(st): State<AppState>) -> Json<Value> {
+    let mut keys: Vec<String> = ["claude", "antigravity", "opencode", "codex", "root"].iter().map(|k| k.to_string()).collect();
+    if let Some(ps) = providers() {
+        keys.extend(ps.current().providers.iter().filter(|p| p.id != provider::ENV_PROVIDER).map(|p| format!("root:{}", p.id)));
+    }
+    let reads = keys.into_iter().map(|k| {
+        let src = usage_source(&st, &k);
+        let http = st.http.clone();
+        async move {
+            let u = usage::read(&http, &k, &src).await;
+            let row = usage::row(&k, &src, u.as_ref());
+            (k, row)
+        }
+    });
+    let rows: serde_json::Map<String, Value> = futures::future::join_all(reads).await.into_iter().collect();
+    Json(Value::Object(rows))
+}
+
+/// What one walk of the chain found.
+#[derive(Debug, PartialEq)]
+enum Walk {
+    /// take this entry; the entries passed over on the way, each with why
+    Take(Target, Vec<Value>),
+    /// every untried entry is out or nearly: one line saying so (+ each one's why)
+    AllOut(String, Vec<Value>),
+    /// no chain (`"none"`, nothing automatic, every entry tried)
+    Nothing,
+}
+
+/// The chain walk (v10): the first entry not yet tried this turn whose usage check clears (below
+/// 90%, no quota error seen — or no numbers at all) takes the turn.
+fn walk_chain(st: &AppState, prof: &profiles::Profile, from: &Target, tried: &[Target]) -> Walk {
+    let mut skipped = Vec::new();
+    let mut said = Vec::new();
+    for t in effective_chain(st, prof, from) {
+        if tried.contains(&t) {
+            continue;
+        }
+        let a = target_avail(st, &t);
+        if a.clears() {
+            return Walk::Take(t, skipped);
+        }
+        said.push(format!("{} ({})", t.show(), a.say()));
+        skipped.push(json!({ "entry": t.show(), "skipped": a.say() }));
+    }
+    if said.is_empty() {
+        return Walk::Nothing;
+    }
+    // Q5: usage is read again before every turn — the session goes on by itself once one resets
+    Walk::AllOut(format!("no fallback clears: {} — the next turn checks again", said.join("; ")), skipped)
+}
+
+/// Switches `id` onto `to` so the retry (and subsequent turns) run there.
+fn apply_fallback(st: &AppState, id: &str, prof: &profiles::Profile, to: &Target) -> Option<Value> {
+    let to_name = engine_word(to.engine);
     let updated = with_session(st, id, |s| {
         s.info["engine"] = json!(to_name);
-        match plan.to_engine {
+        match to.engine {
             None => {
                 let variant = s.info["model"]["variant"]
                     .as_str()
@@ -3635,13 +3753,13 @@ fn apply_fallback(st: &AppState, id: &str, prof: &profiles::Profile, plan: &Fall
                     .as_object()
                     .and_then(|d| d.keys().next().cloned())
                     .unwrap_or_else(|| "yggdrasil".into());
-                s.info["model"] = json!({ "id": plan.to_model, "providerID": provider, "variant": variant });
+                s.info["model"] = json!({ "id": to.model, "providerID": provider, "variant": variant });
                 if let Some(o) = s.info.as_object_mut() {
                     o.remove("harness");
                 }
             }
             Some(k) => {
-                s.info["model"] = json!({ "id": plan.to_model, "providerID": k.name() });
+                s.info["model"] = json!({ "id": to.model, "providerID": k.name() });
                 s.info["harness"] = json!({ "kind": k.name() });
             }
         }
@@ -3653,12 +3771,115 @@ fn apply_fallback(st: &AppState, id: &str, prof: &profiles::Profile, plan: &Fall
     updated
 }
 
-/// One-line system briefing for the harness/model taking over after a hard quota bounce.
-fn fallback_takeover_note(from: harness::Kind) -> String {
-    format!(
-        "Previous harness {} hit a hard quota before doing any work; you are taking over this session and its full context — continue the last request.",
-        from.name()
-    )
+/// What the turn has done so far, from its own tool parts: how many calls, the files written or
+/// edited (distinct, in order), and one short line per call.
+fn done_state(msg: &Value) -> (usize, Vec<String>, Vec<String>) {
+    let tools: Vec<&Value> = msg["parts"].as_array().into_iter().flatten().filter(|p| p["type"] == "tool").collect();
+    let mut files: Vec<String> = Vec::new();
+    let mut lines = Vec::new();
+    for p in &tools {
+        let name = p["tool"].as_str().unwrap_or("tool");
+        let input = &p["state"]["input"];
+        let path = ["file_path", "filePath", "path", "notebook_path", "TargetFile", "target_file", "AbsolutePath"].iter().find_map(|k| input[*k].as_str());
+        let low = name.to_ascii_lowercase();
+        let writes = ["edit", "write", "patch", "replace", "create"].iter().any(|w| low.contains(w));
+        if let Some(f) = path.filter(|_| writes) {
+            if !files.iter().any(|x| x == f) {
+                files.push(f.to_string());
+            }
+        }
+        let what = ["command", "file_path", "filePath", "path", "pattern", "url", "query", "CommandLine", "TargetFile"]
+            .iter()
+            .find_map(|k| input[*k].as_str())
+            .map(|w| w.lines().next().unwrap_or_default().chars().take(100).collect::<String>())
+            .unwrap_or_default();
+        lines.push(if what.is_empty() { format!("- {name}") } else { format!("- {name}: {what}") });
+    }
+    (tools.len(), files, lines)
+}
+
+/// Why the turn is moving on.
+enum Why<'a> {
+    /// the engine answered with a hard quota error
+    Quota,
+    /// the usage check before the turn: nearly or fully used
+    Usage(&'a usage::Avail),
+    /// a fallback that could not run at all (not signed in, not installed…)
+    Failed(&'a str),
+}
+
+/// The system briefing for the engine taking over: who stopped and why, and — after work was done
+/// — the done-state (steps, files, one line per step), so it continues instead of redoing.
+fn fallback_takeover_note(from: Option<harness::Kind>, why: Why, done: &(usize, Vec<String>, Vec<String>)) -> String {
+    let from = engine_word(from);
+    let (n, files, lines) = done;
+    let take = "you are taking over this session and its full context — continue the last request";
+    let head = match why {
+        Why::Quota if *n == 0 => format!("Previous harness {from} hit a hard quota before doing any work; {take}."),
+        Why::Quota => {
+            let shown = if files.is_empty() { "0".to_string() } else { format!("{} ({})", files.len(), files.join(", ")) };
+            format!("Previous harness {from} hit a hard quota mid-work (steps done: {n} tool calls, files touched: {shown}); {take}, do not redo finished steps.")
+        }
+        Why::Usage(a @ usage::Avail::Out { .. }) => {
+            let at = a.resets_at().map(|t| format!(" (resets {})", usage::short_time(t))).unwrap_or_default();
+            format!("Previous harness {from} is out of its usage limit{at}; {take}.")
+        }
+        Why::Usage(a) => format!("Previous harness {from} is at its usage limit ({}); {take}.", a.say()),
+        Why::Failed(e) => {
+            let e: String = e.lines().next().unwrap_or_default().chars().take(160).collect();
+            if *n == 0 { format!("Previous harness {from} could not run ({e}); {take}.") } else { format!("Previous harness {from} could not run ({e}); {take}, do not redo finished steps.") }
+        }
+    };
+    if *n == 0 || lines.is_empty() {
+        return head;
+    }
+    let mut shown: Vec<&str> = lines.iter().map(String::as_str).take(12).collect();
+    if lines.len() > 12 {
+        shown.push("- …");
+    }
+    format!("{head}\nDone in this turn before the switch:\n{}", shown.join("\n"))
+}
+
+/// The conversation so far, for a harness that takes a session over in a NEW conversation of its
+/// own (it has no memory of the session): the user's messages, the replies and the steps, oldest
+/// first, the newest ~24k characters. Empty when this turn's message is the first.
+fn takeover_transcript(history: &[Value], turn_id: &str) -> String {
+    let upto = history.iter().position(|m| m["info"]["id"] == turn_id).unwrap_or(history.len());
+    let mut said: Vec<String> = Vec::new();
+    for m in &history[last_compaction(&history[..upto])..upto] {
+        let role = m["info"]["role"].as_str().unwrap_or_default();
+        for p in m["parts"].as_array().into_iter().flatten() {
+            match p["type"].as_str() {
+                Some("text") | Some("compaction") => {
+                    let t = p["text"].as_str().unwrap_or_default().trim();
+                    if !t.is_empty() {
+                        said.push(format!("{}: {t}", if role == "user" { "USER" } else { "ASSISTANT" }));
+                    }
+                }
+                Some("tool") => {
+                    let (_, _, line) = done_state(&json!({ "parts": [p] }));
+                    if let Some(l) = line.first() {
+                        said.push(format!("ASSISTANT ran {}", l.trim_start_matches("- ")));
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    if said.is_empty() {
+        return String::new();
+    }
+    let mut kept: Vec<String> = Vec::new();
+    let mut n = 0;
+    for s in said.into_iter().rev() {
+        n += s.len();
+        if n > 24_000 && !kept.is_empty() {
+            break;
+        }
+        kept.push(s);
+    }
+    kept.reverse();
+    format!("<earlier_conversation>\nThis session ran on another engine until now. Its conversation so far, oldest first:\n\n{}\n</earlier_conversation>\n\n", kept.join("\n\n"))
 }
 
 /// Records which harness/engine + model actually served the turn on the session's card (non-MAIN
@@ -3746,50 +3967,128 @@ async fn run_turn(st: &AppState, id: &str, tx: &mpsc::Sender<Event>, queue_ms: u
     // engine stamped on the session, else its role's default
     let info = st.sessions.lock().unwrap().get(id).map(|s| s.info.clone()).unwrap_or(Value::Null);
     let prof = profile_of(st, &info);
-    let harness = engine_of(st, &info);
-    let mut served_engine: Option<harness::Kind> = harness;
+    // harness chains (v10): the usage check before the turn, then — when an engine runs out, even
+    // mid-work — the role's chain, one try per entry, at most 3 hops; only the coordinator (and a
+    // pinned role / session, a terminal's conversation) never moves
+    let pinned = is_pinned_for_fallback(&info, &prof);
+    let first = current_target(st, id, &info);
+    let mut served_engine: Option<harness::Kind> = first.engine;
     let mut fallback_used: Option<FallbackPlan> = None;
+    let mut fb_steps: Vec<Value> = Vec::new();
     let outcome = {
         let fut = async {
-            match harness {
-                Some(kind) => {
-                    let prompt = harness_prompt(&history, turn_id, auto_class);
-                    match harness_loop(st, id, prompt.clone(), tx, &mut run, kind, None).await {
-                        Ok(()) => Ok(()),
-                        Err(e) => {
-                            if let Some(plan) = plan_harness_fallback(st, &info, &prof, kind, &e, run.tool_count()) {
-                                eprintln!(
-                                    "FALLBACK session={id} role={} from={}/{} to={}/{} reason={}",
-                                    prof.name,
-                                    plan.from_engine.name(),
-                                    plan.from_model,
-                                    engine_word(plan.to_engine),
-                                    plan.to_model,
-                                    plan.reason.chars().take(160).collect::<String>()
-                                );
-                                apply_fallback(st, id, &prof, &plan);
-                                // clear any quota error text streamed by the bounced harness before retrying once
-                                run.text.clear();
-                                run.msg["parts"] = json!([]);
-                                run.first_delta_ms = None;
-                                run.first_token_seen = false;
-                                run.retries += 1;
-                                replace_message(st, id, &run.msg);
-                                served_engine = plan.to_engine;
-                                fallback_used = Some(plan.clone());
-                                let takeover = fallback_takeover_note(plan.from_engine);
-                                match plan.to_engine {
-                                    None => agent_loop(st, id, history, tx, &mut run, Some(&takeover)).await,
-                                    Some(fb_kind) => harness_loop(st, id, prompt, tx, &mut run, fb_kind, Some(&takeover)).await,
-                                }
-                                .map_err(|fb_err| format!("{fb_err} (fallback {}/{} after {} quota)", engine_word(plan.to_engine), plan.to_model, plan.from_engine.name()))
-                            } else {
-                                Err(e)
-                            }
+            let mut cur = first.clone();
+            let mut tried = vec![cur.clone()];
+            let mut note: Option<String> = None;
+            let mut hops = 0usize;
+            let mut first_why = "quota";
+            // moves the turn onto `to`: the session's engine, the step on record, the streamed
+            // error text gone (steps already done stay — they happened)
+            let mut take_over = |run: &mut Run, cur: &Target, to: &Target, reason: String, skipped: Vec<Value>, steps: &mut Vec<Value>| {
+                eprintln!(
+                    "FALLBACK session={id} role={} from={} to={} tools_done={} reason={}",
+                    prof.name,
+                    cur.show(),
+                    to.show(),
+                    run.tool_count(),
+                    reason.chars().take(160).collect::<String>()
+                );
+                apply_fallback(st, id, &prof, to);
+                run.text.clear();
+                if run.tool_count() == 0 {
+                    run.msg["parts"] = json!([]);
+                }
+                run.first_delta_ms = None;
+                run.first_token_seen = false;
+                run.retries += 1;
+                replace_message(st, id, &run.msg);
+                steps.extend(skipped);
+                steps.push(json!({ "from": cur.show(), "to": to.show(), "reason": reason, "tools_done": run.tool_count() }));
+                served_engine = to.engine;
+                let plan = fallback_used.get_or_insert_with(|| FallbackPlan {
+                    from_engine: cur.engine,
+                    from_model: cur.model.clone(),
+                    to_engine: to.engine,
+                    to_model: to.model.clone(),
+                    reason: reason.chars().take(240).collect(),
+                });
+                plan.to_engine = to.engine;
+                plan.to_model = to.model.clone();
+            };
+            if !pinned {
+                let a = target_avail(st, &cur);
+                if !a.clears() {
+                    match walk_chain(st, &prof, &cur, &tried) {
+                        Walk::Take(to, skipped) => {
+                            first_why = "usage";
+                            take_over(&mut run, &cur, &to, format!("usage: {}", a.say()), skipped, &mut fb_steps);
+                            note = Some(fallback_takeover_note(cur.engine, Why::Usage(&a), &done_state(&run.msg)));
+                            tried.push(to.clone());
+                            cur = to;
+                            hops += 1;
                         }
+                        // out for sure and nothing else clears: one line, no doomed run (the
+                        // next turn reads the numbers again)
+                        Walk::AllOut(line, _) if a.out() => {
+                            return Err(format!("{}: {} — {line}", cur.show(), a.say()));
+                        }
+                        // nearly used up and nothing better: it runs where it is — it may finish
+                        _ => {}
                     }
                 }
-                None => agent_loop(st, id, history, tx, &mut run, None).await,
+            }
+            loop {
+                let before = run.tool_count();
+                let r = match cur.engine {
+                    Some(kind) => {
+                        let mut prompt = harness_prompt(&history, turn_id, auto_class);
+                        if hops > 0 {
+                            // a new conversation on this harness: it gets the session's so far
+                            prompt = format!("{}{prompt}", takeover_transcript(&history, turn_id));
+                        }
+                        harness_loop(st, id, prompt, tx, &mut run, kind, note.as_deref()).await
+                    }
+                    None => agent_loop(st, id, history.clone(), tx, &mut run, note.as_deref()).await,
+                };
+                let e = match r {
+                    Ok(()) => {
+                        usage::mark_ok(&usage_key(&cur));
+                        return Ok(());
+                    }
+                    Err(e) => e,
+                };
+                let quota = harness::is_quota_error(&e);
+                if quota {
+                    // z.ai prints when its window resets ("reset at 2026-11-24 23:44:03", Beijing time)
+                    let until = cur.engine.is_none().then(|| provider::reset_from_message(&e, root_reset_offset(st), provider::now_ms())).flatten();
+                    usage::mark_out(&usage_key(&cur), until, e.lines().next().unwrap_or_default());
+                }
+                let decorate = |e: String, cur: &Target| {
+                    if hops == 0 { e } else { format!("{e} (fallback {} after {} {first_why})", cur.show(), engine_word(first.engine)) }
+                };
+                // a quota error moves on (mid-work too); a fallback that could not even start
+                // (no step of its own) gives the next entry its try
+                let failed_to_start = hops > 0 && run.tool_count() == before;
+                if pinned || hops >= profiles::FALLBACK_CAP || !(quota || failed_to_start) {
+                    return Err(decorate(e, &cur));
+                }
+                match walk_chain(st, &prof, &cur, &tried) {
+                    Walk::Take(to, skipped) => {
+                        let why = if quota { Why::Quota } else { Why::Failed(&e) };
+                        let done = done_state(&run.msg);
+                        let reason = format!("{}: {}", if quota { "quota" } else { "error" }, e.lines().next().unwrap_or_default());
+                        take_over(&mut run, &cur, &to, reason, skipped, &mut fb_steps);
+                        note = Some(fallback_takeover_note(cur.engine, why, &done));
+                        tried.push(to.clone());
+                        cur = to;
+                        hops += 1;
+                    }
+                    Walk::AllOut(line, skipped) => {
+                        fb_steps.extend(skipped);
+                        return Err(format!("{} — {line}", decorate(e, &cur)));
+                    }
+                    Walk::Nothing => return Err(decorate(e, &cur)),
+                }
             }
         };
         tokio::select! {
@@ -3836,11 +4135,12 @@ async fn run_turn(st: &AppState, id: &str, tx: &mpsc::Sender<Event>, queue_ms: u
             run.msg["info"]["meta"]["model"] = json!(served_model);
             if let Some(ref fb) = fallback_used {
                 run.msg["info"]["meta"]["fallback"] = json!({
-                    "from": fb.from_engine.name(),
+                    "from": engine_word(fb.from_engine),
                     "from_model": fb.from_model,
                     "to": served_name,
                     "to_model": served_model,
                     "reason": fb.reason,
+                    "chain": fb_steps,
                 });
             }
             record_serving_engine(st, id, served_name, &served_model);
@@ -3854,8 +4154,19 @@ async fn run_turn(st: &AppState, id: &str, tx: &mpsc::Sender<Event>, queue_ms: u
             run.finish(&e);
             run.lat_log(&format!("error: {}", &e[..e.len().min(120)]));
             run.msg["info"]["error"] = json!({ "name": "UnknownError", "data": { "message": e } });
-            if fallback_used.is_some() {
+            if let Some(ref fb) = fallback_used {
+                if !run.msg["info"]["meta"].is_object() {
+                    run.msg["info"]["meta"] = json!({});
+                }
+                run.msg["info"]["meta"]["fallback"] = json!({ "from": engine_word(fb.from_engine), "from_model": fb.from_model,
+                    "to": served_name, "to_model": served_model, "reason": fb.reason, "chain": fb_steps });
                 record_serving_engine(st, id, served_name, &served_model);
+            } else if !fb_steps.is_empty() {
+                // nothing took over, but the chain was looked at: what each entry said
+                if !run.msg["info"]["meta"].is_object() {
+                    run.msg["info"]["meta"] = json!({});
+                }
+                run.msg["info"]["meta"]["fallback"] = json!({ "chain": fb_steps });
             }
             replace_message(st, id, &run.msg);
             emit(st, tx, "error", json!({ "sessionID": id, "error": e })).await;
@@ -4493,7 +4804,9 @@ async fn send_with_retry(req: &reqwest::RequestBuilder, retries: &mut u32) -> Re
         if code == 429 {
             let body = resp.text().await.unwrap_or_default();
             let low = body.to_lowercase();
-            let quota = ["balance", "quota", "insufficient", "billing", "exceeded your"].iter().any(|k| low.contains(k));
+            // z.ai words its plan limits "[1310] … Limit Exhausted" / "[1308] Usage limit reached":
+            // the same quota a harness reports — no backoff, the chain takes over at once
+            let quota = ["balance", "quota", "insufficient", "billing", "exceeded your"].iter().any(|k| low.contains(k)) || harness::is_quota_error(&body);
             if quota || attempt >= BACKOFF_MS.len() {
                 return Err(format!("upstream 429 Too Many Requests: {body}"));
             }
@@ -4984,6 +5297,20 @@ async fn main() {
             models.push(m.to_string());
         }
     }
+    // the provider registry (provider.rs): the env upstream + providers.json, re-read when the
+    // file changes; a broken file leaves the env upstream serving alone
+    let registry = match provider::Providers::boot() {
+        Ok(ps) => {
+            let reg = ps.current();
+            eprintln!("providers: {} ({})", reg.providers.iter().map(|p| p.id.as_str()).collect::<Vec<_>>().join(", "), reg.source);
+            Some(ps)
+        }
+        Err(e) => {
+            eprintln!("providers: {e} — the env upstream serves alone");
+            None
+        }
+    };
+    let _ = PROVIDERS.set(registry);
     let data_dir = PathBuf::from(std::env::var("YGG_DATA_DIR").unwrap_or_else(|_| "./data".into()));
     let profiles_path = std::env::var("YGG_PROFILES")
         .ok()
@@ -5169,6 +5496,7 @@ async fn main() {
         .route("/agent", get(list_agents))
         .route("/engine", get(list_engines))
         .route("/engine/{name}", axum::routing::put(put_engine))
+        .route("/usage", get(get_usage))
         .route("/shared-prompt", get(get_shared).put(put_shared))
         .route("/extensions", get(|State(st): State<AppState>| async move { Json(st.config.ext.describe()) }))
         // B7b: a peer root runs this root's extension tool (peer token only; ext.rs)
@@ -7074,111 +7402,198 @@ mod fallback_tests {
         (st, dir)
     }
 
-    #[test]
-    fn fallback_target_prefers_explicit_then_role_default_then_root_glm() {
-        let dir = std::env::temp_dir().join(format!("ygg-fb-prof-{}", std::process::id()));
+    fn agents(tag: &str, body: &str) -> (PathBuf, profiles::Profiles) {
+        static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let dir = std::env::temp_dir().join(format!("ygg-fb-{tag}-{}-{}", std::process::id(), N.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let f = dir.join("agents.json");
-        std::fs::write(
-            &f,
+        std::fs::write(&f, body).unwrap();
+        let ps = profiles::Profiles::load(f.to_str());
+        (dir, ps)
+    }
+
+    fn t(engine: Option<harness::Kind>, model: &str) -> Target {
+        Target { engine, model: model.into() }
+    }
+
+    const KEYS: &[&str] = &["claude", "antigravity", "opencode", "codex", "root"];
+
+    fn clear_usage() {
+        for k in KEYS {
+            usage::clear_for_test(k);
+        }
+    }
+
+    #[test]
+    fn automatic_fallback_prefers_role_default_then_root_glm() {
+        // roles with no chain of their own (custom ones, or a built-in the owner cleared)
+        let (dir, ps) = agents(
+            "auto",
             r#"{"agent":{
-                "fix":{"harness":"claude","model":"opus"},
-                "build":{"harness":"antigravity","model":"gemini-4-neon-high"},
-                "research":{"harness":"root","model":"glm-5.3-flash"},
-                "custom":{"harness":"claude","model":"opus","fallback":{"engine":"antigravity","model":"gemini-4-hydrogen"}},
+                "fixer":{"harness":"claude","model":"opus"},
+                "builder":{"harness":"antigravity","model":"gemini-4-neon-high"},
+                "reader":{"harness":"root","model":"glm-5.3-flash"},
+                "build":{"harness":"antigravity","model":"gemini-4-neon-high","fallback":[]},
                 "optout":{"harness":"claude","model":"opus","fallback":"none"}
             }}"#,
-        )
-        .unwrap();
-        let ps = profiles::Profiles::load(f.to_str());
+        );
         let (st, sdir) = fb_app("http://127.0.0.1:1".into(), ps, vec!["glm-5.3-flash".into(), "glm-5.3".into(), "glm-5.2".into()]);
         let get = |n: &str| st.config.profiles.read().unwrap().get(n).cloned().unwrap();
-
+        let (claude, agy) = (Some(harness::Kind::Claude), Some(harness::Kind::Antigravity));
         // claude default role -> root + full glm-5.3 (not -flash)
-        assert_eq!(resolve_fallback_target(&st, &get("fix"), harness::Kind::Claude), Some((None, "glm-5.3".into())));
-        // claude override on an antigravity-default role -> role's other default engine (antigravity)
-        assert_eq!(
-            resolve_fallback_target(&st, &get("build"), harness::Kind::Claude),
-            Some((Some(harness::Kind::Antigravity), "gemini-4-neon-high".into()))
-        );
-        // antigravity default role failing on antigravity -> root + glm-5.3
-        assert_eq!(resolve_fallback_target(&st, &get("build"), harness::Kind::Antigravity), Some((None, "glm-5.3".into())));
-        // claude override on a root-default role -> root + role's own model (glm-5.3-flash)
-        assert_eq!(resolve_fallback_target(&st, &get("research"), harness::Kind::Claude), Some((None, "glm-5.3-flash".into())));
-        // explicit fallback engine + model
-        assert_eq!(
-            resolve_fallback_target(&st, &get("custom"), harness::Kind::Claude),
-            Some((Some(harness::Kind::Antigravity), "gemini-4-hydrogen".into()))
-        );
-        // explicit fallback opt-out ("none")
-        assert_eq!(resolve_fallback_target(&st, &get("optout"), harness::Kind::Claude), None);
+        assert_eq!(resolve_fallback_target(&st, &get("fixer"), claude), Some(t(None, "glm-5.3")));
+        // claude override on an antigravity-default role -> the role's own engine
+        assert_eq!(resolve_fallback_target(&st, &get("builder"), claude), Some(t(agy, "gemini-4-neon-high")));
+        assert_eq!(resolve_fallback_target(&st, &get("builder"), agy), Some(t(None, "glm-5.3")));
+        // claude override on a root role -> root + the role's own model; root on root: nothing
+        assert_eq!(resolve_fallback_target(&st, &get("reader"), claude), Some(t(None, "glm-5.3-flash")));
+        assert_eq!(resolve_fallback_target(&st, &get("reader"), None), None);
+        // a cleared built-in chain walks the automatic one
+        assert_eq!(effective_chain(&st, &get("build"), &t(claude, "opus")), vec![t(agy, "gemini-4-neon-high")]);
+        // "none": no chain at all
+        assert!(effective_chain(&st, &get("optout"), &t(claude, "opus")).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&sdir);
+    }
 
+    /// A1 + A2: the role's chain in order; an entry the usage check says is out (or ≥ 90%) is
+    /// passed over; one try per entry per turn; everything out = one line.
+    #[test]
+    fn the_walk_follows_the_chain_and_skips_what_is_used_up() {
+        let _g = harness::TEST_PATH_LOCK.blocking_lock();
+        clear_usage();
+        let (dir, ps) = agents(
+            "walk",
+            r#"{"agent":{
+                "fix":{"harness":"claude","model":"opus"},
+                "lead":{"harness":"claude","model":"opus","fallback":["agy","root/glm-5.3","claude/sonnet"]},
+                "far":{"harness":"claude","fallback":["root/elsewhere-model"]}
+            }}"#,
+        );
+        let (st, sdir) = fb_app("http://127.0.0.1:1".into(), ps, vec!["glm-5.3-flash".into(), "glm-5.3".into()]);
+        let get = |n: &str| st.config.profiles.read().unwrap().get(n).cloned().unwrap();
+        let (claude, agy) = (Some(harness::Kind::Claude), Some(harness::Kind::Antigravity));
+        let from = t(claude, "opus");
+
+        // the built-in suggestion for fix: Antigravity, then root glm-5.3
+        assert_eq!(effective_chain(&st, &get("fix"), &from), vec![t(agy, "gemini-4-neon-high"), t(None, "glm-5.3")]);
+        // a root model this root does not serve takes the best one it does
+        assert_eq!(effective_chain(&st, &get("far"), &from), vec![t(None, "glm-5.3")]);
+        // nothing known: the first entry takes it
+        assert_eq!(walk_chain(&st, &get("fix"), &from, &[from.clone()]), Walk::Take(t(agy, "gemini-4-neon-high"), vec![]));
+        // agy hit its limit earlier (it has no numbers, only errors): skipped, root next
+        usage::mark_out("antigravity", None, "RESOURCE_EXHAUSTED: quota exceeded");
+        let Walk::Take(to, skipped) = walk_chain(&st, &get("fix"), &from, &[from.clone()]) else { panic!("root must take it") };
+        assert_eq!(to, t(None, "glm-5.3"));
+        assert_eq!(skipped[0]["entry"], "antigravity/gemini-4-neon-high");
+        assert!(skipped[0]["skipped"].as_str().unwrap().contains("hit its limit"), "{skipped:?}");
+        // root at 92% of its 5-hour window: skipped too -> everything out, one line
+        usage::set_for_test("root", vec![usage::Window { label: "5-hour".into(), pct: 92, resets_at: None, model: None }]);
+        let Walk::AllOut(line, skipped) = walk_chain(&st, &get("fix"), &from, &[from.clone()]) else { panic!("all out") };
+        assert!(line.contains("no fallback clears") && line.contains("92% of its 5-hour window") && line.contains("next turn checks again"), "{line}");
+        assert_eq!(skipped.len(), 2);
+        // 89% clears again
+        usage::set_for_test("root", vec![usage::Window { label: "5-hour".into(), pct: 89, resets_at: None, model: None }]);
+        assert!(matches!(walk_chain(&st, &get("fix"), &from, &[from.clone()]), Walk::Take(ref x, _) if *x == t(None, "glm-5.3")));
+        // one try per entry per turn: a tried entry is not walked again
+        assert_eq!(walk_chain(&st, &get("fix"), &from, &[from.clone(), t(None, "glm-5.3")]), Walk::AllOut(
+            "no fallback clears: antigravity/gemini-4-neon-high (hit its limit (RESOURCE_EXHAUSTED: quota exceeded), resets ".to_string()
+                + &usage::short_time(usage::out_until("antigravity").unwrap().0) + ") — the next turn checks again",
+            vec![json!({"entry": "antigravity/gemini-4-neon-high", "skipped": usage::judge(None, usage::out_until("antigravity"), None).say()})]
+        ));
+        // claude/sonnet shares Claude's plan: a Claude quota error rules it out with opus
+        usage::mark_ok("antigravity");
+        usage::mark_out("claude", None, "You've hit your 5-hour limit");
+        let lead_from = t(claude, "opus");
+        // (its agy entry names no model: agy's default, "default" here)
+        let tried = [lead_from.clone(), t(agy, "default"), t(None, "glm-5.3")];
+        assert!(matches!(walk_chain(&st, &get("lead"), &lead_from, &tried), Walk::AllOut(ref l, _) if l.contains("claude/sonnet (hit its limit")));
+        // but a week scoped to Fable leaves sonnet free (proactive check, numbers only)
+        usage::mark_ok("claude");
+        usage::set_for_test("claude", vec![
+            usage::Window { label: "5-hour".into(), pct: 40, resets_at: None, model: None },
+            usage::Window { label: "week (fable)".into(), pct: 97, resets_at: None, model: Some("fable".into()) },
+        ]);
+        assert!(target_avail(&st, &t(claude, "fable")).out() || !target_avail(&st, &t(claude, "fable")).clears());
+        assert!(target_avail(&st, &t(claude, "sonnet")).clears());
+        clear_usage();
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&sdir);
     }
 
     #[test]
-    fn pinning_and_midwork_rules_block_fallback() {
-        let dir = std::env::temp_dir().join(format!("ygg-fb-pin-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let f = dir.join("agents.json");
-        std::fs::write(
-            &f,
+    fn only_the_coordinator_and_explicit_pins_never_fall_back() {
+        let (dir, ps) = agents(
+            "pin",
             r#"{"agent":{
                 "fix":{"harness":"claude","model":"opus"},
                 "pinned_role":{"harness":"claude","model":"opus","pinned":true},
                 "integrator":{"harness":"claude","model":"opus"}
             }}"#,
-        )
-        .unwrap();
-        let ps = profiles::Profiles::load(f.to_str());
-        let (st, sdir) = fb_app("http://127.0.0.1:1".into(), ps, vec!["glm-5.3-flash".into(), "glm-5.3".into()]);
-        let get = |n: &str| st.config.profiles.read().unwrap().get(n).cloned().unwrap();
-        let quota = "claude: You've hit your 5-hour limit · resets 11:30pm (Europe/Paris)";
-
-        let normal = json!({"id":"ses_a","title":"Fix login bug","agent":"fix","engine":"claude","model":{"id":"opus","providerID":"claude"}});
-        // 0 tools + quota -> fallback planned
-        assert!(plan_harness_fallback(&st, &normal, &get("fix"), harness::Kind::Claude, quota, 0).is_some());
-        // >= 1 tools (mid-work) -> NEVER fall back
-        assert!(plan_harness_fallback(&st, &normal, &get("fix"), harness::Kind::Claude, quota, 1).is_none());
-        // non-quota error -> NEVER fall back
-        assert!(plan_harness_fallback(&st, &normal, &get("fix"), harness::Kind::Claude, "claude exited 1: invalid flag", 0).is_none());
-        // pinned role -> NEVER fall back
-        assert!(plan_harness_fallback(&st, &normal, &get("pinned_role"), harness::Kind::Claude, quota, 0).is_none());
-        // integrator role -> NEVER fall back
-        assert!(plan_harness_fallback(&st, &normal, &get("integrator"), harness::Kind::Claude, quota, 0).is_none());
-        // P1 trunk integrator session (by live id or title) -> NEVER fall back
-        let p1_by_id = json!({"id":"ses_82772a463f1a495791a851d1d3386d4c","title":"integrator","agent":"lead","engine":"claude"});
-        let p1_by_title = json!({"id":"ses_other","title":"P1 · home root on the trunk (integrator)","agent":"lead","engine":"claude"});
-        let p2_title = json!({"id":"ses_p2","title":"P2 · full sessions on other roots","agent":"lead","engine":"claude"});
-        assert!(plan_harness_fallback(&st, &p1_by_id, &get("lead"), harness::Kind::Claude, quota, 0).is_none());
-        assert!(plan_harness_fallback(&st, &p1_by_title, &get("lead"), harness::Kind::Claude, quota, 0).is_none());
-        assert!(plan_harness_fallback(&st, &p2_title, &get("lead"), harness::Kind::Claude, quota, 0).is_some(), "P2 is not pinned");
-        // explicitly pinned session -> NEVER fall back
-        let pinned_sess = json!({"id":"ses_pin","title":"release","agent":"fix","engine":"claude","pinned":true});
-        assert!(plan_harness_fallback(&st, &pinned_sess, &get("fix"), harness::Kind::Claude, quota, 0).is_none());
-        // attached terminal conversation -> NEVER fall back
+        );
+        let get = |n: &str| ps.get(n).cloned().unwrap();
+        let normal = json!({"id":"ses_a","title":"Fix login bug","agent":"fix","engine":"claude"});
+        assert!(!is_pinned_for_fallback(&normal, &get("fix")));
+        // the coordinator (MAIN) never moves; a pinned role, a pinned session, a terminal's conversation neither
+        assert!(is_pinned_for_fallback(&json!({"id":"ses_m","title":"[MAIN]","agent":"coordinator"}), &get("coordinator")));
+        assert!(is_pinned_for_fallback(&normal, &get("pinned_role")));
+        assert!(is_pinned_for_fallback(&json!({"id":"ses_pin","title":"release","agent":"fix","pinned":true}), &get("fix")));
         let attached = json!({"id":"ses_trm","title":"term","agent":"build","engine":"claude","harness":{"kind":"claude","id":"u1","attached":true}});
-        assert!(plan_harness_fallback(&st, &attached, &get("build"), harness::Kind::Claude, quota, 0).is_none());
-
+        assert!(is_pinned_for_fallback(&attached, &get("build")));
+        // owner v10: "only the coordinator never falls back" — P1, MAIN-looking titles and a role
+        // named integrator are ordinary sessions now
+        let p1 = json!({"id":"ses_82772a463f1a495791a851d1d3386d4c","title":"P1 · home root on the trunk (integrator)","agent":"lead","engine":"claude"});
+        assert!(!is_pinned_for_fallback(&p1, &get("lead")));
+        assert!(!is_pinned_for_fallback(&normal, &get("integrator")));
         let _ = std::fs::remove_dir_all(&dir);
-        let _ = std::fs::remove_dir_all(&sdir);
     }
 
-    /// End-to-end `run_turn` with fake `claude` + fake `agy` binaries and an in-process root upstream:
-    /// 1) 0 tools + quota -> retries once on root glm-5.3, succeeds, card records serving engine (no
-    ///    user-facing fallback annotations), internal meta records fallback, root upstream receives
-    ///    the one-line takeover system briefing
-    /// 2) 1 tool ran + quota -> does NOT fall back, fails with quota error, keeps claude
-    /// 3) pinned role + 0 tools + quota -> does NOT fall back
-    /// 4) P1 trunk integrator session + 0 tools + quota -> does NOT fall back
-    /// 5) double-quota (claude -> antigravity, both hit quota) -> retries ONCE, never loops, and
-    ///    agy receives the one-line takeover briefing
+    #[test]
+    fn the_takeover_brief_carries_what_is_done() {
+        let msg = json!({ "parts": [
+            { "type": "tool", "tool": "Bash", "state": { "input": { "command": "ls src\nrm -rf nothing" } } },
+            { "type": "text", "text": "looking" },
+            { "type": "tool", "tool": "Edit", "state": { "input": { "file_path": "src/app.py", "old_string": "a", "new_string": "b" } } },
+            { "type": "tool", "tool": "Write", "state": { "input": { "file_path": "src/app.py" } } },
+            { "type": "tool", "tool": "write", "state": { "input": { "filePath": "api.ts" } } }
+        ] });
+        let done = done_state(&msg);
+        assert_eq!(done.0, 4);
+        assert_eq!(done.1, vec!["src/app.py".to_string(), "api.ts".to_string()]);
+        let note = fallback_takeover_note(Some(harness::Kind::Claude), Why::Quota, &done);
+        assert!(note.starts_with("Previous harness claude hit a hard quota mid-work (steps done: 4 tool calls, files touched: 2 (src/app.py, api.ts)); you are taking over this session and its full context — continue the last request, do not redo finished steps."), "{note}");
+        assert!(note.contains("\n- Bash: ls src\n- Edit: src/app.py\n"), "{note}");
+        // before any work: the shipped one-liner, unchanged
+        assert_eq!(
+            fallback_takeover_note(Some(harness::Kind::Claude), Why::Quota, &done_state(&json!({ "parts": [] }))),
+            "Previous harness claude hit a hard quota before doing any work; you are taking over this session and its full context — continue the last request."
+        );
+        let high = usage::Avail::High { pct: 92, window: "5-hour".into(), resets_at: None };
+        assert_eq!(
+            fallback_takeover_note(Some(harness::Kind::Claude), Why::Usage(&high), &done_state(&json!({ "parts": [] }))),
+            "Previous harness claude is at its usage limit (92% of its 5-hour window used); you are taking over this session and its full context — continue the last request."
+        );
+        // the earlier conversation, for a harness that starts a new one
+        let hist = vec![
+            json!({ "info": { "id": "m1", "role": "user" }, "parts": [{ "type": "text", "text": "fix the login" }] }),
+            json!({ "info": { "id": "m2", "role": "assistant" }, "parts": [{ "type": "tool", "tool": "Bash", "state": { "input": { "command": "pytest" } } }, { "type": "text", "text": "2 tests fail" }] }),
+            json!({ "info": { "id": "m3", "role": "user" }, "parts": [{ "type": "text", "text": "go on" }] }),
+        ];
+        let tr = takeover_transcript(&hist, "m3");
+        assert!(tr.contains("USER: fix the login\n\nASSISTANT ran Bash: pytest\n\nASSISTANT: 2 tests fail\n</earlier_conversation>"), "{tr}");
+        assert_eq!(takeover_transcript(&hist[..1], "m1"), "", "a first message has nothing earlier");
+    }
+
+    /// End-to-end `run_turn` with fake `claude` + fake `agy` binaries and an in-process root upstream.
+    /// THE OWNER'S SCENARIO first: a Claude session hits the 5-hour limit after 2 tool calls → the
+    /// next entry of the role's chain takes the turn at once with a done-state brief, the steps
+    /// stay, nothing is redone. Then: 0 tools on an automatic chain, a pinned role, an explicit
+    /// one-entry chain that is out too, a two-hop walk, the proactive usage switch, all out.
     #[tokio::test]
-    async fn run_turn_fallback_end_to_end() {
+    async fn run_turn_walks_the_chain_end_to_end() {
         let _path_guard = harness::TEST_PATH_LOCK.lock().await;
+        clear_usage();
         let orig_path = std::env::var("PATH").unwrap_or_default();
 
         // in-process OpenAI-compatible mock root upstream that records requested models + system msgs
@@ -7221,7 +7636,7 @@ mod fallback_tests {
         let agy_hits = tmp.join("agy.hits");
         let agy_stdin = tmp.join("agy.stdin");
 
-        // fake `claude`: inspects prompt on stdin to decide behavior
+        // fake `claude`: inspects the prompt on stdin to decide what happens
         let claude_script = bin_dir.join("claude");
         std::fs::write(
             &claude_script,
@@ -7232,13 +7647,13 @@ PROMPT=$(cat)
 case "$PROMPT" in
   *MIDWORK_QUOTA*)
     echo '{{"type":"system","subtype":"init","session_id":"cc-mid-1"}}'
-    echo '{{"type":"assistant","session_id":"cc-mid-1","message":{{"content":[{{"type":"tool_use","name":"Bash","input":{{"command":"ls"}}}}]}}}}'
+    echo '{{"type":"assistant","session_id":"cc-mid-1","message":{{"content":[{{"type":"tool_use","name":"Bash","input":{{"command":"pytest -q"}}}}]}}}}'
+    echo '{{"type":"assistant","session_id":"cc-mid-1","message":{{"content":[{{"type":"tool_use","name":"Edit","input":{{"file_path":"src/app.py","old_string":"a","new_string":"b"}}}}]}}}}'
     echo '{{"type":"result","subtype":"error","is_error":true,"result":"You'\''ve hit your 5-hour limit · resets 11:30pm (Europe/Paris)","session_id":"cc-mid-1"}}'
     exit 1
     ;;
   *QUOTA_BOUNCE*)
     echo '{{"type":"system","subtype":"init","session_id":"cc-bounce-1"}}'
-    echo '{{"type":"assistant","session_id":"cc-bounce-1","message":{{"content":[{{"type":"text","text":"You'\''ve hit your 5-hour limit · resets 11:30pm (Europe/Paris)"}}]}}}}'
     echo '{{"type":"result","subtype":"error","is_error":true,"result":"You'\''ve hit your 5-hour limit · resets 11:30pm (Europe/Paris)","session_id":"cc-bounce-1"}}'
     exit 1
     ;;
@@ -7251,16 +7666,23 @@ esac
             ),
         )
         .unwrap();
-        // fake `agy`: records stdin and hits quota (for double-quota single-retry + takeover brief proof)
+        // fake `agy`: records stdin; AGY_QUOTA in it = its quota is out too, else it answers
         let agy_script = bin_dir.join("agy");
         std::fs::write(
             &agy_script,
             format!(
                 r#"#!/bin/sh
 echo 1 >> '{hits}'
-cat > '{stdin}'
-echo '{{"event":"result","result":{{"status":"ERROR","error":"RESOURCE_EXHAUSTED: quota exceeded"}}}}'
-exit 1
+IN=$(cat)
+printf '%s\n=====\n' "$IN" >> '{stdin}'
+case "$IN" in
+  *AGY_QUOTA*)
+    echo '{{"event":"result","result":{{"status":"ERROR","error":"RESOURCE_EXHAUSTED: quota exceeded"}}}}'
+    exit 1
+    ;;
+esac
+echo '{{"event":"init","conversation_id":"agy-conv-1"}}'
+echo '{{"event":"result","result":{{"conversation_id":"agy-conv-1","status":"SUCCESS","response":"AGY-TOOK-OVER"}}}}'
 "#,
                 hits = agy_hits.display(),
                 stdin = agy_stdin.display(),
@@ -7281,8 +7703,9 @@ exit 1
             &agents_file,
             r#"{"agent":{
                 "fix":{"harness":"claude","model":"opus"},
+                "fixer":{"harness":"claude","model":"opus"},
                 "pinned_deploy":{"harness":"claude","model":"opus","pinned":true},
-                "double_q":{"harness":"claude","model":"opus","fallback":{"engine":"antigravity","model":"gemini-4-neon-high"}}
+                "only_agy":{"harness":"claude","model":"opus","fallback":["agy/gemini-4-neon-high"]}
             }}"#,
         )
         .unwrap();
@@ -7298,61 +7721,101 @@ exit 1
                 s.info["card"] = json!({ "topic": title, "status": "working" });
                 s.messages.push(umsg);
             });
-            let (tx, _rx) = mpsc::channel(32);
+            let (tx, _rx) = mpsc::channel(64);
             let res = run_turn(&st, &sid, &tx, 0, false, &tid).await;
             let final_info = st.sessions.lock().unwrap().get(&sid).unwrap().info.clone();
             (res, final_info)
         };
+        let hits = |p: &PathBuf| std::fs::read_to_string(p).unwrap_or_default().lines().count();
+        // agy reads one JSON user line: its text, decoded
+        let last_agy_in = || {
+            let raw = std::fs::read_to_string(&agy_stdin).unwrap_or_default();
+            let line = raw.rsplit("=====").nth(1).unwrap_or_default().trim().to_string();
+            serde_json::from_str::<Value>(&line).ok().and_then(|v| v["message"]["content"].as_str().map(String::from)).unwrap_or(line)
+        };
 
-        let want_brief = fallback_takeover_note(harness::Kind::Claude);
+        // 1. THE SCENARIO: fix on Claude, 2 tool calls done, 5-hour limit -> agy (fix's entry 1)
+        //    takes the turn at once, briefed with the done-state; the 2 steps stay on the reply
+        let (res, info) = run_one(st.clone(), "Fix login", "fix", None, "MIDWORK_QUOTA fix the login").await;
+        let msg = res.expect("mid-work quota must continue on the chain");
+        assert_eq!(message_text(&msg), "AGY-TOOK-OVER");
+        let tools: Vec<&str> = msg["parts"].as_array().unwrap().iter().filter(|p| p["type"] == "tool").map(|p| p["tool"].as_str().unwrap()).collect();
+        assert_eq!(tools, vec!["Bash", "Edit"], "the steps Claude did stay on the reply");
+        let brief = last_agy_in();
+        assert!(
+            brief.contains("Previous harness claude hit a hard quota mid-work (steps done: 2 tool calls, files touched: 1 (src/app.py)); you are taking over this session and its full context — continue the last request, do not redo finished steps."),
+            "agy must get the done-state brief: {brief}"
+        );
+        assert!(brief.contains("- Bash: pytest -q\n- Edit: src/app.py"), "{brief}");
+        assert_eq!((hits(&claude_hits), hits(&agy_hits)), (1, 1), "Claude once, agy once");
+        assert_eq!(info["engine"], "antigravity");
+        assert_eq!(info["card"]["engine"], "antigravity");
+        assert!(info["card"].get("fallback_from").is_none(), "no fallback label on the card");
+        let fb = &msg["info"]["meta"]["fallback"];
+        assert_eq!((fb["from"].as_str(), fb["to"].as_str()), (Some("claude"), Some("antigravity")));
+        assert_eq!(fb["chain"][0]["tools_done"], 2);
+        assert_eq!(fb["chain"][0]["from"], "claude/opus");
+        assert!(fb["chain"][0]["reason"].as_str().unwrap().starts_with("quota: claude: You've hit your 5-hour limit"));
+        assert!(seen_models.lock().unwrap().is_empty(), "root never called");
+        usage::clear_for_test("claude");
 
-        // 1. 0 tools + Claude 5-hour quota -> falls back once to root glm-5.3, briefs the model,
-        //    records serving engine on card (without user-facing fallback annotations) and meta.fallback
-        let (res, info) = run_one(st.clone(), "Fix auth", "fix", None, "QUOTA_BOUNCE please fix").await;
-        let msg = res.expect("fallback to root must succeed");
+        // 2. the same, agy out too (its quota error this turn) -> root glm-5.3, entry 2: two hops
+        let (res, info) = run_one(st.clone(), "Fix again", "fix", None, "MIDWORK_QUOTA AGY_QUOTA fix it").await;
+        let msg = res.expect("the walk goes on to entry 2");
         assert_eq!(message_text(&msg), "SERVED-BY-ROOT:glm-5.3");
         assert_eq!(info["engine"], "root");
-        assert_eq!(info["model"]["id"], "glm-5.3");
-        assert_eq!(info["card"]["engine"], "root");
-        assert_eq!(info["card"]["model"], "glm-5.3");
-        assert!(info["card"].get("fallback_from").is_none(), "no user-facing fallback_from on card");
-        assert!(info["card"].get("fallback_reason").is_none(), "no user-facing fallback_reason on card");
-        assert_eq!(msg["info"]["meta"]["fallback"]["from"], "claude");
-        assert_eq!(msg["info"]["meta"]["fallback"]["to"], "root");
-        assert_eq!(seen_models.lock().unwrap().as_slice(), &["glm-5.3"]);
-        assert!(seen_systems.lock().unwrap()[0].contains(&want_brief), "root model must receive takeover brief");
+        assert_eq!(msg["info"]["meta"]["fallback"]["chain"].as_array().unwrap().len(), 2);
+        let sys = seen_systems.lock().unwrap().last().cloned().unwrap();
+        assert!(sys.contains("Previous harness antigravity hit a hard quota mid-work (steps done: 2 tool calls"), "{sys}");
+        clear_usage();
 
-        // 2. 1 tool ran + quota -> NEVER falls back mid-work
-        let (res, info) = run_one(st.clone(), "Midwork fix", "fix", None, "MIDWORK_QUOTA do work").await;
-        assert!(res.is_err(), "mid-work quota must fail, not fall back");
-        assert_eq!(info["engine"], "claude");
-        assert!(info["card"].get("fallback_from").is_none());
-        assert_eq!(seen_models.lock().unwrap().len(), 1, "root upstream must not be called for mid-work");
+        // 3. 0 tools on a role without a chain: the automatic one (root, full glm-5.3), unchanged
+        let (res, info) = run_one(st.clone(), "Fix auth", "fixer", None, "QUOTA_BOUNCE please fix").await;
+        let msg = res.expect("fallback to root must succeed");
+        assert_eq!(message_text(&msg), "SERVED-BY-ROOT:glm-5.3");
+        assert_eq!((info["engine"].as_str(), info["model"]["id"].as_str()), (Some("root"), Some("glm-5.3")));
+        assert!(seen_systems.lock().unwrap().last().unwrap().contains(&fallback_takeover_note(Some(harness::Kind::Claude), Why::Quota, &(0, vec![], vec![]))));
+        clear_usage();
 
-        // 3. Pinned role + 0 tools + quota -> NEVER falls back
+        // 4. pinned role -> never falls back
+        let calls = seen_models.lock().unwrap().len();
         let (res, info) = run_one(st.clone(), "Deploy job", "pinned_deploy", None, "QUOTA_BOUNCE deploy").await;
         assert!(res.is_err(), "pinned role must not fall back");
         assert_eq!(info["engine"], "claude");
-        assert!(info["card"].get("fallback_from").is_none());
-        assert_eq!(seen_models.lock().unwrap().len(), 1);
+        assert_eq!(seen_models.lock().unwrap().len(), calls);
+        clear_usage();
 
-        // 4. P1 trunk integrator session + 0 tools + quota -> NEVER falls back
-        let (res, info) = run_one(st.clone(), "P1 · home root on the trunk (integrator)", "lead", Some("claude"), "QUOTA_BOUNCE merge").await;
-        assert!(res.is_err(), "P1 integrator must not fall back");
-        assert_eq!(info["engine"], "claude");
-        assert!(info["card"].get("fallback_from").is_none());
-        assert_eq!(seen_models.lock().unwrap().len(), 1);
+        // 5. an explicit one-entry chain that is out as well: tried once, never a third engine
+        let agy0 = hits(&agy_hits);
+        let (res, _) = run_one(st.clone(), "Double quota", "only_agy", None, "QUOTA_BOUNCE AGY_QUOTA double").await;
+        let err = res.expect_err("both out must fail");
+        assert!(err.contains("(fallback antigravity/gemini-4-neon-high after claude quota)"), "{err}");
+        assert_eq!(hits(&agy_hits), agy0 + 1, "the fallback is tried exactly once");
+        assert_eq!(seen_models.lock().unwrap().len(), calls, "never chains past the role's own list");
+        clear_usage();
 
-        // 5. Double quota (claude -> antigravity, both hit quota) -> retries ONCE only, briefs agy
-        let (res, info) = run_one(st.clone(), "Double quota", "double_q", None, "QUOTA_BOUNCE double").await;
-        let err = res.expect_err("double quota must fail after one retry");
-        assert!(err.contains("fallback antigravity/gemini-4-neon-high after claude quota"), "{err}");
-        assert!(info["card"].get("fallback_from").is_none(), "no user-facing fallback_from on card");
-        let agy_count = std::fs::read_to_string(&agy_hits).unwrap_or_default().lines().count();
-        assert_eq!(agy_count, 1, "fallback harness must be tried exactly once");
-        let agy_in = std::fs::read_to_string(&agy_stdin).unwrap_or_default();
-        assert!(agy_in.contains(&want_brief), "taking-over harness must receive takeover brief: {agy_in}");
-        assert_eq!(seen_models.lock().unwrap().len(), 1, "must not chain a third attempt to root");
+        // 6. proactive: Claude's numbers say 95% before the turn -> agy takes it, Claude never runs
+        let c0 = hits(&claude_hits);
+        usage::set_for_test("claude", vec![usage::Window { label: "5-hour".into(), pct: 95, resets_at: None, model: None }]);
+        let (res, info) = run_one(st.clone(), "Fix early", "fix", None, "please fix early").await;
+        assert_eq!(message_text(&res.expect("switches before the turn")), "AGY-TOOK-OVER");
+        assert_eq!(hits(&claude_hits), c0, "Claude at 95% is not even started");
+        assert_eq!(info["engine"], "antigravity");
+        assert!(last_agy_in().contains("Previous harness claude is at its usage limit (95% of its 5-hour window used)"), "{}", last_agy_in());
+        clear_usage();
+
+        // 7. everything out (Claude used up, agy's error seen, root at 97%): one line, nothing runs
+        let (c0, a0, r0) = (hits(&claude_hits), hits(&agy_hits), seen_models.lock().unwrap().len());
+        usage::set_for_test("claude", vec![usage::Window { label: "5-hour".into(), pct: 100, resets_at: None, model: None }]);
+        usage::mark_out("antigravity", None, "RESOURCE_EXHAUSTED");
+        usage::set_for_test("root", vec![usage::Window { label: "5-hour".into(), pct: 97, resets_at: None, model: None }]);
+        let (res, info) = run_one(st.clone(), "Fix late", "fix", None, "please fix late").await;
+        let err = res.expect_err("all out");
+        assert!(err.starts_with("claude/opus: its 5-hour window is used up — no fallback clears: antigravity/gemini-4-neon-high (hit its limit"), "{err}");
+        assert!(err.contains("root/glm-5.3 (97% of its 5-hour window used)"), "{err}");
+        assert_eq!((hits(&claude_hits), hits(&agy_hits), seen_models.lock().unwrap().len()), (c0, a0, r0));
+        assert_eq!(info["engine"], "claude", "nothing moved");
+        clear_usage();
 
         unsafe { std::env::set_var("PATH", orig_path) };
         srv.abort();

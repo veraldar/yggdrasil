@@ -90,6 +90,11 @@ impl Provider {
     fn has_model(&self, m: &str) -> bool {
         self.models.iter().any(|(id, _)| id == m)
     }
+
+    /// The provider runs `m`: a listed model, or any model when its list is discovered (`auto`).
+    pub fn serves(&self, m: &str) -> bool {
+        self.has_model(m)
+    }
 }
 
 /// One concrete upstream call target.

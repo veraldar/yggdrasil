@@ -35,6 +35,107 @@ pub struct Rule {
     pub allow: bool,
 }
 
+/// The most entries a role's fallback chain holds (owner, v10 Q2: short chains stay readable).
+pub const FALLBACK_CAP: usize = 3;
+
+/// One step of a role's fallback chain: an engine (`None` = the root engine, on any provider) and
+/// its model (`None` = that engine's default). Written `engine/model`: `agy/gemini-4-neon-high`,
+/// `root/glm-5.3`, `root/mac-studio/qwen3.8-27b` (the root on a provider), `claude/sonnet`, `claude`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FallbackEntry {
+    pub harness: Option<crate::harness::Kind>,
+    pub model: Option<String>,
+}
+
+impl FallbackEntry {
+    /// `engine[/model]` — the engine's words as anywhere else (`agy`, `claude-code`, `root`…).
+    pub fn parse(raw: &str) -> Result<FallbackEntry, String> {
+        let t = raw.trim();
+        let (eng, model) = match t.split_once('/') {
+            Some((e, m)) => (e.trim(), Some(m.trim()).filter(|m| !m.is_empty()).map(String::from)),
+            None => (t, None),
+        };
+        let Some(name) = engine_name(eng) else {
+            return Err(format!("unknown engine {eng:?} in fallback {t:?} (root | claude | antigravity | opencode | codex, then /model)"));
+        };
+        Ok(FallbackEntry { harness: crate::harness::Kind::parse(name), model: model.filter(|m| m != "default") })
+    }
+
+    /// `{engine, model}` (the shipped single-slot form) or `engine/model`.
+    fn from_value(v: &Value) -> Result<FallbackEntry, String> {
+        match v {
+            Value::String(s) => FallbackEntry::parse(s),
+            Value::Object(o) => {
+                let eng = o.get("engine").or_else(|| o.get("harness")).and_then(Value::as_str).map(str::trim).filter(|e| !e.is_empty()).unwrap_or("root");
+                let mut e = FallbackEntry::parse(eng)?;
+                if let Some(m) = o.get("model").and_then(Value::as_str).map(str::trim).filter(|m| !m.is_empty() && *m != "default") {
+                    e.model = Some(m.into());
+                }
+                Ok(e)
+            }
+            other => Err(format!("a fallback entry is \"engine/model\", not {other}")),
+        }
+    }
+
+    pub fn engine(&self) -> &'static str {
+        self.harness.map_or("root", crate::harness::Kind::name)
+    }
+
+    /// `antigravity/gemini-4-neon-high`, `root/glm-5.3`, `claude` (engine default).
+    pub fn show(&self) -> String {
+        match &self.model {
+            Some(m) => format!("{}/{m}", self.engine()),
+            None => self.engine().to_string(),
+        }
+    }
+}
+
+/// What a `fallback` value says: `None` = automatic, `Some(None)` = never, else the chain.
+type FallbackSetting = Option<Option<Vec<FallbackEntry>>>;
+
+/// Reads every form `fallback` was ever written in: `null` / `""` / `[]` (automatic), `"none"` /
+/// `false` (never), `"engine[/model]"` or `{engine, model}` (a one-entry chain — the shipped
+/// single slot), `["agy/gemini-4-neon-high", "root/glm-5.3", …]` (the chain, at most 3, each
+/// entry once).
+pub fn parse_fallback(v: &Value) -> Result<FallbackSetting, String> {
+    let chain = |entries: Vec<FallbackEntry>| -> Result<FallbackSetting, String> {
+        if entries.len() > FALLBACK_CAP {
+            return Err(format!("a fallback chain holds at most {FALLBACK_CAP} entries ({} given)", entries.len()));
+        }
+        for (i, e) in entries.iter().enumerate() {
+            if entries[..i].contains(e) {
+                return Err(format!("{} is in the fallback chain twice", e.show()));
+            }
+        }
+        Ok(if entries.is_empty() { None } else { Some(Some(entries)) })
+    };
+    match v {
+        Value::Null => Ok(None),
+        Value::Bool(false) => Ok(Some(None)),
+        Value::String(s) => match s.trim() {
+            "" | "auto" => Ok(None),
+            "none" | "off" => Ok(Some(None)),
+            t => chain(vec![FallbackEntry::parse(t)?]),
+        },
+        Value::Object(_) => chain(vec![FallbackEntry::from_value(v)?]),
+        Value::Array(items) => {
+            let mut entries = Vec::new();
+            for it in items {
+                if matches!(it.as_str().map(str::trim), Some("none" | "off")) {
+                    return Err("\"none\" stands alone, not inside a chain".into());
+                }
+                entries.push(FallbackEntry::from_value(it)?);
+            }
+            chain(entries)
+        }
+        other => Err(format!("invalid fallback {other} (want [\"engine/model\", …] up to {FALLBACK_CAP} | \"none\" | null)")),
+    }
+}
+
+fn chain_of(entries: &[&str]) -> Vec<FallbackEntry> {
+    entries.iter().filter_map(|e| FallbackEntry::parse(e).ok()).collect()
+}
+
 #[derive(Clone, Debug)]
 pub struct Profile {
     pub name: String,
@@ -49,11 +150,11 @@ pub struct Profile {
     pub rules: Vec<Rule>,
     /// another agent harness runs this session's turns (`claude` | `opencode` | `codex` | `antigravity`)
     pub harness: Option<String>,
-    /// fallback engine when the primary harness hits a hard quota with 0 tools ran
-    /// (`root` | `claude` | `opencode` | `codex` | `antigravity` | `none`); `None` = automatic default
-    pub fallback_harness: Option<String>,
-    /// optional model for the fallback engine (`None` = pick best/default for that engine)
-    pub fallback_model: Option<String>,
+    /// what takes over when this role's engine runs out (harness chains, v10): the ordered chain,
+    /// at most `FALLBACK_CAP` entries; empty = automatic (the role's default engine, else the root)
+    pub fallback_chain: Vec<FallbackEntry>,
+    /// `"fallback": "none"`: this role never falls back
+    pub fallback_off: bool,
     /// pinned by deploy rules: never automatically fall back to another harness
     pub pinned: bool,
     /// the role text for lite-tier models (short, few rules); `None` = the full prompt
@@ -250,8 +351,8 @@ pub fn builtins() -> Vec<Profile> {
         sessions,
         rules,
         harness: None,
-        fallback_harness: None,
-        fallback_model: None,
+        fallback_chain: Vec::new(),
+        fallback_off: false,
         pinned: false,
         prompt_lite: None,
     };
@@ -266,21 +367,30 @@ pub fn builtins() -> Vec<Profile> {
     coordinator.variant = Some("off".into());
     coordinator.pinned = true;
     coordinator.prompt_lite = Some(COORDINATOR_LITE.into());
+    // the suggested chains (v10, owner: "the latest fallback harness proposition is good"): every
+    // step moves to another company, Claude last where a role doesn't need it
     let mut lead = p("lead", "owns a project end to end: plans, splits into sub-sessions, iterates until done", LEAD_PROMPT, false, true, allow_all());
     lead.prompt_lite = Some(LEAD_LITE.into());
+    lead.fallback_chain = chain_of(&["antigravity/gemini-4-neon-high", "root/glm-5.3"]);
     let mut build = p("build", "does one concrete task fully: code, run, test, fix", BUILD_PROMPT, false, false, allow_all());
     build.prompt_lite = Some(BUILD_LITE.into());
+    build.fallback_chain = chain_of(&["root/glm-5.3", "claude/sonnet"]);
     let mut fix = p("fix", "repairs something broken: reproduces it, finds the root cause, fixes it and proves it with a test", FIX_PROMPT, false, false, allow_all());
     fix.prompt_lite = Some(FIX_LITE.into());
+    fix.fallback_chain = chain_of(&["antigravity/gemini-4-neon-high", "root/glm-5.3"]);
+    let mut research = p("research", "reads, fetches and compares; answers with evidence", RESEARCH_PROMPT, false, false, allow_all());
+    research.fallback_chain = chain_of(&["antigravity/gemini-4-neon-high"]);
+    let mut review = review_profile();
+    review.fallback_chain = chain_of(&["root/glm-5.3", "claude/sonnet"]);
     vec![
         coordinator,
         lead,
         build,
         fix,
-        p("research", "reads, fetches and compares; answers with evidence", RESEARCH_PROMPT, false, false, allow_all()),
+        research,
         // few agents (user 11-13: "too many agent types"; fix asked for 11-13); opencode / codex stay a harness choice
         // for agents you make in the editor
-        review_profile(),
+        review,
         // claude and agy were agents here until 11-22: they are engines now (`ENGINES`), and any
         // role runs on them
     ]
@@ -389,8 +499,8 @@ fn review_profile() -> Profile {
         sessions: false,
         rules,
         harness: None,
-        fallback_harness: None,
-        fallback_model: None,
+        fallback_chain: Vec::new(),
+        fallback_off: false,
         pinned: false,
         prompt_lite: None,
     }
@@ -586,8 +696,8 @@ impl Profiles {
                 sessions: false,
                 rules: Vec::new(),
                 harness: None,
-                fallback_harness: None,
-                fallback_model: None,
+                fallback_chain: Vec::new(),
+                fallback_off: false,
                 pinned: false,
                 prompt_lite: None,
             });
@@ -632,17 +742,26 @@ impl Profiles {
             if let Some(b) = a["pinned"].as_bool() {
                 p.pinned = if name == "coordinator" { true } else { b };
             }
-            if let Some(fb) = a.get("fallback") {
-                if let Some((eng, mdl)) = parse_fallback_value(fb) {
-                    p.fallback_harness = eng;
-                    p.fallback_model = mdl;
+            // the older keys (`fallback_harness` + `fallback_model`) are one entry, like `fallback`'s
+            // single-slot forms; a chain the file holds wins over both
+            let legacy = a["fallback_harness"].as_str().map(|h| {
+                let m = a["fallback_model"].as_str().map(str::trim).filter(|m| !m.is_empty());
+                json!({ "engine": h, "model": m })
+            });
+            let legacy = legacy.map(|l| if matches!(l["engine"].as_str().map(str::trim), Some("none" | "off")) { json!("none") } else { l });
+            if let Some(fb) = a.get("fallback").or(legacy.as_ref()) {
+                // a chain a newer brain wrote may be longer than this one takes: the first entries hold
+                let fb = match fb {
+                    Value::Array(items) if items.len() > FALLBACK_CAP => {
+                        eprintln!("agents file: {name}'s fallback chain has {} entries — the first {FALLBACK_CAP} are kept", items.len());
+                        Value::Array(items[..FALLBACK_CAP].to_vec())
+                    }
+                    other => other.clone(),
+                };
+                match parse_fallback(&fb) {
+                    Ok(set) => p.set_fallback(set),
+                    Err(e) => eprintln!("agents file: {name}'s fallback: {e} — keeping {}", fallback_json(&p)),
                 }
-            }
-            if let Some(fh) = a["fallback_harness"].as_str() {
-                p.fallback_harness = parse_fallback_engine(fh);
-            }
-            if let Some(fm) = a["fallback_model"].as_str().filter(|m| !m.trim().is_empty()) {
-                p.fallback_model = Some(fm.trim().into());
             }
             // The coordinator's tool scope is the brain's contract (it routes, it does not
             // write); a file entry may describe it but not widen it.
@@ -674,47 +793,31 @@ impl Profiles {
     }
 }
 
-fn parse_fallback_engine(raw: &str) -> Option<String> {
-    let t = raw.trim();
-    if t.is_empty() {
-        return None;
+/// `fallback` as the API and the file say it: `"none"`, `[]` (automatic) or the chain's
+/// `engine/model` strings in order.
+pub fn fallback_json(p: &Profile) -> Value {
+    if p.fallback_off {
+        return json!("none");
     }
-    if matches!(t, "none" | "off") {
-        return Some("none".into());
-    }
-    engine_name(t).map(String::from)
+    json!(p.fallback_chain.iter().map(FallbackEntry::show).collect::<Vec<_>>())
 }
 
-fn parse_fallback_value(v: &Value) -> Option<(Option<String>, Option<String>)> {
-    match v {
-        Value::Null => Some((None, None)),
-        Value::Bool(false) => Some((Some("none".into()), None)),
-        Value::String(s) => {
-            let t = s.trim();
-            if t.is_empty() {
-                Some((None, None))
-            } else {
-                parse_fallback_engine(t).map(|e| (Some(e), None))
+impl Profile {
+    fn set_fallback(&mut self, set: FallbackSetting) {
+        match set {
+            None => {
+                self.fallback_off = false;
+                self.fallback_chain.clear();
+            }
+            Some(None) => {
+                self.fallback_off = true;
+                self.fallback_chain.clear();
+            }
+            Some(Some(chain)) => {
+                self.fallback_off = false;
+                self.fallback_chain = chain;
             }
         }
-        Value::Object(o) => {
-            let eng_raw = o.get("engine").or_else(|| o.get("harness")).and_then(Value::as_str);
-            let eng = match eng_raw {
-                Some(s) if !s.trim().is_empty() => Some(parse_fallback_engine(s)?),
-                _ => None,
-            };
-            let mdl = o.get("model").and_then(Value::as_str).map(str::trim).filter(|m| !m.is_empty()).map(String::from);
-            Some((eng, mdl))
-        }
-        _ => None,
-    }
-}
-
-fn fallback_json(p: &Profile) -> Value {
-    match (&p.fallback_harness, &p.fallback_model) {
-        (None, None) => Value::Null,
-        (Some(e), None) if e == "none" => json!("none"),
-        (e, m) => json!({ "engine": e, "model": m }),
     }
 }
 
@@ -763,7 +866,7 @@ impl Profiles {
         let mut p = self.by_name.get(name).cloned().unwrap_or_else(|| Profile {
             name: name.into(), description: String::new(), mode: "primary".into(), prompt: BUILD_PROMPT.into(), model: None,
             variant: None, steps: None, fold: false, sessions: false, rules: allow_all(), harness: None,
-            fallback_harness: None, fallback_model: None, pinned: false, prompt_lite: None,
+            fallback_chain: Vec::new(), fallback_off: false, pinned: false, prompt_lite: None,
         });
         let door = name == "coordinator";
         if let Some(h) = body["harness"].as_str() {
@@ -784,11 +887,11 @@ impl Profiles {
             p.pinned = b;
         }
         if let Some(fb) = body.get("fallback") {
-            let Some((eng, mdl)) = parse_fallback_value(fb) else {
-                return Err("invalid fallback (want null | \"none\" | engine | {engine, model?})".into());
-            };
-            p.fallback_harness = eng;
-            p.fallback_model = mdl;
+            let set = parse_fallback(fb)?;
+            if door && matches!(set, Some(Some(_))) {
+                return Err("the coordinator never falls back".into());
+            }
+            p.set_fallback(set);
         }
         if let Some(d) = body["description"].as_str() {
             p.description = d.trim().chars().take(300).collect();
@@ -855,13 +958,18 @@ impl Profiles {
         entry["description"] = json!(p.description);
         entry["mode"] = json!(p.mode);
         entry["harness"] = json!(p.harness.clone().unwrap_or_else(|| "root".into()));
+        // the chain is written when it is not the built-in suggestion (`[]` = automatic, which a
+        // built-in role only has when the owner cleared it); the older single-slot keys go
+        let builtin_fb = builtins().into_iter().find(|b| b.name == p.name).map(|b| fallback_json(&b)).unwrap_or_else(|| json!([]));
         let fb = fallback_json(p);
-        if fb.is_null() {
-            if let Some(o) = entry.as_object_mut() {
+        if let Some(o) = entry.as_object_mut() {
+            o.remove("fallback_harness");
+            o.remove("fallback_model");
+            if fb == builtin_fb {
                 o.remove("fallback");
+            } else {
+                o.insert("fallback".into(), fb);
             }
-        } else {
-            entry["fallback"] = fb;
         }
         if p.pinned {
             entry["pinned"] = json!(true);
@@ -1084,7 +1192,7 @@ mod tests {
     fn prof(rules: Vec<Rule>) -> Profile {
         Profile { name: "t".into(), description: String::new(), mode: "primary".into(), prompt: String::new(), model: None,
             variant: None, steps: None, fold: false, sessions: false, rules, harness: None,
-            fallback_harness: None, fallback_model: None, pinned: false, prompt_lite: None }
+            fallback_chain: Vec::new(), fallback_off: false, pinned: false, prompt_lite: None }
     }
 
     #[test]
@@ -1354,30 +1462,102 @@ mod tests {
             r#"{"agent":{
                 "fix":{"harness":"claude","model":"opus","fallback":{"engine":"root","model":"glm-5.3"}},
                 "integrator":{"harness":"claude","model":"opus","pinned":true},
-                "strict":{"harness":"claude","fallback":"none"}
+                "strict":{"harness":"claude","fallback":"none"},
+                "old":{"harness":"claude","fallback_harness":"agy","fallback_model":"gemini-4-neon-high"},
+                "long":{"harness":"claude","fallback":["agy","root/glm-5.3","claude/sonnet","codex"]}
             }}"#,
         )
         .unwrap();
         let mut ps = Profiles::load(f.to_str());
+        let e = |s: &str| FallbackEntry::parse(s).unwrap();
+        // the shipped single-slot forms are entry 1
         let fix = ps.get("fix").unwrap();
-        assert_eq!(fix.fallback_harness.as_deref(), Some("root"));
-        assert_eq!(fix.fallback_model.as_deref(), Some("glm-5.3"));
-        assert!(!fix.pinned);
+        assert_eq!(fix.fallback_chain, vec![e("root/glm-5.3")]);
+        assert!(!fix.pinned && !fix.fallback_off);
+        assert_eq!(ps.get("old").unwrap().fallback_chain, vec![e("antigravity/gemini-4-neon-high")]);
         assert!(ps.get("integrator").unwrap().pinned);
-        assert_eq!(ps.get("strict").unwrap().fallback_harness.as_deref(), Some("none"));
+        assert!(ps.get("strict").unwrap().fallback_off);
         assert!(ps.get("coordinator").unwrap().pinned);
+        // a file chain longer than the cap keeps its first three
+        assert_eq!(ps.get("long").unwrap().fallback_chain.len(), FALLBACK_CAP);
         // upsert validates fallback and pinned
         assert!(ps.upsert("fix", &json!({"fallback": "emacs"})).is_err());
+        assert!(ps.upsert("fix", &json!({"fallback": ["agy", "root", "claude/sonnet", "codex"]})).unwrap_err().contains("at most 3"));
+        assert!(ps.upsert("fix", &json!({"fallback": ["agy", "antigravity"]})).unwrap_err().contains("twice"));
         assert!(ps.upsert("coordinator", &json!({"pinned": false})).is_err());
-        ps.upsert("lead", &json!({"harness": "claude", "fallback": {"engine": "agy", "model": "gemini-4-neon-high"}, "pinned": false})).unwrap();
+        assert!(ps.upsert("coordinator", &json!({"fallback": ["agy"]})).is_err(), "the coordinator never falls back");
+        assert!(ps.upsert("coordinator", &json!({"fallback": []})).is_ok(), "an editor saving the whole coordinator entry");
+        ps.upsert("lead", &json!({"harness": "claude", "fallback": ["agy/gemini-4-neon-high", "root/mac-studio/qwen3.8-27b", "claude/sonnet"], "pinned": false})).unwrap();
+        // the older object form still saves (as a one-entry chain)
+        ps.upsert("custom", &json!({"harness": "claude", "fallback": {"engine": "agy", "model": "gemini-4-neon-high"}})).unwrap();
         let again = Profiles::load(f.to_str());
         let lead = again.get("lead").unwrap();
-        assert_eq!(lead.fallback_harness.as_deref(), Some("antigravity"));
-        assert_eq!(lead.fallback_model.as_deref(), Some("gemini-4-neon-high"));
+        assert_eq!(lead.fallback_chain, vec![e("agy/gemini-4-neon-high"), e("root/mac-studio/qwen3.8-27b"), e("claude/sonnet")]);
+        assert_eq!(lead.fallback_chain[1].harness, None, "root/… is the root engine");
+        assert_eq!(lead.fallback_chain[1].model.as_deref(), Some("mac-studio/qwen3.8-27b"), "the model keeps its provider");
         assert!(!lead.pinned);
         let d = again.detail("lead").unwrap();
-        assert_eq!(d["fallback"], json!({"engine": "antigravity", "model": "gemini-4-neon-high"}));
+        assert_eq!(d["fallback"], json!(["antigravity/gemini-4-neon-high", "root/mac-studio/qwen3.8-27b", "claude/sonnet"]));
         assert_eq!(d["pinned"], false);
+        assert_eq!(again.detail("custom").unwrap()["fallback"], json!(["antigravity/gemini-4-neon-high"]));
+        assert_eq!(again.detail("strict").unwrap()["fallback"], json!("none"));
+        // the old keys are gone from the file once a role is saved
+        let raw: Value = serde_json::from_slice(&std::fs::read(&f).unwrap()).unwrap();
+        assert!(raw["agent"]["custom"].get("fallback_harness").is_none());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn builtin_chains_are_the_suggested_ones_and_clearing_means_automatic() {
+        let dir = std::env::temp_dir().join(format!("ygg-prof-chain-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("agents.json");
+        // the live file's shape: roles with an engine, no fallback key
+        std::fs::write(&f, r#"{"agent":{"lead":{"harness":"claude","model":"opus"},"build":{"harness":"antigravity","model":"gemini-4-neon-high"}}}"#).unwrap();
+        let mut ps = Profiles::load(f.to_str());
+        let shown = |ps: &Profiles, n: &str| ps.detail(n).unwrap()["fallback"].clone();
+        assert_eq!(shown(&ps, "lead"), json!(["antigravity/gemini-4-neon-high", "root/glm-5.3"]));
+        assert_eq!(shown(&ps, "build"), json!(["root/glm-5.3", "claude/sonnet"]));
+        assert_eq!(shown(&ps, "fix"), json!(["antigravity/gemini-4-neon-high", "root/glm-5.3"]));
+        assert_eq!(shown(&ps, "review"), json!(["root/glm-5.3", "claude/sonnet"]));
+        assert_eq!(shown(&ps, "research"), json!(["antigravity/gemini-4-neon-high"]));
+        assert_eq!(shown(&ps, "coordinator"), json!([]));
+        assert!(ps.get("coordinator").unwrap().pinned);
+        // the catalog (GET /agent) carries the same chain
+        let cat = ps.catalog();
+        let lead = cat.as_array().unwrap().iter().find(|a| a["name"] == "lead").unwrap();
+        assert_eq!(lead["fallback"], json!(["antigravity/gemini-4-neon-high", "root/glm-5.3"]));
+        // a save that leaves the suggestion alone does not freeze it into the file
+        ps.upsert("lead", &json!({"model": "fable"})).unwrap();
+        let raw: Value = serde_json::from_slice(&std::fs::read(&f).unwrap()).unwrap();
+        assert!(raw["agent"]["lead"].get("fallback").is_none(), "{}", raw["agent"]["lead"]);
+        // cleared = automatic, and it stays cleared after a reload
+        ps.upsert("build", &json!({"fallback": []})).unwrap();
+        let again = Profiles::load(f.to_str());
+        assert_eq!(shown(&again, "build"), json!([]));
+        assert!(again.get("build").unwrap().fallback_chain.is_empty() && !again.get("build").unwrap().fallback_off);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn fallback_entries_parse() {
+        let e = FallbackEntry::parse("agy/gemini-4-neon-high").unwrap();
+        assert_eq!((e.harness, e.model.as_deref()), (Some(crate::harness::Kind::Antigravity), Some("gemini-4-neon-high")));
+        assert_eq!(e.show(), "antigravity/gemini-4-neon-high");
+        let r = FallbackEntry::parse("root/openrouter/anthropic/claude-sonnet").unwrap();
+        assert_eq!((r.harness, r.model.as_deref()), (None, Some("openrouter/anthropic/claude-sonnet")));
+        let c = FallbackEntry::parse("claude").unwrap();
+        assert_eq!((c.harness, c.model), (Some(crate::harness::Kind::Claude), None));
+        assert_eq!(FallbackEntry::parse("claude/default").unwrap().model, None);
+        assert!(FallbackEntry::parse("glm-5.3").is_err(), "an engine comes first");
+        assert!(FallbackEntry::parse("").is_err());
+        assert!(matches!(parse_fallback(&json!(null)), Ok(None)));
+        assert!(matches!(parse_fallback(&json!([])), Ok(None)));
+        assert!(matches!(parse_fallback(&json!("none")), Ok(Some(None))));
+        assert!(matches!(parse_fallback(&json!(false)), Ok(Some(None))));
+        assert!(parse_fallback(&json!(["none"])).is_err());
+        assert!(parse_fallback(&json!(42)).is_err());
+        assert!(matches!(parse_fallback(&json!(["agy", "root", "claude"])), Ok(Some(Some(ref c))) if c.len() == 3));
     }
 }
