@@ -163,3 +163,9 @@
 - Green on af508c9a (mine): app unit 31/31, cargo 159, tree-e2e GREEN, root-home-layout rig 6/6 with the real 11-20 debian-box brain as "old" and 6/6 with the default, roots-sheet 2/2, root-detail 3/3 ×2 + theme 1/1 (twin, mock model).
 - Deployed 20261124-1851-af508c9a, hub-app + hub-app-tailnet. Health 11/11.
 - Live ap 360 px touch: header keys at the same boxes on /, /roots/debian-box, /roots/omarchy-lab (203/242/281,12), no tabs. debian-box wears terminus = the owner's own pick (17:22, 200 from their phone, after the 17:06 update). Pick drift for debian-box → 200, persists after reload, only there; lab/home//settings unchanged; terminus put back (rev 3). claude model on debian-box opus → sonnet → 200, persists after reload; put back to opus. #418 still on every page (open).
+
+## 11-24 19:0x fix-repair-keeps-roots (76e8f263, merged 482f1f66) — handed over by "mac re-pair trust fix" (ses_2b01218f)
+- Re-pair (claim with the phone's own old refresh credential, old device not revoked) → the new device is written live with the old `roots`, roots.json `dev` moves to it (handOverRoots), then the old device is revoked. A fresh pairing inherits nothing; a revoked device hands nothing over. App only.
+- Green on 482f1f66: app unit 36/36, cargo 159, tree-e2e GREEN, sim/repair-keeps-roots-e2e.py 13/13 ×3 (needs ABSOLUTE --app/--bin-trunk: relative → "spawn … ENOENT" at 2b), v09-ladder auth/pair-ladder/bridge/join 10 passed 1 skipped, root-home-layout rig 6/6, roots-sheet 2/2.
+- Deployed 20261124-1903-482f1f66, hub-app + hub-app-tailnet. Health 11/11. live-door AP + tailnet PASS; owner's Android dev_0bce5815 live with [omarchy-lab, debian-box]; hub-wg pins both (up); test device revoked, roots none.
+- NOT run (owner's own yes only): scripts/root-regrant.py --root mac-studio --apply --confirm mac-studio:dev_0bce5815 (gives mac-studio its approval back).
