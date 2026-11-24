@@ -300,6 +300,15 @@ mod tests {
     }
 
     #[test]
+    fn the_shell_script_hashes_the_same_paths() {
+        // scripts/root-part-id.sh gives release.sh's git-less builds their id: same list, same order
+        let f = Path::new(env!("CARGO_MANIFEST_DIR")).join("../scripts/root-part-id.sh");
+        let Ok(sh) = std::fs::read_to_string(&f) else { return }; // a copy holding root/ alone
+        let line = sh.lines().find_map(|l| l.strip_prefix("PATHS=\"")).expect("PATHS= in root-part-id.sh");
+        assert_eq!(line.trim_end_matches('"').split(' ').collect::<Vec<_>>(), PATHS);
+    }
+
+    #[test]
     fn this_repo_gives_the_ids_of_record() {
         // NOTES (root-updates-design §1): 25c54c2f and b3258d03 → 1481715ef90f. Skipped where the
         // sources are not a checkout holding those commits (a git archive copy).
