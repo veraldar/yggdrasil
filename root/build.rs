@@ -5,6 +5,7 @@
 //! always uses its own git, whatever those say. Neither: "dev". The brain reads the stamp with
 //! env!("YGG_STAMP_…") (peers::build_info) — never from a file beside the binary.
 
+#[allow(dead_code)] // clean_id is for the tests and scripts
 #[path = "src/build_id.rs"]
 mod build_id;
 
