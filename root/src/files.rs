@@ -421,6 +421,7 @@ async fn peer_bytes(st: &AppState, root: &str, path: &str) -> Result<Vec<u8>, St
 
 /// Brings a file here from `root`, in pieces under the tunnel's limit; checks its hash.
 pub async fn pull(st: &AppState, root: &str, hash: &str) -> Result<u64, String> {
+    let t0 = std::time::Instant::now();
     if !valid_hash(hash) {
         return Err("not a file hash".into());
     }
@@ -471,9 +472,10 @@ pub async fn pull(st: &AppState, root: &str, hash: &str) -> Result<u64, String> 
     }
     .await;
     st.files.pulls.lock().unwrap().remove(hash);
+    let took = t0.elapsed();
     match res {
         Ok(()) => {
-            eprintln!("files: pulled {hash} ({}) from {root}", human_size(size));
+            eprintln!("files: pulled {hash} ({}) from {root} in {} ms", human_size(size), took.as_millis());
             Ok(size)
         }
         Err(e) => {
@@ -577,14 +579,27 @@ pub async fn share_artifact(State(st): State<AppState>, Json(b): Json<Value>) ->
     let session = b["session"].as_str().filter(|s| !s.is_empty()).map(String::from);
     if let Some(root) = b["root"].as_str().filter(|r| !r.is_empty() && *r != st.config.peers.me) {
         let body = json!({ "name": name, "session": session });
+        let t0 = std::time::Instant::now();
         let r = match crate::peers::call(&st, root, "POST", "/file/artifact", Some(body), 60).await {
             Ok(r) => r,
             Err(e) if e.contains(" 404 ") => return err(StatusCode::NOT_FOUND, &format!("{name} is not on {root}")),
             Err(e) => return err(StatusCode::BAD_GATEWAY, &no_answer(root, &e)),
         };
+        let t_call = t0.elapsed();
         let Some(hash) = r["hash"].as_str().filter(|h| valid_hash(h)).map(String::from) else { return err(StatusCode::BAD_GATEWAY, "bad answer") };
-        if let Err(e) = pull(&st, root, &hash).await {
-            return err(StatusCode::BAD_GATEWAY, &e);
+        let t_pull = std::time::Instant::now();
+        match pull(&st, root, &hash).await {
+            Ok(size) => {
+                // the root→root leg of an artifact open, timed on the receiving side
+                // (11-24, artifact first-open fix 3): call_ms = the peer answered, pull_ms =
+                // the bytes arrived, size = what crossed. Logged, never metered elsewhere.
+                eprintln!(
+                    "artifact pull {name} from {root}: {size}B call_ms={} pull_ms={}",
+                    t_call.as_millis(),
+                    t_pull.elapsed().as_millis()
+                );
+            }
+            Err(e) => return err(StatusCode::BAD_GATEWAY, &e),
         }
         let mut out = r.clone();
         out["root"] = json!(root);

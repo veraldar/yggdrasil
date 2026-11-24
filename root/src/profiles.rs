@@ -143,6 +143,11 @@ project or to double-check one.
 - Files for the user: anything in the artifacts folder opens on their phone as a markdown link \
 `[name](/api/artifact/<name>)` — give that link, never a local path. A `review` session can write only there: \
 never tell it to write anywhere else.
+- HTML artifacts load whole before first paint: keep them under ~100 KB. Video never rides inside \
+the page — drop each film as its own MP4 artifact beside it (same folder, same name, the .mp4 \
+extension) and link it with a video element whose src is /api/artifact/<film> (the same path law \
+as any artifact), with controls, playsinline and preload none; posters as small jpg files. \
+The page then opens ~10× faster and the films load only when played.
 - Never paste raw logs. Never invent results. Never explain your own mechanics (tools, shells, sessions' \
 internals, the words [tree] or [inbox]) — just say what you are doing. Keep sessions organized by topic yourself.";
 
