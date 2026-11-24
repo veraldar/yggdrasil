@@ -664,6 +664,49 @@
   .oz-swt { display: inline-flex; gap: 2px; flex: none; vertical-align: middle; }
   .oz-swt i { display: block; width: 7px; height: 9px; border: 1px solid var(--oz-border); }
   .oz-gone { opacity: .5; }
+
+  /* ── fallback chain & grouped provider pickers (harness-chains v10) ── */
+  .oz-fb { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 5px; margin-top: 3px; font-size: 10.5px; color: var(--oz-dim); min-width: 0; }
+  .oz-fc {
+    display: inline-flex; align-items: center; gap: 5px; max-width: 100%; min-width: 0;
+    padding: 0 6px 0 1px; font-size: 10px; line-height: 16px;
+    border: 1px solid var(--oz-border); color: var(--oz-dim); background: var(--oz-bg);
+  }
+  .oz-fc em { font-style: normal; color: var(--oz-text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+  .oz-fc .oz-badge, .oz-fb-ed .oz-badge {
+    position: static; top: auto; right: auto; flex: none;
+    min-width: 14px; height: 14px; line-height: 14px; padding: 0 3px; font-size: 9.5px;
+  }
+  .oz-fc.plus {
+    padding: 0 4px; height: 18px; color: var(--oz-success);
+    border-color: color-mix(in srgb, var(--oz-success) 60%, transparent); background: none;
+  }
+  .oz-fb-ed { padding-bottom: 4px; }
+  .oz-fb-ed li {
+    display: flex; align-items: center; gap: 6px; padding: 6px 2px; min-width: 0;
+    border-bottom: 1px var(--oz-rule) var(--oz-border); font-size: 12px;
+  }
+  .oz-fb-ed li:last-child { border-bottom: 0; }
+  .oz-fb-ed .h { flex: none; color: var(--oz-dim); font-size: 13px; }
+  .oz-fb-ed .tx { flex: 1 1 auto; min-width: 0; line-height: 1.35; overflow: hidden; }
+  .oz-fb-ed .tx > span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .oz-fb-ed .tx small { display: block; font-size: 10.5px; color: var(--oz-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .oz-fb-ed .oz-k.sm { padding: 0; font-size: 13px; flex: none; }
+  .oz-chips button { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .oz-chips button em { font-style: normal; color: var(--oz-text); margin-left: 4px; }
+  .oz-chips button small { margin-left: 5px; font-size: 9.5px; letter-spacing: normal; opacity: .8; }
+  .oz-pgrp { display: flex; flex-direction: column; gap: 6px; padding-top: 8px; border-top: 1px var(--oz-rule) var(--oz-border); min-width: 0; }
+  .oz-pgrp:first-child { padding-top: 0; border-top: 0; }
+  .oz-pl { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; font-size: 10.5px; color: var(--oz-dim); letter-spacing: .04em; min-width: 0; }
+  .oz-ptag {
+    display: inline-flex; align-items: center; flex: none; padding: 0 5px; font-size: 9.5px; line-height: 15px;
+    border: 1px solid var(--oz-border); color: var(--oz-dim); letter-spacing: normal;
+  }
+  .oz-ptag.ok { color: var(--oz-success); border-color: color-mix(in srgb, var(--oz-success) 50%, transparent); }
+  .oz-ptag.bad { color: var(--oz-danger); border-color: color-mix(in srgb, var(--oz-danger) 50%, transparent); }
+  .oz-ptag.act { color: var(--oz-active); border-color: color-mix(in srgb, var(--oz-active) 50%, transparent); }
+  .oz-kv li > span { min-width: 0; overflow-wrap: anywhere; }
+  .oz-prov-kv li { grid-template-columns: 7.8em 1fr auto; }
 }
 
 /* under reduced motion everything holds still — the words still differ,

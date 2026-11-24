@@ -185,7 +185,26 @@ export async function PATCH(req: Request, ctx: { params: Promise<{ id: string }>
         const r = await fetch(`${OC}/config/providers`, { cache: 'no-store' });
         const d = r.ok ? await r.json() : { providers: [] };
         const p = (d.providers || []).find((x: { id: string }) => x.id === m.providerID);
-        if (!p?.models?.[target])
+        let known = !!p?.models?.[target];
+        if (!known) {
+          // also check /provider (registry + discovered models from any root provider)
+          const pr = await fetch(`${OC}/provider`, { cache: 'no-store' }).catch(() => null);
+          const pd = pr?.ok ? await pr.json().catch(() => null) : null;
+          const plist = Array.isArray(pd?.providers) ? pd.providers : [];
+          const hit = plist.find(
+            (x: { id?: string; name?: string }) => x.id === m.providerID || x.name === m.providerID
+          );
+          if (hit) {
+            const ms = [
+              ...(Array.isArray(hit.models) ? hit.models : []),
+              ...(Array.isArray(hit.discovered) ? hit.discovered : []),
+            ];
+            known = ms.some((x: unknown) =>
+              typeof x === 'string' ? x === target : (x as { id?: string })?.id === target
+            );
+          }
+        }
+        if (!known)
           return NextResponse.json(
             { error: `unknown model ${m.providerID}/${target}` },
             { status: 400 }
