@@ -1324,7 +1324,7 @@ mod tests {
         ps.upsert("agy1", &json!({"harness": "antigravity", "model": "gemini-3.8-flash-low"})).unwrap();
         let g = ps.detail("agy1").unwrap();
         assert_eq!(g["harness"], "antigravity");
-        assert_eq!(g["customizable"], json!(["description", "model"]));
+        assert_eq!(g["customizable"], json!(["description", "model", "fallback"]));
         assert!(ps.remove("agy1").is_ok());
         assert!(ps.upsert("gem", &json!({"harness": "gemini"})).is_err(), "Gemini CLI is no longer a harness");
         let again = Profiles::load(f.to_str());
