@@ -1,0 +1,314 @@
+{
+  "about": "CONTRACTS.md C3 shared vectors (written by IDP, trunk/src/v1/paseto.rs build_vectors). Every verifier (trunk, branch/lib/trunk-auth.ts, the bridge) runs every case: ctx.now is unix seconds, ctx.region the request's region class, ctx.kill_epoch the epoch seen, ctx.deny the deny-list ({did, until unix ms}; an entry counts while until > now*1000). Checks in order: signature with a non-retired kid → invalid; exp ≤ now → expired; rgn ≠ region → region; kep < kill_epoch → revoked; did denied → revoked; no token → missing. Regenerate: WRITE_VECTORS=1 cargo test vectors_file",
+  "alg": "v4.public (Ed25519), implicit assertion empty",
+  "cases": [
+    {
+      "ctx": {
+        "deny": [],
+        "kill_epoch": 3,
+        "now": 1764072060,
+        "region": "net:8.8.0.0/16"
+      },
+      "expect": {
+        "did": "dev_TESTdevice0000000",
+        "ok": true,
+        "role": "admin",
+        "sub": "acc_TESTaccount000000"
+      },
+      "name": "ok",
+      "token": "v4.public.eyJpc3MiOiJodHRwczovL2xqb29scS52ZXJhbGRhci5vcmciLCJzdWIiOiJhY2NfVEVTVGFjY291bnQwMDAwMDAiLCJkaWQiOiJkZXZfVEVTVGRldmljZTAwMDAwMDAiLCJyb2xlIjoiYWRtaW4iLCJyZ24iOiJuZXQ6OC44LjAuMC8xNiIsImtlcCI6MywiaWF0IjoiMjAyNS0xMS0yNVQxMjowMDowMFoiLCJleHAiOiIyMDI1LTExLTI1VDEyOjE1OjAwWiIsImp0aSI6IldXVGFCVnJqSFBqcmNqRGhrS1VFaVEifbH2lky0K_1VbtYnlflVi_5-z50msmwZ1izSAVwMIE-WA1wkDfCLmg6QmIZAkDRHRlykpWSUSyYDeUkmLMoUJQU.eyJraWQiOiJrXzVfc1dGeEVjeDlsMzRvZWkifQ"
+    },
+    {
+      "ctx": {
+        "deny": [],
+        "kill_epoch": 3,
+        "now": 1764072060,
+        "region": "net:8.8.0.0/16"
+      },
+      "expect": {
+        "reauth": "login",
+        "why": "missing"
+      },
+      "name": "missing",
+      "token": ""
+    },
+    {
+      "ctx": {
+        "deny": [],
+        "kill_epoch": 3,
+        "now": 1764072060,
+        "region": "net:8.8.0.0/16"
+      },
+      "expect": {
+        "reauth": "login",
+        "why": "invalid"
+      },
+      "name": "invalid: tampered signature",
+      "token": "v4.public.eyJpc3MiOiJodHRwczovA2xqb29scS52ZXJhbGRhci5vcmciLCJzdWIiOiJhY2NfVEVTVGFjY291bnQwMDAwMDAiLCJkaWQiOiJkZXZfVEVTVGRldmljZTAwMDAwMDAiLCJyb2xlIjoiYWRtaW4iLCJyZ24iOiJuZXQ6OC44LjAuMC8xNiIsImtlcCI6MywiaWF0IjoiMjAyNS0xMS0yNVQxMjowMDowMFoiLCJleHAiOiIyMDI1LTExLTI1VDEyOjE1OjAwWiIsImp0aSI6IldXVGFCVnJqSFBqcmNqRGhrS1VFaVEifbH2lky0K_1VbtYnlflVi_5-z50msmwZ1izSAVwMIE-WA1wkDfCLmg6QmIZAkDRHRlykpWSUSyYDeUkmLMoUJQU.eyJraWQiOiJrXzVfc1dGeEVjeDlsMzRvZWkifQ"
+    },
+    {
+      "ctx": {
+        "deny": [],
+        "kill_epoch": 3,
+        "now": 1764072060,
+        "region": "net:8.8.0.0/16"
+      },
+      "expect": {
+        "reauth": "login",
+        "why": "invalid"
+      },
+      "name": "invalid: signed by a key not in keys[]",
+      "token": "v4.public.eyJpc3MiOiJodHRwczovL2xqb29scS52ZXJhbGRhci5vcmciLCJzdWIiOiJhY2NfVEVTVGFjY291bnQwMDAwMDAiLCJkaWQiOiJkZXZfVEVTVGRldmljZTAwMDAwMDAiLCJyb2xlIjoiYWRtaW4iLCJyZ24iOiJuZXQ6OC44LjAuMC8xNiIsImtlcCI6MywiaWF0IjoiMjAyNS0xMS0yNVQxMjowMDowMFoiLCJleHAiOiIyMDI1LTExLTI1VDEyOjE1OjAwWiIsImp0aSI6IldXVGFCVnJqSFBqcmNqRGhrS1VFaVEifVqFBFtjesF9uWDGVZe5bOe4dUYhna991IadWA_Dx_-mdcgMyiaFOKqvqgxUMsEUkKneoDFTrGALtdocWX_q5wM.eyJraWQiOiJrX01ESTd1THZnQms5V09SNTEifQ"
+    },
+    {
+      "ctx": {
+        "deny": [],
+        "kill_epoch": 3,
+        "now": 1764072060,
+        "region": "net:8.8.0.0/16"
+      },
+      "expect": {
+        "reauth": "login",
+        "why": "invalid"
+      },
+      "name": "invalid: retired kid",
+      "token": "v4.public.eyJpc3MiOiJodHRwczovL2xqb29scS52ZXJhbGRhci5vcmciLCJzdWIiOiJhY2NfVEVTVGFjY291bnQwMDAwMDAiLCJkaWQiOiJkZXZfVEVTVGRldmljZTAwMDAwMDAiLCJyb2xlIjoiYWRtaW4iLCJyZ24iOiJuZXQ6OC44LjAuMC8xNiIsImtlcCI6MywiaWF0IjoiMjAyNS0xMS0yNVQxMjowMDowMFoiLCJleHAiOiIyMDI1LTExLTI1VDEyOjE1OjAwWiIsImp0aSI6IldXVGFCVnJqSFBqcmNqRGhrS1VFaVEifWcsVKt1lGPHM5z0UOhrzcRqarispOXftiSLKirOqHQeS-pD4H4oqEjwalVtkamycWilf84zfGey1Amus7lQ2go.eyJraWQiOiJrXzZBODJFYUEzNktlamhiTEEifQ"
+    },
+    {
+      "ctx": {
+        "deny": [],
+        "kill_epoch": 3,
+        "now": 1764072060,
+        "region": "net:8.8.0.0/16"
+      },
+      "expect": {
+        "reauth": "login",
+        "why": "invalid"
+      },
+      "name": "invalid: not v4.public",
+      "token": "v4.local.eyJpc3MiOiJodHRwczovL2xqb29scS52ZXJhbGRhci5vcmciLCJzdWIiOiJhY2NfVEVTVGFjY291bnQwMDAwMDAiLCJkaWQiOiJkZXZfVEVTVGRldmljZTAwMDAwMDAiLCJyb2xlIjoiYWRtaW4iLCJyZ24iOiJuZXQ6OC44LjAuMC8xNiIsImtlcCI6MywiaWF0IjoiMjAyNS0xMS0yNVQxMjowMDowMFoiLCJleHAiOiIyMDI1LTExLTI1VDEyOjE1OjAwWiIsImp0aSI6IldXVGFCVnJqSFBqcmNqRGhrS1VFaVEifbH2lky0K_1VbtYnlflVi_5-z50msmwZ1izSAVwMIE-WA1wkDfCLmg6QmIZAkDRHRlykpWSUSyYDeUkmLMoUJQU.eyJraWQiOiJrXzVfc1dGeEVjeDlsMzRvZWkifQ"
+    },
+    {
+      "ctx": {
+        "deny": [],
+        "kill_epoch": 3,
+        "now": 1764072060,
+        "region": "net:8.8.0.0/16"
+      },
+      "expect": {
+        "reauth": "login",
+        "why": "invalid"
+      },
+      "name": "invalid: extra claim",
+      "token": "v4.public.eyJhZG1pbiI6dHJ1ZSwiZGlkIjoiZGV2X1RFU1RkZXZpY2UwMDAwMDAwIiwiZXhwIjoiMjAyNS0xMS0yNVQxMjoxNTowMFoiLCJpYXQiOiIyMDI1LTExLTI1VDEyOjAwOjAwWiIsImlzcyI6Imh0dHBzOi8vbGpvb2xxLnZlcmFsZGFyLm9yZyIsImp0aSI6IldXVGFCVnJqSFBqcmNqRGhrS1VFaVEiLCJrZXAiOjMsInJnbiI6Im5ldDo4LjguMC4wLzE2Iiwicm9sZSI6ImFkbWluIiwic3ViIjoiYWNjX1RFU1RhY2NvdW50MDAwMDAwIn0a8DTlYR4lyfxeLnGEH0sFfAzntLH3SbJ0tjviiNx_PFluE1VDUvNjm-hWcbRS7IxkRCoPfuvAhPymrTRb1o8E.eyJraWQiOiJrXzVfc1dGeEVjeDlsMzRvZWkifQ"
+    },
+    {
+      "ctx": {
+        "deny": [],
+        "kill_epoch": 3,
+        "now": 1764072900,
+        "region": "net:8.8.0.0/16"
+      },
+      "expect": {
+        "reauth": "refresh",
+        "why": "expired"
+      },
+      "name": "expired",
+      "token": "v4.public.eyJpc3MiOiJodHRwczovL2xqb29scS52ZXJhbGRhci5vcmciLCJzdWIiOiJhY2NfVEVTVGFjY291bnQwMDAwMDAiLCJkaWQiOiJkZXZfVEVTVGRldmljZTAwMDAwMDAiLCJyb2xlIjoiYWRtaW4iLCJyZ24iOiJuZXQ6OC44LjAuMC8xNiIsImtlcCI6MywiaWF0IjoiMjAyNS0xMS0yNVQxMjowMDowMFoiLCJleHAiOiIyMDI1LTExLTI1VDEyOjE1OjAwWiIsImp0aSI6IldXVGFCVnJqSFBqcmNqRGhrS1VFaVEifbH2lky0K_1VbtYnlflVi_5-z50msmwZ1izSAVwMIE-WA1wkDfCLmg6QmIZAkDRHRlykpWSUSyYDeUkmLMoUJQU.eyJraWQiOiJrXzVfc1dGeEVjeDlsMzRvZWkifQ"
+    },
+    {
+      "ctx": {
+        "deny": [],
+        "kill_epoch": 3,
+        "now": 1764072060,
+        "region": "lan:192.168.1.0/24"
+      },
+      "expect": {
+        "reauth": "refresh",
+        "why": "region"
+      },
+      "name": "region",
+      "token": "v4.public.eyJpc3MiOiJodHRwczovL2xqb29scS52ZXJhbGRhci5vcmciLCJzdWIiOiJhY2NfVEVTVGFjY291bnQwMDAwMDAiLCJkaWQiOiJkZXZfVEVTVGRldmljZTAwMDAwMDAiLCJyb2xlIjoiYWRtaW4iLCJyZ24iOiJuZXQ6OC44LjAuMC8xNiIsImtlcCI6MywiaWF0IjoiMjAyNS0xMS0yNVQxMjowMDowMFoiLCJleHAiOiIyMDI1LTExLTI1VDEyOjE1OjAwWiIsImp0aSI6IldXVGFCVnJqSFBqcmNqRGhrS1VFaVEifbH2lky0K_1VbtYnlflVi_5-z50msmwZ1izSAVwMIE-WA1wkDfCLmg6QmIZAkDRHRlykpWSUSyYDeUkmLMoUJQU.eyJraWQiOiJrXzVfc1dGeEVjeDlsMzRvZWkifQ"
+    },
+    {
+      "ctx": {
+        "deny": [],
+        "kill_epoch": 4,
+        "now": 1764072060,
+        "region": "net:8.8.0.0/16"
+      },
+      "expect": {
+        "reauth": "login",
+        "why": "revoked"
+      },
+      "name": "revoked: kill epoch moved",
+      "token": "v4.public.eyJpc3MiOiJodHRwczovL2xqb29scS52ZXJhbGRhci5vcmciLCJzdWIiOiJhY2NfVEVTVGFjY291bnQwMDAwMDAiLCJkaWQiOiJkZXZfVEVTVGRldmljZTAwMDAwMDAiLCJyb2xlIjoiYWRtaW4iLCJyZ24iOiJuZXQ6OC44LjAuMC8xNiIsImtlcCI6MywiaWF0IjoiMjAyNS0xMS0yNVQxMjowMDowMFoiLCJleHAiOiIyMDI1LTExLTI1VDEyOjE1OjAwWiIsImp0aSI6IldXVGFCVnJqSFBqcmNqRGhrS1VFaVEifbH2lky0K_1VbtYnlflVi_5-z50msmwZ1izSAVwMIE-WA1wkDfCLmg6QmIZAkDRHRlykpWSUSyYDeUkmLMoUJQU.eyJraWQiOiJrXzVfc1dGeEVjeDlsMzRvZWkifQ"
+    },
+    {
+      "ctx": {
+        "deny": [
+          {
+            "did": "dev_TESTdevice0000000",
+            "until": 1764072900000
+          }
+        ],
+        "kill_epoch": 3,
+        "now": 1764072060,
+        "region": "net:8.8.0.0/16"
+      },
+      "expect": {
+        "reauth": "login",
+        "why": "revoked"
+      },
+      "name": "revoked: did on the deny-list",
+      "token": "v4.public.eyJpc3MiOiJodHRwczovL2xqb29scS52ZXJhbGRhci5vcmciLCJzdWIiOiJhY2NfVEVTVGFjY291bnQwMDAwMDAiLCJkaWQiOiJkZXZfVEVTVGRldmljZTAwMDAwMDAiLCJyb2xlIjoiYWRtaW4iLCJyZ24iOiJuZXQ6OC44LjAuMC8xNiIsImtlcCI6MywiaWF0IjoiMjAyNS0xMS0yNVQxMjowMDowMFoiLCJleHAiOiIyMDI1LTExLTI1VDEyOjE1OjAwWiIsImp0aSI6IldXVGFCVnJqSFBqcmNqRGhrS1VFaVEifbH2lky0K_1VbtYnlflVi_5-z50msmwZ1izSAVwMIE-WA1wkDfCLmg6QmIZAkDRHRlykpWSUSyYDeUkmLMoUJQU.eyJraWQiOiJrXzVfc1dGeEVjeDlsMzRvZWkifQ"
+    },
+    {
+      "ctx": {
+        "deny": [
+          {
+            "did": "dev_other",
+            "until": 1764072900000
+          }
+        ],
+        "kill_epoch": 3,
+        "now": 1764072060,
+        "region": "net:8.8.0.0/16"
+      },
+      "expect": {
+        "did": "dev_TESTdevice0000000",
+        "ok": true,
+        "role": "admin",
+        "sub": "acc_TESTaccount000000"
+      },
+      "name": "ok: deny entry for another device",
+      "token": "v4.public.eyJpc3MiOiJodHRwczovL2xqb29scS52ZXJhbGRhci5vcmciLCJzdWIiOiJhY2NfVEVTVGFjY291bnQwMDAwMDAiLCJkaWQiOiJkZXZfVEVTVGRldmljZTAwMDAwMDAiLCJyb2xlIjoiYWRtaW4iLCJyZ24iOiJuZXQ6OC44LjAuMC8xNiIsImtlcCI6MywiaWF0IjoiMjAyNS0xMS0yNVQxMjowMDowMFoiLCJleHAiOiIyMDI1LTExLTI1VDEyOjE1OjAwWiIsImp0aSI6IldXVGFCVnJqSFBqcmNqRGhrS1VFaVEifbH2lky0K_1VbtYnlflVi_5-z50msmwZ1izSAVwMIE-WA1wkDfCLmg6QmIZAkDRHRlykpWSUSyYDeUkmLMoUJQU.eyJraWQiOiJrXzVfc1dGeEVjeDlsMzRvZWkifQ"
+    },
+    {
+      "ctx": {
+        "deny": [
+          {
+            "did": "dev_TESTdevice0000000",
+            "until": 1764072030000
+          }
+        ],
+        "kill_epoch": 3,
+        "now": 1764072060,
+        "region": "net:8.8.0.0/16"
+      },
+      "expect": {
+        "did": "dev_TESTdevice0000000",
+        "ok": true,
+        "role": "admin",
+        "sub": "acc_TESTaccount000000"
+      },
+      "name": "ok: deny entry already past its until",
+      "token": "v4.public.eyJpc3MiOiJodHRwczovL2xqb29scS52ZXJhbGRhci5vcmciLCJzdWIiOiJhY2NfVEVTVGFjY291bnQwMDAwMDAiLCJkaWQiOiJkZXZfVEVTVGRldmljZTAwMDAwMDAiLCJyb2xlIjoiYWRtaW4iLCJyZ24iOiJuZXQ6OC44LjAuMC8xNiIsImtlcCI6MywiaWF0IjoiMjAyNS0xMS0yNVQxMjowMDowMFoiLCJleHAiOiIyMDI1LTExLTI1VDEyOjE1OjAwWiIsImp0aSI6IldXVGFCVnJqSFBqcmNqRGhrS1VFaVEifbH2lky0K_1VbtYnlflVi_5-z50msmwZ1izSAVwMIE-WA1wkDfCLmg6QmIZAkDRHRlykpWSUSyYDeUkmLMoUJQU.eyJraWQiOiJrXzVfc1dGeEVjeDlsMzRvZWkifQ"
+    },
+    {
+      "ctx": {
+        "deny": [],
+        "kill_epoch": 3,
+        "now": 1764072901,
+        "region": "loopback"
+      },
+      "expect": {
+        "reauth": "refresh",
+        "why": "expired"
+      },
+      "name": "order: expired beats region",
+      "token": "v4.public.eyJpc3MiOiJodHRwczovL2xqb29scS52ZXJhbGRhci5vcmciLCJzdWIiOiJhY2NfVEVTVGFjY291bnQwMDAwMDAiLCJkaWQiOiJkZXZfVEVTVGRldmljZTAwMDAwMDAiLCJyb2xlIjoiYWRtaW4iLCJyZ24iOiJuZXQ6OC44LjAuMC8xNiIsImtlcCI6MywiaWF0IjoiMjAyNS0xMS0yNVQxMjowMDowMFoiLCJleHAiOiIyMDI1LTExLTI1VDEyOjE1OjAwWiIsImp0aSI6IldXVGFCVnJqSFBqcmNqRGhrS1VFaVEifbH2lky0K_1VbtYnlflVi_5-z50msmwZ1izSAVwMIE-WA1wkDfCLmg6QmIZAkDRHRlykpWSUSyYDeUkmLMoUJQU.eyJraWQiOiJrXzVfc1dGeEVjeDlsMzRvZWkifQ"
+    },
+    {
+      "ctx": {
+        "deny": [],
+        "kill_epoch": 9,
+        "now": 1764072060,
+        "region": "loopback"
+      },
+      "expect": {
+        "reauth": "refresh",
+        "why": "region"
+      },
+      "name": "order: region beats revoked",
+      "token": "v4.public.eyJpc3MiOiJodHRwczovL2xqb29scS52ZXJhbGRhci5vcmciLCJzdWIiOiJhY2NfVEVTVGFjY291bnQwMDAwMDAiLCJkaWQiOiJkZXZfVEVTVGRldmljZTAwMDAwMDAiLCJyb2xlIjoiYWRtaW4iLCJyZ24iOiJuZXQ6OC44LjAuMC8xNiIsImtlcCI6MywiaWF0IjoiMjAyNS0xMS0yNVQxMjowMDowMFoiLCJleHAiOiIyMDI1LTExLTI1VDEyOjE1OjAwWiIsImp0aSI6IldXVGFCVnJqSFBqcmNqRGhrS1VFaVEifbH2lky0K_1VbtYnlflVi_5-z50msmwZ1izSAVwMIE-WA1wkDfCLmg6QmIZAkDRHRlykpWSUSyYDeUkmLMoUJQU.eyJraWQiOiJrXzVfc1dGeEVjeDlsMzRvZWkifQ"
+    },
+    {
+      "ctx": {
+        "deny": [],
+        "kill_epoch": 3,
+        "now": 1764081999,
+        "region": "net:8.8.0.0/16"
+      },
+      "expect": {
+        "reauth": "login",
+        "why": "invalid"
+      },
+      "name": "order: invalid beats expired",
+      "token": "v4.public.eyJpc3MiOiJodHRwczovA2xqb29scS52ZXJhbGRhci5vcmciLCJzdWIiOiJhY2NfVEVTVGFjY291bnQwMDAwMDAiLCJkaWQiOiJkZXZfVEVTVGRldmljZTAwMDAwMDAiLCJyb2xlIjoiYWRtaW4iLCJyZ24iOiJuZXQ6OC44LjAuMC8xNiIsImtlcCI6MywiaWF0IjoiMjAyNS0xMS0yNVQxMjowMDowMFoiLCJleHAiOiIyMDI1LTExLTI1VDEyOjE1OjAwWiIsImp0aSI6IldXVGFCVnJqSFBqcmNqRGhrS1VFaVEifbH2lky0K_1VbtYnlflVi_5-z50msmwZ1izSAVwMIE-WA1wkDfCLmg6QmIZAkDRHRlykpWSUSyYDeUkmLMoUJQU.eyJraWQiOiJrXzVfc1dGeEVjeDlsMzRvZWkifQ"
+    },
+    {
+      "ctx": {
+        "deny": [],
+        "kill_epoch": 3,
+        "now": 1764072060,
+        "region": "net:8.8.0.0/16"
+      },
+      "expect": {
+        "did": "dev_TESTdevice0000000",
+        "ok": true,
+        "role": "admin",
+        "sub": "acc_TESTaccount000000"
+      },
+      "name": "ok: kep above the epoch seen",
+      "token": "v4.public.eyJpc3MiOiJodHRwczovL2xqb29scS52ZXJhbGRhci5vcmciLCJzdWIiOiJhY2NfVEVTVGFjY291bnQwMDAwMDAiLCJkaWQiOiJkZXZfVEVTVGRldmljZTAwMDAwMDAiLCJyb2xlIjoiYWRtaW4iLCJyZ24iOiJuZXQ6OC44LjAuMC8xNiIsImtlcCI6NSwiaWF0IjoiMjAyNS0xMS0yNVQxMjowMDowMFoiLCJleHAiOiIyMDI1LTExLTI1VDEyOjE1OjAwWiIsImp0aSI6IldXVGFCVnJqSFBqcmNqRGhrS1VFaVEifSip9wV31TSiAgOP01919j-Mmb6aAgimeZCBifWv-bPuj2z6RWxpSH4kqrUZW8Glhtkii--WTTfefE8qsVCZUgw.eyJraWQiOiJrXzVfc1dGeEVjeDlsMzRvZWkifQ"
+    },
+    {
+      "ctx": {
+        "deny": [],
+        "kill_epoch": 3,
+        "now": 1764072060,
+        "region": "net:8.8.0.0/16"
+      },
+      "expect": {
+        "did": "dev_TESTdevice0000000",
+        "ok": true,
+        "role": "member",
+        "sub": "acc_TESTaccount000000"
+      },
+      "name": "ok: member role",
+      "token": "v4.public.eyJpc3MiOiJodHRwczovL2xqb29scS52ZXJhbGRhci5vcmciLCJzdWIiOiJhY2NfVEVTVGFjY291bnQwMDAwMDAiLCJkaWQiOiJkZXZfVEVTVGRldmljZTAwMDAwMDAiLCJyb2xlIjoibWVtYmVyIiwicmduIjoibmV0OjguOC4wLjAvMTYiLCJrZXAiOjMsImlhdCI6IjIwMjUtMTEtMjVUMTI6MDA6MDBaIiwiZXhwIjoiMjAyNS0xMS0yNVQxMjoxNTowMFoiLCJqdGkiOiJXV1RhQlZyakhQanJjakRoa0tVRWlRIn1EFwxU8UOJ3p3hj1Z8jOPxAkoqG-jqRCSjQeOQd6NIYGNJJ6PqJ7e3vJRore4JUryiRno7M3zR2KMvPFjtBUMF.eyJraWQiOiJrXzVfc1dGeEVjeDlsMzRvZWkifQ"
+    }
+  ],
+  "claims": {
+    "did": "dev_TESTdevice0000000",
+    "exp": "2025-11-25T12:15:00Z",
+    "iat": "2025-11-25T12:00:00Z",
+    "iss": "https://ljoolq.veraldar.org",
+    "jti": "WWTaBVrjHPjrcjDhkKUEiQ",
+    "kep": 3,
+    "rgn": "net:8.8.0.0/16",
+    "role": "admin",
+    "sub": "acc_TESTaccount000000"
+  },
+  "footer": "{\"kid\":\"k_5_sWFxEcx9l34oei\"}",
+  "keys": [
+    {
+      "alg": "ed25519",
+      "kid": "k_5_sWFxEcx9l34oei",
+      "public": "rvIv9_QlQezCeAsJ4uvoeoo-ick9GbsEGCSmF8QNT8E",
+      "retired_at": null
+    },
+    {
+      "alg": "ed25519",
+      "kid": "k_6A82EaA36KejhbLA",
+      "public": "aTWbXLsYnS7yHsMsJfEPPFn_-u0hnFcrQsEgGfYS78c",
+      "retired_at": 1764000000000
+    }
+  ],
+  "kid": "k_5_sWFxEcx9l34oei",
+  "public_b64url": "rvIv9_QlQezCeAsJ4uvoeoo-ick9GbsEGCSmF8QNT8E",
+  "secret_seed_b64url": "S1igAt50ft85IRvSRUySzUlH3jCagQIY5JRE6uyFhW4",
+  "token": "v4.public.eyJpc3MiOiJodHRwczovL2xqb29scS52ZXJhbGRhci5vcmciLCJzdWIiOiJhY2NfVEVTVGFjY291bnQwMDAwMDAiLCJkaWQiOiJkZXZfVEVTVGRldmljZTAwMDAwMDAiLCJyb2xlIjoiYWRtaW4iLCJyZ24iOiJuZXQ6OC44LjAuMC8xNiIsImtlcCI6MywiaWF0IjoiMjAyNS0xMS0yNVQxMjowMDowMFoiLCJleHAiOiIyMDI1LTExLTI1VDEyOjE1OjAwWiIsImp0aSI6IldXVGFCVnJqSFBqcmNqRGhrS1VFaVEifbH2lky0K_1VbtYnlflVi_5-z50msmwZ1izSAVwMIE-WA1wkDfCLmg6QmIZAkDRHRlykpWSUSyYDeUkmLMoUJQU.eyJraWQiOiJrXzVfc1dGeEVjeDlsMzRvZWkifQ",
+  "version": 1
+}
