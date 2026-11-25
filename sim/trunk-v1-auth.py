@@ -542,8 +542,8 @@ def t_has_roots(t):
     """WIRE's stand-in: a row in its roots table flips has_roots; signed-in pages then go to the door."""
     c, m = login(t, ip(110), second={"recovery": S.recovery_code()})
     db = sqlite3.connect(os.path.join(t.root, "trunk.db"))
-    db.execute("CREATE TABLE IF NOT EXISTS roots (id TEXT PRIMARY KEY, revoked_at INTEGER)")
-    db.execute("INSERT INTO roots (id) VALUES ('rt_test')")
+    # a row in WIRE's roots table (migration 100), as an enrollment would leave it
+    db.execute("INSERT INTO roots (id, name, hostname, os, arch, root_pub, wg_pub, wg_addr, peer_token_hash, enrolled_at) VALUES ('rt_test', 'test', 'test', 'linux', 'x86_64', 'pub_test', 'wg_test', '10.77.0.250', '00', 0)")
     db.commit()
     r = c.get("/t/state")
     check("roots: /t/state has_roots flips with the first root", r.status == 200 and r.j("has_roots") is True, r)
