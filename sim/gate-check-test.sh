@@ -26,8 +26,9 @@ fail() { n=$((n + 1)); fails=$((fails + 1)); echo "FAIL $1${2:+ — $2}"; }
 
 # ---------------------------------------------------------------- a scratch repo holding the scripts under test
 R=$T/repo
-mkdir -p "$R/trunk/deploy"
+mkdir -p "$R/trunk/deploy" "$R/trunk/install"
 cp "$SRC/trunk/deploy/gate-check.sh" "$SRC/trunk/deploy/ljoolq-up.sh" "$SRC/trunk/deploy/ljoolq-provision.sh" "$R/trunk/deploy/"
+printf '#!/bin/sh\nexit 0\n' >"$R/trunk/install/trunk.sh"
 echo one >"$R/file.txt"
 g() { git -C "$R" -c user.name=t -c user.email=t@t -c commit.gpgsign=false "$@"; }
 g init -q && g add -A && g commit -qm one
@@ -156,9 +157,9 @@ reset_files; mkfile "$SHA.json" "$SHA" 'd["gates"].append({"id": "G6.1", "result
 out=$(bash "$R/trunk/deploy/gate-check.sh" "$SHA" "$R" 2>&1); rc=$?
 [ $rc = 0 ] && pass "an extra (newer) GREEN gate does not refuse" || fail "an extra GREEN gate does not refuse" "rc=$rc $out"
 
-# the M0 VPS-step shells: gate first; a refusal stops them before anything else; a pass says not built yet, exit 3
+# the M0 VPS-step shell still unbuilt (ljoolq-up): gate first; refusal stops before anything else; pass says not built yet, exit 3
 reset_files; mkfile "$SHA.json" "$SHA"
-for s in ljoolq-up ljoolq-provision; do
+for s in ljoolq-up; do
   out=$(bash "$R/trunk/deploy/$s.sh" "$SHA" 2>&1); rc=$?
   [ $rc = 3 ] && [[ "$out" == *"$s: not built yet (OPS stream, M6)"* ]] && [[ "$out" == "gate-check: OK"* ]] &&
     pass "$s.sh with a complete green file: gate OK, then 'not built yet', exit 3" || fail "$s.sh good file" "rc=$rc $out"
@@ -176,15 +177,34 @@ for s in ljoolq-up ljoolq-provision; do
   [ $rc = 1 ] && [[ "$out" == *"no gate file"* ]] && pass "$s.sh with no gate file: refused" || fail "$s.sh no file" "rc=$rc $out"
   mv "$T/held.json" "$V1_GATES_DIR/$SHA.json"
 done
+# the built OPS provisioning script (ljoolq-provision.sh): gate_check runs before anything reaches ssh/docker
+out=$(TMPDIR="$T" LJOOLQ_SHOW=1 bash "$R/trunk/deploy/ljoolq-provision.sh" up "$SHA" 2>&1); rc=$?
+[ $rc = 0 ] && [[ "$out" == *"gate-check: OK"* ]] && [[ "$out" == *"would run on ssh:veraldar as root:"* ]] &&
+  pass "ljoolq-provision.sh up with a complete green file: gate OK (dry-run LJOOLQ_SHOW=1)" || fail "ljoolq-provision.sh good file" "rc=$rc $out"
+touch "$R/stray.log"
+out=$(TMPDIR="$T" bash "$R/trunk/deploy/ljoolq-provision.sh" up "$SHA" 2>&1); rc=$?
+[ $rc = 1 ] && [[ "$out" == *"gate-check: REFUSED worktree is not clean"* ]] && [[ "$out" != *"would run"* ]] &&
+  pass "ljoolq-provision.sh on a dirty tree: refused before any remote call" || fail "ljoolq-provision.sh dirty" "rc=$rc $out"
+rm -f "$R/stray.log"
+out=$(TMPDIR="$T" bash "$R/trunk/deploy/ljoolq-provision.sh" up "$OLD" 2>&1); rc=$?
+[ $rc = 1 ] && [[ "$out" == *"REFUSED worktree HEAD is"* ]] && pass "ljoolq-provision.sh for another commit: refused" || fail "ljoolq-provision.sh other sha" "rc=$rc $out"
+out=$(TMPDIR="$T" bash "$R/trunk/deploy/ljoolq-provision.sh" 2>&1); rc=$?
+[ $rc = 64 ] && pass "ljoolq-provision.sh without a subcommand: usage, exit 64" || fail "ljoolq-provision.sh usage" "rc=$rc $out"
+mv "$V1_GATES_DIR/$SHA.json" "$T/held.json"
+out=$(TMPDIR="$T" bash "$R/trunk/deploy/ljoolq-provision.sh" up "$SHA" 2>&1); rc=$?
+[ $rc = 1 ] && [[ "$out" == *"no gate file"* ]] && pass "ljoolq-provision.sh with no gate file: refused" || fail "ljoolq-provision.sh no file" "rc=$rc $out"
+out=$(TMPDIR="$T" LJOOLQ_TEST_SKIP_GATE=1 bash "$R/trunk/deploy/ljoolq-provision.sh" up "$SHA" 2>&1); rc=$?
+[ $rc = 1 ] && [[ "$out" == *"for a docker: rehearsal box only"* ]] && pass "ljoolq-provision.sh refuses LJOOLQ_TEST_SKIP_GATE=1 on ssh:veraldar" || fail "ljoolq-provision.sh skip-gate ssh" "rc=$rc $out"
+mv "$T/held.json" "$V1_GATES_DIR/$SHA.json"
 # the real scripts (not only the copies) are what was tested
 for s in gate-check ljoolq-up ljoolq-provision; do
   cmp -s "$SRC/trunk/deploy/$s.sh" "$R/trunk/deploy/$s.sh" || fail "copy of $s.sh differs"
 done
-# no network, no VPS: no shimmed tool was called; no ssh/veraldar in the shells' code lines
+# no network, no VPS: no shimmed tool was called; no ssh/veraldar in gate-check or the unbuilt M0 shell's code lines
 [ ! -s "$T/shim/calls" ] && pass "nothing tried ssh/scp/rsync/curl/wget/incus/nc" || fail "a network tool was called" "$(cat "$T/shim/calls")"
-if grep -vE '^\s*#' "$SRC/trunk/deploy/ljoolq-up.sh" "$SRC/trunk/deploy/ljoolq-provision.sh" "$SRC/trunk/deploy/gate-check.sh" |
-  grep -qE '\b(ssh|scp|rsync|curl|wget|incus|veraldar)\b'; then fail "the M0 shells name a remote tool or the VPS in code"
-else pass "the M0 shells name no remote tool and no VPS host in code"; fi
+if grep -vE '^\s*#' "$SRC/trunk/deploy/ljoolq-up.sh" "$SRC/trunk/deploy/gate-check.sh" |
+  grep -qE '\b(ssh|scp|rsync|curl|wget|incus|veraldar)\b'; then fail "gate-check / unbuilt M0 shell name a remote tool or the VPS in code"
+else pass "gate-check and unbuilt M0 shell name no remote tool and no VPS host in code"; fi
 real_after=$(ls -la --time-style=+%s.%N "$REAL_GATES" 2>/dev/null | md5sum)
 [ "$real_before" = "$real_after" ] && pass "the real gates folder was not touched" || fail "the real gates folder changed during the test"
 
