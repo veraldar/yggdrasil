@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """v1-baseline.py <sha> [--out FILE] — the M0 baseline table: what the ladder measured on <sha> (as-is gates from
 gates/<sha>.json, the v0.9 versions of port gates from gates/<sha>.partial.json) next to tree-next's last green
-(the registry's last_green). Writes markdown (default ~/.cache/trunk-v1/baseline-<sha12>.md); notes are added by hand.
+(the registry's last_green). Writes markdown (default ~/.cache/trunk-v1/baseline-<sha>.md); notes are added by hand.
 """
 import argparse, json, os, subprocess, sys
 
@@ -52,7 +52,12 @@ def main():
     for g in reg["gates"]:
         gid = g["id"]
         pick = res.get((gid, "v09", "partial")) if g["status"] == "port" else None
-        pick = pick or res.get((gid, "v1", "full")) or res.get((gid, "v1", "partial"))
+        if not pick:   # the newer of the full and the partial run (a gate re-run with --only wins)
+            cands = [c for c in (res.get((gid, "v1", "full")), res.get((gid, "v1", "partial"))) if c]
+            last = lambda c: max([r.get("end") or "" for r in c.get("runs") or []] or [""])
+            pick = max(cands, key=last) if cands else None
+            if pick and len(cands) == 2 and pick is cands[1]:
+                pick = dict(pick, reason=(pick.get("reason") or "") + f" (re-run with --only; the full run said {cands[0]['result']})")
         if not pick:
             rows.append(f"| {gid} | {g['status']} | — | not run | | {g.get('last_green', '')} | |")
             continue
@@ -64,7 +69,7 @@ def main():
             f"{full.get('started')} → {full.get('ended')}, ladder {full.get('ladder_version')}",
             f"- v0.9 baseline of the port gates: `gates/{sha}.partial.json` — {part.get('started')} → {part.get('ended')}, ladder {part.get('ladder_version')}",
             f"- logs: `~/.cache/trunk-v1/gates/{sha}/<gate>/run<n>[-<step>].log`", ""]
-    out = a.out or os.path.join(BASE, f"baseline-{sha[:12]}.md")
+    out = a.out or os.path.join(BASE, f"baseline-{sha}.md")
     open(out, "w").write("\n".join(head + rows) + "\n")
     print(out)
 
