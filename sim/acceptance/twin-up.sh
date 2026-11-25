@@ -32,8 +32,8 @@ if [ "$DO" != down ]; then
   done
 fi
 if [ "$DO" = down ]; then
-  systemctl --user stop rootsim-acc-$RUN-librarian rootsim-acc-$RUN-tap acc-$RUN-app acc-$RUN-trunk rootsim-acc-$RUN rootsim-acc-$RUN-secrets 2>/dev/null || true
-  for u in rootsim-acc-$RUN-librarian rootsim-acc-$RUN-tap acc-$RUN-app acc-$RUN-trunk rootsim-acc-$RUN rootsim-acc-$RUN-secrets; do systemctl --user reset-failed "$u" 2>/dev/null || true; done
+  systemctl --user stop rootsim-acc-$RUN-librarian rootsim-acc-$RUN-tap acc-$RUN-livekit acc-$RUN-app acc-$RUN-trunk rootsim-acc-$RUN rootsim-acc-$RUN-secrets 2>/dev/null || true
+  for u in rootsim-acc-$RUN-librarian rootsim-acc-$RUN-tap acc-$RUN-livekit acc-$RUN-app acc-$RUN-trunk rootsim-acc-$RUN rootsim-acc-$RUN-secrets; do systemctl --user reset-failed "$u" 2>/dev/null || true; done
   echo "twin $RUN down"; exit 0
 fi
 BIN=${DO:-$ROOT/root/target/release/yggdrasil}
@@ -69,6 +69,46 @@ systemd-run --user --unit rootsim-acc-$RUN-librarian --collect -q \
   python3 "$ROOT/root/extensions/librarian/librarian.py" --root "$BR" --port "$LIBP" \
     --db "$T/librarian.db" --artifacts "$ART" --poll 5 >/dev/null
 
+# 2b. optional LiveKit dev server on the twin (TWIN_LIVEKIT=1, default 0: tailnet twin unchanged)
+LK_ENV=()
+LK_PORT=""
+if [ "${TWIN_LIVEKIT:-0}" = 1 ]; then
+  LK_BIN=${LIVEKIT_BIN:-$HOME/.cache/trunk-rtc/livekit-server}
+  [ -x "$LK_BIN" ] || { echo "TWIN_LIVEKIT=1: livekit-server not found at $LK_BIN"; exit 1; }
+  systemctl --user stop acc-$RUN-livekit 2>/dev/null || true
+  systemctl --user reset-failed acc-$RUN-livekit 2>/dev/null || true
+  # Pick a free port in 19040-19049 (check ss -ltn so we never collide with anything live)
+  for cand in $(seq 19040 19049); do
+    if ! ss -ltn 2>/dev/null | grep -qE "[:.]${cand}[[:space:]]"; then
+      LK_PORT=$cand
+      break
+    fi
+  done
+  [ -n "$LK_PORT" ] || { echo "TWIN_LIVEKIT=1: no free port in 19040-19049"; exit 1; }
+  LK_TCP=$((LK_PORT + 20))
+  LK_UDP=$((LK_PORT + 30))
+  cat >"$T/livekit.yaml" <<YAML
+port: $LK_PORT
+bind_addresses: [127.0.0.1]
+rtc:
+  tcp_port: $LK_TCP
+  udp_port: $LK_UDP
+  use_external_ip: false
+  node_ip: 127.0.0.1
+keys:
+  devkey: secret
+logging:
+  level: warn
+YAML
+  chmod 600 "$T/livekit.yaml"
+  systemd-run --user --unit acc-$RUN-livekit --collect -q \
+    -p StandardOutput=append:"$T/livekit.log" -p StandardError=append:"$T/livekit.log" \
+    "$LK_BIN" --config "$T/livekit.yaml" >/dev/null
+  for _ in $(seq 1 40); do curl -sf -m 1 "http://127.0.0.1:$LK_PORT/" >/dev/null 2>&1 && break; sleep 0.25; done
+  # livekit.localhost resolves to 127.0.0.1 in Chromium (RFC 6761) and matches base.spec.ts's ws url check
+  LK_ENV=(-E LIVEKIT_URL="ws://livekit.localhost:$LK_PORT" -E LIVEKIT_API_URL="http://127.0.0.1:$LK_PORT" -E LIVEKIT_API_KEY=devkey -E LIVEKIT_API_SECRET=secret)
+fi
+
 # 3. the app: the worktree's build — tailnet mode (the twin is loopback-only), or trunk mode (v1)
 systemctl --user stop acc-$RUN-app acc-$RUN-trunk 2>/dev/null || true
 systemctl --user reset-failed acc-$RUN-app acc-$RUN-trunk 2>/dev/null || true
@@ -77,6 +117,7 @@ if [ "$AUTH" = tailnet ]; then
 systemd-run --user --unit acc-$RUN-app --collect -q --working-directory="$ROOT/branch" \
   -E NODE_ENV=production -E PORT=8250 -E HOST=127.0.0.1 -E BIFROST_AUTH=tailnet \
   -E OPENCODE_URL="$BR" -E ARTIFACTS_DIR="$ART" -E BIFROST_MAIN_TITLE='[MAIN]' \
+  "${LK_ENV[@]}" \
   -p StandardOutput=append:"$T/app.log" -p StandardError=append:"$T/app.log" \
   "$NODE" node_modules/next/dist/bin/next start -p 8250 -H 127.0.0.1 >/dev/null
 for _ in $(seq 1 60); do curl -sf -m 2 http://127.0.0.1:8250/ >/dev/null && break; sleep 0.5; done
@@ -90,6 +131,7 @@ else
     -E BIFROST_TRUNK_STATE="$T/trunk/trunk-state.json" -E BIFROST_TRUNK_URL="http://127.0.0.1:$FRONT" \
     -E BIFROST_OBS_DIR="$T/obs" \
     -E OPENCODE_URL="$BR" -E ARTIFACTS_DIR="$ART" -E BIFROST_MAIN_TITLE='[MAIN]' \
+    "${LK_ENV[@]}" \
     -p StandardOutput=append:"$T/app.log" -p StandardError=append:"$T/app.log" \
     "$NODE" server.mjs >/dev/null
   systemd-run --user --unit acc-$RUN-trunk --collect -q --working-directory="$ROOT" \
@@ -103,13 +145,16 @@ else
   [ "$code" = 302 ] || { echo "trunk mode: a stranger got $code from the app, not 302 /login"; exit 1; }
 fi
 
-# the door: MAIN exists before the specs run (the app's own rule, once per twin)
-curl -sf -m 20 -X POST http://127.0.0.1:8250/api/onboard -H 'content-type: application/json' \
-  -d '{"step":"main"}' | python3 -c 'import json,sys; d=json.load(sys.stdin); print("twin MAIN:", d.get("id"), d.get("slug"), "(created)" if d.get("created") else "(existing)")'
+# the door: MAIN exists before the specs run (unless TWIN_SEED_MAIN=0 for tree-first.spec.ts)
+if [ "${TWIN_SEED_MAIN:-1}" = 1 ]; then
+  curl -sf -m 20 -X POST http://127.0.0.1:8250/api/onboard -H 'content-type: application/json' \
+    -d '{"step":"main"}' | python3 -c 'import json,sys; d=json.load(sys.stdin); print("twin MAIN:", d.get("id"), d.get("slug"), "(created)" if d.get("created") else "(existing)")'
+fi
+LK_NOTE=""; [ -n "$LK_PORT" ] && LK_NOTE=" · livekit :$LK_PORT"
 if [ "$AUTH" = trunk ]; then
-  echo "twin $RUN up (trunk): brain :4250 · librarian :$LIBP · app :8250 (BIFROST_AUTH=trunk) · trunk front :$FRONT (drive this) · state $T"
+  echo "twin $RUN up (trunk): brain :4250 · librarian :$LIBP · app :8250 (BIFROST_AUTH=trunk) · trunk front :$FRONT (drive this)$LK_NOTE · state $T"
 else
-echo "twin $RUN up: brain :4250 · librarian :$LIBP · app :8250 · state $T"
+  echo "twin $RUN up: brain :4250 · librarian :$LIBP · app :8250$LK_NOTE · state $T"
 fi
 [ "${TWIN_TAP:-0}" = 1 ] && echo "tap: :$TAPP → $T/tap.jsonl (+$T/tap/bodies/)"
 exit 0  # (the line above is false without a tap: the twin is up all the same)

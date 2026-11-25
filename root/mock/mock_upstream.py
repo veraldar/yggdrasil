@@ -177,9 +177,9 @@ def plan(body):
     reply = f"MOCK-REPLY: you said '{last}' ({len(msgs)} msgs)"
     slow = last.startswith("slow") or bool(re.match(r"count from 1 to", last, re.I))
     cut = last.startswith("cut")
-    exact = re.search(r"reply(?: with exactly)?:\s*(\S+)", last, re.I)
+    exact = re.search(r"reply(?: with exactly)?:[ \t]*([^\n]+)", last, re.I)
     if exact:
-        reply = exact.group(1).rstrip(".")
+        reply = exact.group(1).strip().rstrip(".")
     nap = re.search(r"\bsleep (\d+)", last)
     if slow:
         reply += " " + "lorem ipsum " * 30 + "SLOW-END"
