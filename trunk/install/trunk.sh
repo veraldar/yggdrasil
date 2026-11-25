@@ -1,18 +1,15 @@
 #!/usr/bin/env bash
-# trunk.sh — your own trunk on a small rented server (a VPS): the public address your phone and your other
-# computers reach. Your home computer (the hub) dials OUT to it; nothing at home opens a port.
+# trunk.sh — YOUR OWN TRUNK on a small rented server (a VPS): the public address your phone and your
+# computers reach. Your home computer (the root) dials OUT to it; nothing at home opens a port.
 #
-#   sudo bash trunk.sh --name trunk.example.org   first run: install, certificate, start, print the CONNECT LINE
-#   sudo bash trunk.sh                             re-run: same release, renew the certificate if due, keep
-#                                                  the key (= the pin your hub trusts) and the hub's token
-#   sudo bash trunk.sh --rotate-token              a NEW connect line (the old token stops working at once)
-#   sudo bash trunk.sh --update                    the newest release, if newer (what the weekly timer runs)
-#   sudo bash trunk.sh --uninstall                 remove the trunk (lists what goes, asks first; -y: no question)
-#   sudo bash trunk.sh --adopt /etc/trunk-ap       take over an access point set up by hand: its key (so the pin),
-#                                                  the hub's token (so the connect line), its certificate, port,
-#                                                  :443 router and renewal webroot are kept; its service is
-#                                                  stopped and disabled once this one answers (put back if not);
-#                                                  the folder itself is left as it was
+#   sudo bash trunk.sh --name trunk.example.org   first run: install, certificate, start — then CLAIM it
+#                                                 (the claim code lives only on this server; your phone's
+#                                                 browser turns it into your admin account)
+#   sudo bash trunk.sh                            re-run: same release, renew the certificate if due
+#   sudo bash trunk.sh --update [--major]         the newest signed 1.x release, if newer (what the weekly
+#                                                 timer runs). --major alone allows crossing to 2.x
+#   sudo bash trunk.sh --renew [--force]          certificate only (what the daily timer runs)
+#   sudo bash trunk.sh --uninstall                remove the trunk (lists what goes, asks first; -y)
 #
 # Every download is checked before it runs: the release's SHA256SUMS must be signed by the yggdrasil
 # release key (embedded below as YGG_SIGNER, never fetched), and each file must match its line in it.
@@ -20,31 +17,39 @@
 # Debian's automatic security updates on, and a weekly timer that installs a newer signed release.
 #
 #   --name NAME          the server's DNS name (an A/AAAA record pointing at this server). Needed once.
+#   --add-name HOST      one more DNS name this trunk answers as (extra_names, its own certificate line).
+#                         Repeat it per name. Used at switchover: --add-name ap.veraldar.org.
 #   --version vX.Y.Z     which release of github.com/veraldar/yggdrasil (default: this script's own)
 #   --binary FILE        use this bifrost-net binary instead of downloading one
-#   --port N             where the access point listens: 443 (default) — or, with --behind-proxy, the
-#                        loopback port your :443 router forwards to (default 4443)
-#   --behind-proxy       :443 already serves a website: listen on 127.0.0.1:<port>, read the client's real
-#                        address from a PROXY v1 line, and print how to route the trunk's name to it
-#   --self-signed        no Let's Encrypt (tests, LAN). Phones show a warning; the hub's pin works the same.
+#   --behind-proxy       :443 (and :80) already serve a website: the trunk listens plain http on
+#                         127.0.0.1:8080 (phase 1) and reads the client's real address from X-Forwarded-For
+#                         of the proxy in front (trusted_proxies). This script prints how to route the
+#                         trunk's name to it (Caddy or nginx).
+#   --acme               a certificate from Let's Encrypt (the default). Same as today: from OUR permanent
+#                         key with certbot --csr, so the SPKI pin — what roots pin — survives renewals.
 #   --webroot DIR        Let's Encrypt through the web server that holds port 80 (it serves DIR at
-#                        http://NAME/.well-known/acme-challenge/). Without it, port 80 must be free.
+#                         http://NAME/.well-known/acme-challenge/). Without it, port 80 must be free.
+#                         The trunk serves the tokens itself at /.well-known/acme-challenge/ (behind a
+#                         proxy, the front forwards that path to the trunk).
 #   --email ADDR         tell Let's Encrypt who you are (expiry mails). Default: no address.
 #   --acme-server URL    another ACME server (default Let's Encrypt production; tests use Pebble)
+#   --self-signed        no Let's Encrypt (tests, LAN). Phones show a warning; roots' pin works the same.
 #   --renew [--force]    certificate only (what the daily timer runs)
 #   --no-firewall        leave the firewall alone (default: ufw on; it stays off when other services listen)
 #   --no-auto-updates    no automatic security updates, no weekly trunk update (both on by default)
 #   -y                   don't ask (packages with apt, --uninstall)
 #
-# Linux x86_64 with systemd and glibc 2.31+ (Debian 11+, Ubuntu 20.04+; tested on Debian 12). Runs as the admin
-# user (sudo). Files:
-#   /etc/yggdrasil-trunk/key.pem      the access point's private key (600): made ONCE, kept forever — the pin
-#                                     your hub trusts is its fingerprint, so certificate renewals never break it
+# Linux x86_64 with systemd and glibc 2.31+ (Debian 11+, Ubuntu 20.04+; tested on Debian 12). Runs as the
+# admin user (sudo). Files:
+#   /etc/yggdrasil-trunk/trunk.toml   the v1 trunk's config (CONTRACTS C2; no secrets)
+#   /etc/yggdrasil-trunk/key.pem      the TLS private key (600): made ONCE, kept forever — the pin your
+#                                     roots trust is its fingerprint, so certificate renewals never break it
 #   /etc/yggdrasil-trunk/cert.pem     the certificate (Let's Encrypt, made from that key with certbot --csr)
-#   /etc/yggdrasil-trunk/ap.toml      the access point's config: only the SHA-256 of the hub's token, no secret
 #   /etc/yggdrasil-trunk/trunk.conf   what you chose (name, port, mode) — re-runs read it
-#   /usr/local/lib/yggdrasil-trunk/   bifrost-net (+ sni-443.py with --behind-proxy)
-#   yggdrasil-trunk.service           the access point (DynamicUser; gets a copy of the key in its private /run dir)
+#   /var/lib/yggdrasil-trunk/         trunk.db (the trunk's state) — owned by the static user `trunk`
+#   /run/trunk/                       credentials (trunk-kek, claim code), copied by an ExecStartPre=+ step
+#   /usr/local/lib/yggdrasil-trunk/   bifrost-net · trunk-ctl is /usr/local/bin
+#   yggdrasil-trunk.service           the trunk (static user `trunk`; ProtectSystem=strict)
 #   yggdrasil-trunk-cert.timer        daily: renews the certificate when a third of its life is left
 #   yggdrasil-trunk-update.timer      weekly: trunk.sh --update (a newer signed release, the same checks)
 set -euo pipefail
@@ -71,9 +76,6 @@ die()  { printf '\033[1;31mxx\033[0m  %s\n' "$1" >&2; exit "${2:-1}"; }
 on_err() {
   local rc=$?
   printf '\033[1;31mxx\033[0m  trunk.sh stopped at line %s: %s\n' "$1" "$2" >&2
-  if [ "${ADOPT_STOPPED:-0}" = 1 ] && [ "${ADOPT_BACK:-0}" = 0 ]; then   # adopting: the access point you had comes back
-    ADOPT_BACK=1; ROLLING=1; adopt_back && warn "the access point you had ($ADOPT_UNIT) is back and answering"
-  fi
   if [ "${HAVE_PREV:-0}" = 1 ] && [ "${CHANGED:-0}" = 1 ] && [ "${ROLLING:-0}" = 0 ]; then
     ROLLING=1; rollback && warn "the previous trunk is back and answering"
   fi
@@ -83,11 +85,12 @@ trap 'on_err $LINENO "$BASH_COMMAND"' ERR
 
 ARGS=("$@")
 NAME='' VERSION='' BINARY='' PORT='' BEHIND='' CERTMODE='' WEBROOT='' EMAIL='' ACME=''
-ROTATE=0 RENEW=0 FORCE=0 YES=0 UPDATE=0 UNINSTALL=0 FIREWALL='' AUTOUPD='' ADOPT=''
+ADD_NAMES=() MAJOR=0 RENEW=0 FORCE=0 YES=0 UPDATE=0 UNINSTALL=0 FIREWALL='' AUTOUPD=''
 need() { [ $# -ge 2 ] && [ -n "$2" ] || die "$1 needs a value" 64; }
 while [ $# -gt 0 ]; do
   case $1 in
     --name) need "$@"; NAME=$2; shift ;;
+    --add-name) need "$@"; ADD_NAMES+=("$2"); shift ;;
     --version) need "$@"; VERSION=$2; shift ;;
     --binary) need "$@"; BINARY=$2; shift ;;
     --port) need "$@"; PORT=$2; shift ;;
@@ -98,12 +101,11 @@ while [ $# -gt 0 ]; do
     --webroot) need "$@"; WEBROOT=$2; CERTMODE=acme; shift ;;
     --email) need "$@"; EMAIL=$2; shift ;;
     --acme-server) need "$@"; ACME=$2; CERTMODE=acme; shift ;;
-    --rotate-token) ROTATE=1 ;;
+    --major) MAJOR=1 ;;
     --renew) RENEW=1 ;;
     --force) FORCE=1 ;;
     --update) UPDATE=1 ;;
     --uninstall) UNINSTALL=1 ;;
-    --adopt) need "$@"; ADOPT=${2%/}; shift ;;
     --no-firewall) FIREWALL=0 ;;
     --no-auto-updates) AUTOUPD=0 ;;
     -y|--yes) YES=1 ;;
@@ -119,21 +121,24 @@ if [ "$(id -u)" != 0 ]; then
   case $0 in /*|./*|../*) exec sudo -- bash "$0" "${ARGS[@]}" ;; *) exec sudo -- bash "./$0" "${ARGS[@]}" ;; esac
 fi
 [ -d /run/systemd/system ] || die "this server does not run systemd (needed for the service and the renewal timer)"
-HERE=$(cd "$(dirname "$0")" && pwd)
+# (HERE unused in v1: the router comes from the release only)
 ETC=/etc/yggdrasil-trunk
 LIB=/usr/local/lib/yggdrasil-trunk
 VAR=/var/lib/yggdrasil-trunk
 CONF=$ETC/trunk.conf
 KEY=$ETC/key.pem
 CERT=$ETC/cert.pem
-APTOML=$ETC/ap.toml
+TOML=$ETC/trunk.toml
+KEK=$ETC/trunk-kek
 BIN=$LIB/bifrost-net
+CTL=/usr/local/bin/trunk-ctl
 SELF=/usr/local/sbin/yggdrasil-trunk
 UNIT=yggdrasil-trunk.service
 UNIT_FILE=/etc/systemd/system/$UNIT
+STATIC_USER=trunk
 CHANGED=0
 UNITS_ALL=(yggdrasil-trunk.service yggdrasil-trunk-cert.timer yggdrasil-trunk-cert.service
-  yggdrasil-trunk-update.timer yggdrasil-trunk-update.service yggdrasil-sni-443.service)
+  yggdrasil-trunk-update.timer yggdrasil-trunk-update.service)
 
 confget() { [ -f "$CONF" ] && sed -n "s/^$1=//p" "$CONF" | tail -1 || true; }
 # where releases come from (a mirror or a test server is remembered for the timers; signed all the same)
@@ -143,12 +148,12 @@ RELEASES=${TRUNK_RELEASES:-$(confget RELEASES)}; RELEASES=${RELEASES:-https://gi
 if [ $UNINSTALL = 1 ]; then
   GONE=()
   for u in "${UNITS_ALL[@]}"; do [ -e "/etc/systemd/system/$u" ] && GONE+=("/etc/systemd/system/$u  (unit)"); done
-  for p in "$ETC" "$LIB" "$VAR" /var/log/yggdrasil-trunk "$SELF"; do [ -e "$p" ] && GONE+=("$p"); done
+  for p in "$ETC" "$LIB" "$VAR" /var/log/yggdrasil-trunk "$SELF" "$CTL"; do [ -e "$p" ] && GONE+=("$p"); done
   FW_RULES=$(confget FIREWALL_RULES)
   if [ ${#GONE[@]} = 0 ]; then say "no yggdrasil trunk on this server — nothing to remove"; exit 0; fi
   echo "This removes the yggdrasil trunk from this server:"
   printf '    %s\n' "${GONE[@]}"
-  [ -e "$KEY" ] && echo "    (the key in $ETC is your hub's pin: a new install makes a new one and a new connect line)"
+  [ -e "$KEK" ] && echo "    (the key-encryption key in $ETC goes too: trunk.db backups become unreadable without it)"
   [ -n "$FW_RULES" ] && echo "    firewall rules trunk.sh added: $FW_RULES (ufw itself stays on, ssh stays open)"
   echo "    kept: the packages it installed (certbot, ufw, unattended-upgrades — the security updates stay on)"
   if [ $YES = 0 ]; then
@@ -162,101 +167,45 @@ if [ $UNINSTALL = 1 ]; then
   if [ -n "$FW_RULES" ] && command -v ufw >/dev/null; then
     for r in $FW_RULES; do ufw delete allow "$r" >/dev/null 2>&1 || true; done
   fi
-  rm -rf "$ETC" "$LIB" "$VAR" /var/log/yggdrasil-trunk "$SELF"
-  say "removed. At home: bash install.sh --trunk off (or bash install.sh --uninstall) — the hub's line to this server is gone."
+  rm -rf "$ETC" "$LIB" "$VAR" /var/log/yggdrasil-trunk "$SELF" "$CTL"
+  if id "$STATIC_USER" >/dev/null 2>&1; then
+    userdel "$STATIC_USER" 2>/dev/null || warn "could not remove the user $STATIC_USER (in use?)"
+  fi
+  say "removed."
   exit 0
 fi
-
-# ------------------------------------------------------------- --adopt DIR (an access point made by hand)
-# Its key, the hub's token (by its SHA-256), the certificate, the port, the PROXY line and the ICE forward go
-# into this script's own files BEFORE the install below runs, so the pin and the connect line stay the same.
-ADOPT_UNIT='' ADOPT_TIMERS='' ADOPT_STOPPED=0
-if [ -n "$ADOPT" ]; then
-  [ -s "$ADOPT/key.pem" ] && [ -s "$ADOPT/cert.pem" ] && [ -f "$ADOPT/ap.toml" ] ||
-    die "--adopt $ADOPT: no key.pem, cert.pem and ap.toml there — not an access point made by hand" 64
-  A_HASH=$(sed -n 's/^bridge_token_sha256 = "\([0-9a-f]\{64\}\)".*/\1/p' "$ADOPT/ap.toml" | head -1)
-  [ -n "$A_HASH" ] || die "--adopt: $ADOPT/ap.toml has no bridge_token_sha256 (the hub's token) — nothing to adopt" 64
-  [ "$(openssl pkey -in "$ADOPT/key.pem" -pubout 2>/dev/null)" = "$(openssl x509 -in "$ADOPT/cert.pem" -noout -pubkey 2>/dev/null)" ] ||
-    die "--adopt: $ADOPT/cert.pem does not carry $ADOPT/key.pem's public key — refusing (the hub's pin would break)"
-  if [ -s "$KEY" ] && ! cmp -s "$KEY" "$ADOPT/key.pem"; then
-    die "--adopt: this server already has a trunk of its own ($KEY, another key) — nothing to adopt" 64
-  fi
-  # the [ap] table's own listen (the first one), the ICE forward's (the [[ap.tcp]] named livekit-ice)
-  A_LISTEN=$(sed -n 's/^listen *= *"\(.*\)".*/\1/p' "$ADOPT/ap.toml" | head -1)
-  A_ICE=$(awk -F'"' '/^name *= *"livekit-ice"/ {f = 1; next} f && /^listen *=/ {n = split($2, a, ":"); print a[n]; exit}' "$ADOPT/ap.toml")
-  A_PROXY=$(sed -n 's/^proxy_protocol *= *\(true\|false\).*/\1/p' "$ADOPT/ap.toml" | head -1)
-  case $A_LISTEN/${A_PROXY:-false} in
-    127.0.0.1:*/true|localhost:*/true|\[::1\]:*/true) BEHIND=${BEHIND:-1} ;;
-    127.0.0.1:*/false|localhost:*/false|\[::1\]:*/false)
-      die "--adopt: $ADOPT/ap.toml listens on $A_LISTEN without the PROXY line — a router in front that sends none is not supported" 64 ;;
-    */true) die "--adopt: $ADOPT/ap.toml takes a PROXY line on a public address ($A_LISTEN) — not supported" 64 ;;
-    *) BEHIND=${BEHIND:-0} ;;
-  esac
-  PORT=${PORT:-${A_LISTEN##*:}}
-  [ -n "$A_ICE" ] && ICE_PORT=${ICE_PORT:-$A_ICE}
-  [ -n "$NAME" ] || NAME=$(openssl x509 -in "$ADOPT/cert.pem" -noout -ext subjectAltName 2>/dev/null | tr ',' '\n' |
-    sed -n 's/^ *DNS:\(.*\)$/\1/p' | head -1)
-  # a CA's certificate (Let's Encrypt) is renewed from now on by this script's timer, through the same webroot
-  if [ "$(openssl x509 -in "$ADOPT/cert.pem" -noout -issuer | sed 's/^issuer=//')" != "$(openssl x509 -in "$ADOPT/cert.pem" -noout -subject | sed 's/^subject=//')" ]; then
-    A_CERT=acme; else A_CERT=self-signed; fi
-  CERTMODE=${CERTMODE:-$A_CERT}
-  # the units that ran it: the service whose ExecStart reads its ap.toml, the timer that renews its certificate
-  for u in /etc/systemd/system/*.service; do
-    [ -f "$u" ] || continue
-    if grep -q "^ExecStart=.* -c $ADOPT/ap.toml" "$u"; then ADOPT_UNIT=$(basename "$u"); fi
-  done
-  for t in /etc/systemd/system/*.timer; do
-    [ -f "$t" ] || continue
-    case $(basename "$t") in yggdrasil-trunk-*) continue ;; esac   # ours (this script names the folder in its help)
-    sv=/etc/systemd/system/$(basename "$t" .timer).service; [ -f "$sv" ] || continue
-    ex=$(sed -n 's/^ExecStart=//p' "$sv" | awk '{print $1}')
-    if grep -qs -- "$ADOPT" "$sv" "$ex" && grep -qs certbot "$sv" "$ex"; then   # its certificate renewal (nothing else)
-      ADOPT_TIMERS="$ADOPT_TIMERS $(basename "$t")"
-      if [ -z "$WEBROOT" ]; then WEBROOT=$(grep -hos -- '--webroot -w [^ ]*' "$sv" "$ex" | head -1 | awk '{print $3}' || true); fi
-    fi
-  done
-  # what this run takes over (written once: a re-run of --adopt finds them in place)
-  install -d -m 755 "$ETC"
-  if [ ! -s "$KEY" ]; then (umask 077; cp "$ADOPT/key.pem" "$KEY.new"); chown root:root "$KEY.new"; chmod 600 "$KEY.new"; mv -f "$KEY.new" "$KEY"; fi
-  if [ ! -s "$CERT" ]; then install -m 644 "$ADOPT/cert.pem" "$CERT"; echo "$A_CERT" >"$ETC/cert.source"; fi
-  [ -f "$APTOML" ] || printf '# adopted from %s — rewritten below\nbridge_token_sha256 = "%s"\n' "$ADOPT" "$A_HASH" >"$APTOML"
-  if [ -f "$ADOPT/sni-443.conf" ] && [ ! -f "$ETC/sni-443.conf" ]; then install -m 644 "$ADOPT/sni-443.conf" "$ETC/sni-443.conf"; fi
-  FIREWALL=${FIREWALL:-0}   # a server set up by hand keeps its firewall as it is (--no-firewall, remembered)
-  say "adopting $ADOPT${ADOPT_UNIT:+ ($ADOPT_UNIT)}: the key (the pin), the hub's token, the $A_CERT certificate, ${A_LISTEN}${A_ICE:+, ICE :$A_ICE}${WEBROOT:+, renewal through $WEBROOT}"
-fi
-adopt_back() { # this run stopped the adopted access point: stop ours, start it again → 0 when it answers
-  systemctl disable --now --quiet $UNIT 2>/dev/null || true
-  systemctl start "$ADOPT_UNIT" || return 1
-  ADOPT_STOPPED=0
-  [ "$(probe_ap)" != 000 ]
-}
 
 NAME=${NAME:-$(confget NAME)}
 [ -n "$NAME" ] || die "which name? sudo bash trunk.sh --name trunk.example.org  (a DNS name that points at this server)" 64
 NAME=$(printf '%s' "$NAME" | tr '[:upper:]' '[:lower:]')
 NAME=${NAME%.}
 case $NAME in
-  *[!a-z0-9.-]*|.*|-*|'') die "--name: '$NAME' is not a host name (letters, digits, dots, dashes) or an IPv4 address" 64 ;;
+  *[!a-z0-9.-]*|.*|-*|'') die "--name: '$NAME' is not a host name (letters, digits, dots, dashes)" 64 ;;
 esac
 IS_IP=0; case $NAME in *[!0-9.]*) ;; *) IS_IP=1 ;; esac
 BEHIND=${BEHIND:-$(confget BEHIND_PROXY)}; BEHIND=${BEHIND:-0}
 CERTMODE=${CERTMODE:-$(confget CERT)}; CERTMODE=${CERTMODE:-acme}
 [ $IS_IP = 1 ] && [ "$CERTMODE" = acme ] && die "Let's Encrypt needs a DNS name, not an IP address (or use --self-signed)" 64
+# extra names: remembered (a re-run keeps them), --add-name adds to them
+EXTRA_NAMES=$(confget EXTRA_NAMES)
+for n in ${ADD_NAMES[@]+"${ADD_NAMES[@]}"}; do
+  case $n in *[!a-zA-Z0-9.-]*|.*|-*|'') die "--add-name: '$n' is not a host name" 64 ;; esac
+  case " $EXTRA_NAMES " in *" $n "*) ;; *) EXTRA_NAMES="${EXTRA_NAMES:+$EXTRA_NAMES }$n" ;; esac
+done
+# phase 1 (behind a proxy): plain http on 8080 — the v1 config's C2 default
 if [ -z "$PORT" ]; then
   PORT=$(confget PORT)
-  # switching between direct and behind-proxy changes the default port
-  if [ -z "$PORT" ] || [ "$BEHIND" != "$(confget BEHIND_PROXY)" ]; then [ "$BEHIND" = 1 ] && PORT=4443 || PORT=443; fi
+  if [ -z "$PORT" ] || [ "$BEHIND" != "$(confget BEHIND_PROXY)" ]; then [ "$BEHIND" = 1 ] && PORT=8080 || PORT=443; fi
 fi
 case $PORT in ''|*[!0-9]*) die "--port: a number" 64 ;; esac
-# the loopback port of the raw ICE-TCP forward (voice media: sni-443.py's "ice" line points here)
-ICE_PORT=${ICE_PORT:-$(confget ICE_PORT)}; ICE_PORT=${ICE_PORT:-4479}
-case $ICE_PORT in ''|*[!0-9]*) die "ICE_PORT: a number" 64 ;; esac
 WEBROOT=${WEBROOT:-$(confget WEBROOT)}
 EMAIL=${EMAIL:-$(confget EMAIL)}
 ACME=${ACME:-$(confget ACME_SERVER)}
 CA_BUNDLE=${REQUESTS_CA_BUNDLE:-$(confget CA_BUNDLE)}   # a test ACME server's own CA (Pebble); empty for Let's Encrypt
 PUBLIC_PORT=$PORT; [ "$BEHIND" = 1 ] && PUBLIC_PORT=443
 HOSTPORT=$NAME; [ "$PUBLIC_PORT" = 443 ] || HOSTPORT=$NAME:$PUBLIC_PORT
+SCHEME=https; [ "$BEHIND" = 1 ] && SCHEME=http   # phase 1: the proxy terminates TLS; the trunk speaks http
+PUBLIC_URL=$SCHEME://$HOSTPORT
 
 # -------------------------------------------------------------------------------------- packages
 apt_need() { # PKG… — install what is missing (asks first unless -y or not a terminal)
@@ -273,15 +222,16 @@ apt_need() { # PKG… — install what is missing (asks first unless -y or not a
   DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends "${miss[@]}" >/dev/null
 }
 
-probe_ap() { # → the HTTP status the access point gives a pinned request on its port (000: nothing answers in 10 s)
-  local b64 c=000 p
-  b64=$(openssl pkey -in "$KEY" -pubout -outform DER 2>/dev/null | openssl dgst -sha256 -binary | base64)
-  p=(curl -sk -o /dev/null -m 5 -w '%{http_code}' --pinnedpubkey "sha256//$b64" --resolve "$NAME:$PORT:127.0.0.1" "https://$NAME:$PORT/")
-  [ "$BEHIND" = 1 ] && p=(curl --haproxy-protocol "${p[@]:1}")   # (never between -w and its format)
+probe_trunk() { # the HTTP status the trunk gives on its port (000: nothing answers in 10 s)
+  local c=000 p
+  if [ "$BEHIND" = 1 ]; then
+    p=(curl -s -o /dev/null -m 5 -w '%{http_code}' "http://127.0.0.1:$PORT/t/state")
+  else
+    p=(curl -sk -o /dev/null -m 5 -w '%{http_code}' --resolve "$NAME:$PORT:127.0.0.1" "https://$NAME:$PORT/t/state")
+  fi
   for _ in $(seq 20); do c=$("${p[@]}" 2>/dev/null || true); [ "$c" != 000 ] && break; sleep 0.5; done
   echo "$c"
 }
-
 # ------------------------------------------------------------------- the release: signed, checked
 fetch() { curl -fsSL --retry 3 --proto '=https,http' -o "$2" "$1"; }
 REL_DIR=''
@@ -322,10 +272,12 @@ newer() { # A B — is version A newer than B? A pre-release is OLDER than its r
     *) return 0 ;;
   esac
 }
+major_of() { printf '%s' "${1%%-*}" | cut -d. -f1; }
 
 # ------------------------------------------------------------------------- --update (the timer)
 # The newest signed release: when it is newer than the one installed, its own trunk.sh (checked against
-# the signed SHA256SUMS) re-runs with --version — the same install, the same checks, the key + token kept.
+# the signed SHA256SUMS) re-runs with --version — the same install, the same checks, the keys + db kept.
+# A NEW MAJOR needs --major: v1 never updates itself to v2 silently.
 if [ $UPDATE = 1 ]; then
   [ -f "$CONF" ] || die "no trunk installed here (no $CONF) — run trunk.sh --name … first"
   [ "$(confget SOURCE)" = file ] && { say "update: the binary is your own file (--binary) — nothing to update"; exit 0; }
@@ -339,6 +291,13 @@ if [ $UPDATE = 1 ]; then
     else warn "update: the release offered ($NEWV) is OLDER than the one installed ($HAVE) — refusing to go back"; fi
     exit 0
   fi
+  if [ -n "$HAVE" ] && [ "$(major_of "$NEWV")" != "$(major_of "$HAVE")" ]; then
+    if [ $MAJOR = 0 ]; then
+      die "update: v$HAVE → v$NEWV crosses a MAJOR version (v$(major_of "$HAVE") → v$(major_of "$NEWV")).
+    A major is a different system: read its release notes, then run: sudo bash $SELF --update --major" 64
+    fi
+    say "update: crossing the major v$(major_of "$HAVE") → v$(major_of "$NEWV") (--major given)"
+  fi
   [ -n "$VERSION" ] || release_sums "$(release_base "$NEWV")"   # that release's own signed list (not "latest")
   release_get "$(release_base "$NEWV")" trunk.sh "$REL_DIR/trunk.sh"
   say "update: ${HAVE:-?} → $NEWV (its trunk.sh, checked against the signed SHA256SUMS)"
@@ -348,7 +307,7 @@ if [ $UPDATE = 1 ]; then
 fi
 
 # ---------------------------------------------------------------------------- the certificate
-pin_of_key() { # the hub's pin: sha-256 of the public key (SPKI), "sha-256 AA:BB:…"
+pin_of_key() { # the roots' pin: sha-256 of the public key (SPKI), "sha-256 AA:BB:…"
   openssl pkey -in "$KEY" -pubout -outform DER 2>/dev/null | sha256sum | cut -c1-64 | tr 'a-f' 'A-F' |
     sed 's/../&:/g; s/:$//; s/^/sha-256 /'
 }
@@ -366,7 +325,9 @@ cert_due() { # less than a third of its life left (90-day cert: 30 days; 6-day c
   [ $((e - now)) -lt $(((e - s) / 3)) ]
 }
 self_signed() {
-  local san="DNS:$NAME"; [ $IS_IP = 1 ] && san="IP:$NAME"
+  local san="DNS:$NAME" n
+  for n in $EXTRA_NAMES; do san="$san,DNS:$n"; done
+  [ $IS_IP = 1 ] && san="IP:$NAME"
   openssl req -x509 -new -key "$KEY" -subj "/CN=$NAME" -addext "subjectAltName=$san" -days 3650 -out "$CERT.new" 2>/dev/null
   chmod 644 "$CERT.new"; mv -f "$CERT.new" "$CERT"
   echo self-signed >"$ETC/cert.source"
@@ -399,8 +360,8 @@ EOF
 caddy holds port 80. Add this site to your Caddyfile ("http://" = caddy makes no certificate for it):
 
     http://$NAME {
-        root * $dir
-        file_server
+        handle /.well-known/acme-challenge/* { reverse_proxy 127.0.0.1:$PORT }
+        handle { respond 404 }
     }
 
 then: sudo systemctl reload caddy
@@ -410,10 +371,7 @@ EOF
     apache2*|httpd*) cat <<EOF
 apache holds port 80. Add to the <VirtualHost *:80> that answers $NAME (or a new one with ServerName $NAME):
 
-    Alias /.well-known/acme-challenge/ $dir/.well-known/acme-challenge/
-    <Directory $dir/.well-known/acme-challenge>
-        Require all granted
-    </Directory>
+    ProxyPass /.well-known/acme-challenge/ http://127.0.0.1:$PORT/.well-known/acme-challenge/
 
 then: sudo systemctl reload apache2
 and:  sudo bash trunk.sh --webroot $dir
@@ -427,8 +385,9 @@ EOF
     ;;
   esac
 }
-acme_issue() { # Let's Encrypt for NAME from OUR key (certbot --csr): the pin survives every renewal
-  local w how=() who
+acme_issue() { # Let's Encrypt for NAME (+ extra names) from OUR key (certbot --csr): the pin survives every renewal
+  local w how=() who sans="DNS:$NAME" n
+  for n in $EXTRA_NAMES; do sans="$sans,DNS:$n"; done
   if [ -n "$WEBROOT" ]; then
     mkdir -p "$WEBROOT/.well-known/acme-challenge"; chmod 755 "$WEBROOT" "$WEBROOT/.well-known" "$WEBROOT/.well-known/acme-challenge"
     how=(--webroot -w "$WEBROOT")
@@ -438,14 +397,14 @@ acme_issue() { # Let's Encrypt for NAME from OUR key (certbot --csr): the pin su
     how=(--standalone --http-01-port 80)
   fi
   w=$(mktemp -d)
-  openssl req -new -key "$KEY" -subj "/CN=$NAME" -addext "subjectAltName=DNS:$NAME" -out "$w/ap.csr" 2>/dev/null
+  openssl req -new -key "$KEY" -subj "/CN=$NAME" -addext "subjectAltName=$sans" -out "$w/ap.csr" 2>/dev/null
   local args=(certonly --non-interactive --agree-tos --preferred-challenges http "${how[@]}"
     --config-dir "$VAR/letsencrypt" --work-dir "$VAR/letsencrypt/work" --logs-dir /var/log/yggdrasil-trunk
     --csr "$w/ap.csr" --cert-path "$w/cert.pem" --fullchain-path "$w/fullchain.pem" --chain-path "$w/chain.pem")
   if [ -n "$EMAIL" ]; then args+=(--email "$EMAIL"); else args+=(--register-unsafely-without-email); fi
   [ -n "$ACME" ] && args+=(--server "$ACME")
   local ca="Let's Encrypt"; [ -n "$ACME" ] && ca=$ACME
-  say "certificate: asking $ca for $NAME (HTTP-01 on port 80${WEBROOT:+ through $WEBROOT})"
+  say "certificate: asking $ca for $NAME${EXTRA_NAMES:+ (+ $EXTRA_NAMES)} (HTTP-01 on port 80${WEBROOT:+ through $WEBROOT})"
   if ! REQUESTS_CA_BUNDLE=${CA_BUNDLE:-${REQUESTS_CA_BUNDLE:-}} certbot "${args[@]}" >"$w/log" 2>&1; then
     sed 's/^/    /' "$w/log" | tail -n 15 >&2
     ACME_HINT="the certificate request failed (above). Check that $NAME points at this server (DNS A/AAAA record)
@@ -455,14 +414,14 @@ and that port 80 is reachable from the internet (your provider's firewall too). 
   [ -s "$w/fullchain.pem" ] || { ACME_HINT="certbot answered but wrote no certificate"; rm -rf "$w"; return 1; }
   install -m 644 "$w/fullchain.pem" "$CERT.new" && mv -f "$CERT.new" "$CERT"
   rm -rf "$w"
-  cert_key_ok || die "the new certificate does not carry this server's key — refusing (your hub's pin would break)"
+  cert_key_ok || die "the new certificate does not carry this server's key — refusing (your roots' pin would break)"
   echo acme >"$ETC/cert.source"
   CHANGED=1
   say "certificate: $(openssl x509 -in "$CERT" -noout -issuer | sed 's/^issuer=//') · until $(openssl x509 -in "$CERT" -noout -enddate | cut -d= -f2)"
 }
 ensure_cert() { # → 0 done · 2 waiting for the webroot · 1 failed (ACME_HINT says why)
   if ! cert_key_ok || ! cert_for_name; then
-    self_signed   # a valid cert from our key right away: the access point starts, the hub's pin already works
+    self_signed   # a valid cert from our key right away: the trunk starts, the roots' pin already works
     say "certificate: self-signed for $NAME (from this server's key)"
   fi
   [ "$CERTMODE" = acme ] || return 0
@@ -489,7 +448,7 @@ if [ $RENEW = 1 ]; then
 fi
 
 # ======================================================================================= install
-say "yggdrasil trunk for $NAME ($( [ "$BEHIND" = 1 ] && echo "behind your :443 router → 127.0.0.1:$PORT" || echo "port $PORT" ), certificate: $CERTMODE)"
+say "yggdrasil trunk (v1) for $NAME ($( [ "$BEHIND" = 1 ] && echo "behind a proxy → 127.0.0.1:$PORT http" || echo "port $PORT"), certificate: $CERTMODE)"
 # in a subshell: os-release defines NAME and VERSION, which are ours here
 # shellcheck disable=SC1091
 OS=$( . /etc/os-release 2>/dev/null; printf '%s|%s' " ${ID:-} ${ID_LIKE:-} " "${PRETTY_NAME:-unknown}" )
@@ -507,17 +466,12 @@ case $(uname -m) in x86_64|amd64) ARCH=x86_64 ;; aarch64|arm64) ARCH=aarch64 ;; 
 command -v ss >/dev/null || apt_need iproute2
 OURS=0; systemctl is-active --quiet $UNIT 2>/dev/null && OURS=1
 OWNER=$(port_owner t "$PORT")
-ADOPT_PID=''; [ -n "$ADOPT_UNIT" ] && ADOPT_PID=$(systemctl show -p MainPID --value "$ADOPT_UNIT" 2>/dev/null || true)
-if [ -n "$OWNER" ] && [ -n "$ADOPT_PID" ] && [ "$ADOPT_PID" != 0 ] &&
-   ss -Hltnp "sport = :$PORT" 2>/dev/null | grep -q "pid=$ADOPT_PID,"; then
-  OWNER=''   # the access point being adopted: stopped just before ours starts
-fi
 if [ -n "$OWNER" ] && ! { [ $OURS = 1 ] && [ "$OWNER" = bifrost-net ]; }; then
   if [ "$BEHIND" = 1 ]; then
-    die "port $PORT (loopback, for the access point) is taken by '$OWNER' — pick another: --port N"
+    die "port $PORT (loopback, for the trunk) is taken by '$OWNER' — pick another: --port N"
   fi
   die "port $PORT is taken by '$OWNER' (a website?). Keep it: run again with --behind-proxy — the trunk then
-    listens on 127.0.0.1:4443 and this script shows how to route $NAME there from :443. Nothing was installed."
+    listens plain http on 127.0.0.1:8080 and this script shows how to route $NAME to it from :443. Nothing was installed."
 fi
 if [ "$BEHIND" = 0 ] && [ -z "$(port_owner t 443)" ] && [ "$PORT" != 443 ]; then
   warn "port 443 is free but the trunk will listen on $PORT — phones then need https://$HOSTPORT"
@@ -525,10 +479,9 @@ fi
 
 FIREWALL=${FIREWALL:-$(confget FIREWALL)}; FIREWALL=${FIREWALL:-1}
 AUTOUPD=${AUTOUPD:-$(confget AUTO_UPDATES)}; AUTOUPD=${AUTOUPD:-1}
-PKGS=(ca-certificates curl openssl iproute2 libopus0 openssh-client)   # openssh-client: ssh-keygen checks the release
-[ "$BEHIND" = 1 ] && PKGS+=(python3)
+PKGS=(ca-certificates curl openssl iproute2 openssh-client sqlite3)   # openssh-client: ssh-keygen checks the release
 [ "$FIREWALL" = 1 ] && PKGS+=(ufw)
-[ "$AUTOUPD" = 1 ] && PKGS+=(unattended-upgrades)
+[ "$CERTMODE" = acme ] && PKGS+=(certbot)
 apt_need "${PKGS[@]}"
 
 # ------------------------------------------------------------------------------ 2. the binary
@@ -574,12 +527,12 @@ else
 fi
 install -d -m 755 "$ETC" "$LIB"
 install -d -m 711 "$VAR"   # 711: a web server may reach $VAR/acme (--webroot), nobody may list
-# The trunk as it ran before this run (binary, router, config, unit, this script) is kept in $VAR/previous:
+# The trunk as it ran before this run (binary, config, unit, this script) is kept in $VAR/previous:
 # when what this run installs does not start or answer, it goes back in place and restarts (--update's net).
 PREV=$VAR/previous HAVE_PREV=0
 if [ -x "$BIN" ] && [ -f "$CONF" ]; then
   rm -rf "$PREV.new"; install -d -m 700 "$PREV.new"
-  for f in "$BIN" "$LIB/sni-443.py" "$APTOML" "$CONF" "$UNIT_FILE" "$SELF"; do
+  for f in "$BIN" "$TOML" "$CONF" "$UNIT_FILE" "$SELF"; do
     if [ -f "$f" ]; then cp -p "$f" "$PREV.new/$(basename "$f")"; fi
   done
   rm -rf "$PREV"; mv "$PREV.new" "$PREV"; HAVE_PREV=1
@@ -588,14 +541,13 @@ rollback() { # put the previous trunk back and restart it → 0 when it answers 
   [ "$HAVE_PREV" = 1 ] || return 1
   warn "putting back the trunk that ran before this run ($(sed -n 's/^BINARY=//p' "$PREV/trunk.conf" 2>/dev/null))"
   install -m 755 "$PREV/bifrost-net" "$BIN.new" && mv -f "$BIN.new" "$BIN"
-  if [ -f "$PREV/sni-443.py" ]; then install -m 755 "$PREV/sni-443.py" "$LIB/sni-443.py"; fi
-  if [ -f "$PREV/ap.toml" ]; then install -m 644 "$PREV/ap.toml" "$APTOML"; fi
+  if [ -f "$PREV/trunk.toml" ]; then install -m 644 "$PREV/trunk.toml" "$TOML"; fi
   if [ -f "$PREV/trunk.conf" ]; then install -m 644 "$PREV/trunk.conf" "$CONF"; fi
   if [ -f "$PREV/$UNIT" ]; then install -m 644 "$PREV/$UNIT" "$UNIT_FILE"; fi
   if [ -f "$PREV/yggdrasil-trunk" ]; then install -m 755 "$PREV/yggdrasil-trunk" "$SELF"; fi
   systemctl daemon-reload; systemctl reset-failed $UNIT 2>/dev/null || true   # a crash loop may have hit the start limit
   systemctl restart $UNIT
-  [ "$(probe_ap)" != 000 ]
+  [ "$(probe_trunk)" != 000 ]
 }
 if [ "$NEWBIN" != "$BIN" ] && ! { [ -f "$BIN" ] && [ "$(sha256sum <"$NEWBIN")" = "$(sha256sum <"$BIN")" ]; }; then
   install -m 755 "$NEWBIN" "$BIN.new" && mv -f "$BIN.new" "$BIN"; CHANGED=1
@@ -608,29 +560,37 @@ if [ -n "$MISSING" ]; then
   if [ "$CHANGED" = 1 ] && rollback; then die "$GOTVER needs libraries this server lacks: $MISSING— the previous trunk is back and running"; fi
   die "bifrost-net needs libraries this server lacks: $MISSING"
 fi
-if ! "$BIN" ap-token >/dev/null 2>&1; then
+if ! "$BIN" trunk-kek --help >/dev/null 2>&1; then
   if [ "$CHANGED" = 1 ] && rollback; then die "$GOTVER does not run here — the previous binary is back and running"; fi
   die "$BIN does not run here (too old a release, or the wrong architecture?)"
 fi
 
-# ------------------------------------------------------------------------------ 3. the key: once
-if [ -s "$KEY" ]; then
-  say "key: $KEY (kept — the pin stays the same)"
-else
-  (umask 077; openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -out "$KEY.new" 2>/dev/null)
-  chown root:root "$KEY.new"; chmod 600 "$KEY.new"; mv "$KEY.new" "$KEY"
-  say "key: $KEY (new, mode 600 — keep it: your hub pins it)"
+# ---------------------------------------------------------------- 3. the static user + the kek
+# v1: the trunk owns state on disk (trunk.db), so it runs as the STATIC user `trunk` (A16), not a
+# dynamic one. The kek stays root-only on disk; an ExecStartPre=+ step copies it (and anything else
+# in $ETC/cred) into the service's /run/trunk at each start (LoadCredential fails on Debian 12
+# containers, FINDINGS.md:431).
+if ! id "$STATIC_USER" >/dev/null 2>&1; then
+  useradd --system --home-dir /nonexistent --shell /usr/sbin/nologin --user-group "$STATIC_USER" \
+    || die "could not create the system user $STATIC_USER"
+  say "user:   $STATIC_USER (system user, no login)"
 fi
-chmod 600 "$KEY"; chown root:root "$KEY"
-PIN=$(pin_of_key)
+chown "$STATIC_USER:$STATIC_USER" "$VAR"
+if [ ! -f "$KEK" ]; then
+  (umask 077; "$BIN" trunk-kek "$KEK")
+  say "kek:    $KEK (new, mode 600 — keep it: trunk.db and its backups are unreadable without it)"
+else
+  say "kek:    $KEK (kept)"
+fi
+chown root:root "$KEK"; chmod 600 "$KEK"
 
 # ---------------------------------------------------------------------- 4. DNS + the certificate
 if [ $IS_IP = 0 ]; then
   RESOLVED=$(getent ahosts "$NAME" 2>/dev/null | awk '{print $1}' | sort -u | tr '\n' ' ' || true)
   MINE=$(ip -o addr show 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | tr '\n' ' ')
   if [ -z "$RESOLVED" ]; then
-    [ "$CERTMODE" = acme ] && die "$NAME does not resolve yet: create a DNS record $NAME → this server's public address, wait a minute, re-run"
-    warn "$NAME does not resolve (yet) — phones and your hub need it to"
+    [ "$CERTMODE" = acme ] && die "$NAME does not resolve yet: create a DNS record $NAME → this server's public address, wait a minute, re-run" 64
+    warn "$NAME does not resolve (yet) — phones and your roots need it to"
   else
     hit=0; for r in $RESOLVED; do case " $MINE " in *" $r "*) hit=1 ;; esac; done
     [ $hit = 1 ] || warn "$NAME resolves to $RESOLVED but this server's addresses are $MINE (fine behind 1:1 NAT, e.g. a cloud provider's public IP)"
@@ -694,73 +654,82 @@ if [ "$FIREWALL" = 1 ]; then
 fi
 ensure_cert || CERT_RC=$?
 
-# ------------------------------------------------------------------- 5. the token + ap.toml
-OLDHASH=$(sed -n 's/^bridge_token_sha256 = "\([0-9a-f]\{64\}\)".*/\1/p' "$APTOML" 2>/dev/null | head -1 || true)
-TOKEN=''
-# a token is minted when there is none, on --rotate-token, and when the last run made one but stopped
-# before showing it (the marker): nobody may be left holding a token that was never printed
-UNSHOWN=$ETC/.token-not-shown-yet
-if [ -z "$OLDHASH" ] || [ $ROTATE = 1 ] || [ -e "$UNSHOWN" ]; then
-  T2=$("$BIN" ap-token)
-  TOKEN=$(sed -n 's/^token = "\([0-9a-f]*\)".*/\1/p' <<<"$T2")
-  HASH=$(sed -n 's/^bridge_token_sha256 = "\([0-9a-f]*\)".*/\1/p' <<<"$T2")
-  [ ${#TOKEN} -ge 32 ] && [ ${#HASH} = 64 ] || die "bifrost-net ap-token gave no token"
-  : >"$UNSHOWN"
+# ---------------------------------------------------------------- 5. trunk.toml (C2) + systemd
+EXTRA_TOML=''
+for n in $EXTRA_NAMES; do EXTRA_TOML="$EXTRA_TOML\"$n\", "; done
+EXTRA_TOML=${EXTRA_TOML%, }
+[ -z "$EXTRA_TOML" ] && EXTRA_TOML='[]'
+LISTEN_HTTP='' LISTEN_TLS='' PROXY_LINE='false' TRUSTED=''
+if [ "$BEHIND" = 1 ]; then
+  # phase 1: plain http on loopback; the proxy in front (Caddy/nginx) terminates TLS and forwards.
+  # XFF is believed from the proxy's loopback address only (trusted_proxies).
+  LISTEN_HTTP="127.0.0.1:$PORT"
+  TRUSTED='["127.0.0.1/32", "::1/128"]'
 else
-  HASH=$OLDHASH
+  # phase 2: own TLS on :443 (SPKI pin); PROXY v1 off (no router in front)
+  LISTEN_TLS="0.0.0.0:$PORT"
+  [ -s /proc/net/if_inet6 ] && LISTEN_TLS="[::]:$PORT"
 fi
-LISTEN="0.0.0.0:$PORT"
-[ "$BEHIND" = 1 ] && LISTEN="127.0.0.1:$PORT"
-# both IPv4 and IPv6 when this server has IPv6 (a dual-stack socket)
-[ "$BEHIND" = 0 ] && [ -s /proc/net/if_inet6 ] && [ "$(cat /proc/sys/net/ipv6/bindv6only 2>/dev/null)" = 0 ] && LISTEN="[::]:$PORT"
-cat >"$APTOML.new" <<TOML
-# GENERATED by trunk.sh — re-run it to change anything (sudo bash trunk.sh --help). No secret in here:
-# the hub's token is known only by its SHA-256; the service gets the key in its own /run directory.
-[ap]
-listen = "$LISTEN"
-cert_path = "/run/yggdrasil-trunk/cert.pem"
-key_path = "/run/yggdrasil-trunk/key.pem"
-bridge_token_sha256 = "$HASH"
-proxy_protocol = $( [ "$BEHIND" = 1 ] && echo true || echo false )
-# voice: a phone's WebRTC media is ICE over TCP (RFC 4571-framed STUN, then DTLS/SRTP — encrypted
-# between the phone and your home computer, opaque here). On :443 it is told apart from TLS by its
-# first bytes (this listener: "ice" below; behind sni-443.py: its "ice" line) and rides this raw
-# forward to the home computer, which maps the name to its LiveKit.
-$(grep -aq 'ICE-TCP on this listener' "$BIN" && echo 'ice = "livekit-ice"' || echo '# (this bifrost-net predates "ice": voice needs sni-443.py in front)')
-
-[[ap.tcp]]
-name = "livekit-ice"
-listen = "127.0.0.1:$ICE_PORT"
+# only the proxy's PROXY line when there is one: a v0.9-style sni router in front is not in v1's path
+CERT_TOML=''
+[ -n "$LISTEN_TLS" ] && CERT_TOML="cert_path = \"/run/yggdrasil-trunk/cert.pem\"
+key_path  = \"/run/yggdrasil-trunk/key.pem\""
+cat >"$TOML.new" <<TOML
+# GENERATED by trunk.sh — the v1 trunk's config (CONTRACTS C2). No secrets: the kek and oauth secrets
+# live in $ETC and are copied to /run/trunk by the service's ExecStartPre at each start.
+public_url     = "$PUBLIC_URL"
+extra_names    = [$EXTRA_TOML]
+listen_http    = "$LISTEN_HTTP"
+listen_tls     = "$LISTEN_TLS"
+listen_ice     = ""                              # phase 2: "0.0.0.0:4479" (framed STUN / ICE-TCP)
+proxy_protocol = $PROXY_LINE
+trusted_proxies = $TRUSTED
+db             = "$VAR/trunk.db"
+state_dir      = "$VAR"
+cred_dir       = "/run/trunk"
+ctl_socket     = "/run/trunk/ctl.sock"
+acme_webroot   = "$VAR/acme"
+rp_id          = "veraldar.org"
+origins        = ["$PUBLIC_URL"]
+ice_owner_from = []
+$CERT_TOML
+[auth]
+region_policy = "refresh"
 TOML
-chmod 644 "$APTOML.new"
-if [ -f "$APTOML" ] && [ "$(sha256sum <"$APTOML.new")" = "$(sha256sum <"$APTOML")" ]; then rm -f "$APTOML.new"
-else mv -f "$APTOML.new" "$APTOML"; CHANGED=1; fi
+chmod 644 "$TOML.new"
+if [ -f "$TOML" ] && [ "$(sha256sum <"$TOML.new")" = "$(sha256sum <"$TOML")" ]; then rm -f "$TOML.new"
+else mv -f "$TOML.new" "$TOML"; CHANGED=1; fi
 
-# ------------------------------------------------------------------------- 6. systemd units
+# the units ---------------------------------------------------------------------------------------------
 put_unit() { # path — content on stdin; marks CHANGED
   local tmp; tmp=$(mktemp); cat >"$tmp"; chmod 644 "$tmp"
   if [ -f "$1" ] && [ "$(sha256sum <"$tmp")" = "$(sha256sum <"$1")" ]; then rm -f "$tmp"; else mv -f "$tmp" "$1"; CHANGED=1; fi
 }
-# The key stays root-only on disk. At each start, a root-run ExecStartPre (+) hands a copy to the service's
-# dynamic user in its private /run directory (tmpfs, 0700, gone when it stops) — what LoadCredential= does,
-# but it also works where systemd 252 leaves credentials unreadable (Debian 12 in a container-based VPS).
+# The kek (and any oauth secret) stays root-only on disk. At each start, a root-run ExecStartPre (+) copies
+# what is in $ETC/cred into the service's own /run/trunk (tmpfs, 0700, owned by $STATIC_USER, gone when it
+# stops) — what LoadCredential= does, but it also works where systemd 252 leaves credentials unreadable
+# (Debian 12 in a container, FINDINGS.md:431).
 # shellcheck disable=SC2016  # $$ and %% are systemd's escapes; the shell inside the unit expands them
-PRE='ExecStartPre=+/bin/sh -c '"'"'d=$$RUNTIME_DIRECTORY; install -m 400 -o "$$(stat -c %%u "$$d")" '"$KEY"' "$$d/key.pem" && install -m 444 '"$CERT"' "$$d/cert.pem"'"'"
+PRE=$(printf '%s' "ExecStartPre=+/bin/sh -c 'd=\$RUNTIME_DIRECTORY; install -d -m 700 -o \$USER -g \$GROUP \$d/cred && for f in $KEK $ETC/cred/*; do [ -f \$f ] && install -m 400 -o \$USER -g \$GROUP \$f \$d/cred/\$(basename \$f); done'")
+CERT_PRE=""
+[ -n "$LISTEN_TLS" ] && CERT_PRE=$(printf '%s' "ExecStartPre=+/bin/sh -c 'd=\$RUNTIME_DIRECTORY; install -m 400 -o \$USER -g \$GROUP $KEY \$d/key.pem && install -m 444 $CERT \$d/cert.pem'")
 put_unit "$UNIT_FILE" <<UNIT
-# GENERATED by trunk.sh. The access point of your yggdrasil trunk.
+# GENERATED by trunk.sh. The v1 trunk: accounts, devices, roots, the relay to your roots.
 [Unit]
-Description=yggdrasil trunk — the access point your phone and your computers reach ($NAME)
+Description=yggdrasil trunk — accounts, devices and roots ($NAME)
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 $PRE
-ExecStart=$BIN ap -c $APTOML
+$CERT_PRE
+ExecStart=$BIN trunk -c $TOML
+User=$STATIC_USER
+Group=$STATIC_USER
 RuntimeDirectory=yggdrasil-trunk
 RuntimeDirectoryMode=0700
-DynamicUser=yes
-AmbientCapabilities=CAP_NET_BIND_SERVICE
-CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+StateDirectory=yggdrasil-trunk
+ReadWritePaths=/var/lib/yggdrasil-trunk
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes
@@ -779,6 +748,10 @@ RestartSec=2
 [Install]
 WantedBy=multi-user.target
 UNIT
+# trunk-ctl: the console client (root only; dispatches on argv[0])
+if ! { [ -f "$CTL" ] && [ "$(sha256sum <"$BIN")" = "$(sha256sum <"$CTL")" ]; }; then
+  install -m 755 "$BIN" "$CTL.new" && mv -f "$CTL.new" "$CTL"
+fi
 # this script, for the timers (they read trunk.conf): the release's own trunk.sh, checked against its signed
 # SHA256SUMS (this file when it is that one, else the release's copy) — never an OLDER release's
 SELF_SRC=$0
@@ -836,75 +809,13 @@ WantedBy=timers.target
 UNIT
 fi
 
-# ---------------------------------------------------------- 7. --behind-proxy: the :443 router
-if [ "$BEHIND" = 1 ]; then
-  # the router: from the signed release (the one just checked), else next to this script (a checkout or an
-  # unpacked release), else the one installed before
-  SRC=''
-  if [ -n "$REL_DIR" ] && [ -n "$(sum_of sni-443.py)" ]; then
-    release_get "$BASE" sni-443.py "$REL_DIR/sni-443.py"; SRC=$REL_DIR/sni-443.py
-  fi
-  [ -n "$SRC" ] || for c in "$HERE/../deploy/sni-443.py" "$HERE/sni-443.py"; do [ -f "$c" ] && { SRC=$c; break; }; done
-  [ -z "$SRC" ] && [ -f "$LIB/sni-443.py" ] && SRC=$LIB/sni-443.py   # a re-run: keep the one installed
-  if [ -z "$SRC" ]; then
-    WANTV=${VERSION#v}; WANTV=${WANTV:-$YGG_RELEASE}
-    BASE=$(release_base "$WANTV"); release_sums "$BASE"
-    release_get "$BASE" sni-443.py "$REL_DIR/sni-443.py"; SRC=$REL_DIR/sni-443.py
-  fi
-  if [ "$SRC" != "$LIB/sni-443.py" ] && ! { [ -f "$LIB/sni-443.py" ] && [ "$(sha256sum <"$SRC")" = "$(sha256sum <"$LIB/sni-443.py")" ]; }; then
-    install -m 755 "$SRC" "$LIB/sni-443.py.new" && mv -f "$LIB/sni-443.py.new" "$LIB/sni-443.py"
-    systemctl is-active --quiet yggdrasil-sni-443 2>/dev/null && SNI_RESTART=1
-  fi
-  if [ ! -f "$ETC/sni-443.conf" ]; then
-    cat >"$ETC/sni-443.conf" <<EOF
-# sni-443.conf — who gets which TLS name on :443 (yggdrasil-sni-443.service). Re-read on restart.
-#   route NAME BACKEND [proxy]   TLS for NAME (or *.example.org) goes to BACKEND, untouched;
-#                                proxy = a PROXY v1 line first, carrying the client's real address
-#   default BACKEND              everything else: other names, no name, plain http
-#   stun BACKEND                 optional: STUN/TURN over TCP (coturn)
-#   ice BACKEND                  voice: ICE over TCP (a phone's WebRTC media) → the trunk's raw forward
-listen  0.0.0.0:443
-route   $NAME  127.0.0.1:$PORT  proxy
-default 127.0.0.1:8443
-ice     127.0.0.1:$ICE_PORT
-EOF
-    chmod 644 "$ETC/sni-443.conf"
-  elif ! grep -q "^route[[:space:]]\+${NAME}[[:space:]]" "$ETC/sni-443.conf"; then
-    warn "$ETC/sni-443.conf has no route for $NAME — add: route $NAME 127.0.0.1:$PORT proxy"
-  fi
-  if ! grep -q "^ice[[:space:]]" "$ETC/sni-443.conf"; then
-    warn "$ETC/sni-443.conf has no 'ice' line — voice from phones needs it: add 'ice 127.0.0.1:$ICE_PORT', then systemctl restart yggdrasil-sni-443"
-  fi
-  put_unit /etc/systemd/system/yggdrasil-sni-443.service <<UNIT
-# GENERATED by trunk.sh. Shares :443 by TLS name (SNI): $NAME → the trunk, the rest → your website.
-# NOT enabled by trunk.sh: move your website's https to the 'default' backend first (see trunk.sh's output).
-[Unit]
-Description=:443 by TLS name — the trunk and your website on one port ($ETC/sni-443.conf)
-After=network-online.target
-Wants=network-online.target
-[Service]
-ExecStart=/usr/bin/python3 $LIB/sni-443.py -c $ETC/sni-443.conf
-DynamicUser=yes
-AmbientCapabilities=CAP_NET_BIND_SERVICE
-CapabilityBoundingSet=CAP_NET_BIND_SERVICE
-NoNewPrivileges=yes
-ProtectSystem=strict
-ProtectHome=yes
-PrivateTmp=yes
-Restart=always
-RestartSec=1
-[Install]
-WantedBy=multi-user.target
-UNIT
-fi
-
-# ------------------------------------------------------------------- 8. settings, then start
+# ------------------------------------------------------------------- 6. settings, then start
 cat >"$CONF.new" <<EOF
 # GENERATED by trunk.sh — what you chose; re-runs read it. No secrets.
 NAME=$NAME
 PORT=$PORT
-ICE_PORT=$ICE_PORT
 BEHIND_PROXY=$BEHIND
+EXTRA_NAMES=$EXTRA_NAMES
 CERT=$CERTMODE
 WEBROOT=$WEBROOT
 EMAIL=$EMAIL
@@ -916,25 +827,11 @@ RELEASES=$( [ "$RELEASES" = https://github.com/veraldar/yggdrasil/releases ] || 
 FIREWALL=$FIREWALL
 FIREWALL_RULES=$FW_RULES
 AUTO_UPDATES=$AUTOUPD
-ADOPTED_FROM=${ADOPT:-$(confget ADOPTED_FROM)}
 EOF
 chmod 644 "$CONF.new"; mv -f "$CONF.new" "$CONF"
 systemctl daemon-reload
 systemctl enable --quiet $UNIT
-if [ -n "$ADOPT_UNIT" ] && systemctl is-active --quiet "$ADOPT_UNIT"; then
-  systemctl stop "$ADOPT_UNIT"; ADOPT_STOPPED=1; say "stopped $ADOPT_UNIT (the access point being adopted)"
-fi
 if [ $OURS = 0 ] || [ $CHANGED = 1 ]; then systemctl restart $UNIT; say "started $UNIT"; else say "running $UNIT (unchanged)"; fi
-if [ -n "$ADOPT" ] && [ "$BEHIND" = 1 ] && systemctl is-active --quiet yggdrasil-sni-443; then
-  # the :443 router ran from the adopted folder's config: from now on from ours (the same lines), and at boot
-  sp=$(systemctl show -p MainPID --value yggdrasil-sni-443)
-  if ! tr '\0' ' ' <"/proc/$sp/cmdline" 2>/dev/null | grep -q -- "-c $ETC/sni-443.conf"; then SNI_RESTART=1; fi
-  systemctl enable --quiet yggdrasil-sni-443
-  if systemctl is-enabled --quiet turn-dispatcher 2>/dev/null; then
-    warn "turn-dispatcher is still enabled: at boot it races yggdrasil-sni-443 for :443 — sudo systemctl disable turn-dispatcher"
-  fi
-fi
-if [ "${SNI_RESTART:-0}" = 1 ]; then systemctl restart yggdrasil-sni-443; say "restarted yggdrasil-sni-443 (a new sni-443.py)"; fi
 if [ "$CERTMODE" = acme ]; then systemctl enable --quiet --now yggdrasil-trunk-cert.timer
 else systemctl disable --quiet --now yggdrasil-trunk-cert.timer 2>/dev/null || true; fi
 # automatic updates: Debian's security updates (unattended-upgrades) + the weekly signed trunk update
@@ -951,102 +848,78 @@ else
   systemctl disable --quiet --now yggdrasil-trunk-update.timer 2>/dev/null || true
 fi
 
-# the access point answers on its port with THIS key (curl pins it)
-code=$(probe_ap)
-if [ "$code" = 000 ] && [ "$ADOPT_STOPPED" = 1 ]; then
-  journalctl -u $UNIT -n 15 --no-pager -o cat >&2 || true
-  ROLLING=1
-  if adopt_back; then die "the access point does not answer on 127.0.0.1:$PORT (log above) — $ADOPT_UNIT is back and answering; nothing else changed there"; fi
-  die "the access point does not answer on 127.0.0.1:$PORT (log above), and $ADOPT_UNIT did not come back either: sudo systemctl start $ADOPT_UNIT"
-fi
-if [ "$code" != 000 ] && [ -n "$ADOPT" ]; then
-  # ours answers: the adopted one stays off, its renewal too; its folder is left as it was
-  [ -n "$ADOPT_UNIT" ] && systemctl disable --quiet "$ADOPT_UNIT" 2>/dev/null || true
-  for t in $ADOPT_TIMERS; do systemctl disable --now --quiet "$t" 2>/dev/null || true; done
-  ADOPT_STOPPED=0
-  say "adopted: ${ADOPT_UNIT:-the old access point} stopped and disabled${ADOPT_TIMERS:+, its renewal timer ($(echo $ADOPT_TIMERS)) too} — $ADOPT is left as it was"
-  say "  once all is well: sudo rm -rf $ADOPT${ADOPT_UNIT:+ /etc/systemd/system/$ADOPT_UNIT}   (until then: the way back)"
-fi
+# the trunk answers on its port with THIS key (curl pins it)
+code=$(probe_trunk)
 if [ "$code" = 000 ]; then
   journalctl -u $UNIT -n 15 --no-pager -o cat >&2 || true
   if [ "$CHANGED" = 1 ] && rollback; then
-    die "$GOTVER does not answer on 127.0.0.1:$PORT (log above) — the previous trunk is back and answering"
+    die "the trunk does not answer on 127.0.0.1:$PORT (log above) — the previous trunk is back and answering"
   fi
-  die "the access point does not answer on 127.0.0.1:$PORT (log above)"
+  die "the trunk does not answer on 127.0.0.1:$PORT (log above)"
 fi
-case $code in 503) STATE="answering — no hub connected yet" ;; *) STATE="answering — a hub is connected (HTTP $code)" ;; esac
-say "access point: https://$HOSTPORT  $STATE"
-say "pin: $PIN"
+case $code in 200) STATE="answering" ;; *) STATE="answering (HTTP $code)" ;; esac
+say "trunk:   $PUBLIC_URL  $STATE"
+say "pin:     $(pin_of_key)"
 
 # ----------------------------------------------------------------------------------- the end
 line() { printf '%s\n' "────────────────────────────────────────────────────────────────────────────────"; }
 echo
-if [ "$BEHIND" = 1 ] && ! systemctl is-active --quiet yggdrasil-sni-443; then   # a running router needs no how-to
+if [ "$BEHIND" = 1 ]; then
   line
   cat <<EOF
- :443 is your website's. Send the name $NAME to the trunk — pick ONE:
+ :443 is your website's (the proxy in front). Send the name $NAME to the trunk — pick ONE:
 
- A) our small router (python3, ~200 lines: $LIB/sni-443.py, config $ETC/sni-443.conf)
-    1. move your website's HTTPS from :443 to 127.0.0.1:8443
-         nginx:  listen 443 ssl;   →  listen 127.0.0.1:8443 ssl;
-         caddy:  global options block { https_port 8443 }            (http stays on :80)
-    2. sudo systemctl enable --now yggdrasil-sni-443
-    The website keeps its own certificate and gets its TLS untouched; only $NAME is routed to the trunk.
+ A) Caddy already on :443 — add this site to your Caddyfile:
 
- B) nginx already on :443 — let it route by name (module: libnginx-mod-stream), top level of nginx.conf:
-
-    stream {
-        map \$ssl_preread_server_name \$ygg_backend {
-            $NAME  127.0.0.1:$PORT;
-            default        127.0.0.1:8443;
-        }
-        server {
-            listen 443; $V6_443
-            ssl_preread on;
-            proxy_pass \$ygg_backend;
-            proxy_protocol on;
-        }
+    $NAME {
+        reverse_proxy 127.0.0.1:$PORT
     }
 
-    and your website's server blocks:  listen 127.0.0.1:8443 ssl proxy_protocol;
-                                       set_real_ip_from 127.0.0.1; real_ip_header proxy_protocol;
+    then: sudo systemctl reload caddy
+    (the trunk also serves /.well-known/acme-challenge/ itself: certbot --webroot $VAR/acme works unchanged)
+
+ B) nginx already on :443 — a server block per name (TLS terminated there, plain http to the trunk):
+
+    server {
+        listen 443 ssl; $V6_443
+        server_name $NAME;
+        ssl_certificate /etc/nginx/your-$NAME.crt;     # your certificate for $NAME
+        ssl_certificate_key /etc/nginx/your-$NAME.key;
+        location / { proxy_pass http://127.0.0.1:$PORT; proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for; }
+    }
+
     then: sudo nginx -t && sudo systemctl reload nginx
 EOF
   line
 fi
 if [ $CERT_RC != 0 ]; then
   line
-  echo " CERTIFICATE PENDING — phones will refuse https://$HOSTPORT until this is done:"
+  echo " CERTIFICATE PENDING — phones will refuse $PUBLIC_URL until this is done:"
   echo
   printf '%s\n' "$ACME_HINT" | sed 's/^/ /'
   echo
-  echo " The trunk already runs with a temporary certificate from the same key: your hub can connect now"
-  echo " (it trusts the key, not the certificate) and needs nothing new once the real one arrives."
+  echo " The trunk already runs with a temporary certificate from the same key: roots can connect now"
+  echo " (they pin the key, not the certificate) and need nothing new once the real one arrives."
   line
 fi
-if [ -n "$TOKEN" ]; then
-  LINE="wss://$HOSTPORT/ap#pin=${PIN#sha-256 },token=$TOKEN"
-  line
-  cat <<EOF
- Your trunk is up: https://$HOSTPORT
+line
+cat <<EOF
+ Your trunk is up: $PUBLIC_URL
 
- On your home computer (the hub), run the installer with --trunk:
+ CLAIM IT (once, from anywhere): your admin account is created from this server.
+  1. On this server:    sudo trunk-ctl claim-code
+     It prints a 6-digit code (rotates every 5 minutes; lives only in /run/trunk/claim).
+  2. On any device:     open  $SCHEME://$HOSTPORT/claim
+     No agent here?     sudo trunk-ctl claim-link   prints the same link with the code in it.
+  3. Enter the code → Approve & create admin → email + password + 2FA (or a passkey).
 
-     bash install.sh --trunk
+ Then add your computers — the empty-trunk page at $PUBLIC_URL shows the one line per system:
 
- and when it asks, paste this connect line (it is not shown while you paste):
+     curl -fsSL $PUBLIC_URL/install/root.sh | bash        Linux, WSL2, macOS
 
-$LINE
-
- The line holds a secret, the token that lets your hub in: paste it only there, never
- into a command. It is shown ONCE — this server keeps only its SHA-256. Lost it, or want
- a new one? sudo bash trunk.sh --rotate-token prints a new line (the old one stops working).
+ Add a name:   sudo bash trunk.sh --add-name ap.example.org
+ Update:       sudo bash trunk.sh --update    (a major needs: --update --major)
+ Remove:       sudo bash trunk.sh --uninstall
 EOF
-  line
-  rm -f "$UNSHOWN"
-  [ $ROTATE = 1 ] && [ -n "$OLDHASH" ] && warn "the previous token no longer works — your hub reconnects once you run install.sh --trunk again and paste the line above"
-else
-  echo " The trunk is up: https://$HOSTPORT · token kept (your hub's connect line still works)."
-  echo " Need the connect line again? It is not stored here: sudo bash trunk.sh --rotate-token prints a new one."
-fi
+line
 exit 0
