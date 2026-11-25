@@ -159,3 +159,7 @@ Unknown keys are an error (same rule as today's bridge config).
 - **A6 (lead, W8 data rule)** Root ids are opaque strings. New roots get `rt_…`. **`import-v0` keeps every v0.9 root's existing id
   (its `roots.json` id) and omarchy's current `YGG_ROOT_NAME` as their v1 ids**, so existing sessions' `info.remote` / `report_to`
   and per-root routes keep working after switchover with no data migration.
+- **A7 (lead, 11-26 — accepted from APP M5, B26)** `POST /t/auth/refresh` returns `"access_token": <paseto>` in its JSON response body
+  (alongside `ok`, `exp`, and the `HttpOnly` `bifrost_device` / `bifrost_refresh` cookies), so `branch/lib/pinned.ts` can send the
+  renewed short-lived PASETO over the WebRTC tunnel's `AUTH` (kind 5) frame (spec §13 B26). The refresh token stays `HttpOnly` only
+  and is never returned in JSON.
