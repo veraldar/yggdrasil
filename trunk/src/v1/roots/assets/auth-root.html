@@ -1,0 +1,59 @@
+<header class="oz-head"><span class="oz-brand">BIFROST</span><span class="head-r"><span class="pill">{{HOST}}</span></span></header>
+
+<section class="oz-blk" id="r-find" hidden>
+  <h2>confirm new server<span class="r">headless root</span></h2>
+  <div>
+    <p class="lead">Enter the 6-digit code the server prints, then check its tunnel key before you connect it.</p>
+    <form class="row" id="r-find-form">
+      <input class="oz-field code grow" id="r-find-code" inputmode="numeric" autocomplete="off" maxlength="7" placeholder="000000" aria-label="6-digit code" required>
+      <button class="oz-k ok" type="submit">Find</button>
+    </form>
+    <p class="msg err" id="r-find-err" hidden></p>
+  </div>
+</section>
+
+<section class="oz-blk" id="r-card" hidden>
+  <h2>connect this computer?<span class="r" id="r-left"></span></h2>
+  <div>
+    <ul class="kv">
+      <li><span class="k">computer</span><span class="v" id="r-host"></span></li>
+      <li><span class="k">system</span><span class="v" id="r-sys"></span></li>
+      <li><span class="k">tunnel key</span><span class="v" id="r-wgfp"></span></li>
+      <li><span class="k">trunk</span><span class="v">{{HOST}}</span></li>
+    </ul>
+    <p class="msg" id="r-why-code" hidden>This computer is on another network than this browser: type the code its screen shows.</p>
+    <label class="f-field" id="r-code-field" hidden><span class="f-lbl"><span>the code on that computer's screen</span></span>
+      <input class="oz-field code" id="r-code" inputmode="numeric" autocomplete="off" maxlength="7" placeholder="000000"></label>
+    <div class="row">
+      <button class="oz-k ok grow" id="r-connect" type="button">Connect root</button>
+      <button class="oz-k" id="r-cancel" type="button">Cancel</button>
+    </div>
+    <p class="msg err" id="r-err" hidden></p>
+  </div>
+</section>
+
+<section class="oz-blk" id="r-stepup" hidden>
+  <h2>confirm it's you<span class="r warn">2FA</span></h2>
+  <div>
+    <p class="lead">Connecting a computer needs a fresh second factor on this device.</p>
+    <form class="row" id="r-stepup-form">
+      <input class="oz-field code grow" id="r-stepup-code" inputmode="numeric" autocomplete="one-time-code" maxlength="7" placeholder="000000" aria-label="authenticator code" required>
+      <button class="oz-k ok" type="submit">Confirm</button>
+    </form>
+    <p class="msg err" id="r-stepup-err" hidden></p>
+  </div>
+</section>
+
+<section class="oz-blk" id="r-done" hidden>
+  <h2>connected<span class="r ok">✓</span></h2>
+  <div>
+    <p class="lead"><b id="r-done-name"></b> is a root of this trunk now. Its installer finishes on its own and the computer dials out.</p>
+    <a class="oz-k ok full" href="/">open the tree</a>
+  </div>
+</section>
+
+<section class="oz-blk" id="r-over" hidden>
+  <h2>nothing to connect</h2>
+  <div><p class="lead" id="r-over-why"></p><a class="oz-k full" href="/add-root">enter a code instead</a></div>
+</section>
+<script src="/t/roots/ui.js" defer></script>

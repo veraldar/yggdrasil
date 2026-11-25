@@ -25,6 +25,8 @@ use super::relay::hub::{Authority, Registry, RootRec};
 use super::server::{Incoming, State};
 use super::state::{DenyEntry, Key};
 
+pub mod pages;
+
 /// The headless code's window and the overlap a just-rotated code keeps.
 pub const CODE_PERIOD_MS: i64 = 300_000;
 pub const CODE_OVERLAP_MS: i64 = 15_000;

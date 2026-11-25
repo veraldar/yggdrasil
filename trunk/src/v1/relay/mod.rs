@@ -60,6 +60,21 @@ fn segs(route: &str) -> Vec<&str> {
 /// First look at every request: `None` = answered here, `Some(inc)` = not WIRE's.
 pub async fn route(st: &Arc<State>, mut inc: Incoming) -> Option<Incoming> {
     let route = inc.req.route().to_string();
+    // the enrollment pages (storyboard step 4) and their script
+    let get = matches!(inc.req.method.as_str(), "GET" | "HEAD");
+    match route.trim_end_matches('/') {
+        "/auth/root" | "/add-root" if get => {
+            let which = if route.starts_with("/auth/root") { "auth-root" } else { "add-root" };
+            let r = roots::pages::page(st, &inc, which);
+            inc.answer(r).await;
+            return None;
+        }
+        "/t/roots/ui.js" if get => {
+            inc.answer(roots::pages::ui_js()).await;
+            return None;
+        }
+        _ => {}
+    }
     let s = segs(&route);
     let mine = matches!(s.as_slice(), ["t", "root"] | ["t", "roots", ..] | ["t", "me", "roots"] | ["t", "me", "door"] | ["t", "ice", "owner"]);
     if !mine {

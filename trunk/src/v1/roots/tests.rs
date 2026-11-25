@@ -136,6 +136,16 @@ fn enroll_body(i: &Installer, host: &str, has_app: bool) -> Value {
             "dtls_fp": "sha-256 AB:CD", "has_app": has_app, "has_voice": false })
 }
 
+fn raw_get(addr: SocketAddr, path: &str, tok: Option<&str>) -> String {
+    let mut s = TcpStream::connect(addr).unwrap();
+    s.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+    let c = tok.map(|t| format!("Cookie: bifrost_device={t}\r\n")).unwrap_or_default();
+    s.write_all(format!("GET {path} HTTP/1.1\r\nHost: trunk.test\r\nAccept: text/html\r\n{c}\r\n").as_bytes()).unwrap();
+    let mut out = vec![];
+    let _ = s.read_to_end(&mut out);
+    String::from_utf8_lossy(&out).to_string()
+}
+
 fn fake_app(name: &'static str) -> SocketAddr {
     let srv = tiny_http::Server::http("127.0.0.1:0").unwrap();
     let addr = srv.server_addr().to_ip().unwrap();
@@ -299,6 +309,15 @@ fn enroll_approve_poll_link_relay_revoke_through_the_server() {
     let (st, off) = t.call("GET", "/api/hello", None, Some(&admin), false);
     assert_eq!((st, off["why"].as_str()), (503, Some("offline")), "{off}");
     assert_eq!(t.call("DELETE", &format!("/t/roots/{root_a}"), None, Some(&admin), true).0, 404, "once");
+    // the pages: signed in → the card's page and its script (CSP, no inline script); else /login
+    let page = raw_get(t.addr, &format!("/auth/root?e={eid}"), Some(&admin));
+    assert!(page.starts_with("HTTP/1.1 200") && page.contains("Connect root") && page.contains("/t/roots/ui.js"), "{}", &page[..page.len().min(300)]);
+    assert!(page.to_ascii_lowercase().contains("content-security-policy: default-src 'self'"), "the shell CSP");
+    assert!(!page.contains("<script>"), "no inline script");
+    let anon = raw_get(t.addr, "/add-root", None);
+    assert!(anon.starts_with("HTTP/1.1 302") && anon.to_ascii_lowercase().contains("location: /login?next=/add-root"), "{}", &anon[..anon.len().min(300)]);
+    let js = raw_get(t.addr, "/t/roots/ui.js", None);
+    assert!(js.starts_with("HTTP/1.1 200") && js.contains("/t/roots/enroll/by-code"));
     // the router's question is answered only to ice_owner_from (none configured here)
     assert_eq!(t.call("GET", "/t/ice/owner?u=abcd", None, None, false).0, 403);
     // a v0.9 bridge dialing /t/root
@@ -319,8 +338,8 @@ fn enroll_limits_and_input_cleaning() {
     body["wg_pub"] = json!(bad.wg_pub);
     body["root_pub"] = json!("short");
     assert_eq!(t.call("POST", "/t/roots/enroll", Some(&body), None, false).0, 400, "root_pub checked");
-    // 5 per 10 minutes per address (the 3 refused above did not count: they were cleaned first? no —
-    // the window takes every attempt, like roots.ts): 2 more pass, then 429
+    // 5 per 10 minutes per address: the window counts every attempt, refused ones too (roots.ts
+    // takes it first as well) — 3 above, 2 more pass, then 429
     let mut codes = vec![];
     for i in 0..3 {
         let n = installer();
