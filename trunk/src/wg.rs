@@ -351,6 +351,13 @@ pub struct NodeConfig {
     pub devices_file: Option<String>,
     #[serde(default)]
     pub peer: Vec<StaticPeer>,
+    /// trunk v1: the bridge's trunk-state.json — the peers are the roots of its SIGNED directory
+    /// (re-read when it changes; a directory whose signature fails is never taken)
+    #[serde(default)]
+    pub trunk_state: Option<String>,
+    /// the trunk key that signs it (b64url Ed25519); absent = the one recorded in the file
+    #[serde(default)]
+    pub trunk_key: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -369,6 +376,10 @@ struct PeerSpec {
     ip: Ipv4Addr,
     /// a static peer (the joined root's hub): dialed every 2 s until up, else every 5 s
     proactive: bool,
+    /// trunk v1: the root's name and its peer token's sha256 from the signed directory (the brain
+    /// accepts a peer call when sha256(x-ygg-peer) matches the sender's; empty on v0.9)
+    name: String,
+    token_sha: String,
 }
 
 fn parse_cidr4(s: &str) -> Result<(Ipv4Addr, u8), String> {
@@ -398,6 +409,69 @@ struct Source {
     follows_hub: bool,
     /// a joined node: the hub's last directory (when it came, the roots in it, its version)
     directory: Dir,
+    /// trunk v1: trunk-state.json and the key its directory must be signed with
+    trunk: Option<TrunkSource>,
+}
+
+/// Trunk v1: the peers of a node are the other roots in the trunk's signed directory.
+struct TrunkSource {
+    path: PathBuf,
+    key: Option<[u8; 32]>,
+    /// (mtime, len) of the file last read, and what it gave
+    seen: Option<(std::time::SystemTime, u64)>,
+    held: (Option<(Ipv4Addr, u8)>, Vec<PeerSpec>, u64),
+    prefix: u8,
+}
+
+impl TrunkSource {
+    /// (this node's address, the other roots) — from the file when it changed, else as held.
+    fn read(&mut self, me: &[u8; 32], warn: &mut dyn FnMut(String)) -> (Option<(Ipv4Addr, u8)>, Vec<PeerSpec>) {
+        let stamp = std::fs::metadata(&self.path).ok().and_then(|m| Some((m.modified().ok()?, m.len())));
+        if stamp.is_some() && stamp == self.seen {
+            return (self.held.0, self.held.1.clone());
+        }
+        self.seen = stamp;
+        let Some(st) = crate::v1::state::StateFile::read(&self.path) else { return (self.held.0, self.held.1.clone()) };
+        let key = self.key.or_else(|| crate::v1::proto::public_from_b64u(&st.trunk.trunk_key));
+        let Some(key) = key else {
+            warn(format!("{}: no trunk key to check its directory with", self.path.display()));
+            return (self.held.0, self.held.1.clone());
+        };
+        let Some((seq, roots)) = st.directory_roots(&key) else {
+            if !st.directory.is_null() {
+                warn(format!("{}: the directory's signature does not verify — keeping the last good one", self.path.display()));
+            }
+            return (self.held.0, self.held.1.clone());
+        };
+        if seq < self.held.2 {
+            return (self.held.0, self.held.1.clone()); // never go back to an older directory
+        }
+        let me_b64 = B64.encode(me);
+        let mine = roots.iter().find(|r| r.wg_pub == me_b64);
+        let addr = mine.and_then(|r| r.wg_addr.parse::<Ipv4Addr>().ok()).map(|ip| (ip, self.prefix));
+        let mut peers: Vec<PeerSpec> = vec![];
+        for r in &roots {
+            if r.wg_pub == me_b64 || !valid_addr(&r.id) || r.id == "local" {
+                continue;
+            }
+            let (Ok(public), Ok(ip)) = (decode_key(&r.wg_pub), r.wg_addr.parse::<Ipv4Addr>()) else { continue };
+            if addr.is_some_and(|a| ip == a.0 || !in_net(ip, a)) {
+                warn(format!("root '{}': wg_addr {ip} is this node's own or outside its net — skipped", r.id));
+                continue;
+            }
+            if peers.iter().any(|p| p.public == public || p.ip == ip || p.id == r.id) {
+                warn(format!("root '{}': its key, address or id is already taken — skipped", r.id));
+                continue;
+            }
+            peers.push(PeerSpec { id: r.id.clone(), public, ip, proactive: false, name: r.name.clone(), token_sha: r.peer_token_sha256.clone() });
+        }
+        if mine.is_none() {
+            warn(format!("{}: this node's key is not in the trunk's directory (not enrolled, or revoked) — no peers", self.path.display()));
+            peers.clear();
+        }
+        self.held = (addr.or(self.held.0), peers, seq);
+        (self.held.0, self.held.1.clone())
+    }
 }
 
 /// A joined node's copy of the hub's directory: when it came, the roots in it, the hub's
@@ -416,7 +490,7 @@ fn parse_directory(v: &Value, me: &[u8; 32]) -> (Vec<PeerSpec>, u64) {
             continue;
         };
         if valid_addr(id) && id != "local" && public != *me {
-            roots.push(PeerSpec { id: id.to_string(), public, ip, proactive: false });
+            roots.push(PeerSpec { id: id.to_string(), public, ip, proactive: false, name: String::new(), token_sha: String::new() });
         }
     }
     (roots, v["v"].as_u64().unwrap_or(0))
@@ -446,6 +520,18 @@ impl Source {
 
     /// (this node's address, the peers it may talk to now)
     fn read(&mut self) -> (Option<(Ipv4Addr, u8)>, Vec<PeerSpec>) {
+        if self.trunk.is_some() {
+            let me = self.me;
+            let mut msgs = vec![];
+            let (addr, mut peers) = self.trunk.as_mut().expect("checked").read(&me, &mut |m| msgs.push(m));
+            for m in msgs {
+                self.warn(m);
+            }
+            let mut all = self.statics.clone();
+            peers.retain(|p| !all.iter().any(|s| s.id == p.id || s.public == p.public || s.ip == p.ip));
+            all.extend(peers);
+            return (self.address.or(addr), all);
+        }
         let mut peers = self.statics.clone();
         let mut addr = self.address;
         let Some(path) = self.roots_file.clone() else {
@@ -510,7 +596,7 @@ impl Source {
                 self.warn(format!("root '{id}': its key, address or id is already taken — skipped"));
                 continue;
             }
-            peers.push(PeerSpec { id: id.to_string(), public, ip, proactive: false });
+            peers.push(PeerSpec { id: id.to_string(), public, ip, proactive: false, name: String::new(), token_sha: String::new() });
         }
         (addr, peers)
     }
@@ -1121,10 +1207,15 @@ impl Engine {
             .filter(|p| p.leaving.is_none())
             .map(|p| {
                 let (hs, tx, rx, _, _) = p.tun.stats();
-                json!({ "id": p.spec.id, "ip": p.spec.ip.to_string(), "fingerprint": fingerprint(&p.spec.public),
+                let mut v = json!({ "id": p.spec.id, "ip": p.spec.ip.to_string(), "fingerprint": fingerprint(&p.spec.public),
                         "up": hs.is_some_and(|d| d < Duration::from_secs(180)),
                         "last_handshake_ms": hs.map(|d| d.as_millis() as u64), "handshakes": p.handshakes,
-                        "tx": tx, "rx": rx, "since": p.since_ms })
+                        "tx": tx, "rx": rx, "since": p.since_ms });
+                if !p.spec.token_sha.is_empty() {
+                    v["name"] = json!(p.spec.name);
+                    v["peer_token_sha256"] = json!(p.spec.token_sha);
+                }
+                v
             })
             .collect();
         peers.sort_by(|a, b| a["id"].as_str().cmp(&b["id"].as_str()));
@@ -1718,11 +1809,25 @@ pub fn start(cfg: NodeConfig) -> Result<NodeHandle, String> {
         }
         let public = decode_key(&p.public_key).map_err(|e| format!("wg.peer '{}': {e}", p.id))?;
         let ip: Ipv4Addr = p.ip.parse().map_err(|e| format!("wg.peer '{}' ip: {e}", p.id))?;
-        statics.push(PeerSpec { id: p.id.clone(), public, ip, proactive: true });
+        statics.push(PeerSpec { id: p.id.clone(), public, ip, proactive: true, name: String::new(), token_sha: String::new() });
     }
-    if address.is_none() && cfg.roots_file.is_none() {
-        return Err("wg: give `address` (a joined root) or `roots_file` (the hub)".into());
+    if address.is_none() && cfg.roots_file.is_none() && cfg.trunk_state.is_none() {
+        return Err("wg: give `trunk_state` (trunk v1), `address` (a joined root) or `roots_file` (the hub)".into());
     }
+    let trunk = match &cfg.trunk_state {
+        None => None,
+        Some(path) => Some(TrunkSource {
+            path: PathBuf::from(path),
+            key: match &cfg.trunk_key {
+                Some(k) => Some(crate::v1::proto::public_from_b64u(k).ok_or("wg.trunk_key: not a b64url Ed25519 public key")?),
+                None => None,
+            },
+            seen: None,
+            held: (None, vec![], 0),
+            prefix: address.map(|a| a.1).unwrap_or(24),
+        }),
+    };
+    let trunk_mode = trunk.is_some();
     let std_udp = UdpSocket::bind(udp_addr).map_err(|e| format!("wg udp bind {udp_addr}: {e}"))?;
     let udp_bound = std_udp.local_addr().map_err(|e| e.to_string())?;
     std_udp.set_nonblocking(true).map_err(|e| e.to_string())?;
@@ -1744,6 +1849,7 @@ pub fn start(cfg: NodeConfig) -> Result<NodeHandle, String> {
         me: *public.as_bytes(),
         follows_hub,
         directory: directory.clone(),
+        trunk,
     };
     let brain = cfg.brain.clone().map(|b| b.trim_end_matches('/').to_string());
     let public_bytes = *public.as_bytes();
@@ -1845,7 +1951,10 @@ pub fn start(cfg: NodeConfig) -> Result<NodeHandle, String> {
                         last_timers = Instant::now();
                         e.timers();
                     }
-                    if last_reload.elapsed() >= Duration::from_secs(1) {
+                    // trunk v1: the file is checked 5×/s (a stat; read only when it changed) so a
+                    // revoked root's tunnel goes well inside P13's 1.5 s
+                    let every = if trunk_mode { Duration::from_millis(200) } else { Duration::from_secs(1) };
+                    if last_reload.elapsed() >= every {
                         last_reload = Instant::now();
                         e.reload();
                     }
@@ -2106,6 +2215,8 @@ mod tests {
                 roots_file: roots.then(|| p("roots.json")),
                 devices_file: roots.then(|| p("devices.json")),
                 peer: peer.map(|k| vec![StaticPeer { id: "local".into(), public_key: b64(k), ip: "10.77.3.1".into() }]).unwrap_or_default(),
+                trunk_state: None,
+                trunk_key: None,
             })
             .unwrap()
         };

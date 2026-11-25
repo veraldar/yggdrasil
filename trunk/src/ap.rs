@@ -316,7 +316,7 @@ impl ServerCertVerifier for PinVerifier {
     }
 }
 
-fn pinned_client(pin: &str) -> Result<TlsConnector, String> {
+pub(crate) fn pinned_client(pin: &str) -> Result<TlsConnector, String> {
     let p = provider();
     let cc = rustls::ClientConfig::builder_with_provider(p.clone())
         .with_protocol_versions(&[&rustls::version::TLS13, &rustls::version::TLS12])
@@ -1410,7 +1410,8 @@ fn normalize_path(raw: &str) -> String {
 /// region of the client's REAL address (as the ap saw it). /api/pair mints.
 /// Ok(true) = gated and allowed, Ok(false) = not a gated path.
 fn gate(tokens: &TokenStore, req: &Req, ip: IpAddr) -> Result<bool, Deny> {
-    if join_exempt(&req.method, &req.path) {
+    // v1 (trunk mode): joining moved to the trunk — nothing here is exempt
+    if !tokens.is_trunk() && join_exempt(&req.method, &req.path) {
         return Ok(false);
     }
     let p = normalize_path(&req.path);
@@ -1588,7 +1589,7 @@ impl Drop for StreamRec {
     }
 }
 
-async fn serve_stream(
+pub(crate) async fn serve_stream(
     cfg: Arc<DialConfig>,
     id: u32,
     open: Vec<u8>,
@@ -1829,7 +1830,7 @@ pub(crate) async fn tunnel_stream(
 }
 
 /// A raw forward on the bridge: only targets named in bridge.toml [ap.tcp].
-async fn serve_raw(
+pub(crate) async fn serve_raw(
     cfg: Arc<DialConfig>,
     id: u32,
     open: Vec<u8>,

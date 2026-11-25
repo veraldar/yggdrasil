@@ -25,6 +25,7 @@ rustls-pki-types = { version = "1", features = ["std"], optional = true }
 webpki = { package = "rustls-webpki", version = "0.103", default-features = false, features = ["ring", "std"], optional = true }
 rcgen = { version = "0.14", default-features = false, features = ["crypto", "pem", "ring"], optional = true }
 sha1 = { version = "0.10", optional = true }
+webpki-roots = { version = "0.26", optional = true }
 # Ed25519 + sha256 for trunk v1 (proto 2, signed directory, PASETO): already in every build via
 # boringtun/rustls/ureq, so a direct dependency costs nothing — the root build verifies the directory too
 ring = "0.17"
@@ -35,6 +36,6 @@ smoltcp = { version = "0.12", default-features = false, features = ["std", "medi
 # native parts need cmake and system libraries (libopus; aws-lc-sys under str0m).
 default = ["bridge"]
 bridge = ["dep:etherparse", "dep:str0m", "dep:opus", "dep:tracing-subscriber", "dep:tracing", "dep:tokio-rustls", "dep:rustls",
-          "dep:rustls-pki-types", "dep:webpki", "dep:rcgen", "dep:sha1"]
+          "dep:rustls-pki-types", "dep:webpki", "dep:rcgen", "dep:sha1", "dep:webpki-roots"]
 # `cargo build --release --no-default-features`: the ROOT build — what a joined root runs
 # (keygen, wg-key, wg, rootlink mint). Pure Rust plus ring's C (any C compiler): no cmake, no libopus.

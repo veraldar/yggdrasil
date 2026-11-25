@@ -223,6 +223,14 @@ impl SignKey {
         self.pair.sign(msg).as_ref().try_into().expect("64-byte signature")
     }
 
+    /// Read an existing key file (never made here: a new key would not match the enrollment).
+    pub fn load(path: &str) -> Result<SignKey, String> {
+        if !std::path::Path::new(path).exists() {
+            return Err(format!("{path}: no root key (the installer makes it at enrollment)"));
+        }
+        SignKey::load_or_create(path)
+    }
+
     /// Read a key file (the b64url seed, mode 0600) or create it (0600). Returns the key.
     pub fn load_or_create(path: &str) -> Result<SignKey, String> {
         let p = std::path::Path::new(path);
