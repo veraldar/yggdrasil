@@ -155,10 +155,10 @@ function totp(secret) {
   await page.waitForURL(url + '/account', { timeout: 8000 }).catch(() => problems.push('silent refresh did not come back to /account'));
   await page.waitForFunction(() => document.getElementById('a-dev-name').textContent !== '…');
   await shot('account-after-silent-refresh');
-  // the first root connects (stand-in for WIRE: a row in its roots table): the empty page notices
+  // the first root enrolls (a row in WIRE's roots table, as an enrollment leaves it): the empty page notices
   await page.goto(url + '/');
   await must('#e-listen');
-  execFileSync('python3', ['-c', "import sqlite3,sys; c=sqlite3.connect(sys.argv[1]); c.execute('CREATE TABLE IF NOT EXISTS roots (id TEXT PRIMARY KEY, revoked_at INTEGER)'); c.execute(\"INSERT INTO roots (id) VALUES ('rt_test')\"); c.commit()", dbPath]);
+  execFileSync('python3', ['-c', "import sqlite3,sys; c=sqlite3.connect(sys.argv[1]); c.execute(\"INSERT INTO roots (id, name, hostname, os, arch, root_pub, wg_pub, wg_addr, peer_token_hash, enrolled_at) VALUES ('rt_test', 'test', 'test', 'linux', 'x86_64', 'pub_test', 'wg_test', '10.77.0.250', '00', 0)\"); c.commit()", dbPath]);
   await page.waitForURL(url + '/offline', { timeout: 10000 }).catch(() => problems.push('the empty page did not move on when has_roots flipped'));
   await shot('first-root-connected-no-door-yet');
   await browser.close();
