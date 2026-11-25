@@ -141,7 +141,6 @@
 
     {"id": "G4.1", "title": "own-trunk-e2e: the lay procedure with trunk.sh v1 (Pebble, claim, --webroot, root.sh, tamper, --major)", "status": "port",
      "last_green": "v0.9 OT_JOIN_MODEL=home 33+12 (NOTES-P1.md:92)",
-     "pending": "trunk.sh v1 + root.sh (INSTALL stream) are not written yet",
      "steps": [{"cmd": "bash sim/own-trunk-e2e.sh", "timeout": 7200, "counts": ["step-table"],
                 "env": {"OT_STATE": "{state}", "OT_JOIN_MODEL": "home", "YGG_RELEASE_CACHE": "{home}/.cache/trunk-v1/release-cache"},
                 "containers": ["ot-files", "ot-pebble", "ot-vps-a", "ot-vps-b", "ot-vps-c", "ot-vps-r", "ot-vps-v", "ot-home", "ot-mac", "ot-jammy", "ot-buster", "ot-voice"],

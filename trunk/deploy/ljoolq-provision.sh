@@ -291,7 +291,7 @@ if [ "${1:-}" = --on-target ]; then shift; on_target "$@"; exit $?; fi
 # ════════════════════════════════════════════════════════════════════ at home
 TARGET=ssh:veraldar
 INSTALLER=$TREE/trunk/install/trunk.sh
-INSTALLER_ARGS="--name $NAME --behind-proxy"
+INSTALLER_ARGS="--name $NAME --behind-proxy --bind $CT_IP --trusted-proxy ${BR_ADDR%/*}/32 --self-signed --no-firewall --no-auto-updates -y"
 PUSH=() IMAGE=images:debian/13 CHECK_URL="http://$CT_IP:8080/t/state" CHECK_CODES=200 CHECK_RESOLVE='' CHECK_INSIDE=0 CHECK_PROXY=0
 [ "${1:-}" = --target ] && { TARGET=${2:?--target ssh:HOST|docker:NAME}; shift 2; }
 CMD=${1:-}; shift || true

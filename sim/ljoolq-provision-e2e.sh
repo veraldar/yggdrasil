@@ -85,10 +85,10 @@ ok "$([ $rc != 0 ] && grep -q 'gate check refused' "$STATE/refuse3" && [ ! -e "$
   "restore without a gate file → refused before any ssh"
 
 # ── 2. up ─────────────────────────────────────────────────────────────────────────────────────────────────
-say "2. up (Incus from Debian, pool, bridge, firewall, profile, container, today's trunk.sh inside as a stand-in)"
-INST_ARGS="--name ljoolq.veraldar.org --behind-proxy --self-signed --binary /root/ljoolq-install/bifrost-net --no-firewall --no-auto-updates -y"
-UP=(up "$SHA" --installer "$ROOT/trunk/install/trunk.sh" --push "$BIN" --push "$ROOT/trunk/deploy/sni-443.py"
-    --installer-args "$INST_ARGS" --check-in-container --check-url https://ljoolq.veraldar.org:4443/ --check-resolve 127.0.0.1 --check-codes 503 --check-proxy-protocol)
+say "2. up (Incus from Debian, pool, bridge, firewall, profile, container, v1 trunk.sh inside)"
+INST_ARGS="--name ljoolq.veraldar.org --behind-proxy --bind 10.99.0.2 --trusted-proxy 10.99.0.1/32 --self-signed --binary /root/ljoolq-install/bifrost-net --no-firewall --no-auto-updates -y"
+UP=(up "$SHA" --installer "$ROOT/trunk/install/trunk.sh" --push "$BIN"
+    --installer-args "$INST_ARGS" --check-url http://10.99.0.2:8080/t/state --check-codes 200)
 t0=$(date +%s)
 prov "${UP[@]}"; rc=$?
 ok "$rc" "ljoolq-provision.sh up exits 0 ($(( $(date +%s) - t0 )) s)" "$(tail -3 "$STATE/last" | tr '\n' ' ')"
@@ -140,12 +140,12 @@ ok "$(bx "iptables -S DOCKER-USER | grep -c ljoolqbr0" | grep -qx 2; echo $?)" "
 # ── 5. snapshot / restore ─────────────────────────────────────────────────────────────────────────────────
 say "5. snapshot, break, restore"
 prov snapshot "$SHA" pre-test; ok $? "snapshot pre-test"
-inct 'systemctl disable -q --now yggdrasil-trunk; rm -f /etc/yggdrasil-trunk/ap.toml' >>"$LOG" 2>&1
-ok "$(inct 'systemctl is-active -q yggdrasil-trunk || [ -f /etc/yggdrasil-trunk/ap.toml ]' && echo 1 || echo 0)" "broken on purpose: the trunk stopped, its ap.toml gone"
+inct 'systemctl disable -q --now yggdrasil-trunk; rm -f /etc/yggdrasil-trunk/trunk.toml' >>"$LOG" 2>&1
+ok "$(inct 'systemctl is-active -q yggdrasil-trunk || [ -f /etc/yggdrasil-trunk/trunk.toml ]' && echo 1 || echo 0)" "broken on purpose: the trunk stopped, its trunk.toml gone"
 prov restore "$SHA" pre-test; ok $? "restore pre-test"
 for _ in $(seq 1 30); do inct 'systemctl is-active -q yggdrasil-trunk' 2>/dev/null && break; sleep 1; done
-code=$(inct 'curl -sk --haproxy-protocol -o /dev/null -m 5 -w "%{http_code}" --resolve ljoolq.veraldar.org:4443:127.0.0.1 https://ljoolq.veraldar.org:4443/' 2>/dev/null)
-ok "$(inct '[ -f /etc/yggdrasil-trunk/ap.toml ] && systemctl is-active -q yggdrasil-trunk' && [ "$code" = 503 ]; echo $?)" "after the restore: ap.toml back, the trunk runs and answers ($code)"
+code=$(bx 'curl -s -o /dev/null -m 5 -w "%{http_code}" http://10.99.0.2:8080/t/state' 2>/dev/null)
+ok "$(inct '[ -f /etc/yggdrasil-trunk/trunk.toml ] && systemctl is-active -q yggdrasil-trunk' && [ "$code" = 200 ]; echo $?)" "after the restore: trunk.toml back, the v1 trunk runs and answers from the host ($code)"
 
 # ── 6. the nightly snapshot really fires (the schedule set to every minute for this check, then put back) ──
 say "6. a scheduled snapshot fires (schedule '* * * * *' for one minute, then the profile's again)"
@@ -166,8 +166,8 @@ st=''
 for _ in $(seq 1 90); do st=$(bx "incus list $CT -c s -f csv" 2>/dev/null); [ "$st" = RUNNING ] && break; sleep 1; done
 ok "$([ "$st" = RUNNING ]; echo $?)" "trunk-ljoolq autostarted ($st)"
 code=000
-for _ in $(seq 1 60); do code=$(inct 'curl -sk --haproxy-protocol -o /dev/null -m 5 -w "%{http_code}" --resolve ljoolq.veraldar.org:4443:127.0.0.1 https://ljoolq.veraldar.org:4443/' 2>/dev/null); [ "$code" = 503 ] && break; sleep 1; done
-ok "$([ "$code" = 503 ]; echo $?)" "the trunk inside answers again ($code)"
+for _ in $(seq 1 60); do code=$(bx 'curl -s -o /dev/null -m 5 -w "%{http_code}" http://10.99.0.2:8080/t/state' 2>/dev/null); [ "$code" = 200 ] && break; sleep 1; done
+ok "$([ "$code" = 200 ]; echo $?)" "the v1 trunk inside answers from the host again ($code)"
 chk "DOCKER-USER rules back after the docker stand-in started again" bx "iptables -S DOCKER-USER | grep -q -- '-i ljoolqbr0 -j ACCEPT' && iptables -S FORWARD | grep -q '^-P FORWARD DROP'"
 chk "the way out works after the reboot" inct 'curl -sS -o /dev/null -m 15 https://deb.debian.org/debian/dists/trixie/Release'
 chk "the snapshots survived (pre-test is there)" bx "incus snapshot list $CT -f csv -c n | grep -qx pre-test"
