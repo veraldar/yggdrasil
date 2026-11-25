@@ -441,7 +441,7 @@ export default function AgentEditor() {
                         {/* Harness groups (Antigravity, Claude Code, opencode, Codex) */}
                         {(['antigravity', 'claude', 'opencode', 'codex'] as const).map((eng) => {
                           const list = (byHarness[eng] || []).filter((m) => m !== 'default');
-                          const choices = list.length > 0 ? list.slice(0, 6) : ['default'];
+                          const choices = list.length > 0 ? list : ['default'];
                           const engPct = usage?.byEngine[eng]?.pct;
                           return (
                             <div
