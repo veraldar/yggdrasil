@@ -419,7 +419,7 @@ export default function AgentEditor() {
                               )}
                             </div>
                             <div className="oz-chips">
-                              {models.slice(0, 8).map((m) => {
+                              {models.map((m) => {
                                 const already = draft.fallback.some(
                                   (s) => s.engine === 'root' && s.model === m
                                 );
