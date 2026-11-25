@@ -102,19 +102,42 @@ const reconnecting = () =>
     }
   );
 
+/** a load issued by a frame inside the app: the iframe navigation (destination 'iframe',
+ *  whose resultingClientId is the frame itself — sandbox="allow-same-origin" artifact frames
+ *  have no scripts, so they never announce a channel of their own), or any sub-resource of
+ *  such a frame (the frame's own clientId, frameType 'nested'). These ride the pinned PAGE's
+ *  channel — they never wait out waitState for a state the frame will never post. */
+async function isNested(e) {
+  if (e.request.destination === 'iframe') return true;
+  if (!e.clientId) return false;
+  try {
+    const c = await self.clients.get(e.clientId);
+    return !!c && c.frameType === 'nested';
+  } catch {
+    return false;
+  }
+}
+
 async function viaPinned(e) {
   const id = e.clientId || e.resultingClientId || '';
   if (!(await loadMode())) return fetch(e.request);
-  // a page still opening its channel: its requests wait (bounded) — never the network first
-  for (let i = 0; i < 2; i++) {
-    const s = pinStates.get(id);
-    if (s === 'connecting' || s === 'reconnecting' || (s === undefined && id && i === 0))
-      await waitState(id, 10000);
-    else break;
-  }
+  // a frame inside a pinned page: no wait for its own state (it posts none) — the parent
+  // page's channel carries it at once. No pinned window anywhere (a page in fallback, an
+  // unpaired browser, the first load before any announcement): the network, as ever.
+  const nested = await isNested(e);
+  if (nested) {
+    if (!(await pinnedClient(id))) return fetch(e.request);
+  } else
+    // a page still opening its channel: its requests wait (bounded) — never the network first
+    for (let i = 0; i < 2; i++) {
+      const s = pinStates.get(id);
+      if (s === 'connecting' || s === 'reconnecting' || (s === undefined && id && i === 0))
+        await waitState(id, 10000);
+      else break;
+    }
   const own = pinStates.get(id);
   if (own === 'refused') return refused('the box key did not match the pairing QR');
-  if (own === 'reconnecting' && !(await pinnedClient(id))) return reconnecting();
+  if (!nested && own === 'reconnecting' && !(await pinnedClient(id))) return reconnecting();
   const c = await pinnedClient(id);
   if (!c) {
     if ([...pinStates.values()].includes('refused'))

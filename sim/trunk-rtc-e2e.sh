@@ -55,7 +55,7 @@ while [ $# -gt 0 ]; do
     *) echo "usage: $0 [--scenario rtc|s16|films]"; exit 2 ;;
   esac
 done
-case "$SCENARIO" in rtc | s16 | films) ;; *) echo "unknown scenario $SCENARIO (rtc|s16|films)"; exit 2 ;; esac
+case "$SCENARIO" in rtc | s16 | films | pinframe) ;; *) echo "unknown scenario $SCENARIO (rtc|s16|films|pinframe)"; exit 2 ;; esac
 if [ -z "${TRUNK_RTC_NS:-}" ]; then
   exec unshare --user --map-root-user --net --mount --pid --fork --mount-proc \
     env TRUNK_RTC_NS=1 TRUNK_RTC_SCENARIO="$SCENARIO" "$0"
@@ -333,7 +333,12 @@ chmod 755 "$PHONE_CHROME"
 
 cd "$B"
 set +e
-if [ "$SCENARIO" = s16 ]; then
+if [ "$SCENARIO" = pinframe ]; then
+  on home env PW_AP_URL="$AP_URL" PW_AP_IP="$VPS" PW_BASE_URL="http://127.0.0.1:$APP" PW_STATE="$STATE" \
+    PW_PHONE_CHROME="$PHONE_CHROME" APP_DIR="$B" PW_REQUIRE="$B/node_modules/playwright" \
+    node "$ROOT/sim/rtc/pin-artifact-frame.mjs" 2>&1 | tee "$STATE/e2e.log"
+  rc=${PIPESTATUS[0]}
+elif [ "$SCENARIO" = s16 ]; then
   on home env PW_AP_URL="$AP_URL" PW_AP_IP="$VPS" PW_BASE_URL="http://127.0.0.1:$APP" PW_STATE="$STATE" \
     PW_HOME="http://127.0.0.1:$HOMEP" PW_LAB="http://127.0.0.1:$LABP" PW_VOICE="http://127.0.0.1:$VOICEP/v1" \
     PW_PHONE_CHROME="$PHONE_CHROME" APP_DIR="$B" \
