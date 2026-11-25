@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect } from 'react';
+import { publishBuild } from '@/lib/auth-mode';
 
 /** Auto-reload stale tabs: a long-lived PWA tab keeps running the JS bundle
  *  it booted with — deploys then look like they "don't work" on the phone.
@@ -14,7 +15,8 @@ export function FreshReload() {
       if (document.hidden) return;
       try {
         const r = await fetch('/api/build', { cache: 'no-store', signal: AbortSignal.timeout(5000) });
-        const { id, ttsVoice } = (await r.json()) as { id: string; ttsVoice?: string };
+        const { id, ttsVoice, auth } = (await r.json()) as { id: string; ttsVoice?: string; auth?: string };
+        publishBuild({ id, ttsVoice, auth }); // the door's auth mode (lib/auth-mode.ts)
         if (ttsVoice) sessionStorage.setItem('oz-tts-voice', ttsVoice);
         if (!id || id === 'unknown') return;
         const seen = sessionStorage.getItem(key);

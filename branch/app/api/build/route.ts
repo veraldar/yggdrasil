@@ -11,7 +11,8 @@ export const dynamic = 'force-dynamic';
 
 /** Current build id + TTS voice — the client auto-reloads when the build
  *  changes (stale PWA tabs keep running old JS for days otherwise), and
- *  namespaces the speaker-anchor storage by voice. */
+ *  namespaces the speaker-anchor storage by voice. Trunk mode (v1) adds
+ *  `auth: "trunk"` (lib/auth-mode.ts). */
 export async function GET() {
   let id = 'unknown';
   try {
@@ -24,5 +25,7 @@ export async function GET() {
   return NextResponse.json({
     id,
     ttsVoice: process.env.TTS_VOICE_FR || 'serena',
+    // v1: the trunk-only UI switches on this (lib/auth-mode.ts); absent in tailnet / devices mode
+    ...(process.env.BIFROST_AUTH === 'trunk' ? { auth: 'trunk' } : {}),
   });
 }

@@ -1,6 +1,6 @@
 'use client';
 
-/** /settings — about, world, engines, yours. The world list is the theme switch
+/** /settings — about, world, engines, yours (+ "account & devices ›" behind a v1 trunk). The world list is the theme switch
  *  (components/world-picker.tsx, the same list a computer's settings tab
  *  shows). Tapping applies at once via next-themes — one data-theme
  *  attribute on <html>, transitions suppressed for the swap frame. Below it:
@@ -15,12 +15,15 @@ import { LineIcon } from '@/components/line-icon';
 import { HOME_ROOT_KEY, type Tree } from '@/components/roots-sheet';
 import { WorldPicker } from '@/components/world-picker';
 import { type EngineRow } from '@/lib/agents';
+import { useTrunkMode } from '@/lib/auth-mode';
 import { VERSION } from '@/lib/version';
 import { VOICE_TEST_SLUG, ensureVoiceTestRoom, setVoiceTest, voiceTestOn } from '@/lib/voice-test';
 import { chosenWorld } from '@/lib/worlds';
 
 export default function SettingsPage() {
   const router = useRouter();
+  // v1 (trunk mode): the account, its 2FA and the devices live on the trunk — one link there
+  const trunk = useTrunkMode();
   const { theme, setTheme } = useTheme();
   // next-themes only knows the stored theme after mount — render no
   // "current" marker on the server pass instead of a wrong one
@@ -171,6 +174,16 @@ export default function SettingsPage() {
           voice tests toggle their own room */}
       <section className="oz-blk">
         <ul className="oz-kv">
+          {trunk && (
+            <li>
+              <span>account &amp; devices</span>
+              <span />
+              {/* the trunk's own page (same origin, not this app's): a full navigation */}
+              <a href="/account" data-testid="account-link" className="oz-k sm">
+                ›
+              </a>
+            </li>
+          )}
           <li>
             <span>roles</span>
             <span />

@@ -18,11 +18,13 @@
 //                          browser context, every Playwright `request`, is a signed-in phone, so the
 //                          §3 specs run unchanged. The token is real (C3, this dir's key, 15 min).
 //         --sign-in cookie only what the browser holds counts: /login → /t/test/sign-in sets the cookies
-//                          as the trunk does after a sign-in; /t/auth/refresh rotates them.
+//                          as the trunk does after a sign-in (?did= ?life_s= ?next=); /t/auth/refresh
+//                          rotates them (a revoked device's refresh is refused: 401 login).
 //       Per-request knobs (tests): `x-trunk-seed-ip: <addr>` = the client address this request comes
 //       from (a roam); POST /t/test/revoke {did} · /t/test/kill · /t/test/unrevoke {did} edit the state.
 //       Stubs: GET /t/state, /t/me, /t/me/roots (<dir>/me-roots.json), /t/roots/pending
-//       (<dir>/roots-pending.json), DELETE /t/roots/:id (logged to <dir>/roots-removed.jsonl).
+//       (<dir>/roots-pending.json), DELETE /t/roots/:id and POST /t/roots/enroll/:id/refuse (admin; logged
+//       to <dir>/roots-removed.jsonl).
 import { createHash, randomBytes } from 'node:crypto';
 import { appendFileSync, chmodSync, existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import http from 'node:http';
@@ -188,11 +190,11 @@ function front() {
     });
   // the cookies the trunk sets after a sign-in or a refresh (C3). No Secure here: the twin is plain
   // http on loopback (Chromium would keep a Secure cookie on 127.0.0.1 too; curl would not).
-  const signIn = (did, ip) => {
+  const signIn = (did, ip, lifeS = 900) => {
     const r = `bfnr-${randomBytes(32).toString('base64url')}`;
     refresh.set(createHash('sha256').update(r).digest('hex'), { did, ip });
     return [
-      `bifrost_device=${mint({ did, ip })}; HttpOnly; SameSite=Strict; Path=/`,
+      `bifrost_device=${mint({ did, ip, lifeS })}; HttpOnly; SameSite=Strict; Path=/`,
       `bifrost_refresh=${r}; HttpOnly; SameSite=Strict; Path=/t/auth`,
     ];
   };
@@ -209,8 +211,11 @@ function front() {
       );
     }
     if (p === '/t/test/sign-in') {
-      const did = u.searchParams.get('did') || 'dev_twin';
-      return res.writeHead(302, { location: u.searchParams.get('next') || '/', 'set-cookie': signIn(did, ipOf(req)), 'cache-control': 'no-store' }).end();
+      // ?did=dev_… (default dev_twin) · ?life_s=N (the access token's life: a test of the refresh path)
+      const did = /^dev_[A-Za-z0-9_-]{1,64}$/.test(u.searchParams.get('did') || '') ? u.searchParams.get('did') : 'dev_twin';
+      const life = Math.max(1, Math.min(900, Number(u.searchParams.get('life_s')) || 900));
+      const next = (u.searchParams.get('next') || '/').startsWith('/') ? u.searchParams.get('next') || '/' : '/';
+      return res.writeHead(302, { location: next, 'set-cookie': signIn(did, ipOf(req), life), 'cache-control': 'no-store' }).end();
     }
     if (p === '/t/auth/refresh' && req.method === 'POST') {
       const r = cookies(req).bifrost_refresh || '';
@@ -219,7 +224,7 @@ function front() {
       const s = state();
       if (!rec || s.deny.some((d) => d.did === rec.did)) return json(res, 401, { why: 'invalid', reauth: 'login' });
       refresh.delete(h);
-      return json(res, 200, { ok: true }, { 'set-cookie': signIn(rec.did, ipOf(req)) });
+      return json(res, 200, { ok: true }, { 'set-cookie': signIn(rec.did, ipOf(req)) }); // a full 15 min again
     }
     if (p === '/t/auth/logout' && req.method === 'POST') {
       return json(res, 200, { ok: true }, { 'set-cookie': ['bifrost_device=; Path=/; Max-Age=0', 'bifrost_refresh=; Path=/t/auth; Max-Age=0'] });
@@ -245,6 +250,12 @@ function front() {
     if (p === '/t/me') return json(res, 200, { account: v.claims.sub, device: v.claims.did, role: v.claims.role });
     if (p === '/t/me/roots') return json(res, 200, readJson(F.meRoots, []));
     if (p === '/t/roots/pending') return json(res, 200, readJson(F.pending, []));
+    const refuse = /^\/t\/roots\/enroll\/([A-Za-z0-9_-]{1,64})\/refuse$/.exec(p);
+    if (refuse && req.method === 'POST') {
+      if (v.claims.role !== 'admin') return json(res, 403, { error: 'admin only' });
+      appendFileSync(F.removed, `${JSON.stringify({ enroll: refuse[1], refused: true, at: Date.now(), by: v.claims.did })}\n`);
+      return json(res, 200, { ok: true, id: refuse[1] });
+    }
     const del = /^\/t\/roots\/([A-Za-z0-9_-]{1,64})$/.exec(p);
     if (del && req.method === 'DELETE') {
       if (v.claims.role !== 'admin') return json(res, 403, { error: 'admin only' });
