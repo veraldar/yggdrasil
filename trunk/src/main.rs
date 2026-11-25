@@ -16,6 +16,9 @@
 //!   ap-token            mint a bridge pairing token (+ its sha-256 for ap.toml)
 //!   ap-pin CERT.pem     print the pin bridge.toml [ap] must carry
 //!   ap-cert DIR NAME..  self-signed cert+key for local runs (prints the pin)
+//!   trunk -c TRUNK.toml   run the v1 trunk (identity, tokens, audit, shell pages, relay) — src/v1/
+//!   trunk-ctl CMD..       the v1 trunk's console (root-only socket); also as argv[0] = trunk-ctl
+//!   trunk-kek FILE        a fresh 32-byte trunk-kek (mode 600, never overwritten)
 //!
 //! Two builds. The default (`bridge` feature) is all of the above. `cargo build --release
 //! --no-default-features` is the ROOT build, what a joined root runs: keygen, wg-key, wg,
@@ -38,7 +41,7 @@ mod config;
 mod echo;
 #[cfg(feature = "bridge")]
 mod opencode;
-#[cfg(feature = "bridge")]
+#[cfg(any(feature = "bridge", feature = "trunk"))]
 mod region;
 mod registry;
 #[cfg(feature = "bridge")]
@@ -58,11 +61,44 @@ mod relay;
 mod serve;
 mod wg;
 mod ws;
+// trunk v1: proto/state in every build; the server under `trunk`, the root link under `bridge`
+mod v1;
 
 fn main() {
+    // installed as /usr/local/bin/trunk-ctl: the console client, dispatched on argv[0]
+    #[cfg(feature = "trunk")]
+    if std::env::args().next().is_some_and(|a| std::path::Path::new(&a).file_name().is_some_and(|n| n == "trunk-ctl")) {
+        let rest: Vec<String> = std::env::args().skip(1).collect();
+        std::process::exit(v1::ctl::cmd_ctl(&rest));
+    }
     let args: Vec<String> = std::env::args().skip(1).collect();
     let code = match args.first().map(String::as_str) {
+        #[cfg(feature = "trunk")]
+        Some("trunk") => v1::cmd_trunk(&args[1..]),
+        #[cfg(feature = "trunk")]
+        Some("trunk-ctl") => v1::ctl::cmd_ctl(&args[1..]),
+        #[cfg(feature = "trunk")]
+        Some("trunk-kek") => v1::cmd_trunk_kek(&args[1..]),
         Some("keygen") => cmd_keygen(),
+        // trunk v1: this root's Ed25519 link key (the installer makes it; the bridge's [trunk] root_key_file)
+        Some("root-key") => match args.get(1) {
+            Some(path) => match v1::proto::SignKey::load_or_create(path) {
+                Ok(k) => {
+                    println!("public_key = \"{}\"\nkid = \"{}\"", k.public_b64u(), v1::proto::kid_of(&k.public()));
+                    0
+                }
+                Err(e) => {
+                    eprintln!("root-key: {e}");
+                    1
+                }
+            },
+            None => {
+                eprintln!("root-key: FILE (created mode 600 if missing; prints the public half)");
+                2
+            }
+        },
+        #[cfg(feature = "trunk")]
+        Some("trunk-rig") => v1::rig::cmd(&args[1..]),
         #[cfg(feature = "bridge")]
         Some("check") => cmd_check(&args[1..]),
         #[cfg(feature = "bridge")]
@@ -154,7 +190,7 @@ fn main() {
         _ => {
             if cfg!(feature = "bridge") {
                 eprintln!(
-                    "usage: bifrost-net keygen | check -c CONFIG | selftest m0|m1|v9|ap | serve -c CONFIG | bridge -c CONFIG | rootlink mint --root ID --dev DEV --ttl SECS --secret SECRET [--out FILE] [--roots a,b] | wg -c NODE.toml | wg-key FILE | ap -c AP.TOML | ap-token | ap-pin CERT.pem | ap-cert DIR NAME.."
+                    "usage: bifrost-net keygen | check -c CONFIG | selftest m0|m1|v9|ap | serve -c CONFIG | bridge -c CONFIG | rootlink mint --root ID --dev DEV --ttl SECS --secret SECRET [--out FILE] [--roots a,b] | wg -c NODE.toml | wg-key FILE | ap -c AP.TOML | ap-token | ap-pin CERT.pem | ap-cert DIR NAME.. | trunk -c TRUNK.toml | trunk-ctl CMD.. | trunk-kek FILE | root-key FILE"
                 );
             } else {
                 eprintln!(

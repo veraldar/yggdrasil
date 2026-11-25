@@ -142,3 +142,20 @@ Unknown keys are an error (same rule as today's bridge config).
   copied into `v1/shell/assets/` at build time by a script (no Node on the VPS: assets are embedded with `include_bytes!`).
 - CSP as spec §8 "Web". No third-party request of any kind. Vanilla JS only (WebAuthn, QR render, countdown, polling).
 - Every page is checked at 360 px (Pixel 7) by Playwright in G3.6.
+
+---
+
+## Amendments (lead, 11-25 23:30 — accepted from WIRE's M2 report; details in `WIRE.md`)
+- **A1 (C4)** The `/t/root` upgrade carries `X-Ygg-Proto: 2`; none or another value → 426.
+- **A2 (C4)** The welcome's `keys` / `kill_epoch` / `deny` are not authority: a root takes keys, kill and revoke only from the
+  **signed** `keys`, `kill`, `revoke` messages sent right after the welcome; the welcome's kill epoch and deny-list may only tighten.
+- **A3 (C4)** `keys` carries a `seq` (a lower one is ignored); new signed `refused {why, root_id, nonce}` (only a verified `revoked`
+  stops a bridge for good); `directory` is `{"t":"directory","directory":{seq,issued_at,roots,sig},"sig"}` — the inner object is what
+  `trunk-state.json` stores and `wg` verifies.
+- **A4 (C5)** `[trunk]` also takes `upstream`, `livekit`, `tcp`, `ice_tcp`, `wg_relay`, `wg_local`; the wg node takes `trunk_state`
+  (+ optional `trunk_key`); `/_wg/_roots` entries gain `name` and `peer_token_sha256`. `[ap]` + `[trunk]` together are refused.
+- **A5 (C5, peer naming)** A v1 root's `YGG_ROOT_NAME` is its **root id**; each root's `YGG_PEER_TOKEN` is its own token from the
+  enrollment result. Display names come from the directory's `name` (the app maps id → name wherever it shows a root).
+- **A6 (lead, W8 data rule)** Root ids are opaque strings. New roots get `rt_…`. **`import-v0` keeps every v0.9 root's existing id
+  (its `roots.json` id) and omarchy's current `YGG_ROOT_NAME` as their v1 ids**, so existing sessions' `info.remote` / `report_to`
+  and per-root routes keep working after switchover with no data migration.

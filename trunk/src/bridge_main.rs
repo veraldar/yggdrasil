@@ -77,7 +77,8 @@ pub fn run(path: &str) -> Result<(), String> {
         .clone();
     // the meter: on by default, its files beside the device registry's folder
     // (hub: ~/.local/share/yggdrasil/hub/obs); BIFROST_OBS=off / BIFROST_OBS_DIR (meter.rs)
-    meter::init("bridge", meter::dir_from_env(meter::dir_beside(std::path::Path::new(&cfg.tokens_file))));
+    let beside = loaded.config.trunk.as_ref().map(|t| t.state_file.clone()).unwrap_or_else(|| cfg.tokens_file.clone());
+    meter::init("bridge", meter::dir_from_env(meter::dir_beside(std::path::Path::new(&beside))));
 
     let candidates: Vec<_> = cfg.candidates.iter().filter_map(|c| c.parse().ok()).collect();
     let http: std::net::SocketAddr = cfg.http.parse().map_err(|e| format!("bridge.http: {e}"))?;
@@ -90,12 +91,53 @@ pub fn run(path: &str) -> Result<(), String> {
         http.port(),
     )
     .to_string();
-    let tokens = std::sync::Arc::new(crate::tokens::TokenStore::open(cfg.tokens_file.clone()));
+    let trunk = loaded.config.trunk.clone();
+    if trunk.is_some() && loaded.config.ap.is_some() {
+        return Err("config has both [ap] (v0.9) and [trunk] (v1): a bridge dials one of them".into());
+    }
+    // v1: the device gate checks PASETO tokens offline against trunk-state.json (kept live by
+    // the link); v0.9: devices.json, written by the app
+    let trunk_state = trunk.as_ref().map(|t| {
+        crate::v1::state::TrunkState::open(Some(t.state_file.clone().into()), &t.url, &t.trunk_key, &t.root_id)
+    });
+    let tokens = match &trunk_state {
+        Some(st) => std::sync::Arc::new(crate::tokens::TokenStore::open_trunk(st.clone())),
+        None => std::sync::Arc::new(crate::tokens::TokenStore::open(cfg.tokens_file.clone())),
+    };
+    let resolve_ice = |list: &Option<Vec<String>>, url_host: &str| -> Vec<std::net::SocketAddr> {
+        match list {
+            Some(list) => list.iter().filter_map(|a| a.parse().ok()).collect(),
+            None => {
+                use std::net::ToSocketAddrs;
+                (url_host, 443).to_socket_addrs().map(|a| a.collect()).unwrap_or_default()
+            }
+        }
+    };
+    // the link to the trunk exists only after the bridge started (it needs the bridge's ICE
+    // listener and ufrags); /offer reaches it through this cell
+    let link_cell: std::sync::Arc<std::sync::OnceLock<std::sync::Arc<crate::v1::link::Link>>> = Default::default();
     // the pinned channel through the trunk: ICE over TCP at the ap's :443, and
     // the HTTP tunnel (the same stream law as the ap's edge, ap.rs)
-    let (ice_tcp, tunnel) = match loaded.config.ap.as_ref() {
-        None => (vec![], None),
-        Some(apc) => {
+    let (ice_tcp, tunnel) = match (loaded.config.ap.as_ref(), trunk.as_ref()) {
+        (None, Some(t)) => {
+            let host = crate::v1::link::parse_origin(&t.url)?.1;
+            let ice = resolve_ice(&t.ice_tcp, &host);
+            let d = crate::ap::DialConfig {
+                url: t.url.clone(),
+                pin: t.pin.clone().unwrap_or_default(),
+                token: String::new(),
+                upstream: t.upstream.clone(),
+                livekit: t.livekit.clone(),
+                tcp: Default::default(),
+                rootlink: None,
+                branch: Some(own.clone()),
+                tokens: tokens.clone(),
+                ice_demux: None,
+            };
+            (ice, Some(std::sync::Arc::new(d)))
+        }
+        (None, None) => (vec![], None),
+        (Some(apc), _) => {
             let ice: Vec<std::net::SocketAddr> = match &apc.ice_tcp {
                 Some(list) => list.iter().filter_map(|a| a.parse().ok()).collect(),
                 None => {
@@ -149,6 +191,15 @@ pub fn run(path: &str) -> Result<(), String> {
         public_url: cfg.public_url.clone(),
         ice_tcp: ice_tcp.clone(),
         tunnel,
+        tokens: Some(tokens.clone()),
+        ice_register: trunk.as_ref().map(|_| {
+            let cell = link_cell.clone();
+            std::sync::Arc::new(move |ufrag: &str| {
+                if let Some(l) = cell.get() {
+                    l.register_wait(&[ufrag.to_string()], crate::v1::link::ICE_ACK_WAIT);
+                }
+            }) as std::sync::Arc<dyn Fn(&str) + Send + Sync>
+        }),
     })?;
 
     println!(
@@ -223,9 +274,50 @@ pub fn run(path: &str) -> Result<(), String> {
             tcp: apc.tcp.clone(),
             rootlink,
             branch: Some(branch),
-            tokens,
+            tokens: tokens.clone(),
             ice_demux,
         });
+    }
+    if let (Some(t), Some(st)) = (trunk.as_ref(), trunk_state.as_ref()) {
+        let root_key = crate::v1::proto::SignKey::load(&t.root_key_file)?;
+        let wg = match (t.wg_relay.as_deref(), t.wg_local.as_deref()) {
+            (Some(r), Some(l)) => Some((
+                r.parse().map_err(|e| format!("[trunk] wg_relay {r}: {e}"))?,
+                l.parse().map_err(|e| format!("[trunk] wg_local {l}: {e}"))?,
+            )),
+            (None, None) => None,
+            _ => return Err("[trunk] wg_relay and wg_local go together".into()),
+        };
+        let ice_demux = handle.ice_listen.map(|bridge| crate::ap::IceDemux { name: "livekit-ice".into(), bridge, ufrags: handle.ufrags.clone() });
+        let link = crate::v1::link::Link::spawn(crate::v1::link::LinkConfig {
+            url: t.url.clone(),
+            pin: t.pin.clone(),
+            trunk_key: t.trunk_key.clone(),
+            root_id: t.root_id.clone(),
+            root_key: std::sync::Arc::new(root_key),
+            state: st.clone(),
+            dial: std::sync::Arc::new(crate::ap::DialConfig {
+                url: t.url.clone(),
+                pin: t.pin.clone().unwrap_or_default(),
+                token: String::new(),
+                upstream: t.upstream.clone(),
+                livekit: t.livekit.clone(),
+                tcp: t.tcp.clone(),
+                rootlink: None,
+                branch: Some(own.clone()),
+                tokens: tokens.clone(),
+                ice_demux,
+            }),
+            wg,
+            ufrags: handle.ufrags.clone(),
+        })?;
+        let _ = link_cell.set(link);
+        println!("  bridge: trunk {} as {} (proto 2, root key {}) → browsers served from {}", t.url, t.root_id, t.root_key_file, t.upstream);
+        println!("  bridge: device gate = PASETO offline against {} (C3); v0.9 devices.json is not read", t.state_file);
+        match wg {
+            Some((r, l)) => println!("  bridge: root <-> root over WireGuard — the trunk relays ciphertext; udp {r} <-> this root's node {l}"),
+            None => println!("  bridge: no WireGuard node (wg_relay / wg_local unset)"),
+        }
     }
     println!("bifrost-net bridge serving — Ctrl-C to stop");
 

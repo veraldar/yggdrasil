@@ -1,0 +1,118 @@
+/* The trunk's own pages (claim, login, account, offline, the empty trunk) — the live app look:
+   tokens.css (palette, data-theme="utopia") + brand.css (the finish) + Commit Mono, then this
+   file for the page frame. Unlayered, so it wins over brand.css's @layer components. No inline
+   styles anywhere (CSP: default-src 'self'). */
+
+@font-face { font-family: 'Commit Mono'; src: url('/t/s/CommitMono-400-Regular.otf') format('opentype'); font-weight: 400; font-style: normal; font-display: swap; }
+@font-face { font-family: 'Commit Mono'; src: url('/t/s/CommitMono-700-Regular.otf') format('opentype'); font-weight: 700; font-style: normal; font-display: swap; }
+
+:root { --mono: 'Commit Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; --oz-border-strong: color-mix(in srgb, var(--oz-text) 34%, transparent); --term-bg: #111813; --term-text: #e2ebd8; --term-dim: #8ba08d; }
+*, *::before, *::after { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; background: var(--oz-bg); color: var(--oz-text); }
+body { margin: 0; min-height: 100vh; font-family: var(--mono); font-size: 14px; line-height: 1.55; background: var(--oz-bg); color: var(--oz-text); overflow-x: hidden; }
+main { max-width: 480px; margin: 0 auto; padding: 0 var(--oz-gap) 48px; overflow-wrap: break-word; }
+a { color: var(--oz-info); }
+button, input { font-family: inherit; }
+[hidden] { display: none !important; }
+
+/* header: the app's 52-px line, BIFROST left, pills right */
+.oz-head { border-bottom: 1px var(--oz-rule) var(--oz-border); margin-bottom: var(--oz-gap); }
+.oz-brand { color: var(--oz-text); font-size: 15px; letter-spacing: .14em; }
+.head-r { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.pill { display: inline-flex; align-items: center; gap: 6px; height: var(--oz-line); padding: 0 9px; border: 1px solid var(--oz-border); background: var(--oz-surface); color: var(--oz-dim); font-size: 11.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 60vw; text-decoration: none; }
+.pill.ok { color: var(--oz-success); border-color: color-mix(in srgb, var(--oz-success) 55%, transparent); }
+.pill.info { color: var(--oz-info); border-color: color-mix(in srgb, var(--oz-info) 55%, transparent); }
+
+/* blocks (brand.css .oz-blk: h2 head + padded children) */
+.oz-blk > h2 { margin: 0; display: flex; align-items: baseline; gap: 6px; }
+.oz-blk > h2 .r { margin-left: auto; letter-spacing: normal; text-transform: none; font-size: 11px; white-space: nowrap; }
+.oz-blk > h2 .r.warn { color: var(--oz-active); }
+.oz-blk > h2 .r.ok { color: var(--oz-success); }
+.oz-blk p { margin: 0 0 10px; }
+.oz-blk p:last-child { margin-bottom: 0; }
+.dim { color: var(--oz-dim); }
+.small { font-size: 12px; }
+.lead { font-size: 13px; }
+
+/* keys */
+.oz-k { cursor: pointer; font-family: var(--mono); }
+.oz-k.full { width: 100%; }
+.oz-k.ok { background: color-mix(in srgb, var(--oz-success) 11%, var(--oz-surface)); font-weight: 700; }
+.oz-k.ok:disabled { cursor: default; }
+.oz-k.red { background: var(--oz-surface); }
+.row { display: flex; gap: 8px; align-items: stretch; }
+.row > .grow { flex: 1 1 auto; min-width: 0; }
+.row > .oz-k:not(.grow) { flex: none; }
+a.oz-k { text-decoration: none; color: var(--oz-dim); }
+a.oz-k.ok, .oz-k.ok { color: var(--oz-success); }
+.row .oz-k, .dl-row .oz-k { white-space: nowrap; }
+
+/* the code the agent verified (display only) */
+.code-slots { display: flex; align-items: center; justify-content: center; gap: 6px; margin: 4px 0 12px; }
+.slot { width: 40px; height: 48px; border: 1px solid var(--oz-border-strong); background: var(--oz-bg); display: grid; place-items: center; font-size: 22px; font-weight: 700; color: var(--oz-text); }
+.slot.dash { width: 12px; border: 0; background: none; color: var(--oz-dim); font-weight: 400; }
+
+/* key-value rows */
+.kv { list-style: none; margin: 0 0 12px; padding: 0; display: grid; gap: 6px; font-size: 12.5px; }
+.kv li { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
+.kv .k { color: var(--oz-dim); flex: none; }
+.kv .v { text-align: right; min-width: 0; overflow-wrap: anywhere; }
+.kv .v.ok { color: var(--oz-success); }
+.kv .v.warn { color: var(--oz-active); }
+
+/* sign-in methods */
+.oauth-stack { display: grid; gap: 8px; margin: 0 0 4px; }
+.oauth-btn { display: flex; align-items: center; gap: 10px; width: 100%; min-height: var(--oz-key); padding: 0 12px; border: 1px solid var(--oz-border-strong); background: var(--oz-bg); color: var(--oz-text); text-decoration: none; font-size: 13px; }
+.oauth-ic { width: 22px; height: 22px; border: 1px solid var(--oz-border); background: var(--oz-surface); display: grid; place-items: center; font-size: 11px; font-weight: 700; flex: none; }
+.oauth-btn .sub { margin-left: auto; font-size: 10.5px; color: var(--oz-dim); }
+.sep { display: flex; align-items: center; gap: 8px; margin: 12px 0 10px; font-size: 11px; color: var(--oz-dim); text-transform: lowercase; }
+.sep::before, .sep::after { content: ''; flex: 1 1 auto; height: 1px; background: var(--oz-border); }
+
+/* fields (brand .oz-field) */
+.f-stack { display: grid; gap: 10px; }
+.f-field { display: grid; gap: 4px; }
+.f-lbl { display: flex; justify-content: space-between; gap: 8px; font-size: 11px; color: var(--oz-dim); }
+.oz-field { color: var(--oz-text); height: var(--oz-key); font-family: var(--mono); font-size: 14px; }
+.oz-field.code { text-align: center; letter-spacing: .3em; font-size: 18px; font-weight: 700; }
+.oz-field:focus { border-color: var(--oz-border-strong); }
+.link { background: none; border: 0; padding: 0; color: var(--oz-info); text-decoration: underline; cursor: pointer; font-size: 12px; }
+
+/* messages */
+.oz-blk .msg, .msg { margin: 10px 0 0; padding: 8px 10px; font-size: 12.5px; border: 1px solid var(--oz-border); background: var(--oz-bg); }
+.msg.err { color: var(--oz-danger); border-color: color-mix(in srgb, var(--oz-danger) 45%, transparent); }
+.msg.ok { color: var(--oz-success); border-color: color-mix(in srgb, var(--oz-success) 45%, transparent); }
+.oz-blk .note, .note { margin: 12px 0 0; padding: 8px 10px; border: 1px dashed color-mix(in srgb, var(--oz-info) 55%, transparent); background: color-mix(in srgb, var(--oz-info) 7%, var(--oz-surface)); font-size: 11.5px; color: var(--oz-dim); }
+.note b { color: var(--oz-info); }
+.ribbon { display: flex; align-items: center; gap: 8px; margin: 2px 0 12px; font-size: 11px; color: var(--oz-info); }
+.ribbon::before, .ribbon::after { content: ''; flex: 1 1 auto; height: 1px; background: color-mix(in srgb, var(--oz-info) 40%, transparent); }
+
+/* TOTP enrolment */
+.enroll { display: grid; grid-template-columns: 112px 1fr; gap: 12px; align-items: center; margin-bottom: 12px; }
+.qr { width: 112px; height: 112px; border: 1px solid var(--oz-border-strong); background: #fff; padding: 4px; }
+.qr svg { display: block; width: 100%; height: 100%; }
+.enroll b { display: block; margin-bottom: 2px; }
+.enroll p { margin: 0; font-size: 12px; color: var(--oz-dim); }
+.secret { font-size: 12px; letter-spacing: .08em; word-break: break-all; color: var(--oz-text); }
+details.manual { margin: -4px 0 12px; font-size: 12px; color: var(--oz-dim); }
+details.manual summary { cursor: pointer; }
+
+/* recovery codes */
+.recovery-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 6px; margin: 8px 0 12px; }
+.recovery-code { padding: 7px 6px; border: 1px solid var(--oz-border); background: var(--oz-bg); font-size: 13px; text-align: center; letter-spacing: .08em; }
+
+/* the empty trunk: OS tabs (pure CSS radios) + the installer line */
+input.os-r { position: absolute; opacity: 0; pointer-events: none; }
+.os-tabs { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; margin: 0 0 10px; }
+.os-tabs label { display: block; text-align: center; padding: 9px 4px; border: 1px solid var(--oz-border); background: var(--oz-bg); color: var(--oz-dim); font-size: 12px; cursor: pointer; user-select: none; }
+#os-lin:checked ~ .os-tabs label[for=os-lin],
+#os-mac:checked ~ .os-tabs label[for=os-mac],
+#os-win:checked ~ .os-tabs label[for=os-win] { color: var(--oz-success); border-color: color-mix(in srgb, var(--oz-success) 60%, transparent); background: color-mix(in srgb, var(--oz-success) 12%, var(--oz-surface)); font-weight: 700; }
+#os-lin:focus-visible ~ .os-tabs label[for=os-lin], #os-mac:focus-visible ~ .os-tabs label[for=os-mac], #os-win:focus-visible ~ .os-tabs label[for=os-win] { outline: 1px solid var(--oz-text); outline-offset: 2px; }
+.os-pane { display: none; }
+#os-lin:checked ~ .os-p-lin, #os-mac:checked ~ .os-p-mac, #os-win:checked ~ .os-p-win { display: block; }
+.dl-cmd { background: var(--term-bg); color: var(--term-text); padding: 10px 11px; font-size: 12.5px; line-height: 1.5; margin: 0 0 10px; word-break: break-all; user-select: all; }
+.dl-cmd .dim { color: var(--term-dim); }
+.dl-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.dl-row .dim { font-size: 11px; text-align: right; }
+.dl-row .oz-k { flex: none; }
+.listen { color: var(--oz-success); }
