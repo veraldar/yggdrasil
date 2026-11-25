@@ -198,6 +198,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "ureq",
+ "webpki-roots 0.26.11",
 ]
 
 [[package]]

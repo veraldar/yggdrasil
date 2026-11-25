@@ -24,6 +24,48 @@ pub struct Config {
     /// dial OUT to an access point (bifrost-net ap) and serve browsers through it
     #[serde(default)]
     pub ap: Option<ApDialSection>,
+    /// trunk v1: dial OUT to `WS /t/root` with this root's key (proto 2, CONTRACTS.md C5)
+    #[serde(default)]
+    pub trunk: Option<TrunkDialSection>,
+}
+
+/// `[trunk]` (CONTRACTS.md C5): this root enrolled into a v1 trunk.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TrunkDialSection {
+    /// the trunk's origin, e.g. "https://ljoolq.veraldar.org" (`http://…` for a local rig)
+    pub url: String,
+    /// the trunk key this root was enrolled with (b64url Ed25519 public): the trunk proves it on
+    /// every connect, so a TLS-terminating front cannot stand in for it
+    pub trunk_key: String,
+    /// this root's Ed25519 key (b64url seed, mode 0600; made by the installer)
+    pub root_key_file: String,
+    /// the id the trunk gave this root at enrollment (`rt_…`)
+    pub root_id: String,
+    /// trunk-state.json: keys, kill epoch, deny-list, directory (this bridge is its only writer)
+    pub state_file: String,
+    /// phase 2 only: the trunk's own TLS identity (SPKI sha-256, as `bifrost-net ap-pin` prints);
+    /// absent = the web PKI (phase 1: behind Caddy)
+    #[serde(default)]
+    pub pin: Option<String>,
+    /// the local PWA browsers are served from (when this root is a door)
+    #[serde(default = "default_ap_upstream")]
+    pub upstream: String,
+    /// LiveKit signaling: /rtc goes here when set
+    #[serde(default)]
+    pub livekit: Option<String>,
+    /// raw TCP forwards the trunk may name → local target, e.g. { livekit-ice = "127.0.0.1:7881" }
+    #[serde(default)]
+    pub tcp: std::collections::HashMap<String, String>,
+    /// where phones dial ICE over TCP (the trunk's :443): absent = the url's host on :443; [] = off
+    #[serde(default)]
+    pub ice_tcp: Option<Vec<String>>,
+    /// root <-> root over WireGuard: this bridge's loopback relay socket (the wg node's `relay`)…
+    #[serde(default)]
+    pub wg_relay: Option<String>,
+    /// …and the local wg node's own udp (its `udp`). Both or neither.
+    #[serde(default)]
+    pub wg_local: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

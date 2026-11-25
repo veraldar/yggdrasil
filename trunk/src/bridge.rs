@@ -97,6 +97,11 @@ pub struct BridgeConfig {
     /// the pinned channel's HTTP tunnel (data channel "tun"): the same stream
     /// law as the access point's edge (ap.rs). None = no tunnel.
     pub tunnel: Option<Arc<crate::ap::DialConfig>>,
+    /// trunk v1: the device gate (PASETO, trunk-state.json) — None = devices.json at tokens_file
+    pub tokens: Option<Arc<TokenStore>>,
+    /// trunk v1 (spec §5.7): register a fresh /offer's ufrag with the trunk and wait for its ack
+    /// (≤ 500 ms) before the answer carrying it goes out
+    pub ice_register: Option<Arc<dyn Fn(&str) + Send + Sync>>,
 }
 
 pub struct BridgeHandle {
@@ -346,7 +351,7 @@ pub fn start(cfg: BridgeConfig) -> Result<BridgeHandle, String> {
     let server = tiny_http::Server::from_listener(listener, None)
         .map_err(|e| format!("bridge http server: {e}"))?;
 
-    let tokens = Arc::new(TokenStore::open(cfg.tokens_file.clone()));
+    let tokens = cfg.tokens.clone().unwrap_or_else(|| Arc::new(TokenStore::open(cfg.tokens_file.clone())));
     let ufrags: Arc<Mutex<HashSet<String>>> = Arc::default();
     let ice_listener = if cfg.ice_tcp.is_empty() {
         None
@@ -565,6 +570,7 @@ pub fn start(cfg: BridgeConfig) -> Result<BridgeHandle, String> {
         let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let ice_tcp = ice_tcp.clone();
         let ufrags = ufrags.clone();
+        let ice_register = cfg.ice_register.clone();
         std::thread::spawn(move || while !stop.load(Ordering::SeqCst) {
             let request = match server.recv_timeout(Duration::from_millis(100)) {
                 Ok(Some(r)) => r,
@@ -629,6 +635,7 @@ pub fn start(cfg: BridgeConfig) -> Result<BridgeHandle, String> {
                 &oc,
                 &ice_tcp,
                 &ufrags,
+                ice_register.as_deref(),
             );
         });
     }
@@ -1382,6 +1389,7 @@ fn handle_signaling_request(
     oc: &Arc<OpencodeClient>,
     ice_tcp: &[SocketAddr],
     ufrags: &Arc<Mutex<HashSet<String>>>,
+    ice_register: Option<&(dyn Fn(&str) + Send + Sync)>,
 ) {
     let url = request.url().trim_end_matches('/').to_string();
     let method = request.method().clone();
@@ -1542,6 +1550,10 @@ fn handle_signaling_request(
         .unwrap_or_default();
     if !ufrag.is_empty() {
         ufrags.lock().unwrap().insert(ufrag.clone());
+        // v1: the trunk routes ICE-TCP by ufrag — the route exists before the phone has the SDP
+        if let Some(reg) = ice_register {
+            reg(&ufrag);
+        }
     }
     let device = grant.device.clone();
     if admit_tx.send(Admit { rtc, grant, epoch, token: raw_token, ip: client_ip, ufrag }).is_err() {
@@ -2357,6 +2369,8 @@ pub fn bridge_test() -> Result<(), String> {
         public_url: None,
         ice_tcp: vec![],
         tunnel: None,
+        tokens: None,
+        ice_register: None,
     })
     .map_err(|e| e.to_string())?;
 
@@ -3088,6 +3102,8 @@ mod dtls_load {
             public_url: None,
             ice_tcp: if tcp { vec![advertised] } else { vec![] },
             tunnel: Some(dial),
+            tokens: None,
+            ice_register: None,
         })
         .unwrap();
         let wire = tcp.then(|| (h.ice_listen.expect("the bridge's ICE-TCP listener"), advertised));

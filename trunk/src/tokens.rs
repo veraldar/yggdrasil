@@ -59,11 +59,29 @@ impl Deny {
             Deny::Region => "region",
         }
     }
-    /// what the client must do next (same contract as the PWA middleware)
+    /// what the client must do next (same contract as the PWA middleware); a bridge in trunk
+    /// mode (v1, CONTRACTS.md C3) says `login` where v0.9 says `pair`
     pub fn reauth(self) -> &'static str {
         match self {
             Deny::Expired | Deny::Region => "refresh",
+            _ if V1_WORDS.load(std::sync::atomic::Ordering::Relaxed) => "login",
             _ => "pair",
+        }
+    }
+}
+
+/// Set once a trunk-mode store is opened: this process answers in v1 words.
+static V1_WORDS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+impl From<crate::v1::state::Why> for Deny {
+    fn from(w: crate::v1::state::Why) -> Deny {
+        use crate::v1::state::Why;
+        match w {
+            Why::Missing => Deny::Missing,
+            Why::Invalid => Deny::Invalid,
+            Why::Expired => Deny::Expired,
+            Why::Region => Deny::Region,
+            Why::Revoked => Deny::Revoked,
         }
     }
 }
@@ -99,6 +117,9 @@ struct Snapshot {
 pub struct TokenStore {
     path: PathBuf,
     cache: std::sync::Mutex<(Instant, Snapshot)>,
+    /// trunk mode (v1): PASETO access tokens checked offline against the trunk's keys, kill epoch
+    /// and deny-list (trunk-state.json, kept live by the bridge's link) — never devices.json
+    trunk: Option<std::sync::Arc<crate::v1::state::TrunkState>>,
 }
 
 const RELOAD: Duration = Duration::from_millis(300);
@@ -108,7 +129,22 @@ impl TokenStore {
         TokenStore {
             path: path.into(),
             cache: std::sync::Mutex::new((Instant::now() - Duration::from_secs(3600), Snapshot::default())),
+            trunk: None,
         }
+    }
+
+    /// Trunk mode: the checks of CONTRACTS.md C3 against the live trunk state.
+    pub fn open_trunk(state: std::sync::Arc<crate::v1::state::TrunkState>) -> TokenStore {
+        V1_WORDS.store(true, std::sync::atomic::Ordering::Relaxed);
+        TokenStore {
+            path: state.path.clone().unwrap_or_default(),
+            cache: std::sync::Mutex::new((Instant::now(), Snapshot::default())),
+            trunk: Some(state),
+        }
+    }
+
+    pub fn is_trunk(&self) -> bool {
+        self.trunk.is_some()
     }
 
     /// The tree's roots registry the app keeps beside the devices file (BIFROST_ROOTS_FILE wins,
@@ -142,6 +178,12 @@ impl TokenStore {
     /// A token minted milliseconds ago may postdate the cache: a miss
     /// re-reads the file once.
     pub fn check(&self, raw: &str, region: &str) -> Result<Grant, Deny> {
+        if let Some(t) = &self.trunk {
+            return t
+                .check(raw, region)
+                .map(|c| Grant { device: c.did, exp_ms: c.exp_ms, region: region.to_string(), roots: vec![] })
+                .map_err(Deny::from);
+        }
         match self.lookup(raw, region, false) {
             Err(Deny::Invalid) => self.lookup(raw, region, true),
             other => other,
@@ -188,6 +230,9 @@ impl TokenStore {
 
     /// The device still exists and is not revoked.
     pub fn device_live(&self, id: &str) -> bool {
+        if let Some(t) = &self.trunk {
+            return !id.is_empty() && t.with(|s| !s.denied(id, now_ms()));
+        }
         self.with(|s| s.revoked.get(id) == Some(&false))
     }
 
@@ -196,26 +241,42 @@ impl TokenStore {
     /// milliseconds ago may postdate the cache: a miss re-reads the file once
     /// (the same law as `check`).
     pub fn knows_dev(&self, id: &str) -> bool {
+        if self.trunk.is_some() {
+            return self.device_live(id);
+        }
         self.device_live(id) || self.with_fresh(true, |s| s.revoked.get(id) == Some(&false))
     }
 
     pub fn kill_epoch(&self) -> u64 {
+        if let Some(t) = &self.trunk {
+            return t.with(|s| s.kill_epoch);
+        }
         self.with(|s| s.epoch)
     }
 
     /// When the kill switch last fired (unix ms) — the meter's kill → cut time.
     pub fn killed_at(&self) -> Option<u64> {
+        if let Some(t) = &self.trunk {
+            return *t.killed_at.lock().unwrap_or_else(|e| e.into_inner());
+        }
         self.with(|s| s.killed_at)
     }
 
     /// When the app revoked this device (unix ms), if it did — the meter's revoke → cut time.
     pub fn revoked_at(&self, id: &str) -> Option<u64> {
+        if let Some(t) = &self.trunk {
+            return t.revoked_at.lock().unwrap_or_else(|e| e.into_inner()).get(id).copied();
+        }
         self.with(|s| s.revoked_at.get(id).copied())
     }
 
     /// The device a raw credential belongs to, whatever its state (a refused token's device,
     /// for the meter: which device a region refusal or an expiry hit). Never the token itself.
     pub fn device_of(&self, raw: &str) -> Option<String> {
+        if let Some(t) = &self.trunk {
+            let (c, _) = t.with(|s| crate::v1::state::signed_claims(s, raw.trim(), now_ms()))?;
+            return c["did"].as_str().map(str::to_string);
+        }
         let raw = raw.trim();
         if raw.len() < 16 {
             return None;
@@ -328,6 +389,40 @@ pub fn bearer(header_value: &str) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The bridge in trunk mode (v1): the same gate API, answered from the trunk's state (C3).
+    #[cfg(feature = "bridge")]
+    #[test]
+    fn trunk_mode_gate() {
+        use crate::v1::proto::{kid_of, paseto_v4_sign, rfc3339, SignKey};
+        let st = crate::v1::state::TrunkState::open(None, "https://t", "tk", "rt_a");
+        let k = SignKey::generate();
+        st.update(|s| s.keys.push(crate::v1::state::Key { kid: kid_of(&k.public()), alg: "ed25519".into(), public: k.public_b64u(), retired_at: None }));
+        let store = TokenStore::open_trunk(st.clone());
+        let now = now_ms();
+        let claims = serde_json::json!({ "iss": "https://t", "sub": "acc_1", "did": "dev_1", "role": "member", "rgn": "loopback", "kep": 0,
+                                         "iat": rfc3339(now), "exp": rfc3339(now + 600_000), "jti": "j" });
+        let tok = paseto_v4_sign(&k, &claims, serde_json::json!({ "kid": kid_of(&k.public()) }).to_string().as_bytes());
+        let g = store.check(&tok, "loopback").unwrap();
+        assert_eq!((g.device.as_str(), g.roots.len()), ("dev_1", 0));
+        assert!(g.exp_ms > now);
+        assert_eq!(store.check(&tok, "net:1.2.0.0/16").unwrap_err(), Deny::Region);
+        assert_eq!(store.check("", "loopback").unwrap_err(), Deny::Missing);
+        assert_eq!(store.device_of(&tok).as_deref(), Some("dev_1"));
+        assert!(store.device_live("dev_1") && store.is_trunk());
+        // the trunk revokes the device: the 500 ms sweep (device_live) and the gate both see it
+        st.update(|s| s.deny.push(crate::v1::state::DenyEntry { did: "dev_1".into(), until: now + 60_000 }));
+        assert!(!store.device_live("dev_1"));
+        assert_eq!(store.check(&tok, "loopback").unwrap_err(), Deny::Revoked);
+        st.update(|s| {
+            s.deny.clear();
+            s.kill_epoch = 1;
+        });
+        assert_eq!(store.kill_epoch(), 1);
+        assert_eq!(store.check(&tok, "loopback").unwrap_err(), Deny::Revoked);
+        assert_eq!(Deny::Revoked.reauth(), "login", "v1 words");
+        assert_eq!(Deny::Expired.reauth(), "refresh");
+    }
 
     #[test]
     fn iso_times_parse() {
