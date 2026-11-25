@@ -61,6 +61,9 @@ export default function AgentEditor() {
   const [byHarness, setByHarness] = useState<Record<string, string[]>>({});
   const [labels, setLabels] = useState<Record<string, Record<string, string>>>({});
   const [providers, setProviders] = useState<ProviderInfo[]>([]);
+  // the root's served catalog (GET /api/models — the same projection the session's
+  // model picker reads): base models with their real -think-<level> variants
+  const [rootModels, setRootModels] = useState<{ id: string; name: string; variants: string[]; providerID: string }[]>([]);
   const [usage, setUsage] = useState<UsageState | null>(null);
   const [addFallbackOpen, setAddFallbackOpen] = useState(false);
   const [isNew, setIsNew] = useState(false);
@@ -74,7 +77,7 @@ export default function AgentEditor() {
     if (!name) return;
     let stop = false;
     (async () => {
-      const [r, pr, ur] = await Promise.all([
+      const [r, pr, ur, mr] = await Promise.all([
         fetch(`/api/agents/${name}`, { cache: 'no-store' }).catch(() => null),
         fetch('/api/provider', { cache: 'no-store' })
           .then((x) => (x.ok ? x.json() : null))
@@ -82,10 +85,18 @@ export default function AgentEditor() {
         fetch('/api/usage', { cache: 'no-store' })
           .then((x) => (x.ok ? x.json() : null))
           .catch(() => null),
+        fetch('/api/models', { cache: 'no-store' })
+          .then((x) => (x.ok ? x.json() : null))
+          .catch(() => null),
       ]);
       const d = await r?.json().catch(() => null);
       if (stop) return;
       if (pr) setProviders(normalizeProvidersResponse(pr).providers);
+      if (Array.isArray(mr))
+        setRootModels(
+          mr.flatMap((p: { id: string; name?: string; models?: { id: string; name?: string; variants?: string[] }[] }) =>
+            (p.models || []).map((m) => ({ id: m.id, name: m.name || m.id, variants: m.variants || [], providerID: p.id })))
+        );
       if (ur) setUsage(normalizeUsageResponse(ur));
       if (r?.ok && d) {
         setDetail(d);
@@ -357,26 +368,32 @@ export default function AgentEditor() {
                     {addFallbackOpen && (
                       <div className="mt-2.5 flex flex-col gap-2" data-testid="fallback-picker">
                         {/* Root providers grouped by provider (GET /provider, or root models fallback on 404) */}
-                        {providers.length > 0 ? (
-                          providers.map((p) => {
-                            const isDefaultEnv = p.id === 'yggdrasil' || p.id === 'zai';
-                            const list = p.models.length ? p.models : isDefaultEnv ? models : [];
-                            if (!list.length) return null;
+                        {rootModels.length > 0 ? (
+                          // the root's served catalog, provider by provider: each base model with
+                          // its think levels (the session picker's own pattern — never a local list)
+                          Object.entries(
+                            rootModels.reduce<Record<string, { id: string; name: string; variants: string[]; providerID: string }[]>>((g, m) => {
+                              (g[m.providerID] ||= []).push(m);
+                              return g;
+                            }, {})
+                          ).map(([pid, ms]) => {
+                            const p = providers.find((x) => x.id === pid);
+                            const isDefaultEnv = pid === 'yggdrasil' || pid === 'zai';
                             const zaiPct = isDefaultEnv ? usage?.byEngine.root?.pct : null;
                             return (
                               <div
-                                key={p.id}
+                                key={pid}
                                 className="oz-pgrp"
-                                data-testid={`fallback-group-${p.id}`}
+                                data-testid={`fallback-group-${pid}`}
                               >
                                 <div className="oz-pl">
-                                  <span>root · {p.name}</span>
-                                  {p.lan && <span className="oz-ptag">LAN</span>}
-                                  {p.noQuota && <span className="oz-ptag">no quota</span>}
-                                  {p.reachable === true && (
+                                  <span>root · {p?.name || pid}</span>
+                                  {p?.lan && <span className="oz-ptag">LAN</span>}
+                                  {p?.noQuota && <span className="oz-ptag">no quota</span>}
+                                  {p?.reachable === true && (
                                     <span className="oz-ptag ok">reachable</span>
                                   )}
-                                  {p.reachable === false && (
+                                  {p?.reachable === false && (
                                     <span className="oz-ptag bad">unreachable</span>
                                   )}
                                   {zaiPct != null && (
@@ -384,25 +401,31 @@ export default function AgentEditor() {
                                   )}
                                 </div>
                                 <div className="oz-chips">
-                                  {list.map((m) => {
-                                    const stepModel = isDefaultEnv ? m : `${p.id}/${m}`;
-                                    const already = draft.fallback.some(
-                                      (s) => s.engine === 'root' && s.model === stepModel
-                                    );
-                                    return (
-                                      <button
-                                        key={`${p.id}/${m}`}
-                                        type="button"
-                                        disabled={already || p.reachable === false}
-                                        onClick={() =>
-                                          addFallbackStep({ engine: 'root', model: stepModel })
-                                        }
-                                      >
-                                        {m}
-                                        {p.lan && <small>LAN</small>}
-                                        {p.reachable === false && <small>unreachable</small>}
-                                      </button>
-                                    );
+                                  {ms.flatMap((m) => {
+                                    // the base id, then its think entries — the catalog names
+                                    // them "glm-5.3 (think high)"; the id carries the level
+                                    const ids = [m.id, ...m.variants.map((v) => `${m.id}-think-${v}`)];
+                                    return ids.map((id) => {
+                                      const stepModel = isDefaultEnv ? id : `${pid}/${id}`;
+                                      const already = draft.fallback.some(
+                                        (s) => s.engine === 'root' && s.model === stepModel
+                                      );
+                                      const lvl = id === m.id ? null : m.variants.find((v) => id === `${m.id}-think-${v}`) || null;
+                                      return (
+                                        <button
+                                          key={`${pid}/${id}`}
+                                          type="button"
+                                          disabled={already || p?.reachable === false}
+                                          onClick={() =>
+                                            addFallbackStep({ engine: 'root', model: stepModel })
+                                          }
+                                        >
+                                          {id === m.id ? m.name || m.id : `${m.id} (think ${lvl})`}
+                                          {p?.lan && <small>LAN</small>}
+                                          {p?.reachable === false && <small>unreachable</small>}
+                                        </button>
+                                      );
+                                    });
                                   })}
                                 </div>
                               </div>
@@ -510,8 +533,16 @@ export default function AgentEditor() {
             <section className="oz-blk">
               <h2>model</h2>
               {(() => {
-                // a picker, never free text: the models this harness actually offers
-                const list = byHarness[h] || models;
+                // a picker, never free text: the models this harness actually offers — on the
+                // root the served catalog (base + think entries, same source as the fallback picker)
+                const list =
+                  h === 'root' && rootModels.length > 0
+                    ? rootModels.flatMap((m) =>
+                        m.providerID === 'yggdrasil' || m.providerID === 'zai'
+                          ? [m.id, ...m.variants.map((v) => `${m.id}-think-${v}`)]
+                          : [`${m.providerID}/${m.id}`, ...m.variants.map((v) => `${m.providerID}/${m.id}-think-${v}`)]
+                      )
+                    : byHarness[h] || models;
                 const cur = draft.model || 'default';
                 return list.length <= 8 ? (
                   <div className="oz-chips">
