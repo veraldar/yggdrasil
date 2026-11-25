@@ -58,6 +58,7 @@ mod relay;
 mod serve;
 mod wg;
 mod ws;
+mod v1;
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
