@@ -139,6 +139,12 @@ with tempfile.TemporaryDirectory(dir=os.environ.get("TMPDIR")) as wt:
     k, why = L.preflight({"cmd": "bash sim/there.sh", "ports": [port]}, ctx)
     s.close()
     check("a busy port: ERROR, nothing stopped", k == "ERROR" and str(port) in why, (k, why))
+    # TIME_WAIT from a rig that just stopped is not a busy port (G1.2's second step hit this, 11-25)
+    srv = socket.socket(); srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1); srv.bind(("127.0.0.1", 0)); srv.listen(1)
+    tw = srv.getsockname()[1]
+    cl = socket.create_connection(("127.0.0.1", tw)); conn, _ = srv.accept()
+    conn.close(); cl.recv(1); cl.close(); srv.close()   # the server side closes first: its port sits in TIME_WAIT
+    check("a port left in TIME_WAIT by the previous rig is free", not L.port_busy(tw))
     check("all there: runs", L.preflight({"cmd": "bash sim/there.sh"}, ctx) == (None, ""))
     check("absolute {wt} paths are not taken for repo paths", L.repo_paths("python3 x.py --app {wt}/branch sim/scenarios/a.json") == ["sim/scenarios/a.json"])
 

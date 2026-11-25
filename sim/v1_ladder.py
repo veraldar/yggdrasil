@@ -106,8 +106,10 @@ def parse_counts(text, names, parsers):
 
 # ------------------------------------------------------------------------------------------------ preflight
 def port_busy(p):
+    """A listener holds p. SO_REUSEADDR as every server sets it: TIME_WAIT left by the previous rig is not 'busy'."""
     for host in ("127.0.0.1", "0.0.0.0"):
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
             s.bind((host, p))
         except OSError:
