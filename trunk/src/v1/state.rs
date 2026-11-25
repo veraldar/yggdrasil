@@ -164,10 +164,19 @@ pub struct Claims {
 /// refused token; nothing else trusts this).
 pub fn signed_claims(st: &StateFile, raw: &str, now: u64) -> Option<(Value, u64)> {
     let (claims, _) = proto::paseto_v4_verify(raw, |footer| {
-        let kid = serde_json::from_slice::<Value>(footer).ok()?["kid"].as_str()?.to_string();
-        st.key_for(&kid, now)
+        let f = serde_json::from_slice::<Value>(footer).ok()?;
+        let o = f.as_object().filter(|o| o.len() == 1)?; // the footer is exactly {"kid"}
+        st.key_for(o.get("kid")?.as_str()?, now)
     })?;
-    let exp = proto::parse_rfc3339(claims["exp"].as_str()?)?;
+    // C3: exactly these keys, second-precision UTC times
+    const KEYS: [&str; 9] = ["iss", "sub", "did", "role", "rgn", "kep", "iat", "exp", "jti"];
+    let o = claims.as_object()?;
+    if o.len() != KEYS.len() || !KEYS.iter().all(|k| o.contains_key(*k)) {
+        return None;
+    }
+    let time = |k: &str| claims[k].as_str().filter(|t| t.len() == 20).and_then(proto::parse_rfc3339);
+    time("iat")?;
+    let exp = time("exp")?;
     Some((claims, exp))
 }
 
@@ -352,6 +361,35 @@ mod tests {
         assert_eq!(Why::Revoked.reauth(), "login");
         assert_eq!(Why::Invalid.reauth(), "login");
         assert_eq!(Why::Missing.reauth(), "login");
+    }
+
+    /// CONTRACTS.md C3: the IDP's shared vectors, every case, the same answer as the trunk.
+    #[test]
+    fn shared_c3_vectors() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../docs/trunk-v1/vectors/paseto.json");
+        let v: Value = serde_json::from_str(&std::fs::read_to_string(path).expect("the vectors file")).unwrap();
+        let mut base = StateFile::new("https://t", "", "");
+        base.keys = serde_json::from_value(v["keys"].clone()).unwrap();
+        let cases = v["cases"].as_array().unwrap();
+        assert!(cases.len() >= 15);
+        for c in cases {
+            let mut st = base.clone();
+            st.kill_epoch = c["ctx"]["kill_epoch"].as_u64().unwrap();
+            st.deny = serde_json::from_value(c["ctx"]["deny"].clone()).unwrap();
+            let now = c["ctx"]["now"].as_u64().unwrap() * 1000;
+            let tok = c["token"].as_str().unwrap_or("");
+            let got = check_token(&st, tok, c["ctx"]["region"].as_str().unwrap(), now);
+            let e = &c["expect"];
+            match got {
+                Ok(cl) => {
+                    assert_eq!(e["ok"], true, "{}: accepted, the trunk refuses ({e})", c["name"]);
+                    assert_eq!((cl.did.as_str(), cl.role.as_str(), cl.sub.as_str()), (e["did"].as_str().unwrap(), e["role"].as_str().unwrap(), e["sub"].as_str().unwrap()), "{}", c["name"]);
+                }
+                Err(w) => {
+                    assert_eq!((Some(w.word()), Some(w.reauth())), (e["why"].as_str(), e["reauth"].as_str()), "{}", c["name"]);
+                }
+            }
+        }
     }
 
     #[test]
