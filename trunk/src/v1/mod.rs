@@ -36,6 +36,8 @@ pub mod roots;
 #[cfg(feature = "trunk")]
 pub mod rig;
 #[cfg(feature = "trunk")]
+pub mod install;
+#[cfg(feature = "trunk")]
 pub mod server;
 #[cfg(feature = "trunk")]
 pub mod shell;

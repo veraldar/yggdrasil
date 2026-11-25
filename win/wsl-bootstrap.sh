@@ -7,11 +7,12 @@
 #       the Linux user the root runs as: NAME (the distribution's own default user), else one named after the
 #       Windows user, made without a password (wsl -u starts it; nothing to type). Then what join.sh needs —
 #       curl, python3, openssh-client, ca-certificates — with apt-get. Writes OUT/setup.ini: user=, made=, result=
-#   wsl-bootstrap.sh --hub URL --name NAME --out OUT [-- more join.sh options]         as that user
-#       runs join.sh — the stamped one the installer embeds beside this script: it fetches the signed release and
+#   wsl-bootstrap.sh --trunk URL --name NAME --out OUT [-- more root.sh options]        as that user
+#       (--hub URL is kept as the old spelling)
+#       runs root.sh — the stamped one the installer embeds beside this script: it fetches the signed release and
 #       checks it (signature + sha256) itself — and keeps OUT/status.ini current for the installer's window:
 #         state=prepare | code (code=, qr=join-qr.bmp) | done | fail (step=W-…, why=the last error line)
-#       Exit: join.sh's (0 joined and running, 3 refused, 4 expired, 64 usage, 1 other), 5 joined but the root
+#       Exit: root.sh's (0 joined and running, 3 refused, 4 expired, 64 usage, 1 other), 5 joined but the root
 #       does not answer (W-RUN).
 #   wsl-bootstrap.sh --cancel           stop the join started above (the installer's Cancel, or its time limit)
 #   wsl-bootstrap.sh --mask             stdin to stdout with key/token-like strings masked
@@ -30,7 +31,8 @@ while [ $# -gt 0 ]; do
     --cancel) MODE=cancel ;;
     --mask) MODE=mask ;;
     --png2bmp) MODE=png2bmp; shift; break ;;
-    --hub) HUB=${2:?}; shift ;;
+    --trunk) HUB=${2:?}; shift ;;
+    --hub) HUB=${2:?}; shift ;;   # the old spelling
     --name) NAME=${2:?}; shift ;;
     --out) OUT=${2:?}; shift ;;
     --user) S_USER=${2:?}; shift ;;
@@ -260,15 +262,15 @@ if [ "$MODE" = setup ]; then
 fi
 
 # ------------------------------------------------------------------------------------------- join
-# its own process group, so --cancel stops join.sh and everything it started for the join (not the root's
-# services: join.sh starts those in a session of their own)
+# its own process group, so --cancel stops root.sh and everything it started for the join (not the root's
+# services: root.sh starts those in a session of their own)
 if [ -z "${VERALDAR_PGRP:-}" ] && command -v setsid >/dev/null; then
   export VERALDAR_PGRP=1
   exec setsid -w "$BASH" "$0" --hub "$HUB" --name "$NAME" --out "$OUT" -- "$@"
 fi
 echo $$ >"$STATE/join.pid"
 HUB=$(printf '%s' "$HUB" | tr -d '\r\n\t ')
-JOIN=${VERALDAR_JOIN_SH:-$HERE/join.sh}
+JOIN=${VERALDAR_JOIN_SH:-$HERE/root.sh}
 PROBE_SECS=${VERALDAR_PROBE_SECS:-30}
 S_STATE=prepare S_CODE='' S_QR='' S_STEP='' S_WHY='' S_RC=''
 status() { ini "$OUT/status.ini" join "state=$S_STATE" "code=$S_CODE" "qr=$S_QR" "name=$NAME" "step=$S_STEP" "why=$S_WHY" "rc=$S_RC"; }
@@ -282,9 +284,9 @@ finish() { # RC STATE STEP WHY
 rm -f "$OUT/join-qr.bmp" "$STATE/join-qr.png"
 status
 # shellcheck disable=SC1091
-note "---- $(date '+%F %T') wsl-bootstrap: hub $HUB, name $NAME, $(. /etc/os-release 2>/dev/null; echo "${PRETTY_NAME:-?}"), kernel $(uname -r)"
+note "---- $(date '+%F %T') wsl-bootstrap: trunk $HUB, name $NAME, $(. /etc/os-release 2>/dev/null; echo "${PRETTY_NAME:-?}"), kernel $(uname -r)"
 [ -n "$HUB" ] && [ -n "$NAME" ] || finish 64 fail W-JOIN "no trunk address or name given"
-[ -f "$JOIN" ] || finish 1 fail W-JOIN "the installer has no join.sh beside wsl-bootstrap.sh"
+[ -f "$JOIN" ] || finish 1 fail W-JOIN "the installer has no root.sh beside wsl-bootstrap.sh"
 
 # THE MODEL — kept in this one place (decision L15: asked when the PC is installed, as on Linux). The installer's
 # model page writes OUT/upstream.env (YGG_UPSTREAM_* lines) when this root has none yet (setup.ini model=0); it moves
@@ -300,7 +302,7 @@ upstream_args() {
   cat "$OUT/upstream.env" >"$UP_FILE" && rm -f "$OUT/upstream.env"
   JARGS+=(--upstream-env "$UP_FILE")
 }
-JARGS=(--hub "$HUB" --name "$NAME" --qr-png "$STATE/join-qr.png")
+JARGS=(--trunk "$HUB" --name "$NAME" --qr-png "$STATE/join-qr.png")
 upstream_args
 DIR=$HOME/.local/share/yggdrasil-root
 prev=''; for a in "$@"; do [ "$prev" = --dir ] && DIR=$a; prev=$a; done
@@ -313,7 +315,7 @@ watch_join() { # join.sh's lines (masked): to setup.log; the code + QR to status
     printf '%s\r\n' "$line" >>"$OUT/setup.log"
     printf '%s\n' "$line" >>"$RUNLOG"
     case $line in
-      *'Code (check it matches the phone):'*)
+      *'code:'*'admin device'*|*'Code (check it matches the phone):'*)
         c=${line##*:}; c=${c//[[:space:]]/}
         S_STATE=code S_CODE=$c S_QR=''
         if [ -s "$STATE/join-qr.png" ] && png2bmp "$STATE/join-qr.png" "$OUT/join-qr.bmp" "${VERALDAR_QR_PX:-215}" 2>>"$LOG"; then
@@ -329,15 +331,15 @@ st=("${PIPESTATUS[@]}")
 set -e
 rc=${st[0]}
 
-# what went wrong, from join.sh's exit code and its last error lines (join.sh die(): "xx  …", rootjoin: "rootjoin: …")
-errs=$(grep -E '^(xx|rootjoin:|curl:)' "$RUNLOG" | tail -n 5 || true)
-last=$(printf '%s\n' "$errs" | grep -E '^(xx|rootjoin:)' | tail -n 1 | sed -E 's/^(xx +|rootjoin: )//' || true)
+# what went wrong, from root.sh's exit code and its last error lines (root.sh die(): "xx  …", the helper: "rootjoin[-v1]: …")
+errs=$(grep -E '^(xx|rootjoin:|rootjoin-v1:|curl:)' "$RUNLOG" | tail -n 5 || true)
+last=$(printf '%s\n' "$errs" | grep -E '^(xx|rootjoin:|rootjoin-v1:)' | tail -n 1 | sed -E 's/^(xx +|rootjoin: |rootjoin-v1: )//' || true)
 case $rc in
   0) ;;
   3) finish 3 fail W-JOIN "refused on the phone" ;;
   4) finish 4 fail W-JOIN "the request expired before it was approved" ;;
-  6) # joined, but "Same as the home root" brought no model (join.sh says why): the join is kept, Setup again picks one
-     finish 6 fail W-MODEL "$(grep -E 'this root has no model yet' "$RUNLOG" | tail -n 1 | sed -E 's/^(!! +|xx +)//; s/^joined, but this root has no model yet: //' || true)" ;;
+  6) # joined, but no model came with it (root.sh says why): the join is kept, Setup again picks one
+     finish 6 fail W-MODEL "$(grep -E 'this root has no model yet|no model chosen' "$RUNLOG" | tail -n 1 | sed -E 's/^(!! +|xx +)//; s/^joined, but this root has no model yet: //' || true)" ;;
 esac
 if [ "$rc" != 0 ]; then
   case $errs in
@@ -346,7 +348,7 @@ if [ "$rc" != 0 ]; then
   esac
   case $errs in
     *'no model upstream'*) finish "$rc" fail W-MODEL "$last" ;;
-    *'cannot download'*|*'cannot reach the hub'*|*'hub answered 404'*|*'hub answered 5'*|*'has no yggdrasil-'*|*'has no build for'*|*'curl: ('*)
+    *'cannot download'*|*'cannot reach the trunk'*|*'trunk answered'*|*'has no yggdrasil-'*|*'has no build for'*|*'curl: ('*)
       finish "$rc" fail W-NET "$last" ;;
     *'python3 (with ssl) is needed'*|*'glibc'*|*'MB are free'*|*'fetching and checking the release needs'*|*'cannot start:'*)
       finish "$rc" fail W-WSL "$last" ;;

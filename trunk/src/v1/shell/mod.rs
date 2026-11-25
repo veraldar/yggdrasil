@@ -125,19 +125,6 @@ pub fn empty_trunk_for(st: &State, req: &Req, np: &str) -> Resp {
     empty_trunk(st)
 }
 
-/// `/install/root.sh` · `/install/root.exe` — INSTALL serves the real ones (M6).
-pub fn install_placeholder(st: &State, np: &str) -> Resp {
-    match np {
-        "/install/root.sh" => Resp::new(
-            503,
-            "text/plain; charset=utf-8",
-            format!("#!/bin/sh\necho 'the root installer for {} is not built yet (v1 INSTALL stream)' >&2\nexit 1\n", st.cfg.origin()),
-        ),
-        "/install/root.exe" => Resp::text(503, "the Windows root installer is not built yet\n"),
-        _ => Resp::text(404, "not here\n"),
-    }
-}
-
 /// `GET /.well-known/acme-challenge/<token>` from `acme_webroot`; the name must match
 /// `[A-Za-z0-9_-]{16,128}`, nothing else is served (§7, §10).
 pub fn acme(st: &State, raw: &str) -> Resp {
