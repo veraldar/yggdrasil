@@ -220,6 +220,11 @@ const server = createServer(async (req, res) => {
         const now = Date.now();
         const user = { info: { id: id('msg_'), role: 'user', time: { created: now } }, parts };
         const files = parts.filter((x) => x.type === 'file');
+        const txt = parts
+          .filter((x) => x.type === 'text')
+          .map((x) => x.text || '')
+          .join('\n');
+        const exact = files.length === 0 && /^reply with exactly:\s*([\s\S]+)$/i.exec(txt.trim());
         const reply = {
           info: {
             id: id('msg_'),
@@ -230,7 +235,9 @@ const server = createServer(async (req, res) => {
           parts: [
             {
               type: 'text',
-              text: `got ${files.length} file${files.length === 1 ? '' : 's'}: ${files.map((f) => f.filename || f.mime).join(', ')}`,
+              text: exact
+                ? exact[1]
+                : `got ${files.length} file${files.length === 1 ? '' : 's'}: ${files.map((f) => f.filename || f.mime).join(', ')}`,
             },
           ],
         };
