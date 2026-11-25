@@ -80,6 +80,25 @@ fn main() {
         #[cfg(feature = "trunk")]
         Some("trunk-kek") => v1::cmd_trunk_kek(&args[1..]),
         Some("keygen") => cmd_keygen(),
+        // trunk v1: this root's Ed25519 link key (the installer makes it; the bridge's [trunk] root_key_file)
+        Some("root-key") => match args.get(1) {
+            Some(path) => match v1::proto::SignKey::load_or_create(path) {
+                Ok(k) => {
+                    println!("public_key = \"{}\"\nkid = \"{}\"", k.public_b64u(), v1::proto::kid_of(&k.public()));
+                    0
+                }
+                Err(e) => {
+                    eprintln!("root-key: {e}");
+                    1
+                }
+            },
+            None => {
+                eprintln!("root-key: FILE (created mode 600 if missing; prints the public half)");
+                2
+            }
+        },
+        #[cfg(feature = "trunk")]
+        Some("trunk-rig") => v1::rig::cmd(&args[1..]),
         #[cfg(feature = "bridge")]
         Some("check") => cmd_check(&args[1..]),
         #[cfg(feature = "bridge")]
@@ -171,7 +190,7 @@ fn main() {
         _ => {
             if cfg!(feature = "bridge") {
                 eprintln!(
-                    "usage: bifrost-net keygen | check -c CONFIG | selftest m0|m1|v9|ap | serve -c CONFIG | bridge -c CONFIG | rootlink mint --root ID --dev DEV --ttl SECS --secret SECRET [--out FILE] [--roots a,b] | wg -c NODE.toml | wg-key FILE | ap -c AP.TOML | ap-token | ap-pin CERT.pem | ap-cert DIR NAME.. | trunk -c TRUNK.toml | trunk-ctl CMD.. | trunk-kek FILE"
+                    "usage: bifrost-net keygen | check -c CONFIG | selftest m0|m1|v9|ap | serve -c CONFIG | bridge -c CONFIG | rootlink mint --root ID --dev DEV --ttl SECS --secret SECRET [--out FILE] [--roots a,b] | wg -c NODE.toml | wg-key FILE | ap -c AP.TOML | ap-token | ap-pin CERT.pem | ap-cert DIR NAME.. | trunk -c TRUNK.toml | trunk-ctl CMD.. | trunk-kek FILE | root-key FILE"
                 );
             } else {
                 eprintln!(
