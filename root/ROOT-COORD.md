@@ -161,7 +161,7 @@ What used to be "profiles" is one concept, **agents**. Every agent runs on a har
 model, thinking, system prompt, tools, steps, manages-sessions are all customizable) or `claude` /
 `opencode` / `codex` / `antigravity` (description + model; Claude Code also takes extra instructions via
 `--append-system-prompt`; Antigravity reads the shared prompt on its first message). Built in: coordinator (MAIN's alone, tools locked), lead, build, fix, research,
-review (read-only; writes only its report), marketer (marketing copy, announcements, docs/README polish, demo scripts; drafts to artifacts by default, marketing edits only in its own worktree). `GET /agent/:name` is the editor's
+review (read-only; writes only its report), marketer (marketing copy, announcements, docs/README polish, demo scripts; spawns `research` sub-sessions, drafts to artifacts by default, marketing edits only in its own worktree). `GET /agent/:name` is the editor's
 detail (incl. `customizable`, `locked`, `models`); `PUT /agent/:name` creates or edits (partial body,
 persisted to `YGG_PROFILES`, live at once); `DELETE` removes agents you made. Switching a session's agent
 stamps the agent's model + thinking (+ harness); the model can be changed afterwards.

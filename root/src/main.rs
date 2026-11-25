@@ -6208,6 +6208,30 @@ mod image_tests {
             .expect("marketer session created");
         assert_eq!((started["agent"].as_str(), started["engine"].as_str()), (Some("marketer"), Some("root")));
         assert_eq!(started["parentID"].as_str(), Some(main.as_str()));
+
+        // marketer spawns its own research sub-session, which reports back to marketer (not MAIN)
+        let mkt_id = started["id"].as_str().unwrap().to_string();
+        assert!(session_profile(&st, &mkt_id).sessions, "marketer manages sub-sessions");
+        let sub_out = tree::run(&st, &mkt_id, "session_start", &json!({
+            "title": "Competitor scan",
+            "agent": "research",
+            "brief": "Compare self-hosted AI assistant landing pages"
+        }))
+        .await;
+        assert!(sub_out.output.starts_with("STARTED"), "{}", sub_out.output);
+        let research = st
+            .sessions
+            .lock()
+            .unwrap()
+            .values()
+            .find(|s| s.info["title"] == "Competitor scan")
+            .map(|s| s.info.clone())
+            .expect("research sub-session created");
+        let res_id = research["id"].as_str().unwrap().to_string();
+        assert_eq!((research["agent"].as_str(), research["engine"].as_str()), (Some("research"), Some("root")));
+        assert_eq!(research["parentID"].as_str(), Some(mkt_id.as_str()));
+        assert!(matches!(tree::report_target(&st, &res_id, None), Some(tree::Target::Local(ref p)) if p == &mkt_id),
+            "research child reports back to marketer");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
