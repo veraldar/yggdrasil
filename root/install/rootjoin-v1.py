@@ -376,7 +376,7 @@ def cmd_enroll(o):
     else:
         say('==> asking %s to enroll this computer as a root ("%s", %s, host %s)' % (trunk, o.name, o.os, o.host))
         st, ans = http("POST", trunk + "/t/roots/enroll", body)
-        if st != 201:
+        if st not in (200, 201):
             fail("the trunk answered %d to the enrollment: %s" % (st, ans.get("error") or ans or "(no body)"))
         miss = [k for k in ("id", "poll_secret", "approve_url", "code", "expires_in") if k not in ans]
         if miss:
@@ -405,8 +405,7 @@ def cmd_enroll(o):
         say("      2. enter the code below (or scan the QR)")
         say("")
         url_base = pend["approve_url"]
-        _headless_banner(trunk, pend, url_base)
-        say("")
+        return _headless_poll(trunk, pend, url_base, pend_path, root_path)
     return _poll(o, pend, pend_path, root_path)
 
 
@@ -443,12 +442,21 @@ def _show_code(code, url_base, o):
     show_qr("%s#c=%s" % (url_base, code))
 
 
-def _headless_banner(trunk, pend, url_base):
-    """The rotating code + countdown + QR of approve_url#c=<code>, refreshed as it rotates."""
+def _headless_poll(trunk, pend, url_base, pend_path, root_path):
+    """The rotating code + countdown + QR of approve_url#c=<code>, polling every POLL_SECS."""
     deadline = pend["deadline"]
     last_code, shown = None, 0
-    while time.time() < deadline:
-        st, ans = http("POST", "%s/t/roots/enroll/%s/poll" % (trunk, pend["id"]), {"secret": pend["secret"]})
+    net_warned = False
+    while time.time() < deadline + 5:
+        try:
+            st, ans = http("POST", "%s/t/roots/enroll/%s/poll" % (trunk, pend["id"]), {"secret": pend["secret"]})
+            net_warned = False
+        except NetError as e:
+            if not net_warned:
+                print("\n!!  trunk unreachable (%s) — still waiting" % e, file=sys.stderr, flush=True)
+                net_warned = True
+            time.sleep(POLL_SECS * 3)
+            continue
         if st == 200 and ans.get("status") == "pending":
             code = str(ans.get("code") or last_code or "")
             left = int(ans.get("code_expires_in") or 0)
@@ -458,16 +466,19 @@ def _headless_banner(trunk, pend, url_base):
                 last_code = code
                 shown = 1
                 _show_code(code, url_base, BANNER_ARGS)
-            # countdown line, redrawn every second
-            end = time.time() + left
-            while time.time() < end and time.time() < deadline:
+            if sys.stdout.isatty():
                 sys.stdout.write("\r\033[K    code %s valid %3d s   enrollment valid %4d s " %
-                                 (last_code, max(0, end - time.time()), max(0, deadline - time.time())))
+                                 (last_code, max(0, left), max(0, deadline - time.time())))
                 sys.stdout.flush()
-                time.sleep(1)
-            sys.stdout.write("\r\033[K")
+            time.sleep(POLL_SECS)
             continue
-        return _poll_result(trunk, pend, st, ans, pend["id"], pend["secret"], None, None)
+        if sys.stdout.isatty():
+            sys.stdout.write("\r\033[K")
+            sys.stdout.flush()
+        r = _poll_result(trunk, pend, st, ans, pend_path, root_path)
+        if r is not None:
+            return r
+        time.sleep(POLL_SECS)
     fail("the enrollment expired before it was approved — run root.sh again for a new code", EXIT_EXPIRED)
 
 

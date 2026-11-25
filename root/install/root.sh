@@ -59,12 +59,13 @@ die()  { printf '\033[1;31mxx\033[0m  %s\n' "$1" >&2; exit "${2:-1}"; }
 usage() { sed -n '2,42p' "$0" | sed 's/^# \{0,1\}//'; }
 
 ARGS=("$@")
-TRUNK='' NAME='' DIR='' SKIP='' WANT_VERSION='' UPSTREAM_FILE='' QR_PNG='' MODEL_PROVIDER_ARG='' MODEL_ARG=''
+TRUNK='' PIN='' NAME='' DIR='' SKIP='' WANT_VERSION='' UPSTREAM_FILE='' QR_PNG='' MODEL_PROVIDER_ARG='' MODEL_ARG=''
 BRAIN_PORT='' APP_PORT='' BRIDGE_PORT='' PROJECT_DIR='' START=1 YES=0 UPDATE=0 STOP=0 UNINSTALL=0 MAJOR=0
 need() { [ $# -ge 2 ] && [ -n "$2" ] || die "$1 needs a value" 64; }
 while [ $# -gt 0 ]; do
   case $1 in
     --trunk) need "$@"; TRUNK=$2; shift ;;
+    --pin) need "$@"; PIN=$2; shift ;;
     --name) need "$@"; NAME=$2; shift ;;
     --dir) need "$@"; DIR=$2; shift ;;
     --upstream-env) need "$@"; UPSTREAM_FILE=$2; shift ;;
@@ -102,6 +103,13 @@ pkg_hint() {
   elif command -v pacman >/dev/null; then echo "sudo pacman -S --needed $*"
   else echo "install: $*"; fi
 }
+MIN_GLIBC=2.31
+if [ $OS != macos ] && [ $UNINSTALL = 0 ] && [ $STOP = 0 ]; then
+  _g=$(ldd --version 2>&1 | head -1 | grep -o '[0-9][0-9]*\.[0-9][0-9]*$' || true)
+  [ -n "$_g" ] || die "this Linux has no glibc (musl?): the release needs glibc $MIN_GLIBC or newer (Debian 11+, Ubuntu 20.04+). Nothing was downloaded."
+  [ "$(printf '%s\n%s\n' "$MIN_GLIBC" "$_g" | sort -V | head -1)" = "$MIN_GLIBC" ] ||
+    die "this Linux's C library is glibc $_g: the release needs $MIN_GLIBC or newer. Nothing was downloaded."
+fi
 PY=$(command -v python3 || true)
 [ -n "$PY" ] || die "python3 is needed — $(pkg_hint python3 ca-certificates)"
 "$PY" -c 'import ssl, json, urllib.request, zlib' 2>/dev/null || die "python3 (with ssl) is needed — $(pkg_hint python3 ca-certificates)"
@@ -115,7 +123,6 @@ esac
 sha256() { if command -v sha256sum >/dev/null; then sha256sum | cut -c1-64; else shasum -a 256 | cut -c1-64; fi; }
 RELEASES=${YGG_RELEASES:-https://github.com/veraldar/yggdrasil/releases}
 REL_HOME=${XDG_DATA_HOME:-$HOME/.local/share}/yggdrasil/release
-MIN_GLIBC=2.31
 
 # ------------------------------------------------------------------ the release: signed, checked
 fetch() { curl -fsSL --retry 3 --proto '=https,http' -o "$2" "$1"; }
@@ -199,14 +206,16 @@ bootstrap() { # WHY — the signed release (--version, else max(this script's, t
     say "release: $want unpacked in $REL_HOME/$want (signature + sha256 checked)"
   fi
   [ -n "$REL_DIR" ] && rm -rf "$REL_DIR"
+  [ -n "$TRUNK_URL_BAKED" ] && [ "$TRUNK_URL_BAKED" != '@TRUNK_URL@' ] && export YGG_TRUNK_URL_BAKED="$TRUNK_URL_BAKED"
+  [ -n "$TRUNK_KEY_BAKED" ] && [ "$TRUNK_KEY_BAKED" != '@TRUNK_KEY@' ] && export YGG_TRUNK_KEY_BAKED="$TRUNK_KEY_BAKED"
   exec bash "$REL_HOME/$want/root/install/root.sh" ${ARGS[@]+"${ARGS[@]}"}
 }
 # alone (downloaded, or from a checkout with no binaries): the release first; --version names another
 HERE=$(cd "$(dirname "$0")" && pwd)
 REPO=$(cd "$HERE/../.." && pwd)
 IN_CHECKOUT=0; [ -f "$HERE/model-step.sh" ] && IN_CHECKOUT=1
-if [ $UNINSTALL = 0 ] && [ $STOP = 0 ]; then
-  if [ $IN_CHECKOUT = 0 ] || [ -n "$WANT_VERSION" ] && [ "$(sed -n '1s/^yggdrasil //p' "$REPO/RELEASE" 2>/dev/null)" != "$WANT_VERSION" ]; then
+if [ $UNINSTALL = 0 ] && [ $STOP = 0 ] && [ $UPDATE = 0 ]; then
+  if [ $IN_CHECKOUT = 0 ] || { [ -n "$WANT_VERSION" ] && [ "$(sed -n '1s/^yggdrasil //p' "$REPO/RELEASE" 2>/dev/null)" != "$WANT_VERSION" ]; }; then
     bootstrap "this root.sh came alone"
   fi
 fi
@@ -314,7 +323,10 @@ mkdir -p "$DIR" "$BIN" "$LOG" "$RUN" "$DIR/data"
 chmod 700 "$DIR"
 JOINED=0; [ -f "$DIR/root.json" ] && JOINED=1
 TRUNK=${TRUNK:-$(confget TRUNK)}
-TRUNK=${TRUNK:-$TRUNK_URL_BAKED}
+if [ -z "$TRUNK" ]; then
+  if [ -n "$TRUNK_URL_BAKED" ] && [ "$TRUNK_URL_BAKED" != '@TRUNK_URL@' ]; then TRUNK=$TRUNK_URL_BAKED
+  elif [ -n "${YGG_TRUNK_URL_BAKED:-}" ]; then TRUNK=$YGG_TRUNK_URL_BAKED; fi
+fi
 TRUNK=${TRUNK%/}
 if [ "$TRUNK" = '@TRUNK_URL@' ] || [ -z "$TRUNK" ]; then TRUNK=''; fi   # an un-baked checkout copy
 if [ -z "$TRUNK" ] && [ $JOINED = 1 ]; then TRUNK=$(confget TRUNK); fi
@@ -430,11 +442,16 @@ fi
 # root.json (written by the helper on approval): root_id, peer_token, trunk url + key, wg addr…
 ROOT_ID=$("$PY" -c 'import json,sys; print(json.load(open(sys.argv[1]))["root_id"])' "$DIR/root.json")
 PEER_TOKEN=$("$PY" -c 'import json,sys; print(json.load(open(sys.argv[1])).get("peer_token",""))' "$DIR/root.json")
-TRUNK_KEY=$("$PY" -c 'import json,sys; t=json.load(open(sys.argv[1])).get("trunk",{}); print(t.get("trunk_key",""))' "$DIR/root.json")
-[ -n "$TRUNK_KEY_BAKED" ] && [ "$TRUNK_KEY_BAKED" != '@TRUNK_KEY@' ] && [ -z "$TRUNK_KEY" ] && TRUNK_KEY=$TRUNK_KEY_BAKED
+TRUNK_KEY=$("$PY" -c 'import json,sys; d=json.load(open(sys.argv[1])); t=d.get("trunk"); print(d.get("trunk_key") or (t.get("trunk_key","") if isinstance(t,dict) else ""))' "$DIR/root.json")
+[ "$TRUNK_KEY_BAKED" = '@TRUNK_KEY@' ] && TRUNK_KEY_BAKED=${YGG_TRUNK_KEY_BAKED:-}
+[ -n "$TRUNK_KEY_BAKED" ] && [ -z "$TRUNK_KEY" ] && TRUNK_KEY=$TRUNK_KEY_BAKED
 [ -n "$TRUNK_KEY" ] || die "root.json has no trunk key — run root.sh again (the enrollment will resume)"
 
 # ------------------------------------------------- 3. the config: bridge.toml, brain.env, app.env
+PIN=${PIN:-$(confget PIN)}
+PIN=${PIN:-${YGG_TRUNK_PIN:-}}
+PIN_TOML=''
+[ -n "$PIN" ] && PIN_TOML="pin = \"$PIN\""
 cat >"$DIR/bridge.toml.new" <<TOML
 # GENERATED by root.sh — the bridge: dials the trunk as root $ROOT_ID. Mode 600 (the node key).
 [node]
@@ -455,6 +472,7 @@ trunk_key = "$TRUNK_KEY"
 root_key_file = "$ROOT_KEY"
 root_id = "$ROOT_ID"
 state_file = "$STATEF"
+$PIN_TOML
 upstream = "127.0.0.1:$APP_PORT"
 wg_relay = "127.0.0.1:$WG_RELAY"
 wg_local = "127.0.0.1:$WG_UDP"
@@ -671,7 +689,7 @@ EOF
 SUP=$(pick_supervisor)
 {
   echo "# yggdrasil-root — written by root.sh; re-runs read it (pass an option to change a value)"
-  echo "TRUNK=$TRUNK"; echo "NAME=$NAME"; echo "ROOT_ID=$ROOT_ID"; echo "BRAIN_PORT=$BRAIN_PORT"
+  echo "TRUNK=$TRUNK"; echo "PIN=$PIN"; echo "NAME=$NAME"; echo "ROOT_ID=$ROOT_ID"; echo "BRAIN_PORT=$BRAIN_PORT"
   echo "APP_PORT=$APP_PORT"; echo "BRIDGE_PORT=$BRIDGE_PORT"; echo "PROJECT_DIR=$PROJECT_DIR"
   echo "SUPERVISOR=$SUP"; echo "VERSION=${YGG_RELEASE:-$(unpacked | tail -1)}"
 } | put "$CONF" 600
