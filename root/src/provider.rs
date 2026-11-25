@@ -295,6 +295,16 @@ fn env_provider(env: Env) -> Result<Option<Provider>, String> {
         Some(z) => parse_offset(&z).ok_or_else(|| format!("YGG_UPSTREAM_RESET_TZ {z:?}: want +HH:MM"))?,
         None => reset_offset_for(&base_url),
     };
+    // every model the unit says the upstream serves (YGG_MODELS, same list root_serves gates
+    // on; `id:tier` tiers are stripped here — the tier is a prompt concern, not a provider one).
+    // The default (YGG_UPSTREAM_MODEL) stays first so `Ref` resolution is unchanged.
+    let mut models: Vec<(String, String)> = vec![(model.clone(), model)];
+    for entry in env("YGG_MODELS").unwrap_or_default().split(',').map(str::trim).filter(|m| !m.is_empty()) {
+        let (m, _) = entry.split_once(':').unwrap_or((entry, ""));
+        if !models.iter().any(|(id, _)| id == m) {
+            models.push((m.to_string(), m.to_string()));
+        }
+    }
     Ok(Some(Provider {
         id: ENV_PROVIDER.into(),
         name: ENV_PROVIDER.into(),
@@ -302,7 +312,7 @@ fn env_provider(env: Env) -> Result<Option<Provider>, String> {
         reset_offset_min,
         key_source: if key.is_some() { "env:YGG_UPSTREAM_API_KEY".into() } else { "none".into() },
         key,
-        models: vec![(model.clone(), model)],
+        models,
         max_tokens: None,
         ptype: if reset_offset_for(&base_url) == 8 * 60 { "zai".into() } else { "openai-compatible".into() },
         auto: false,
