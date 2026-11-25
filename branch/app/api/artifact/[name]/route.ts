@@ -78,9 +78,18 @@ async function serve(
   // itself. Note: when the PWA service worker (public/sw.js) intercepts /api/*
   // navigations, Chromium downgrades sec-fetch-dest to "empty" (or drops it on
   // the pinned tunnel), while Accept still carries text/html.
-  const dest = req.headers.get('sec-fetch-dest');
+  // through the pinned tunnel Chromium's sec-fetch-dest is unreadable (the SW
+  // stamps what it knows as x-bifrost-dest — lib/pinned.ts forwards it)
+  const dest = req.headers.get('x-bifrost-dest') || req.headers.get('sec-fetch-dest');
   const accept = req.headers.get('accept') || '';
-  const doc = dest === 'document' || ((!dest || dest === 'empty') && accept.includes('text/html'));
+  // a frame's load is NOT a doc open (11-25 regression fix): an iframe
+  // navigation carries Accept: text/html too, and treating it as a doc
+  // sent it the CSP sandbox header — an opaque frame again, invisible to
+  // sw.js, back on the edge relay (the exact bug allow-same-origin
+  // closed). The chat's fetches (dest 'empty', accept */*) stay raw.
+  const doc =
+    dest === 'document' ||
+    (dest !== 'iframe' && (!dest || dest === 'empty') && accept.includes('text/html'));
   const html = type.startsWith('text/html');
   const md = type.startsWith('text/markdown');
   if (md && doc) {
@@ -92,7 +101,7 @@ async function serve(
           'X-Artifact-Source': source,
           // as sandboxed as the chat's html frames: no scripts, no
           // access to the app's origin
-          'Content-Security-Policy': 'sandbox',
+          'Content-Security-Policy': 'sandbox allow-same-origin',
         },
       });
     } catch {
@@ -128,7 +137,7 @@ async function serve(
         'Cache-Control': 'no-store',
         'Content-Encoding': 'gzip',
         'X-Artifact-Source': source,
-        ...(html && doc ? { 'Content-Security-Policy': 'sandbox' } : {}),
+        ...(html && doc ? { 'Content-Security-Policy': 'sandbox allow-same-origin' } : {}),
       },
     });
   }
@@ -139,10 +148,10 @@ async function serve(
       'Cache-Control': 'no-store',
       'X-Artifact-Source': source,
       // an html page opened on its own (gallery tap, new tab) renders
-      // as sandboxed as the chat's frame (sandbox="" — allow-same-origin
-      // in the app's own frames, 11-24): no scripts, no
-      // access to the app's origin
-      ...(html && doc ? { 'Content-Security-Policy': 'sandbox' } : {}),
+      // as sandboxed as the chat's frames (allow-same-origin, no
+      // allow-scripts, 11-24/11-25): no scripts, and the origin stays so
+      // the page's media rides the SW's pinned channel too
+      ...(html && doc ? { 'Content-Security-Policy': 'sandbox allow-same-origin' } : {}),
     },
   });
 }

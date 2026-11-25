@@ -169,10 +169,20 @@ async function viaPinned(e) {
   const u = new URL(e.request.url);
   const headers = [];
   e.request.headers.forEach((v, k) => headers.push([k, v]));
+  // sec-fetch-dest is unreadable in a fetch event (Chromium hides it from
+  // request.headers) — the app needs the load's destination to serve a doc
+  // open without the CSP sandbox an iframe load must not get (11-25). The SW
+  // knows e.request.destination: stamp it; the pinned page forwards it, the
+  // route reads it (x-bifrost-dest before sec-fetch-dest).
+  if (e.request.destination) headers.push(['x-bifrost-dest', e.request.destination]);
   const body = ['GET', 'HEAD'].includes(e.request.method) ? null : await e.request.arrayBuffer();
   const ch = new MessageChannel();
   const answer = new Promise((done) => {
     ch.port1.onmessage = (m) => done(m.data);
+    // the carrying page may be gone or never wired: never hold the load
+    // hostage — fall through to the network (the trunk's TLS) after a
+    // short, bounded wait
+    setTimeout(() => done({ state: 'no-answer' }), 4_000);
   });
   c.postMessage(
     { bifrostTunnel: { method: e.request.method, url: u.pathname + u.search, headers, body } },
