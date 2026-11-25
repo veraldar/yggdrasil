@@ -14,6 +14,13 @@
 //! Env: YGG_ROOT_NAME (default: hostname) · YGG_PEERS `name=url,…` · YGG_PEER_TOKEN shared
 //! secret (sent as `x-ygg-peer`, required on `/tree/report` when set) · YGG_ROOT_NOTE free text.
 //!
+//! Per-root peer tokens (trunk v1, spec §3.5 X9 — P6 changes only where the accepted token set
+//! comes from): each root's YGG_PEER_TOKEN is its OWN token, and the YGG_PEERS_FROM list (the
+//! local WireGuard node's `/_wg/_roots`, filled from the trunk's signed directory) names every
+//! other root's `peer_token_sha256`. A call is accepted when sha256(`x-ygg-peer`) equals the hash
+//! of the root its WireGuard door names (`x-ygg-from`); the shared-token rule stays for a tree that
+//! has none (v0.9). A root the list stops naming loses its hash at once.
+//!
 //! Learned peers (roots-learn, 11-13): with YGG_PEERS_FROM=<url> (the hub's bridge:
 //! `http://127.0.0.1:<bridge http>/_roots`, answering `[{"id","since"}]` for the roots linked to
 //! the trunk right now), the watch loop reads that list every few seconds and adds a peer per
@@ -69,6 +76,8 @@ pub struct Peers {
     pub look: Mutex<(String, u64)>,
     /// last-known snapshot of each peer (loaded from & persisted to `data/roots/<name>.json`)
     pub snapshots: Mutex<HashMap<String, Value>>,
+    /// trunk v1: root id → sha256 hex of that root's own peer token (from YGG_PEERS_FROM)
+    pub root_tokens: Mutex<HashMap<String, String>>,
 }
 
 /// Work passed from root to root more often than this is refused (L6): two MAINs can never hand
@@ -190,6 +199,7 @@ impl Peers {
             shares: Mutex::new(HashSet::new()),
             look: Mutex::new((default_theme, 0)),
             snapshots: Mutex::new(HashMap::new()),
+            root_tokens: Mutex::new(HashMap::new()),
         }
     }
 
@@ -216,12 +226,51 @@ impl Peers {
         }
     }
 
-    /// The call carries this root's peer token (none configured = never).
+    /// The call carries a peer token this root accepts: the sending root's own (its hash named by
+    /// the trunk's directory, the root named by the WireGuard door) — or this root's shared one
+    /// (none configured = never).
     pub fn token_ok(&self, headers: &axum::http::HeaderMap) -> bool {
-        let (Some(t), Some(got)) = (&self.token, headers.get("x-ygg-peer").and_then(|v| v.to_str().ok())) else { return false };
-        // length first, then every byte: no early exit on the first difference
-        t.len() == got.len() && t.bytes().zip(got.bytes()).fold(0u8, |acc, (a, b)| acc | (a ^ b)) == 0
+        let got = headers.get("x-ygg-peer").and_then(|v| v.to_str().ok());
+        let from = headers.get("x-ygg-from").and_then(|v| v.to_str().ok());
+        if let (Some(got), Some(from)) = (got, from) {
+            if let Some(want) = self.root_tokens.lock().unwrap().get(from) {
+                if ct_eq(sha256_hex(got).as_bytes(), want.as_bytes()) {
+                    return true;
+                }
+            }
+        }
+        let (Some(t), Some(got)) = (&self.token, got) else { return false };
+        ct_eq(t.as_bytes(), got.as_bytes())
     }
+
+    /// Is a per-root token hash known for `id`?
+    pub fn knows_root_token(&self, id: &str) -> bool {
+        self.root_tokens.lock().unwrap().contains_key(id)
+    }
+}
+
+/// Length first, then every byte: no early exit on the first difference.
+fn ct_eq(a: &[u8], b: &[u8]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+}
+
+fn sha256_hex(s: &str) -> String {
+    use sha2::Digest as _;
+    sha2::Sha256::digest(s.as_bytes()).iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// The per-root peer token hashes in a YGG_PEERS_FROM answer (`[{"id","peer_token_sha256"}]`,
+/// trunk v1); entries without one (v0.9) are skipped.
+pub fn root_token_hashes(v: &Value) -> HashMap<String, String> {
+    v.as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|r| {
+            let id = r["id"].as_str().filter(|id| valid_id(id))?;
+            let h = r["peer_token_sha256"].as_str().filter(|h| h.len() == 64 && h.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)))?;
+            Some((id.to_string(), h.to_string()))
+        })
+        .collect()
 }
 
 /// Did this call come from another root? The trunk's doors mark every call they perform
@@ -238,6 +287,18 @@ pub async fn gate(
     next: axum::middleware::Next,
 ) -> axum::response::Response {
     use axum::response::IntoResponse;
+    let h = req.headers();
+    let p = &st.config.peers;
+    // a root linked a moment ago (its hash not read yet): read the list once, then check again
+    let fresh_root = from_peer(h)
+        && !p.token_ok(h)
+        && p.from.is_some()
+        && h.get("x-ygg-from").and_then(|v| v.to_str().ok()).is_some_and(|f| valid_id(f) && !p.knows_root_token(f));
+    if fresh_root {
+        if let Err(e) = learn(&st).await {
+            eprintln!("peers: {e}");
+        }
+    }
     let h = req.headers();
     if from_peer(h) && !st.config.peers.token_ok(h) {
         let why = if st.config.peers.token.is_none() { "this root takes no calls from other roots (no peer token)" } else { "peer token" };
@@ -262,6 +323,12 @@ pub async fn learn(st: &AppState) -> Result<Vec<String>, String> {
     // one lock at a time (all() takes removed, then learned)
     let removed = p.removed.lock().unwrap().clone();
     let ids: Vec<String> = linked_ids(&v).into_iter().filter(|id| !removed.contains(id)).collect();
+    // trunk v1: the accepted per-root tokens follow the list (an empty list, a blip, changes nothing)
+    if !ids.is_empty() {
+        let mut hashes = root_token_hashes(&v);
+        hashes.retain(|id, _| !removed.contains(id));
+        *p.root_tokens.lock().unwrap() = hashes;
+    }
     let (added, gone) = {
         let mut learned = p.learned.lock().unwrap();
         let gone = forget_unlisted(&mut learned, &ids, &removed, &mut p.absent.lock().unwrap());
@@ -573,6 +640,35 @@ mod tests {
 
     fn pairs(v: &[(&str, &str)]) -> Vec<(String, String)> {
         v.iter().map(|(n, u)| (n.to_string(), u.to_string())).collect()
+    }
+
+    fn hm(v: &[(&str, &str)]) -> axum::http::HeaderMap {
+        let mut h = axum::http::HeaderMap::new();
+        for (k, x) in v {
+            h.insert(axum::http::HeaderName::from_bytes(k.as_bytes()).unwrap(), x.parse().unwrap());
+        }
+        h
+    }
+
+    #[test]
+    fn per_root_tokens_from_the_directory() {
+        let p = Peers::new("me".into(), "", Some("http://127.0.0.1:9/_wg/_roots".into()), None, Some("mine".into()), String::new());
+        let ha = sha256_hex("token-of-a");
+        let list = json!([{ "id": "rt_a", "peer_token_sha256": ha }, { "id": "rt_b" }, { "id": "bad id", "peer_token_sha256": ha },
+                          { "id": "rt_c", "peer_token_sha256": "XYZ" }]);
+        let got = root_token_hashes(&list);
+        assert_eq!(got.len(), 1, "only a valid id with a 64-hex hash: {got:?}");
+        *p.root_tokens.lock().unwrap() = got;
+        // the sender's own token, for the root its WireGuard door names
+        assert!(p.token_ok(&hm(&[("x-ygg-via", "wg"), ("x-ygg-from", "rt_a"), ("x-ygg-peer", "token-of-a")])));
+        // another root's token, or the right token claimed for another root: refused
+        assert!(!p.token_ok(&hm(&[("x-ygg-via", "wg"), ("x-ygg-from", "rt_b"), ("x-ygg-peer", "token-of-a")])));
+        assert!(!p.token_ok(&hm(&[("x-ygg-via", "wg"), ("x-ygg-from", "rt_a"), ("x-ygg-peer", "token-of-b")])));
+        assert!(!p.token_ok(&hm(&[("x-ygg-via", "wg"), ("x-ygg-peer", "token-of-a")])), "no door-named sender: no per-root match");
+        // this root's own (shared, v0.9) token still passes; nothing else does
+        assert!(p.token_ok(&hm(&[("x-ygg-peer", "mine")])));
+        assert!(!p.token_ok(&hm(&[("x-ygg-peer", "nope")])));
+        assert!(p.knows_root_token("rt_a") && !p.knows_root_token("rt_b"));
     }
 
     #[test]
