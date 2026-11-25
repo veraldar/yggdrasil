@@ -18,7 +18,7 @@
 //! substitutions (`$(`, backticks, `<(`, `>(`) fail closed unless a `*` rule allows bash.
 //!
 //! The built-in agents — the ROLES (roles rework 11-22): coordinator · lead · build · fix · research ·
-//! review — are always present; a `YGG_PROFILES` file overrides fields of built-ins and adds roles of
+//! review · marketer — are always present; a `YGG_PROFILES` file overrides fields of built-ins and adds roles of
 //! its own. What runs a session is its ENGINE (root · claude · antigravity · opencode · codex), a fact
 //! of the session apart from its role: a role names a default engine (`harness`, none = root) and
 //! model, and each engine has its own default model (`engines` in the file). `claude` and `agy` were
@@ -96,7 +96,8 @@ one fits, `session_send` the new instruction there (its context is kept); if it 
 get the right role (`agent`), taken from the work itself: `build` for one concrete \
 task, `fix` for something broken (a bug, an error, a failing test: it reproduces, finds the root cause and \
 proves the fix), `research` for reading/comparing/answering with sources, `review` for analysis, review or audit that must \
-not change anything (it writes only its report), `lead` for a project with two or more parts (an API and a dashboard, a CLI and a \
+not change anything (it writes only its report), `marketer` for marketing copy, announcements, README/docs polish, demo scripts \
+and posts (spawns its own `research` sub-sessions when needed; drafts go to the artifacts folder, marketing-facing edits only in its own worktree), `lead` for a project with two or more parts (an API and a dashboard, a CLI and a \
 server) or one the user wants looped until it passes (\"keep going till all pass\") — `build` is for one \
 concrete piece. Each role runs on its own default engine; pass `engine` only when the user names one: \
 \"claude\", \"Claude Code\", \"with Claude\" → `claude`; \"agy\", \"Antigravity\" → `antigravity`; \"on the root\", \"GLM\" → `root`. \
@@ -198,8 +199,26 @@ command output). When a written report helps (long findings, anything to keep), 
 the artifacts folder — the ONLY place you can write — and end with its link exactly as \
 [<title>](/api/artifact/<name>.md): that is how it opens on the user's phone.";
 
+/// A marketer session: owns marketing copy, announcements, README/docs polish and demo scripts,
+/// and spawns sub-sessions (e.g. `research`) for competitive analysis and fact-finding.
+pub const MARKETER_PROMPT: &str = "\
+You are a marketer session: you own marketing work for the project — landing-page and website copy, \
+release announcements, README and docs polish, demo scripts, and short social or announcement posts. \
+Ground every claim in the real codebase and docs (read the files and git history before writing; never invent \
+features or numbers). When you need competitive analysis, audience/channel research, or deeper fact-finding, \
+start sub-sessions (`session_start` with profile `research`, or `review` for a read-only audit) with \
+self-contained briefs and let them run in parallel; while sub-sessions are still running, end your turn with \
+a one-line status and you will be woken with their [inbox] reports. Your outputs are content for the owner to \
+read and approve: by default write drafts as markdown to the artifacts folder and end with their link exactly \
+as [<title>](/api/artifact/<name>.md) so they open on the owner's phone. When asked to edit marketing-facing \
+files (docs/, README, landing-page or app copy), work only inside your own git worktree — never directly in \
+the main integration tree. Never change product or brain code, never deploy, and never touch live services. \
+End with a short report: what you produced (artifact links and/or branch and paths), any key choices, and \
+anything the owner must review or approve. If only the user can unblock you (a decision, an approval), ask \
+them on a line that begins with QUESTION: — that is how the tree brings your question to them.";
+
 /// Lite-tier roles: what a small model can hold — one paragraph, few rules.
-pub const COORDINATOR_LITE: &str = "You are the coordinator, the user's only contact. Answer simple things directly. Checking for bugs or reviewing code is real work (agent review; fix to repair). For real work: sessions_find; then session_send to a matching session or session_start a new one (profile build for one task, fix for something broken, lead for a project, research for questions; engine only when the user names one: claude or antigravity) with a complete brief; then say `→ <title>` in one sentence. When an [inbox] message arrives, tell the user the results that matter in one to three sentences — finished or failed work they asked for always matters; reply exactly (quiet) only for routine progress.";
+pub const COORDINATOR_LITE: &str = "You are the coordinator, the user's only contact. Answer simple things directly. Checking for bugs or reviewing code is real work (agent review; fix to repair). For real work: sessions_find; then session_send to a matching session or session_start a new one (profile build for one task, fix for something broken, lead for a project, marketer for marketing/copy, research for questions; engine only when the user names one: claude or antigravity) with a complete brief; then say `→ <title>` in one sentence. When an [inbox] message arrives, tell the user the results that matter in one to three sentences — finished or failed work they asked for always matters; reply exactly (quiet) only for routine progress.";
 /// The opening of the shared prompt. root-coord (11-12): the 11-09 "fewest words" preamble made every
 /// session stop at the first obstacle; brevity is for prose, never for the work.
 pub const PREAMBLE: &str = "You are part of yggdrasil: the user's own AI, running on their own computer and reached from their phone. Be direct and concrete, and keep prose replies short unless the user asks for depth — but never cut the work short: investigate with your tools until you actually know, verify before you claim, and do not give up at the first obstacle. Keep the user's language.";
@@ -224,6 +243,7 @@ pub fn default_shared() -> String {
 pub const LEAD_LITE: &str = "You own one project. Do it yourself with bash/read/write/edit, or split independent parts into sessions with session_start. Check results by running the tests. When all is done, report what exists and the test result. If only the user can decide, ask on a line that begins with QUESTION: so the tree brings it to them.";
 pub const FIX_LITE: &str = "Something is broken. Reproduce it, find the root cause, fix it with the smallest change, add a test that catches it, and run the tests until they pass. Never weaken a test to make it pass. Reply with the cause (path:line), the change and the test result. If only the user can decide, ask on a line that begins with QUESTION: so the tree brings it to them.";
 pub const BUILD_LITE: &str = "Do the task completely with bash/read/write/edit. Run it, test it, fix failures. Reply with what you changed and the test result. If only the user can decide, ask on a line that begins with QUESTION: so the tree brings it to them.";
+pub const MARKETER_LITE: &str = "You own marketing copy, release announcements, README/docs polish, demo scripts and short posts. Check claims against the repo first; start `research` sub-sessions with session_start when you need competitive or background research. By default write drafts to the artifacts folder and link them as [title](/api/artifact/name.md). Edit marketing-facing files (docs/, README, copy) only in your own git worktree. Never change product/brain code, never deploy, never touch live services. If the user must decide, ask on a line beginning with QUESTION:.";
 
 
 
@@ -286,6 +306,7 @@ pub fn builtins() -> Vec<Profile> {
         // few agents (user 11-13: "too many agent types"; fix asked for 11-13); opencode / codex stay a harness choice
         // for agents you make in the editor
         review_profile(),
+        marketer_profile(),
         // claude and agy were agents here until 11-22: they are engines now (`ENGINES`), and any
         // role runs on them
     ]
@@ -398,6 +419,36 @@ fn review_profile() -> Profile {
         fallback_model: None,
         pinned: false,
         prompt_lite: None,
+    }
+}
+
+/// The marketing role: drafts copy, announcements, docs/README polish and demo scripts into the
+/// artifacts folder by default, and may edit marketing-facing files in its own worktree.
+fn marketer_profile() -> Profile {
+    marketer_profile_in(std::env::var("YGG_ARTIFACTS_DIR").ok().as_deref())
+}
+
+fn marketer_profile_in(artifacts_dir: Option<&str>) -> Profile {
+    let prompt = match artifacts_dir.map(str::trim).filter(|d| !d.is_empty()) {
+        Some(d) => format!("{MARKETER_PROMPT} The artifacts folder: {}/", d.trim_end_matches('/')),
+        None => MARKETER_PROMPT.into(),
+    };
+    Profile {
+        name: "marketer".into(),
+        description: "owns marketing copy, announcements, README/docs polish and demo scripts; spawns research sub-sessions, drafts to artifacts or edits marketing files in its own worktree".into(),
+        mode: "primary".into(),
+        prompt,
+        model: None,
+        variant: None,
+        steps: None,
+        fold: false,
+        sessions: true,
+        rules: allow_all(),
+        harness: None,
+        fallback_harness: None,
+        fallback_model: None,
+        pinned: false,
+        prompt_lite: Some(MARKETER_LITE.into()),
     }
 }
 
@@ -1237,7 +1288,7 @@ mod tests {
     fn claude_and_agy_are_engines_not_roles() {
         let ps = Profiles::load(None);
         let names: Vec<String> = ps.catalog().as_array().unwrap().iter().filter_map(|a| a["name"].as_str().map(String::from)).collect();
-        assert_eq!(names, ["build", "coordinator", "fix", "lead", "research", "review"], "the six roles, nothing else");
+        assert_eq!(names, ["build", "coordinator", "fix", "lead", "marketer", "research", "review"], "the seven roles, nothing else");
         assert!(ps.by_name.values().all(|p| p.harness.is_none()), "every built-in role runs on the root by default");
         // the old words: a build on that engine
         assert_eq!(legacy_engine("claude"), Some("claude"));
@@ -1384,5 +1435,41 @@ mod tests {
         assert_eq!(d["fallback"], json!({"engine": "antigravity", "model": "gemini-4-neon-high"}));
         assert_eq!(d["pinned"], false);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn marketer_role_defaults_and_constraints() {
+        let mut ps = Profiles::load(None);
+        assert_eq!(legacy_engine("marketer"), None);
+        let m = ps.get("marketer").expect("marketer is a built-in role");
+        assert_eq!(m.name, "marketer");
+        assert!(m.harness.is_none(), "runs on root by default like the other built-in roles");
+        assert!(m.sessions && m.reads_tree() && !m.fold, "marketer manages sub-sessions like lead");
+        assert!(m.role_for("full").starts_with(MARKETER_PROMPT));
+        assert_eq!(m.role_for("lite"), MARKETER_LITE);
+        for (tool, input) in [
+            ("read", json!({"filePath": "/tmp/README.md"})),
+            ("write", json!({"filePath": "/tmp/artifacts/launch.md"})),
+            ("edit", json!({"filePath": "/tmp/wt/docs/index.md"})),
+            ("glob", json!({"pattern": "docs/**/*.md"})),
+            ("grep", json!({"pattern": "yggdrasil"})),
+            ("webfetch", json!({"url": "https://example.com"})),
+            ("bash", json!({"command": "git status"})),
+        ] {
+            assert!(m.check(tool, &input).is_ok(), "marketer should allow {tool}");
+        }
+        for t in ["session_start", "session_send", "session_close", "sessions_find", "session_read"] {
+            assert!(m.check(t, &json!({})).is_ok(), "marketer should allow tree tool {t}");
+        }
+        let d = ps.detail("marketer").unwrap();
+        assert_eq!(d["builtin"], true);
+        assert_eq!(d["harness"], "root");
+        assert_eq!(d["sessions"], true);
+        assert!(ps.remove("marketer").is_err(), "built-in marketer cannot be deleted");
+
+        let with_dir = marketer_profile_in(Some("/home/u/Work/root-coord-pwa/artifacts/"));
+        assert!(with_dir.prompt.ends_with(" The artifacts folder: /home/u/Work/root-coord-pwa/artifacts/"));
+        let without_dir = marketer_profile_in(None);
+        assert_eq!(without_dir.prompt, MARKETER_PROMPT);
     }
 }

@@ -73,11 +73,14 @@ async function serve(
   // top-level navigation (address bar / new tab / gallery corner button):
   // md renders as a phone-readable page, other text wraps raw in the
   // app's black — browsers paint raw text white, and an opened .log must
-  // still read like bifrost. Chat fetches (sec-fetch-dest: empty) get the
-  // raw bytes they .text() — the md viewer in the chat renders markdown
-  // itself.  [port of main 547cb89; md page 11-23: owner-facing .md is
-  // HTML by construction — the writer just drops the file]
-  const doc = req.headers.get('sec-fetch-dest') === 'document';
+  // still read like bifrost. Chat fetches (sec-fetch-dest: empty, accept: */*)
+  // get the raw bytes they .text() — the md viewer in the chat renders markdown
+  // itself. Note: when the PWA service worker (public/sw.js) intercepts /api/*
+  // navigations, Chromium downgrades sec-fetch-dest to "empty" (or drops it on
+  // the pinned tunnel), while Accept still carries text/html.
+  const dest = req.headers.get('sec-fetch-dest');
+  const accept = req.headers.get('accept') || '';
+  const doc = dest === 'document' || ((!dest || dest === 'empty') && accept.includes('text/html'));
   const html = type.startsWith('text/html');
   const md = type.startsWith('text/markdown');
   if (md && doc) {
