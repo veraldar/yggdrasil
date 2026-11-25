@@ -2,7 +2,10 @@
 
 For releases before v0.8.0 (`v0.1.0`–`v0.7.0`), see the git tag history.
 
-## Unreleased (v0.9.0)
+## Unreleased (v1.0.0)
+
+The v1 trunk: an account on the trunk (claim, sign-in, devices, roots by enrollment), proto 2 on /t/root,
+per-root credentials, installers `trunk.sh` v1 + `/install/root.sh` + `root.exe`.
 
 Adds the end-design trunk, voice fixes, two-way terminal sessions, and `claude` / `agy` agents on top of `v0.8.1`.
 

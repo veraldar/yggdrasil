@@ -5,7 +5,7 @@
 #   $EDITOR ~/.config/yggdrasil/yggdrasil.env     # set YGG_UPSTREAM_BASE_URL
 #   systemctl --user enable --now yggdrasil
 pkgname=yggdrasil
-pkgver=0.1.0
+pkgver=1.0.0
 pkgrel=1
 pkgdesc='opencode-compatible HTTP server for bifrost (OpenAI-compatible upstream)'
 arch=('x86_64' 'aarch64')
