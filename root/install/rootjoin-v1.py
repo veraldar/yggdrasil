@@ -3,7 +3,7 @@
 
   rootjoin-v1.py enroll --state DIR --trunk URL --name N --os OS --host H --arch A
                         --root-pub KEY --wg-pub KEY --brain-port P --app-port P --bridge-port P
-                        [--upstream FILE | --upstream-env-from-env]
+                        [--qr-png FILE]
 
 The trunk's enrollment API (WIRE.md):
   POST /t/roots/enroll {name, hostname, os, arch, version, build_id, has_app, has_voice,
@@ -345,7 +345,12 @@ def build_id():
         return "dev"
 
 
+BANNER_ARGS = None  # the enroll's parsed args (for --qr-png inside the banner)
+
+
 def cmd_enroll(o):
+    global BANNER_ARGS
+    BANNER_ARGS = o
     state, trunk = o.state, o.trunk.rstrip("/")
     os.makedirs(state, mode=0o700, exist_ok=True)
     pend_path, root_path = os.path.join(state, "pending.json"), os.path.join(state, "root.json")
@@ -380,6 +385,7 @@ def cmd_enroll(o):
 
     # desktop or headless
     browser = _browser()
+    # (the QR picture is written once the first code is known — see _show_code)
     if browser:
         url = pend["approve_url"]
         say("==> opening %s in your browser — approve this computer there" % url)
@@ -425,6 +431,15 @@ def _proc_version():
         return ""
 
 
+def _show_code(code, url_base, o):
+    """The code line + the QR; the PNG too when asked (the Windows installer's window)."""
+    say("    code:  %s   (checked against the code on your admin device)" % code)
+    say("    scan:  %s#c=%s" % (url_base, code))
+    if getattr(o, "qr_png", None):
+        qr_png(qr_matrix("%s#c=%s" % (url_base, code)), o.qr_png)
+    show_qr("%s#c=%s" % (url_base, code))
+
+
 def _headless_banner(trunk, pend, url_base):
     """The rotating code + countdown + QR of approve_url#c=<code>, refreshed as it rotates."""
     deadline = pend["deadline"]
@@ -439,9 +454,7 @@ def _headless_banner(trunk, pend, url_base):
                     say("\r\033[K    code rotated")
                 last_code = code
                 shown = 1
-                say("    code:  %s   (checked against the code on your admin device)" % code)
-                say("    scan:  %s#c=%s" % (url_base, code))
-                show_qr("%s#c=%s" % (url_base, code))
+                _show_code(code, url_base, BANNER_ARGS)
             # countdown line, redrawn every second
             end = time.time() + left
             while time.time() < end and time.time() < deadline:
@@ -557,8 +570,7 @@ def main(argv):
     e.add_argument("--brain-port", type=int, default=4180)
     e.add_argument("--app-port", type=int, default=4182)
     e.add_argument("--bridge-port", type=int, default=4190)
-    e.add_argument("--upstream")
-    e.add_argument("--upstream-env-from-env", action="store_true")
+    e.add_argument("--qr-png", help="also write the QR as a PNG (the Windows installer shows a BMP built from it)")
     o = ap.parse_args(argv)
     return {"enroll": cmd_enroll}[o.cmd](o)
 

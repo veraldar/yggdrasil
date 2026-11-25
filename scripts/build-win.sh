@@ -3,7 +3,7 @@
 #
 #   VERSION   the release, e.g. 0.9.1 (or 0.9.1-rc.1): goes into the exe (window, Apps list, file properties)
 #             and its name
-#   JOIN_SH   the join.sh the installer embeds and runs inside WSL — the STAMPED one of this release
+#   ROOT_SH   the root.sh the installer embeds and runs inside WSL — the STAMPED one of this release
 #             (scripts/release.sh calls this after stamping the installers and before SHA256SUMS is signed,
 #             so the exe is in the signed list). For tests: root/install/join.sh as it is in the tree.
 #   OUTDIR    where the exe goes
@@ -12,16 +12,16 @@
 # nothing to install here. The sources are copied with Windows line endings for .bat/.vbs and Unix ones for .sh,
 # whatever the checkout did.
 set -euo pipefail
-VERSION=${1:-} JOIN_SH=${2:-} OUTDIR=${3:-}
-[ -n "$VERSION" ] && [ -n "$JOIN_SH" ] && [ -n "$OUTDIR" ] || { sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 64; }
+VERSION=${1:-} ROOT_SH=${2:-} OUTDIR=${3:-}
+[ -n "$VERSION" ] && [ -n "$ROOT_SH" ] && [ -n "$OUTDIR" ] || { sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 64; }
 VERSION=${VERSION#v}
 case $VERSION in
   [0-9]*.[0-9]*.[0-9]*) ;;
   *) echo "build-win: VERSION must look like 0.9.1 (got $VERSION)" >&2; exit 64 ;;
 esac
 case $VERSION in *[!0-9A-Za-z.+-]*) echo "build-win: unexpected characters in VERSION $VERSION" >&2; exit 64 ;; esac
-[ -f "$JOIN_SH" ] || { echo "build-win: no join.sh at $JOIN_SH" >&2; exit 1; }
-head -1 "$JOIN_SH" | grep -q '^#!.*bash' || { echo "build-win: $JOIN_SH is not a bash script" >&2; exit 1; }
+[ -f "$ROOT_SH" ] || { echo "build-win: no root.sh at $ROOT_SH" >&2; exit 1; }
+head -1 "$ROOT_SH" | grep -q '^#!.*bash' || { echo "build-win: $ROOT_SH is not a bash script" >&2; exit 1; }
 REPO=$(cd "$(dirname "$0")/.." && pwd)
 WIN=$REPO/win
 IMAGE=${NSIS_IMAGE:-veraldar-nsis:local}
@@ -41,12 +41,12 @@ STAGE=$(mktemp -d)
 trap 'rm -rf "$STAGE"' EXIT
 for f in veraldar.nsi launcher.bat keepalive.vbs; do sed 's/\r$//; s/$/\r/' "$WIN/$f" >"$STAGE/$f"; done
 sed 's/\r$//' "$WIN/wsl-bootstrap.sh" >"$STAGE/wsl-bootstrap.sh"
-# join.sh goes in byte for byte: a stamped join.sh checks its own sha256 against the release's signed SHA256SUMS
-if grep -q $'\r' "$JOIN_SH"; then echo "build-win: $JOIN_SH has CR line endings — refusing it" >&2; exit 1; fi
-cp "$JOIN_SH" "$STAGE/join.sh"
+# root.sh goes in byte for byte: a stamped root.sh checks its own sha256 against the release's signed SHA256SUMS
+if grep -q $'\r' "$ROOT_SH"; then echo "build-win: $ROOT_SH has CR line endings — refusing it" >&2; exit 1; fi
+cp "$ROOT_SH" "$STAGE/root.sh"
 mkdir -p "$OUTDIR"
 OUT=$(cd "$OUTDIR" && pwd)/Veraldar-Setup-$VERSION.exe
 docker run --rm -u "$(id -u):$(id -g)" -v "$STAGE:/src" -w /src "$IMAGE" \
-  makensis -V2 -DAPPVERSION="$VERSION" -DVIVERSION="$VIVERSION" -DJOIN_SH=join.sh -DOUTFILE=/src/out.exe veraldar.nsi >&2
+  makensis -V2 -DAPPVERSION="$VERSION" -DVIVERSION="$VIVERSION" -DJOIN_SH=root.sh -DOUTFILE=/src/out.exe veraldar.nsi >&2
 mv -f "$STAGE/out.exe" "$OUT"
 echo "$OUT"

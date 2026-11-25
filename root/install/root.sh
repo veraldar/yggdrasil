@@ -59,7 +59,7 @@ die()  { printf '\033[1;31mxx\033[0m  %s\n' "$1" >&2; exit "${2:-1}"; }
 usage() { sed -n '2,42p' "$0" | sed 's/^# \{0,1\}//'; }
 
 ARGS=("$@")
-TRUNK='' NAME='' DIR='' SKIP='' WANT_VERSION='' UPSTREAM_FILE='' MODEL_PROVIDER_ARG='' MODEL_ARG=''
+TRUNK='' NAME='' DIR='' SKIP='' WANT_VERSION='' UPSTREAM_FILE='' QR_PNG='' MODEL_PROVIDER_ARG='' MODEL_ARG=''
 BRAIN_PORT='' APP_PORT='' BRIDGE_PORT='' PROJECT_DIR='' START=1 YES=0 UPDATE=0 STOP=0 UNINSTALL=0 MAJOR=0
 need() { [ $# -ge 2 ] && [ -n "$2" ] || die "$1 needs a value" 64; }
 while [ $# -gt 0 ]; do
@@ -68,6 +68,7 @@ while [ $# -gt 0 ]; do
     --name) need "$@"; NAME=$2; shift ;;
     --dir) need "$@"; DIR=$2; shift ;;
     --upstream-env) need "$@"; UPSTREAM_FILE=$2; shift ;;
+    --qr-png) need "$@"; QR_PNG=$2; shift ;;
     --model-provider) need "$@"; MODEL_PROVIDER_ARG=$2; shift ;;
     --model) need "$@"; MODEL_ARG=$2; shift ;;
     --skip) need "$@"; SKIP="$SKIP$2,"; shift ;;
@@ -418,13 +419,10 @@ copy "$HERE/rootjoin-v1.py" "$HELPER" 755
 if [ $JOINED = 1 ]; then
   say "already joined: root $(confget ROOT_ID) of $TRUNK (no new enrollment; --uninstall to leave)"
 else
-  UP_ARGS=()
-  [ -n "${YGG_UPSTREAM_BASE_URL:-}" ] && UP_ARGS=(--upstream-env-from-env)
-  [ -n "$UPSTREAM_FILE" ] && UP_ARGS=(--upstream "$UPSTREAM_FILE")
   say "asking $TRUNK to let this computer join as \"$NAME\" ($OS, host $HOSTN)"
   "$PY" "$HELPER" enroll --state "$DIR" --trunk "$TRUNK" --name "$NAME" --os "$OS" --host "$HOSTN" \
     --arch "$ARCH" --root-pub "$ROOT_PUB" --wg-pub "$WG_PUB" --brain-port "$BRAIN_PORT" \
-    --app-port "$APP_PORT" --bridge-port "$BRIDGE_PORT" ${UP_ARGS[@]+"${UP_ARGS[@]}"} ${START:+} \
+    --app-port "$APP_PORT" --bridge-port "$BRIDGE_PORT" ${QR_PNG:+--qr-png "$QR_PNG"} \
     || exit $?
 fi
 [ -f "$DIR/root.json" ] || die "no root.json — the enrollment did not complete"

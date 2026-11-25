@@ -8,8 +8,9 @@
 ;      distribution has none (wsl -u root useradd); curl, python3, openssh-client, ca-certificates (wsl -u root
 ;      apt-get) ......................................................................... W-WSL
 ;   3  the trunk address, pre-filled ${TRUNK_DEFAULT}
-;   4  the join.sh embedded here (the stamped one of this release) runs inside WSL through wsl-bootstrap.sh,
-;      hidden, with --name <the computer name>; join.sh checks the release's signature itself
+;   4  the root.sh embedded here (the stamped one of this release) runs inside WSL through wsl-bootstrap.sh,
+;      hidden, with --trunk <the address above> --name <the computer name>; root.sh checks the release's
+;      signature itself and enrolls this PC with your trunk's account (v1: no phone pairing scan)
 ;   5  the code and the QR in this window until the phone approves (10 minutes) .. W-NET W-SIG W-JOIN W-MODEL
 ;   6  approved: the start-at-login entry (keepalive.vbs -> launcher.bat), the root started ........ W-RUN
 ;   7  %LOCALAPPDATA%\Veraldar\install-report.txt: versions, each step, the last 40 log lines (masked)
@@ -28,12 +29,17 @@ Unicode true
   !define VIVERSION "0.0.0.0"
 !endif
 !ifndef JOIN_SH
-  !define JOIN_SH "..\root\install\join.sh"
+  !define JOIN_SH "..\root\install\root.sh"
 !endif
 !ifndef OUTFILE
   !define OUTFILE "Veraldar-Setup-${APPVERSION}.exe"
 !endif
-!define TRUNK_DEFAULT "https://ap.veraldar.org"
+; v1: no built-in trunk. The default is where this exe was downloaded from: a folder the trunk's
+; page names (the browser saves Veraldar-Setup-<version>.exe into <Downloads>/<something>), else
+; the address screen asks. (TRUNK_DEFAULT stays overridable for tests: -DTRUNK_DEFAULT=url.)
+!ifndef TRUNK_DEFAULT
+  !define TRUNK_DEFAULT ""
+!endif
 !define UNINST_KEY  "Software\Microsoft\Windows\CurrentVersion\Uninstall\Veraldar"
 !define RUNONCE_KEY "Software\Microsoft\Windows\CurrentVersion\RunOnce"
 !define NTCV_KEY    "SOFTWARE\Microsoft\Windows NT\CurrentVersion"
@@ -500,7 +506,7 @@ FunctionEnd
 Section "-prepare"
   SetOutPath "$INSTDIR"
   File "wsl-bootstrap.sh"
-  File "/oname=join.sh" "${JOIN_SH}"
+  File "/oname=root.sh" "${JOIN_SH}"
   File "launcher.bat"
   File "keepalive.vbs"
   Delete "$INSTDIR\status.ini"
@@ -737,7 +743,7 @@ Function AddressLeave
     IntOp $3 $3 + 1
   ${Loop}
   ${If} $2 = 0
-    MessageBox MB_ICONEXCLAMATION|MB_OK "The address starts with https://, like ${TRUNK_DEFAULT}"
+    MessageBox MB_ICONEXCLAMATION|MB_OK "The address starts with https://, like https://trunk.example.org (your trunk, what your phone uses)"
     Abort
   ${EndIf}
   StrCpy $Trunk $0
@@ -901,6 +907,115 @@ Function ModelShow
   GetDlgItem $1 $HWNDPARENT 1
   SendMessage $1 ${WM_SETTEXT} 0 "STR:Connect"
   nsDialogs::Show
+FunctionEnd
+
+Function TrunkFromExeDir ; the folder this exe was saved into (the trunk's download page names it) -> $Trunk
+  ; $EXEDIR is like C:\Users\me\Downloads\ljoolq.veraldar.org (the browser names the folder after the
+  ; link it followed). Take the LAST path segment; if it looks like a host name (letters, digits, dots,
+  ; dashes, at least one dot), the trunk is https://<it>. Anything else: no guess (the address page asks).
+  StrCpy $0 $EXEDIR
+  StrCpy $1 ""
+  rd:
+    StrCpy $2 $0 1 -1
+    ${If} $2 == "\\"
+      StrCpy $1 $0 "" -1
+      Goto rdone
+    ${EndIf}
+    StrCpy $0 $0 -1
+    ${If} $0 == ""
+      StrCpy $1 ""
+      Goto rdone
+    ${EndIf}
+    StrLen $3 $0
+    ${If} $3 > 200
+      Goto rdone
+    ${EndIf}
+    Goto rd
+  rdone:
+  StrCpy $1 $1 "" 1
+  ${If} $1 == ""
+    StrCpy $1 $EXEDIR
+  ${EndIf}
+  ; $1 = the last segment (maybe with the .exe tail already cut by the \\ split; also drop a trailing
+  ; "Veraldar-Setup-x.y.z.exe" style file name if $EXEDIR pointed at a file-less path)
+  StrCpy $2 0
+  ok:
+    StrCpy $3 $1 1 $2
+    ${If} $3 == ""
+      Goto okdone
+    ${EndIf}
+    ${If} $3 == "."
+    ${OrIf} $3 == "-"
+    ${OrIf} $3 S== $3
+      IntOp $2 $2 + 1
+      Goto ok
+    ${EndIf}
+    StrCpy $1 ""
+  okdone:
+  ${If} $1 != ""
+    StrLen $2 $1
+    ${If} $2 > 1
+      StrCpy $2 $1 1
+      ${If} $2 == "-"
+        StrCpy $1 ""
+      ${EndIf}
+    ${EndIf}
+  ${EndIf}
+  ${If} $1 != ""
+    Push $1
+    Call IsHostName
+    Pop $2
+    ${If} $2 == 1
+      StrCpy $Trunk "https://$1"
+      ${Log} "trunk from the download folder: $Trunk"
+    ${EndIf}
+  ${EndIf}
+FunctionEnd
+
+Function IsHostName ; $1 on the stack -> 1 when it looks like a DNS host (dot, and only [A-Za-z0-9.-])
+  Exch $1
+  Push $2
+  Push $3
+  StrCpy $2 0
+  StrCpy $3 0   ; dots seen
+  hn:
+    StrCpy $4 $1 1 $2
+    ${If} $4 == ""
+      Goto hndone
+    ${EndIf}
+    ${If} $4 == "."
+      IntOp $3 $3 + 1
+    ${Else}
+      StrCpy $5 "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-"
+      StrCpy $6 0
+      hfind:
+        StrCpy $7 $5 1 $6
+        ${If} $7 == ""
+          StrCpy $2 -1
+          Goto hndone
+        ${EndIf}
+        ${If} $7 S== $4
+          Goto hnext
+        ${EndIf}
+        IntOp $6 $6 + 1
+        Goto hfind
+    ${EndIf}
+    hnext:
+      IntOp $2 $2 + 1
+      Goto hn
+  hndone:
+  ${If} $2 == -1
+    StrCpy $1 0
+  ${ElseIf} $3 < 1
+    StrCpy $1 0
+  ${ElseIf} $2 < 4
+    StrCpy $1 0
+  ${Else}
+    StrCpy $1 1
+  ${EndIf}
+  Pop $3
+  Pop $2
+  Exch $1
 FunctionEnd
 
 Function UrlHost ; $0 an http(s):// address -> $0 its host[:port] only (what is logged: no user:pass@, no path, no ?key=)
@@ -1242,7 +1357,7 @@ Function DoneShow
     StrCpy $4 "Nobody approved within 10 minutes."
     StrCpy $5 "Run Setup again for a new code."
   ${Else}
-    StrCpy $4 "The trunk did not let this PC join."
+    StrCpy $4 "The trunk did not let this PC in."
   ${EndIf}
   !insertmacro MUI_HEADER_TEXT "$3" " "
   nsDialogs::Create 1018
@@ -1316,6 +1431,9 @@ Function .onInit
   ${If} $Trunk == ""
     StrCpy $Trunk "${TRUNK_DEFAULT}"
   ${EndIf}
+  ${If} $Trunk == ""
+    Call TrunkFromExeDir
+  ${EndIf}
   StrCpy $JoinProc 0
   CreateFont $FontBig "Segoe UI" 12 600
   CreateFont $FontCode "Segoe UI" 26 700
@@ -1370,14 +1488,14 @@ Section "Uninstall"
   ${If} $Distro != ""
   ${AndIf} $LUser != ""
     DetailPrint "Stopping Veraldar"
-    nsExec::ExecToStack /TIMEOUT=60000 '"$Wsl" -d $Distro -u $LUser --cd "$INSTDIR" -e bash ./join.sh --stop'
+    nsExec::ExecToStack /TIMEOUT=60000 '"$Wsl" -d $Distro -u $LUser --cd "$INSTDIR" -e bash ./root.sh --stop'
     Pop $0
     Pop $0
   ${EndIf}
   Delete "$SMSTARTUP\Veraldar.lnk"
   DeleteRegValue HKCU "${RUNONCE_KEY}" "Veraldar"
   Delete "$INSTDIR\wsl-bootstrap.sh"
-  Delete "$INSTDIR\join.sh"
+  Delete "$INSTDIR\root.sh"
   Delete "$INSTDIR\launcher.bat"
   Delete "$INSTDIR\keepalive.vbs"
   Delete "$INSTDIR\Veraldar-Setup.exe"

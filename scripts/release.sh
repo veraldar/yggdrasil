@@ -28,7 +28,7 @@
 #   sni-443.py                              the :443 router trunk.sh --behind-proxy installs
 #   yggdrasil-VERSION-macos-aarch64.tar.gz  (--mac-host) a joined root on an Apple-silicon Mac: bin/ yggdrasil ·
 #       bifrost-net-root, root/install/, trunk/scripts/root-dial.py, RELEASE, RELEASE-KEY.pub, allowed_signers
-#   Veraldar-Setup-VERSION.exe              the Windows installer (scripts/build-win.sh; embeds this join.sh)
+#   Veraldar-Setup-VERSION.exe              the Windows installer (scripts/build-win.sh; embeds this root.sh)
 #   SHA256SUMS · SHA256SUMS.sig             an OpenSSH signature (ssh-keygen -Y sign -n yggdrasil-release)
 #
 # Every installer embeds the release key's allowed_signers line (YGG_SIGNER=…) and refuses a release whose
@@ -94,7 +94,7 @@ if [ ! -f "$ROOT/RELEASE-KEY.pub" ]; then
   printf '    %s\n' "$SIGNER"
 fi
 REAL_SIGNER=$(cat "$ROOT/allowed_signers")
-INSTALLERS=(root/install/install.sh root/install/join.sh trunk/install/trunk.sh root/install/rootjoin.py)
+INSTALLERS=(root/install/install.sh root/install/join.sh root/install/root.sh trunk/install/trunk.sh root/install/rootjoin.py root/install/rootjoin-v1.py)
 for f in "${INSTALLERS[@]}"; do   # every installer embeds the REAL key, whatever signs this release
   got=$(sed -n "s/^YGG_SIGNER *= *'\(.*\)'\$/\1/p" "$ROOT/$f" | head -1)
   [ "$got" = "$REAL_SIGNER" ] || die "$f embeds another release key (YGG_SIGNER) than allowed_signers — refusing to sign"
@@ -342,8 +342,9 @@ if command -v objdump >/dev/null; then
 else
   printf '\033[1;33m!!\033[0m  %s\n' "no objdump here: the glibc needs of the binaries are not checked (binutils)" >&2
 fi
-for f in root/install/install.sh root/install/join.sh trunk/install/trunk.sh root/install/pair.sh; do bash -n "$STAGE/$f" || die "$f: syntax"; done
+for f in root/install/install.sh root/install/join.sh root/install/root.sh trunk/install/trunk.sh root/install/pair.sh; do bash -n "$STAGE/$f" || die "$f: syntax"; done
 python3 -c "import ast,sys; ast.parse(open(sys.argv[1]).read())" "$STAGE/root/install/rootjoin.py" || die "rootjoin.py: syntax"
+python3 -c "import ast,sys; ast.parse(open(sys.argv[1]).read())" "$STAGE/root/install/rootjoin-v1.py" || die "rootjoin-v1.py: syntax"
 
 # the macOS stage: what a joined root needs and nothing else (no app, no voice: those live on the home computer)
 MSTAGE=$CACHE/stage-macos/yggdrasil-$VERSION
@@ -371,6 +372,7 @@ tar --sort=name --owner=0 --group=0 --numeric-owner --mtime="@$EPOCH" -C "$(dirn
   gzip -n -6 >"$OUT/$TGZ"
 install -m 755 "$STAGE/root/install/install.sh" "$OUT/install.sh"
 install -m 755 "$STAGE/root/install/join.sh" "$OUT/join.sh"
+install -m 755 "$STAGE/root/install/root.sh" "$OUT/root.sh"
 install -m 755 "$STAGE/trunk/install/trunk.sh" "$OUT/trunk.sh"
 install -m 755 "$STAGE/bin/bifrost-net" "$OUT/bifrost-net-$VERSION-linux-x86_64"
 install -m 755 "$STAGE/bin/bifrost-net-root" "$OUT/bifrost-net-root-$VERSION-linux-x86_64"
@@ -383,7 +385,7 @@ else
 fi
 # Windows: the installer embeds this release's stamped join.sh, so it is built here, before SHA256SUMS is signed
 if [ -x "$ROOT/scripts/build-win.sh" ]; then
-  "$ROOT/scripts/build-win.sh" "$VERSION" "$STAGE/root/install/join.sh" "$OUT" || die "the Windows installer did not build"
+  "$ROOT/scripts/build-win.sh" "$VERSION" "$STAGE/root/install/root.sh" "$OUT" || die "the Windows installer did not build"
   [ -s "$OUT/Veraldar-Setup-$VERSION.exe" ] || die "scripts/build-win.sh made no $OUT/Veraldar-Setup-$VERSION.exe"
 else
   warn "no Windows installer in this release (scripts/build-win.sh is missing)"
