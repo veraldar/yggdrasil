@@ -29,6 +29,8 @@ import {
   engineLabel,
   roleTag,
 } from '@/lib/agents';
+import { useTrunkMode } from '@/lib/auth-mode';
+import { onPinState, pinState } from '@/lib/pinned';
 import { rootOfParam } from '@/lib/root-param';
 import {
   type WorldId,
@@ -54,10 +56,57 @@ type RootSettingsResp = {
     mem_gb?: number | null;
   };
   models?: string[];
+  has_model?: boolean;
   roles?: AgentRow[];
   engines?: EngineRow[];
   joined_at?: string | null;
 };
+
+/** Provider presets from root/install/model-step.sh:19-33 (same choices and words). */
+const MODEL_PRESETS = [
+  {
+    id: 'zai',
+    label: 'Z AI',
+    url: 'https://api.z.ai/api/anthropic',
+    style: 'anthropic' as const,
+    model: 'glm-5.3-flash',
+    models: ['glm-5.3-flash', 'glm-5.3', 'glm-5.2'],
+  },
+  {
+    id: 'openrouter',
+    label: 'OpenRouter',
+    url: 'https://openrouter.ai/api/v1',
+    style: 'openai' as const,
+    model: 'openai/gpt-4o-mini',
+    models: [] as string[],
+  },
+  {
+    id: 'anthropic',
+    label: 'Anthropic',
+    url: 'https://api.anthropic.com',
+    style: 'anthropic' as const,
+    model: 'claude-fable-5-2',
+    models: ['claude-fable-5-2', 'claude-opus-5-5', 'claude-sonnet-5-5', 'claude-haiku-5-5'],
+  },
+  {
+    id: 'openai',
+    label: 'OpenAI',
+    url: 'https://api.openai.com/v1',
+    style: 'openai' as const,
+    model: 'gpt-4o-mini',
+    models: [] as string[],
+  },
+  {
+    id: 'other',
+    label: 'Other',
+    url: '',
+    style: 'openai' as const,
+    model: '',
+    models: [] as string[],
+  },
+] as const;
+
+type ProviderId = (typeof MODEL_PRESETS)[number]['id'] | `same:${string}`;
 
 const msOf = (t?: number | null) => (!t ? 0 : t < 1e12 ? t * 1000 : t);
 
@@ -95,6 +144,35 @@ function RootSettings({ rootId }: { rootId: string }) {
   const [openEng, setOpenEng] = useState('');
   const [engText, setEngText] = useState('');
   const [saveErr, setSaveErr] = useState('');
+  // v1 trunk-only model form (§4.1 item 13, §5.6 F7): disabled unless pin state is "end to end"
+  const trunk = useTrunkMode();
+  const [pin, setPin] = useState(() => pinState().state);
+  const [otherRoots, setOtherRoots] = useState<string[]>([]);
+  const [provider, setProvider] = useState<ProviderId>('zai');
+  const [mUrl, setMUrl] = useState<string>(MODEL_PRESETS[0].url);
+  const [mStyle, setMStyle] = useState<'openai' | 'anthropic'>(MODEL_PRESETS[0].style);
+  const [mModel, setMModel] = useState<string>(MODEL_PRESETS[0].model);
+  const [mKey, setMKey] = useState('');
+  const [modelBusy, setModelBusy] = useState(false);
+  const [modelSaved, setModelSaved] = useState('');
+
+  useEffect(() => onPinState((s) => setPin(s)), []);
+  useEffect(() => {
+    if (!trunk) return;
+    void fetch('/api/roots', { cache: 'no-store' })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d: { home?: { name?: string }; roots?: Array<{ name?: string; id?: string }> } | null) => {
+        if (!d) return;
+        const names: string[] = [];
+        if (d.home?.name && d.home.name !== rootId) names.push(d.home.name);
+        for (const x of d.roots ?? []) {
+          const n = x.name || x.id || '';
+          if (n && n !== rootId && !names.includes(n)) names.push(n);
+        }
+        setOtherRoots(names);
+      })
+      .catch(() => {});
+  }, [trunk, rootId]);
 
   useEffect(() => {
     setMounted(true);
@@ -251,6 +329,44 @@ function RootSettings({ rootId }: { rootId: string }) {
     setOpenEng('');
   };
 
+  const pickProvider = (id: ProviderId) => {
+    setProvider(id);
+    setModelSaved('');
+    if (id.startsWith('same:')) return;
+    const p = MODEL_PRESETS.find((x) => x.id === id);
+    if (!p) return;
+    setMUrl(p.url);
+    setMStyle(p.style);
+    setMModel(p.model);
+  };
+
+  const saveModel = async () => {
+    if (modelBusy || !reachable || pin !== 'pinned') return;
+    setModelBusy(true);
+    setModelSaved('');
+    setSaveErr('');
+    try {
+      const body = provider.startsWith('same:')
+        ? { same_as: provider.slice(5) }
+        : {
+            base_url: mUrl.trim(),
+            style: mStyle,
+            model: mModel.trim(),
+            api_key: mKey,
+            ...(MODEL_PRESETS.find((x) => x.id === provider)?.models.length
+              ? { models: MODEL_PRESETS.find((x) => x.id === provider)!.models.join(',') }
+              : {}),
+          };
+      const d = await put<{ ok?: boolean; model?: string; restarting?: boolean }>('model', body);
+      if (d) {
+        setMKey('');
+        setModelSaved(`saved ${d.model || mModel} — restarting brain…`);
+      }
+    } finally {
+      setModelBusy(false);
+    }
+  };
+
   const removeThisRoot = async () => {
     if (busy) return;
     setBusy(true);
@@ -308,6 +424,116 @@ function RootSettings({ rootId }: { rootId: string }) {
         >
           {saveErr}
         </p>
+      )}
+
+      {/* v1 model form (§4.1 item 13, §5.6 F7): shown in trunk mode when the root has no model;
+          disabled unless the pinned channel is "end to end" so the key never crosses unpinned TLS */}
+      {trunk && settings && (settings.has_model === false || !(settings.models && settings.models.length > 0)) && (
+        <section
+          className={`oz-blk ${reachable ? '' : 'oz-gone'}`}
+          data-testid="root-model-block"
+          data-pin-state={pin}
+        >
+          <h2>set a model</h2>
+          {pin !== 'pinned' && (
+            <p className="mb-2 text-[11px] text-[var(--oz-dim)]" data-testid="model-pin-guard">
+              disabled until the channel is end to end
+            </p>
+          )}
+          <div className="oz-chips mb-2.5">
+            {MODEL_PRESETS.map((p) => (
+              <button
+                key={p.id}
+                type="button"
+                disabled={pin !== 'pinned' || !reachable || modelBusy}
+                aria-pressed={provider === p.id}
+                data-testid={`model-provider-${p.id}`}
+                onClick={() => pickProvider(p.id)}
+              >
+                {p.label}
+              </button>
+            ))}
+            {otherRoots.map((r) => (
+              <button
+                key={`same:${r}`}
+                type="button"
+                disabled={pin !== 'pinned' || !reachable || modelBusy}
+                aria-pressed={provider === `same:${r}`}
+                data-testid={`model-provider-same-${r}`}
+                onClick={() => pickProvider(`same:${r}`)}
+              >
+                same as {r}
+              </button>
+            ))}
+          </div>
+          {!provider.startsWith('same:') && (
+            <div className="flex flex-col gap-2">
+              {provider === 'other' && (
+                <>
+                  <input
+                    value={mUrl}
+                    onChange={(e) => setMUrl(e.target.value)}
+                    disabled={pin !== 'pinned' || !reachable || modelBusy}
+                    placeholder="https://…"
+                    aria-label="Provider address"
+                    data-testid="model-url"
+                    className="oz-field"
+                  />
+                  <div className="oz-chips">
+                    {(['openai', 'anthropic'] as const).map((st) => (
+                      <button
+                        key={st}
+                        type="button"
+                        disabled={pin !== 'pinned' || !reachable || modelBusy}
+                        aria-pressed={mStyle === st}
+                        data-testid={`model-style-${st}`}
+                        onClick={() => setMStyle(st)}
+                      >
+                        {st}
+                      </button>
+                    ))}
+                  </div>
+                </>
+              )}
+              <input
+                value={mModel}
+                onChange={(e) => setMModel(e.target.value)}
+                disabled={pin !== 'pinned' || !reachable || modelBusy}
+                placeholder="model name"
+                aria-label="Model"
+                data-testid="model-name"
+                className="oz-field"
+              />
+              <input
+                type="password"
+                autoComplete="off"
+                value={mKey}
+                onChange={(e) => setMKey(e.target.value)}
+                disabled={pin !== 'pinned' || !reachable || modelBusy}
+                placeholder={provider === 'other' ? 'API key (optional on local network)' : 'API key'}
+                aria-label="API key"
+                data-testid="model-key"
+                className="oz-field"
+              />
+            </div>
+          )}
+          <div className="mt-2.5 flex items-center gap-2">
+            <button
+              type="button"
+              disabled={pin !== 'pinned' || !reachable || modelBusy || (!provider.startsWith('same:') && (!mModel.trim() || !mUrl.trim()))}
+              data-testid="model-save"
+              className="oz-k ok px-3"
+              onClick={() => void saveModel()}
+            >
+              {modelBusy ? 'saving…' : 'save model'}
+            </button>
+            {modelSaved && (
+              <span className="text-[11px] text-[var(--oz-success)]" data-testid="model-saved">
+                {modelSaved}
+              </span>
+            )}
+          </div>
+        </section>
       )}
 
       {/* world (saved for that computer) */}

@@ -7,7 +7,13 @@
  * Hidden when there is no pin (the box's own network, the tailnet).
  */
 import { useEffect, useState } from 'react';
-import { type PinState, bootPinned, onPinState, pinState } from '@/lib/pinned';
+import {
+  PIN_CHANGED_ALARM,
+  type PinState,
+  bootPinned,
+  onPinState,
+  pinState,
+} from '@/lib/pinned';
 
 // as early as the page's code runs: requests wait for the channel instead of leaking ahead of it
 if (typeof window !== 'undefined') bootPinned();
@@ -32,6 +38,8 @@ export function PinStateLine() {
     window.addEventListener('bifrost:unpaired', on);
     return () => window.removeEventListener('bifrost:unpaired', on);
   }, []);
+  const text =
+    s.state === 'refused' && s.why === PIN_CHANGED_ALARM ? PIN_CHANGED_ALARM : SAY[s.state];
   return (
     // the look and the place are styles/brand.css § pin (a caption like the band's, and a spot
     // no page's chrome uses — on the front page, the roots' top-right corner)
@@ -39,11 +47,12 @@ export function PinStateLine() {
       className="oz-pin"
       data-testid="pin-state"
       data-state={s.state}
+      role={s.state === 'refused' ? 'alert' : undefined}
       title={s.why}
       hidden={s.state === 'off' || unpaired}
     >
       <i aria-hidden="true" />
-      {SAY[s.state]}
+      {text}
     </div>
   );
 }

@@ -899,6 +899,211 @@ pub async fn post_share(State(st): State<AppState>, ConnectInfo(addr): ConnectIn
     Json(json!({ "root": name, "share": on })).into_response()
 }
 
+fn default_env_file() -> std::path::PathBuf {
+    if let Ok(p) = std::env::var("YGG_ENV_FILE") {
+        if !p.trim().is_empty() {
+            return std::path::PathBuf::from(p);
+        }
+    }
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+    std::path::PathBuf::from(home).join(".config/yggdrasil/yggdrasil.env")
+}
+
+#[derive(Debug, Clone)]
+struct ModelUpdate {
+    base_url: String,
+    style: String,
+    model: String,
+    api_key: String,
+    models: String,
+    vision: String,
+}
+
+fn parse_model_update(body: &Value) -> Result<ModelUpdate, String> {
+    let no_nl = |s: &str, name: &str| -> Result<String, String> {
+        if s.contains('\n') || s.contains('\r') {
+            return Err(format!("{name} must not contain newlines"));
+        }
+        Ok(s.to_string())
+    };
+    let base_url = body["base_url"].as_str().map(str::trim).unwrap_or("");
+    if !(base_url.starts_with("https://") || base_url.starts_with("http://")) || base_url.len() <= 8 {
+        return Err("base_url must start with https:// or http://".into());
+    }
+    let base_url = no_nl(base_url, "base_url")?;
+    let style = body["style"].as_str().map(str::trim).unwrap_or("openai").to_ascii_lowercase();
+    if style != "openai" && style != "anthropic" {
+        return Err("style must be openai or anthropic".into());
+    }
+    let model = body["model"].as_str().map(str::trim).unwrap_or("");
+    if model.is_empty() {
+        return Err("model required".into());
+    }
+    let model = no_nl(model, "model")?;
+    let api_key = no_nl(body["api_key"].as_str().unwrap_or(""), "api_key")?;
+    let models_raw = body["models"].as_str().map(str::trim).filter(|s| !s.is_empty()).unwrap_or(&model);
+    let models = no_nl(models_raw, "models")?;
+    let vision = no_nl(body["vision"].as_str().map(str::trim).unwrap_or(""), "vision")?;
+    Ok(ModelUpdate { base_url, style, model, api_key, models, vision })
+}
+
+fn write_model_env(path: &std::path::Path, upd: &ModelUpdate) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("create env dir: {e}"))?;
+    }
+    let managed = [
+        "YGG_UPSTREAM_BASE_URL=",
+        "YGG_UPSTREAM_STYLE=",
+        "YGG_UPSTREAM_MODEL=",
+        "YGG_UPSTREAM_API_KEY=",
+        "YGG_MODELS=",
+        "YGG_VISION_MODELS=",
+    ];
+    let mut kept: Vec<String> = Vec::new();
+    if let Ok(existing) = std::fs::read_to_string(path) {
+        for line in existing.lines() {
+            let trimmed = line.trim_start().strip_prefix("export ").unwrap_or(line.trim_start());
+            if managed.iter().any(|p| trimmed.starts_with(p)) {
+                continue;
+            }
+            kept.push(line.to_string());
+        }
+    }
+    kept.push(format!("YGG_UPSTREAM_BASE_URL={}", upd.base_url));
+    kept.push(format!("YGG_UPSTREAM_STYLE={}", upd.style));
+    kept.push(format!("YGG_UPSTREAM_MODEL={}", upd.model));
+    if !upd.api_key.is_empty() {
+        kept.push(format!("YGG_UPSTREAM_API_KEY={}", upd.api_key));
+    }
+    kept.push(format!("YGG_MODELS={}", upd.models));
+    if !upd.vision.is_empty() {
+        kept.push(format!("YGG_VISION_MODELS={}", upd.vision));
+    }
+    let content = format!("{}\n", kept.join("\n"));
+    let tmp = path.with_extension(format!("env.tmp.{}", std::process::id()));
+    {
+        use std::io::Write;
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600);
+        }
+        let mut f = opts.open(&tmp).map_err(|e| format!("open env tmp: {e}"))?;
+        f.write_all(content.as_bytes()).map_err(|e| format!("write env tmp: {e}"))?;
+        f.sync_all().map_err(|e| format!("sync env tmp: {e}"))?;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
+    }
+    std::fs::rename(&tmp, path).map_err(|e| format!("rename env: {e}"))?;
+    Ok(())
+}
+
+fn apply_self_model(st: &AppState, upd: &ModelUpdate, env_path: &std::path::Path, restart: bool) -> Response {
+    if let Err(e) = write_model_env(env_path, upd) {
+        return err(StatusCode::INTERNAL_SERVER_ERROR, &e);
+    }
+    // Never log api_key or base_url query params
+    eprintln!("root {}: model updated to {} ({}) — restarting={restart}", st.config.peers.me, upd.model, upd.style);
+    if restart {
+        tokio::spawn(async {
+            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+            std::process::exit(75);
+        });
+    }
+    Json(json!({
+        "ok": true,
+        "root": st.config.peers.me,
+        "model": upd.model,
+        "style": upd.style,
+        "restarting": restart,
+    }))
+    .into_response()
+}
+
+/// `PUT /root/model` — updates THIS root's upstream model (writes its 0600 env file and exits for
+/// its supervisor to restart). Allowed only from loopback (the local app) or from the home root
+/// over WireGuard (`x-ygg-via: wg`). Keys are never logged.
+pub async fn put_self_model(
+    State(st): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<std::net::SocketAddr>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> Response {
+    if peers::from_peer(&headers) {
+        let via = headers.get("x-ygg-via").and_then(|v| v.to_str().ok()).unwrap_or("");
+        if via != "wg" {
+            return err(StatusCode::FORBIDDEN, "model updates from another root require the root link (WireGuard)");
+        }
+        if let Some(home) = &st.config.peers.home {
+            let from = headers.get("x-ygg-from").and_then(|v| v.to_str().ok()).unwrap_or("");
+            if from != home {
+                return err(StatusCode::FORBIDDEN, "only the home root may change this computer's model");
+            }
+        }
+    } else if !addr.ip().is_loopback() {
+        return err(StatusCode::FORBIDDEN, "only this computer may set its model");
+    }
+    let upd = match parse_model_update(&body) {
+        Ok(u) => u,
+        Err(e) => return err(StatusCode::BAD_REQUEST, &e),
+    };
+    let env_path = default_env_file();
+    let restart = std::env::var("YGG_TEST_NO_EXIT").as_deref() != Ok("1");
+    apply_self_model(&st, &upd, &env_path, restart)
+}
+
+/// `PUT /root/{name}/model` — loopback-only (from the app): updates `name`'s model (directly for
+/// this root, or over WireGuard for another root). Supports `{same_as: "<other_root>"}`.
+pub async fn put_peer_model(
+    State(st): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<std::net::SocketAddr>,
+    headers: HeaderMap,
+    Path(name): Path<String>,
+    Json(body): Json<Value>,
+) -> Response {
+    if !addr.ip().is_loopback() || peers::from_peer(&headers) {
+        return err(StatusCode::FORBIDDEN, "only this computer sets a root's model");
+    }
+    let payload = if let Some(src) = body["same_as"].as_str().map(str::trim).filter(|s| !s.is_empty()) {
+        if src == st.config.peers.me {
+            model_settings(&st)
+        } else {
+            if st.config.peers.url(src).is_none() {
+                return err(StatusCode::NOT_FOUND, &format!("unknown root {src}"));
+            }
+            match peers::call(&st, src, "GET", "/root/model", None, 8).await {
+                Ok(v) => v,
+                Err(e) => return err(StatusCode::BAD_GATEWAY, &e),
+            }
+        }
+    } else {
+        body
+    };
+    let upd = match parse_model_update(&payload) {
+        Ok(u) => u,
+        Err(e) => return err(StatusCode::BAD_REQUEST, &e),
+    };
+    if name == st.config.peers.me {
+        let env_path = default_env_file();
+        let restart = std::env::var("YGG_TEST_NO_EXIT").as_deref() != Ok("1");
+        return apply_self_model(&st, &upd, &env_path, restart);
+    }
+    if st.config.peers.url(&name).is_none() {
+        return err(StatusCode::NOT_FOUND, &format!("unknown root {name}"));
+    }
+    match peers::call(&st, &name, "PUT", "/root/model", Some(payload), 12).await {
+        Ok(v) => Json(v).into_response(),
+        Err(e) if e.contains(" 400 ") => err(StatusCode::BAD_REQUEST, &e),
+        Err(e) if e.contains(" 403 ") => err(StatusCode::FORBIDDEN, &e),
+        Err(e) => err(StatusCode::BAD_GATEWAY, &e),
+    }
+}
+
 // ── routes ───────────────────────────────────────────────────────────────────
 
 fn err(code: StatusCode, msg: &str) -> Response {
@@ -985,6 +1190,7 @@ pub async fn get_settings(State(st): State<AppState>, Path(name): Path<String>) 
         let roles = st.config.profiles.read().unwrap().catalog();
         let engines = crate::engines_json(&st);
         let models: Vec<String> = st.config.models.clone();
+        let has_model = !st.config.model.trim().is_empty() && !st.config.base_url.trim().is_empty();
         return Json(json!({
             "root": me,
             "home": true,
@@ -994,6 +1200,7 @@ pub async fn get_settings(State(st): State<AppState>, Path(name): Path<String>) 
             "theme_rev": theme_rev,
             "hardware": desc["hardware"],
             "models": models,
+            "has_model": has_model,
             "roles": roles,
             "engines": engines,
         }))
@@ -1817,5 +2024,45 @@ mod tests {
         // removing lab deletes its snapshot too
         remove(&home2, "lab");
         assert!(!home2.data_dir.join("roots/lab.json").exists());
+    }
+
+    #[test]
+    fn model_env_writes_0600_preserves_other_keys_and_validates() {
+        let dir = std::env::temp_dir().join(format!("ygg-model-env-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("yggdrasil.env");
+        std::fs::write(&path, "YGG_LISTEN=127.0.0.1:4096\nYGG_UPSTREAM_MODEL=old\nYGG_UPSTREAM_API_KEY=old-key\n").unwrap();
+
+        let bad_url = parse_model_update(&json!({ "base_url": "ftp://x", "style": "openai", "model": "m" }));
+        assert!(bad_url.is_err());
+        let bad_nl = parse_model_update(&json!({ "base_url": "https://api.openai.com/v1", "style": "openai", "model": "m\nEVIL=1" }));
+        assert!(bad_nl.is_err());
+
+        let upd = parse_model_update(&json!({
+            "base_url": "https://api.z.ai/api/anthropic",
+            "style": "anthropic",
+            "model": "glm-5.3-flash",
+            "api_key": "sk-test-secret",
+            "models": "glm-5.3-flash,glm-5.3"
+        }))
+        .unwrap();
+        write_model_env(&path, &upd).unwrap();
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "env file must be 0600");
+        }
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("YGG_LISTEN=127.0.0.1:4096"));
+        assert!(text.contains("YGG_UPSTREAM_BASE_URL=https://api.z.ai/api/anthropic"));
+        assert!(text.contains("YGG_UPSTREAM_STYLE=anthropic"));
+        assert!(text.contains("YGG_UPSTREAM_MODEL=glm-5.3-flash"));
+        assert!(text.contains("YGG_UPSTREAM_API_KEY=sk-test-secret"));
+        assert!(text.contains("YGG_MODELS=glm-5.3-flash,glm-5.3"));
+        assert!(!text.contains("old-key"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

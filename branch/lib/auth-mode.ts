@@ -23,6 +23,9 @@ export function publishBuild(b: BuildInfo): void {
 
 export const isTrunk = (b: BuildInfo | null) => b?.auth === 'trunk';
 
+/** resolves once FreshReload has published /api/build (used by non-React modules such as lib/pinned.ts). */
+export const buildReady = (): Promise<BuildInfo> => ready;
+
 /** true once /api/build said trunk mode (false until then, and in tailnet / devices mode). */
 export function useTrunkMode(): boolean {
   const [trunk, setTrunk] = useState(() => isTrunk(known));

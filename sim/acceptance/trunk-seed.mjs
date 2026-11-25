@@ -192,11 +192,15 @@ function front() {
   // http on loopback (Chromium would keep a Secure cookie on 127.0.0.1 too; curl would not).
   const signIn = (did, ip, lifeS = 900) => {
     const r = `bfnr-${randomBytes(32).toString('base64url')}`;
+    const accessToken = mint({ did, ip, lifeS });
     refresh.set(createHash('sha256').update(r).digest('hex'), { did, ip });
-    return [
-      `bifrost_device=${mint({ did, ip, lifeS })}; HttpOnly; SameSite=Strict; Path=/`,
-      `bifrost_refresh=${r}; HttpOnly; SameSite=Strict; Path=/t/auth`,
-    ];
+    return {
+      accessToken,
+      cookies: [
+        `bifrost_device=${accessToken}; HttpOnly; SameSite=Strict; Path=/`,
+        `bifrost_refresh=${r}; HttpOnly; SameSite=Strict; Path=/t/auth`,
+      ],
+    };
   };
   // the device a /t/* call speaks for: its cookie — or, under --sign-in auto, the twin's device (the
   // same rule as the relay: a cookie-less request is signed in on the way through)
@@ -225,7 +229,7 @@ function front() {
       const did = /^dev_[A-Za-z0-9_-]{1,64}$/.test(u.searchParams.get('did') || '') ? u.searchParams.get('did') : 'dev_twin';
       const life = Math.max(1, Math.min(900, Number(u.searchParams.get('life_s')) || 900));
       const next = (u.searchParams.get('next') || '/').startsWith('/') ? u.searchParams.get('next') || '/' : '/';
-      return res.writeHead(302, { location: next, 'set-cookie': signIn(did, ipOf(req), life), 'cache-control': 'no-store' }).end();
+      return res.writeHead(302, { location: next, 'set-cookie': signIn(did, ipOf(req), life).cookies, 'cache-control': 'no-store' }).end();
     }
     if (p === '/t/auth/refresh' && req.method === 'POST') {
       const r = cookies(req).bifrost_refresh || '';
@@ -234,7 +238,8 @@ function front() {
       const s = state();
       if (!rec || s.deny.some((d) => d.did === rec.did)) return json(res, 401, { why: 'invalid', reauth: 'login' });
       refresh.delete(h);
-      return json(res, 200, { ok: true }, { 'set-cookie': signIn(rec.did, ipOf(req)) }); // a full 15 min again
+      const issued = signIn(rec.did, ipOf(req));
+      return json(res, 200, { ok: true, access_token: issued.accessToken }, { 'set-cookie': issued.cookies }); // a full 15 min again
     }
     if (p === '/t/auth/logout' && req.method === 'POST') {
       return json(res, 200, { ok: true }, { 'set-cookie': ['bifrost_device=; Path=/; Max-Age=0', 'bifrost_refresh=; Path=/t/auth; Max-Age=0'] });
