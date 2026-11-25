@@ -1,16 +1,20 @@
 'use client';
 
-/** /settings — about, world, yours. The world list is the theme switch
+/** /settings — about, world, engines, yours. The world list is the theme switch
  *  (components/world-picker.tsx, the same list a computer's settings tab
  *  shows). Tapping applies at once via next-themes — one data-theme
- *  attribute on <html>, transitions suppressed for the swap frame. */
+ *  attribute on <html>, transitions suppressed for the swap frame. Below it:
+ *  the engines block (components/engines-block.tsx) — each engine's default
+ *  model, saved to the brain on tap. */
 import { useEffect, useState } from 'react';
 import { useTheme } from 'next-themes';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
+import { EnginesBlock } from '@/components/engines-block';
 import { LineIcon } from '@/components/line-icon';
 import { HOME_ROOT_KEY, type Tree } from '@/components/roots-sheet';
 import { WorldPicker } from '@/components/world-picker';
+import { type EngineRow } from '@/lib/agents';
 import { VERSION } from '@/lib/version';
 import { VOICE_TEST_SLUG, ensureVoiceTestRoom, setVoiceTest, voiceTestOn } from '@/lib/voice-test';
 import { chosenWorld } from '@/lib/worlds';
@@ -43,6 +47,8 @@ export default function SettingsPage() {
 
   // the home root's name — picking a world here also persists it on the home root
   const [homeRoot, setHomeRoot] = useState('');
+  // the engines' default models (GET /api/engines); null until loaded or on an older brain (404)
+  const [engines, setEngines] = useState<EngineRow[] | null>(null);
 
   useEffect(() => {
     setMounted(true);
@@ -64,6 +70,41 @@ export default function SettingsPage() {
       })
       .catch(() => {});
   }, [setTheme]);
+
+  // load engines on mount; retry on transient errors, stop cleanly on 404 (older brain)
+  useEffect(() => {
+    if (engines) return;
+    let stop = false;
+    let timer: ReturnType<typeof setInterval> | null = null;
+    const clear = () => {
+      if (timer) {
+        clearInterval(timer);
+        timer = null;
+      }
+    };
+    const load = () =>
+      fetch('/api/engines', { cache: 'no-store' })
+        .then(async (r) => {
+          if (stop) return;
+          if (r.status === 404) {
+            clear();
+            return;
+          }
+          const d = await r.json().catch(() => null);
+          if (stop) return;
+          if (r.ok && Array.isArray(d)) {
+            setEngines(d);
+            clear();
+          }
+        })
+        .catch(() => {});
+    void load();
+    timer = setInterval(() => !document.hidden && void load(), 2000);
+    return () => {
+      stop = true;
+      clear();
+    };
+  }, [engines]);
 
   async function toggleVoiceTest() {
     const on = !vt;
@@ -123,8 +164,10 @@ export default function SettingsPage() {
         />
       </section>
 
+      {engines && engines.length > 0 && <EnginesBlock engines={engines} onSaved={setEngines} />}
+
       {/* the simple menu (owner feedback): three rows, nothing else —
-          roles opens the roles and engines; walk-through re-walks in the test room;
+          roles opens the roles page; walk-through re-walks in the test room;
           voice tests toggle their own room */}
       <section className="oz-blk">
         <ul className="oz-kv">

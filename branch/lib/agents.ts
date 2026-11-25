@@ -103,7 +103,7 @@ const WORD: Record<string, string> = {
 };
 /** the small grey word at the right of a list row: the engine (none on the root) */
 export const engineWord = (e?: string | null) => (e && WORD[e]) || '';
-/** what each engine is, in one line (the roles page's engines block) */
+/** what each engine is, in one line (the settings page's engines block) */
 export const ENGINE_NOTE: Record<string, string> = {
   root: "this computer's own models · tools checked by the brain",
   claude: "Anthropic's CLI · its own tools · 5-hour quota",
@@ -111,6 +111,46 @@ export const ENGINE_NOTE: Record<string, string> = {
   opencode: 'its own tools and providers',
   codex: "OpenAI's CLI · its own tools",
 };
+
+export type EngineControlKind = 'free' | 'chips' | 'select';
+
+/** Partition engines into the main visible rows (root · Claude Code · Antigravity) and the ones
+ *  tucked behind the "more engines" fold (opencode · Codex, or any row flagged `more: true`). */
+export function splitEngines(engines: EngineRow[]): { main: EngineRow[]; more: EngineRow[] } {
+  const isMore = (e: EngineRow) => e.more ?? MORE_ENGINES.has(e.name);
+  return {
+    main: engines.filter((e) => !isMore(e)),
+    more: engines.filter(isMore),
+  };
+}
+
+/** Which inline picker an engine opens on tap: free text when it accepts arbitrary ids
+ *  (no models or only ["default"]), chip buttons up to 8 choices, else a <select>. */
+export function engineControlKind(engine: Pick<EngineRow, 'models'>): EngineControlKind {
+  const models = engine.models || [];
+  if (!models.length || (models.length === 1 && models[0] === 'default')) return 'free';
+  return models.length <= 8 ? 'chips' : 'select';
+}
+
+/** Merge the brain's PUT /api/engines/:name response into the engines list. When the brain
+ *  answers an empty/minimal 200 body, the chosen model still applies locally. */
+export function applyEngineSave(
+  engines: EngineRow[],
+  name: string,
+  saved: unknown,
+  fallbackModel: string | null
+): EngineRow[] {
+  const isRow =
+    !!saved &&
+    typeof saved === 'object' &&
+    'name' in saved &&
+    (saved as { name: unknown }).name === name;
+  return engines.map((e) =>
+    e.name === name
+      ? { ...e, ...(isRow ? (saved as Partial<EngineRow>) : { model: fallbackModel }) }
+      : e
+  );
+}
 
 type HarnessLike = { kind?: unknown; attached?: unknown } | string | null | undefined;
 /** the owner's own terminal conversation, continued here: a list row carries its kind as
@@ -222,9 +262,9 @@ export function engineDiff(
 export const ENGINE_FRESH =
   '⚠ the new engine starts fresh: it sees only new messages, not this conversation';
 
-/** a role's three-letter tag: LEA(d), BUI(ld), FIX, REV(iew), RES(earch), a custom one's first
- *  three letters — and the coordinator's is MAI wherever it shows (MAIN here, a proxy of another
- *  root's MAIN, the roles page) */
+/** a role's three-letter tag: LEA(d), BUI(ld), FIX, REV(iew), RES(earch), MAR(keter), a custom
+ *  one's first three letters — and the coordinator's is MAI wherever it shows (MAIN here, a proxy
+ *  of another root's MAIN, the roles page) */
 export const agentTag = (agent: string) =>
   agent === 'coordinator'
     ? 'MAI'
@@ -234,7 +274,7 @@ export const agentTag = (agent: string) =>
         .toUpperCase();
 
 /** the built-in roles in the order the owner reads them (the mockup's); a custom one after */
-const ROLE_ORDER = ['coordinator', 'lead', 'build', 'fix', 'review', 'research'];
+const ROLE_ORDER = ['coordinator', 'lead', 'build', 'fix', 'review', 'research', 'marketer'];
 export const byRole = (a: { name: string }, b: { name: string }) => {
   const i = (n: string) => (ROLE_ORDER.includes(n) ? ROLE_ORDER.indexOf(n) : ROLE_ORDER.length);
   return i(a.name) - i(b.name) || a.name.localeCompare(b.name);
@@ -253,7 +293,7 @@ export const HARNESS_TAG: Record<string, string> = {
 
 /** every row carries one (roles rework 11-22): the badge is the ROLE, never the engine.
  *  MAIN is MAI; the owner's own terminal conversation is TRM (never hired for a job); else
- *  the role's (LEA · BUI · FIX · REV · RES · a custom one's first three letters). */
+ *  the role's (LEA · BUI · FIX · REV · RES · MAR · a custom one's first three letters). */
 export const sessionTag = (s: { agent?: string | null; harness?: HarnessLike }, isMain = false) =>
   isMain ? 'MAI' : isAttached(s.harness) ? 'TRM' : agentTag(roleOf(s.agent));
 

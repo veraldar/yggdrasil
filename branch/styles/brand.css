@@ -62,6 +62,10 @@
   .oz-k.heard::before { content: ''; position: absolute; inset: -6px; border: 1px solid color-mix(in srgb, var(--oz-active) 45%, transparent); animation: oz-ring 1.6s ease-out infinite; pointer-events: none; }
   .oz-k.heard.drop { color: var(--oz-danger); border-color: var(--oz-danger); box-shadow: none; }
   .oz-k.heard.drop::before { display: none; }
+  /* a mark on a key (the roots key: a computer is not up to date), under a badge when both show */
+  .oz-k.mark { color: var(--oz-text); }
+  .oz-k.mark::after { content: ''; position: absolute; top: -3px; right: -3px; width: 7px; height: 7px; background: var(--oz-active); }
+  .oz-k.mark .oz-badge { z-index: 1; }
   .oz-badge {
     position: absolute; top: -7px; right: -7px; min-width: 17px; height: 17px; padding: 0 4px;
     background: var(--oz-text); color: var(--oz-bg); font-size: 10px; line-height: 17px; text-align: center; font-weight: 700;
@@ -645,7 +649,7 @@
   .oz-alist .tag { flex: none; padding: 0 6px; font-size: 10px; line-height: 16px; border: 1px solid var(--oz-border); color: var(--oz-dim); }
   .oz-alist .m { flex: none; margin-left: auto; font-size: 11px; color: var(--oz-dim); }
   .oz-alist .r2 { display: block; margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 10.5px; color: var(--oz-dim); }
-  /* the roles page's engines: a row that opens its model choices in place */
+  /* the settings page's engines: a row that opens its model choices in place */
   .oz-alist li.eng { border-bottom: 1px var(--oz-rule) var(--oz-border); }
   .oz-alist li.eng:last-child { border-bottom: 0; }
   .oz-alist li.eng > button { display: block; width: 100%; min-width: 0; padding: 8px 2px; text-align: left; font-size: 12px; }

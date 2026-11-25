@@ -179,6 +179,15 @@ if [ $BUILD = 1 ]; then
   rm -f "$CACHE/commit"
   if [ $DIRTY = 0 ]; then BUILD_COMMIT=$(git -C "$ROOT" rev-parse HEAD); else BUILD_COMMIT="dirty-$(date +%s)"; fi
   EPOCH=$(git -C "$ROOT" log -1 --format=%ct); printf '%s\n' "$EPOCH" >"$CACHE/epoch"
+  # the brain's build stamp (root/build.rs): the copies below have no git, so it comes in by env. A
+  # --dirty tree whose root part has changes is no commit's build: dev (never a clean id)
+  RP=$("$ROOT/scripts/root-part-id.sh" --paths)
+  # shellcheck disable=SC2086
+  if [ $DIRTY = 0 ] || [ -z "$(git -C "$ROOT" status --porcelain --untracked-files=all -- $RP)" ]; then
+    "$ROOT/scripts/root-part-id.sh" --env HEAD >"$CACHE/build-env"
+  else
+    printf 'YGG_BUILD_ID=dev\nYGG_BUILD_DESCRIBE=%s\n' "$DESCRIBE" >"$CACHE/build-env"
+  fi
 else
   [ -d "$SRC" ] && [ -x "$CACHE/target-bullseye/root/release/yggdrasil" ] && [ -d "$CACHE/app/standalone" ] || die "--no-build: nothing built yet"
   DESCRIBE=$(cat "$CACHE/describe"); EPOCH=$(cat "$CACHE/epoch")
@@ -192,7 +201,7 @@ if [ $BUILD = 1 ]; then
   printf 'FROM rust:1-bullseye\nRUN apt-get update -qq && apt-get install -y -qq --no-install-recommends libopus-dev pkg-config >/dev/null && rm -rf /var/lib/apt/lists/*\n' |
     docker build -q -t ygg-release-build:bullseye - >/dev/null
   docker run --rm -v "$SRC:/src" -v "$CACHE/cargo:/usr/local/cargo/registry" -v "$CACHE/target-bullseye:/target" \
-    ygg-release-build:bullseye bash -c "
+    --env-file "$CACHE/build-env" ygg-release-build:bullseye bash -c "
       set -e; rc=0
       (cd /src/root && cargo build --release --locked -q --target-dir /target/root) &&
       (cd /src/trunk && cargo build --release --locked -q --target-dir /target/trunk) &&
@@ -226,7 +235,7 @@ if [ -n "$MAC_HOST" ] && { [ $BUILD = 1 ] || [ "$(cat "$MAC/commit" 2>/dev/null)
   tar -C "$SRC" -cf - root trunk | ssh -o BatchMode=yes "$MAC_HOST" "rm -rf ~/$MREM/src && mkdir -p ~/$MREM/src && tar -xf - -C ~/$MREM/src" ||
     die "could not copy the sources to $MAC_HOST"
   # its own cargo home (the Mac's ~/.cargo registry is left alone); rustup's toolchain is the Mac's own
-  ssh -o BatchMode=yes "$MAC_HOST" "set -e; B=\$HOME/$MREM; export PATH=\$HOME/.cargo/bin:/usr/bin:/bin:/usr/sbin:/sbin CARGO_HOME=\$B/cargo-home
+  ssh -o BatchMode=yes "$MAC_HOST" "set -e; B=\$HOME/$MREM; export $(tr '\n' ' ' <"$CACHE/build-env" 2>/dev/null) PATH=\$HOME/.cargo/bin:/usr/bin:/bin:/usr/sbin:/sbin CARGO_HOME=\$B/cargo-home
     (cd \$B/src/root && cargo build --release --locked -q --target-dir \$B/target/root)
     (cd \$B/src/trunk && cargo build --release --locked -q --no-default-features --target-dir \$B/target/trunk-root)
     sw_vers -productVersion >\$B/macos-version; rustc --version >\$B/rustc-version" || die "the macOS build failed on $MAC_HOST"

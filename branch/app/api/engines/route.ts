@@ -1,8 +1,8 @@
 /** GET /api/engines → the brain's GET /engine: what can run a session — root · Claude Code ·
  *  Antigravity · opencode · Codex, each with its default model and its choices
- *  ([{name, label, word, model, models, labels, more}]). The roles page's engines block and the
- *  session settings' "runs on" read it. A brain without /engine (an older root) answers its 404:
- *  the pages then fall back to what they know. */
+ *  ([{name, label, word, model, models, labels, more}]). The settings page's engines block and
+ *  the session settings' "runs on" read it. A brain without /engine (an older root) answers its
+ *  404: the pages then fall back to what they know. */
 import { NextResponse } from 'next/server';
 import { OC } from '@/lib/oc';
 

@@ -227,6 +227,8 @@ export default function SessionsPage() {
   const [rootsOpen, setRootsOpen] = useState(false);
   const [homeRoot, setHomeRoot] = useState('');
   const [pendingJoins, setPendingJoins] = useState(0);
+  // how many roots run another build than home: a mark on the roots key
+  const [rootsBehind, setRootsBehind] = useState(0);
   const [rootThemes, setRootThemes] = useState<Record<string, string | null>>({});
   const [loading, setLoading] = useState(true);
   const loadInFlightRef = useRef(false);
@@ -434,6 +436,7 @@ export default function SessionsPage() {
   const onTree = useCallback(
     (t: Tree) => {
       setPendingJoins(t.joins?.length ?? 0);
+      setRootsBehind((t.roots ?? []).filter((r) => r.behind).length);
       cacheTreeThemes(t);
       // only worlds someone picked (theme_rev > 0): an unpicked one is the brain's name-hashed
       // default, and adopting it flipped the owner's light app to dark aether (11-23 22:17)
@@ -791,6 +794,7 @@ export default function SessionsPage() {
           artifactsHref="/artifacts"
           unseen={unseenArts}
           joins={pendingJoins}
+          behind={rootsBehind}
           loading={loading}
           onRoots={() => setRootsOpen(true)}
           onRefresh={load}

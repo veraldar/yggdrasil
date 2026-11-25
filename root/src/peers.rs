@@ -340,6 +340,22 @@ fn mem_gb() -> u64 {
 }
 
 /// `GET /root` — what this root is and can do right now.
+/// Which build this brain is, as build.rs stamped it (src/build_id.rs): `id` the root-part id
+/// (12 hex; `dirty-…` for a tree with changes; "dev" unknown), the commit and its time (s), git
+/// describe, and the platform (linux-x86_64, macos-aarch64 …) a bundle for it must be built for.
+pub fn build_info() -> Value {
+    json!({
+        "id": BUILD_ID,
+        "commit": env!("YGG_STAMP_COMMIT"),
+        "epoch": env!("YGG_STAMP_EPOCH").parse::<u64>().unwrap_or(0),
+        "describe": env!("YGG_STAMP_DESCRIBE"),
+        "plat": format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH),
+    })
+}
+
+/// This brain's root-part id: a peer reporting another one (or none: an older brain) is behind.
+pub const BUILD_ID: &str = env!("YGG_STAMP_ID");
+
 pub fn describe(st: &AppState) -> Value {
     let running = st.running.lock().unwrap().len();
     let sessions = st.sessions.lock().unwrap().len();
@@ -349,6 +365,7 @@ pub fn describe(st: &AppState) -> Value {
     json!({
         "name": st.config.peers.me, "note": st.config.peers.note, "models": models, "profiles": profiles,
         "theme": theme, "theme_rev": theme_rev,
+        "build": build_info(),
         "hardware": { "os": std::env::consts::OS, "arch": std::env::consts::ARCH,
             "cpus": std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1), "mem_gb": mem_gb() },
         "load": { "running": running, "sessions": sessions },

@@ -661,6 +661,7 @@ function RootHome({ rootId }: { rootId: string }) {
           artifactsHref={`/roots/${enc}/artifacts`}
           unseen={unseenArts}
           joins={tree?.joins?.length ?? 0}
+          behind={tree?.roots.filter((r) => r.behind).length ?? 0}
           loading={loading}
           gone={!!tree && !reachable}
           onRoots={() => setRootsOpen(true)}

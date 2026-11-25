@@ -32,7 +32,7 @@ Home computer (root: yggdrasil + bifrost-net bridge/wg + app + voice)
 Other computers (additional roots: Linux; macOS from a checkout)
 ```
 
-- **root (`root/`, binary `yggdrasil`)** — A coordinator called `MAIN` that you talk to through one conversation. When work takes multiple steps, `MAIN` starts and follows child sessions (`lead`, `build`, `fix`, `research`, `review`), or delegates to coding harnesses (`claude` for Claude Code, `agy` for Antigravity, `opencode`, `codex`). Multiple machines form one tree of roots.
+- **root (`root/`, binary `yggdrasil`)** — A coordinator called `MAIN` that you talk to through one conversation. When work takes multiple steps, `MAIN` starts and follows child sessions (`lead`, `build`, `fix`, `research`, `review`, `marketer`), or delegates to coding harnesses (`claude` for Claude Code, `agy` for Antigravity, `opencode`, `codex`). Multiple machines form one tree of roots.
 - **trunk (`trunk/`, binary `bifrost-net`)** — An access point on a small VPS with only TCP port 443 open (plus port 80 for Let's Encrypt certificate checks). Your home computer dials out to it. Once paired, your phone connects straight to your home bridge over WebRTC whose DTLS key is pinned by the pairing QR code, and roots talk to each other over WireGuard (`bifrost-net wg`). The VPS forwards encrypted bytes it cannot read.
 - **branch (`branch/`)** — The phone web app (Next.js 15 PWA) served from your home computer. Its `/api/*` proxy is the single seam to the brain, which never listens publicly. `branch/voice/` runs a Python `livekit-agents` worker (speech-to-text → `yggdrasil` → text-to-speech, push-to-talk and hands-free).
 
@@ -63,7 +63,7 @@ Read [root/install/README.md](root/install/README.md) for home and multi-machine
 
 ## What it does today
 
-- **One conversation, managed work behind it:** Talk or type to `MAIN`; it answers simple questions directly, starts sub-sessions with role-scoped tool rules (`build`, `fix`, `research`, `review`, `lead`), and summarizes finished or blocked reports back to you.
+- **One conversation, managed work behind it:** Talk or type to `MAIN`; it answers simple questions directly, starts sub-sessions with role-scoped tool rules (`build`, `fix`, `research`, `review`, `marketer`, `lead`), and summarizes finished or blocked reports back to you.
 - **Multiple AI engines and editable agents:** Built-in `yggdrasil` tool loop plus `claude` (Claude Code), `agy` (Antigravity), `opencode`, and `codex` harnesses; edit agent prompts, models, thinking levels, and shared instructions in the app.
 - **Terminal sessions both ways (`root/cc-live/`, `branch/app/cc/[id]/`):** Browse and watch active terminal conversations (Claude Code, Antigravity, `opencode`) from your phone, send input into `tmux` or Claude Code background sessions (including answering interactive prompts), or continue closed sessions through the brain with single-writer safety.
 - **Multi-machine trees over WireGuard:** Join extra Linux (or, from a checkout, macOS) machines via phone-approved QR (`docs/spec-join.md`). `MAIN` can start sessions on any linked root (`session_start … root=<name>`), and root-to-root brain traffic travels inside WireGuard (`boringtun` + `smoltcp`) without opening ports or needing root privileges.
