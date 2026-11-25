@@ -1,0 +1,83 @@
+<header class="oz-head"><a class="oz-brand" href="/">BIFROST</a><span class="head-r"><span class="pill" id="a-email">account</span></span></header>
+
+<section class="oz-blk" id="a-stepup" hidden>
+  <h2>confirm it's you<span class="r warn">step-up</span></h2>
+  <div>
+    <p class="lead">Changes to sign-in need a fresh code from your authenticator (good for 10 minutes on this device).</p>
+    <form class="row" id="a-stepup-form">
+      <input class="oz-field code grow" id="a-stepup-code" inputmode="numeric" autocomplete="one-time-code" maxlength="9" placeholder="000000" aria-label="6-digit code or a recovery code" required>
+      <button class="oz-k ok" type="submit">Confirm</button>
+    </form>
+    <p class="dim small">Lost the authenticator? A recovery code works here too.</p>
+    <p class="msg err" id="a-stepup-err" hidden></p>
+  </div>
+</section>
+
+<section class="oz-blk">
+  <h2>this device</h2>
+  <div>
+    <ul class="kv">
+      <li><span class="k">name</span><span class="v" id="a-dev-name">…</span></li>
+      <li><span class="k">role</span><span class="v" id="a-dev-role">…</span></li>
+      <li><span class="k">signed in</span><span class="v" id="a-dev-via">…</span></li>
+      <li><span class="k">2FA</span><span class="v" id="a-dev-fresh">…</span></li>
+    </ul>
+  </div>
+</section>
+
+<section class="oz-blk">
+  <h2>two-factor</h2>
+  <div>
+    <ul class="kv">
+      <li><span class="k">authenticator</span><span class="v ok" id="a-totp">…</span></li>
+      <li><span class="k">recovery codes</span><span class="v" id="a-recovery">…</span></li>
+    </ul>
+    <div class="row">
+      <button class="oz-k grow" id="a-totp-reset" type="button">Reset authenticator</button>
+      <button class="oz-k grow" id="a-recovery-new" type="button">New recovery codes</button>
+    </div>
+    <div id="a-totp-box" hidden>
+      <p class="sep">new authenticator</p>
+      <div class="enroll">
+        <div class="qr" id="a-qr"></div>
+        <div><b>Scan in your authenticator app</b><p>The old one keeps working until you confirm the new code.</p></div>
+      </div>
+      <details class="manual"><summary>can't scan? type the key</summary><span class="secret" id="a-secret"></span></details>
+      <form class="row" id="a-totp-form">
+        <input class="oz-field code grow" id="a-totp-code" inputmode="numeric" autocomplete="one-time-code" maxlength="7" placeholder="000000" aria-label="6-digit code" required>
+        <button class="oz-k ok" type="submit">Confirm</button>
+      </form>
+    </div>
+    <div id="a-codes-box" hidden>
+      <p class="sep">recovery codes · shown once</p>
+      <div class="recovery-grid" id="a-codes-grid"></div>
+      <p class="dim small">The old codes stopped working.</p>
+    </div>
+    <p class="msg" id="a-2fa-msg" hidden></p>
+  </div>
+</section>
+
+<section class="oz-blk">
+  <h2>password</h2>
+  <div>
+    <form class="f-stack" id="a-pw-form" autocomplete="on">
+      <input class="oz-field" type="email" id="a-pw-user" autocomplete="username" hidden>
+      <label class="f-field"><span class="f-lbl"><span>current password</span></span>
+        <input class="oz-field" id="a-pw-current" type="password" autocomplete="current-password" required></label>
+      <label class="f-field"><span class="f-lbl"><span>new password</span><span>12–128 characters</span></span>
+        <input class="oz-field" id="a-pw-new" type="password" autocomplete="new-password" minlength="12" maxlength="128" required></label>
+      <button class="oz-k full" type="submit">Change password</button>
+    </form>
+    <p class="msg" id="a-pw-msg" hidden></p>
+  </div>
+</section>
+
+<section class="oz-blk">
+  <h2>passkeys</h2>
+  <div><p class="dim small">Passkey sign-in (WebAuthn) arrives in a later update.</p></div>
+</section>
+
+<div class="row">
+  <a class="oz-k grow" href="/">← back</a>
+  <button class="oz-k red grow" id="a-logout" type="button">Sign out</button>
+</div>

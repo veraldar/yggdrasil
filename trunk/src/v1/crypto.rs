@@ -136,6 +136,14 @@ impl Kek {
         Ok(plain.to_vec())
     }
 
+    /// HMAC-SHA256 (hex) under a kek-derived key: the at-rest form of a low-entropy secret (claim
+    /// codes, recovery codes) — a copy of the db alone cannot brute-force it.
+    pub fn pepper(&self, label: &str, data: &[u8]) -> String {
+        let k = self.derive(&format!("pepper:{label}"));
+        let key = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, &k.raw);
+        hex(ring::hmac::sign(&key, data).as_ref())
+    }
+
     /// A key for another purpose, derived from the kek (sha256 over a label and the kek).
     pub fn derive(&self, label: &str) -> Kek {
         let mut h = Sha256::new();

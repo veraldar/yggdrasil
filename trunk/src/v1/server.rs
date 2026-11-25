@@ -417,14 +417,16 @@ pub async fn dispatch(st: Arc<State>, inc: Incoming) {
     let np = normalize_path(&raw);
     // 2. the trunk's namespace, canonical paths only
     if trunk_namespace(&np) {
-        if np != raw && !(raw.len() > 1 && raw.trim_end_matches('/') == np) {
+        // canonical = no encoding, no dot or empty segments (case is matched by each route itself)
+        let low = raw.to_lowercase();
+        if np != low && !(low.len() > 1 && low.trim_end_matches('/') == np) {
             return inc.answer(Resp::text(404, "not here\n")).await;
         }
         if np == "/t" || np.starts_with("/t/") {
             return idp::api::handle(st, inc).await;
         }
         if np.starts_with("/install") {
-            return inc.answer(shell::install_placeholder(&st, &np)).await;
+            return inc.answer(shell::install_placeholder(&st, &raw)).await;
         }
         if np.starts_with("/.well-known/acme-challenge/") {
             let r = shell::acme(&st, &raw);
@@ -447,7 +449,13 @@ pub async fn dispatch(st: Arc<State>, inc: Incoming) {
         }
         Err(why) => {
             let r = if shell::wants_page(&inc.req) {
-                Resp::redirect("/login")
+                // the login page first tries the refresh cookie, then comes back here
+                let p = inc.req.path.clone();
+                if p == "/" || p.contains(['\r', '\n']) || !p.starts_with('/') || p.starts_with("//") {
+                    Resp::redirect("/login")
+                } else {
+                    Resp::redirect(&format!("/login?next={}", shell::url_enc(&p)))
+                }
             } else {
                 Resp::json(401, &serde_json::from_str(&why.body()).unwrap_or_default())
             };
