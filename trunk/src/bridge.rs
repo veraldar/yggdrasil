@@ -134,6 +134,14 @@ const RECHECK: Duration = Duration::from_millis(500);
 /// resend it. Draining every few datagrams keeps the queue near empty; a datagram carries one
 /// record (sometimes two or three), so 8 stays far below 30.
 const FEED_BATCH: usize = 8;
+/// RTC-STACK: the RTC loop's stack. str0m 0.24 `Rtc::do_poll_output` calls itself once per SCTP
+/// packet it hands to DTLS (lib.rs:1738), so one poll in a fast transfer goes as deep as the
+/// packets SCTP has ready: 120+ deep in `dtls_load` (11-25). A level is 1.8 KB in release on top
+/// of the loop's own ~60 KB frame; in a debug build a level is 24.6 KB, and the 2 MiB default
+/// stack overflowed at 81 levels (every ICE-TCP `dtls_load` case aborted the test binary). A
+/// stack overflow aborts the whole bridge: every phone channel and the trunk link with it. 16 MiB
+/// is address space, not memory: only the pages a deep poll touches are ever backed.
+const RTC_STACK: usize = 16 << 20;
 /// an access token may lapse this long before the peer is severed (renewal
 /// rides `auth.refresh` over the channel a minute before expiry)
 const EXPIRY_GRACE_MS: u64 = 30_000;
@@ -639,7 +647,8 @@ pub fn start(cfg: BridgeConfig) -> Result<BridgeHandle, String> {
         let tokens = tokens.clone();
         let out_rx = Arc::new(Mutex::new(out_rx));
         let ufrags = ufrags.clone();
-        std::thread::spawn(move || {
+        // RTC-STACK: its own stack, not the 2 MiB default (see RTC_STACK)
+        std::thread::Builder::new().name("bridge-rtc".into()).stack_size(RTC_STACK).spawn(move || {
             let mut peers: HashMap<usize, Peer> = HashMap::new();
             let mut next_id = 0usize;
             let mut buf = vec![0u8; 4000];
@@ -1054,7 +1063,8 @@ pub fn start(cfg: BridgeConfig) -> Result<BridgeHandle, String> {
                 meter::peak(&MP.loop_lag_us, iter.as_micros() as u64);
                 std::thread::sleep(Duration::from_millis(2));
             }
-        });
+        })
+        .expect("bridge-rtc thread");
     }
 
     Ok(BridgeHandle {
@@ -2848,7 +2858,8 @@ mod dtls_load {
         M.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// The upstream: POST → counts the body and answers the count; GET → TOTAL bytes.
+    /// The upstream: POST → counts the body and answers the count; GET /download/<n> → n bytes
+    /// (TOTAL without a number).
     fn upstream() -> SocketAddr {
         let l = TcpListener::bind("127.0.0.1:0").unwrap();
         let a = l.local_addr().unwrap();
@@ -2875,12 +2886,21 @@ mod dtls_load {
                         }
                     }
                     if first.starts_with("GET") {
-                        let _ = write!(w, "HTTP/1.1 200 OK\r\nContent-Length: {TOTAL}\r\nConnection: close\r\n\r\n");
+                        let size = first
+                            .split_whitespace()
+                            .nth(1)
+                            .and_then(|path| path.rsplit('/').next())
+                            .and_then(|n| n.parse::<usize>().ok())
+                            .unwrap_or(TOTAL);
+                        let _ = write!(w, "HTTP/1.1 200 OK\r\nContent-Length: {size}\r\nConnection: close\r\n\r\n");
                         let block = vec![0x5a_u8; 64 * 1024];
-                        for _ in 0..TOTAL / block.len() {
-                            if w.write_all(&block).is_err() {
+                        let mut left = size;
+                        while left > 0 {
+                            let n = left.min(block.len());
+                            if w.write_all(&block[..n]).is_err() {
                                 return;
                             }
+                            left -= n;
                         }
                         return;
                     }
@@ -2894,6 +2914,65 @@ mod dtls_load {
                     let body = got.to_string();
                     let _ = write!(w, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
                 });
+            }
+        });
+        a
+    }
+
+    /// Which way the phone's packets go.
+    #[derive(Clone, Copy, PartialEq)]
+    enum Path {
+        /// datagrams to the bridge's media socket
+        Udp,
+        /// ICE-TCP straight into the bridge's listener, frame by frame as the phone writes them
+        IceTcp,
+        /// ICE-TCP as live: through the access point, which hands the bridge what the phone
+        /// sent in bunches, one write every `hold` (see `bunching_ap`)
+        IceTcpVia(Duration),
+    }
+
+    /// The access point between the phone and the bridge, as the phone's packets meet it live:
+    /// they pile up in the phone's radio, on the VPS's :443 and in the one trunk link (ping p95
+    /// up to 295 ms in a bad minute on 11-24), and `ap::serve_raw` writes each chunk the link
+    /// brings into the bridge's ICE-TCP socket whole. Here: what the phone sent goes to the
+    /// bridge as one write every `hold`; the bridge's answers pass straight through.
+    fn bunching_ap(bridge: SocketAddr, hold: Duration) -> SocketAddr {
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        let a = l.local_addr().unwrap();
+        std::thread::spawn(move || {
+            let Ok((phone, _)) = l.accept() else { return };
+            let up = TcpStream::connect(bridge).unwrap();
+            let _ = phone.set_nodelay(true);
+            let _ = up.set_nodelay(true);
+            let (mut down_r, mut down_w) = (up.try_clone().unwrap(), phone.try_clone().unwrap());
+            std::thread::spawn(move || {
+                let _ = std::io::copy(&mut down_r, &mut down_w);
+            });
+            let pending = Arc::new(Mutex::new(Vec::<u8>::new()));
+            let done = Arc::new(AtomicBool::new(false));
+            {
+                let (pending, done, mut phone) = (pending.clone(), done.clone(), phone);
+                std::thread::spawn(move || {
+                    let mut buf = vec![0u8; 65536];
+                    while let Ok(n) = phone.read(&mut buf) {
+                        if n == 0 {
+                            break;
+                        }
+                        pending.lock().unwrap().extend_from_slice(&buf[..n]);
+                    }
+                    done.store(true, Ordering::SeqCst);
+                });
+            }
+            let mut up = up;
+            loop {
+                std::thread::sleep(hold);
+                let bunch = std::mem::take(&mut *pending.lock().unwrap());
+                if !bunch.is_empty() && up.write_all(&bunch).is_err() {
+                    return;
+                }
+                if bunch.is_empty() && done.load(Ordering::SeqCst) {
+                    return;
+                }
             }
         });
         a
@@ -2914,8 +2993,9 @@ mod dtls_load {
         buf: Vec<u8>,
         tun: str0m::channel::ChannelId,
         open: bool,
-        got: Vec<u8>,
-        closed: bool,
+        /// what each tunnel stream brought back, and which streams the bridge closed
+        got: HashMap<u32, Vec<u8>>,
+        closed: HashSet<u32>,
     }
 
     impl Phone {
@@ -2946,7 +3026,7 @@ mod dtls_load {
             assert!(status.starts_with('2'), "offer refused: {status} {body}");
             let answer: str0m::change::SdpAnswer = serde_json::from_str(&body).unwrap();
             rtc.sdp_api().accept_answer(pending, answer).unwrap();
-            Phone { rtc, wire, local, buf: vec![0u8; 65536], tun, open: false, got: vec![], closed: false }
+            Phone { rtc, wire, local, buf: vec![0u8; 65536], tun, open: false, got: HashMap::new(), closed: HashSet::new() }
         }
 
         fn pump(&mut self) {
@@ -2974,25 +3054,24 @@ mod dtls_load {
                     }
                 }
             }
-            // a well-behaved receiver (a browser's DTLS is not dimpl): the phone, too, polls
-            // between small batches, so every refusal this test counts is the bridge's
-            let mut rest = inputs.as_slice();
-            loop {
-                let (batch, more) = rest.split_at(rest.len().min(FEED_BATCH));
-                rest = more;
-                for (proto, source, data) in batch {
-                    let input = Input::Receive(
-                        now,
-                        Receive { proto: *proto, source: *source, destination: self.local, contents: data.as_slice().try_into().unwrap() },
-                    );
-                    if self.rtc.accepts(&input) {
-                        let _ = self.rtc.handle_input(input);
-                    }
+            // a well-behaved receiver (a browser's DTLS is not dimpl): the phone polls after
+            // every datagram, so every refusal this test counts is the bridge's. One at a time is
+            // also how a browser takes them: its SCTP (Chrome's dcSCTP) then acknowledges every
+            // second packet. Polling after 8 (as before 11-25) sent a quarter of the
+            // acknowledgements a real phone sends while downloading, and no download case could
+            // see the 11-24 refusals.
+            for (proto, source, data) in &inputs {
+                let input = Input::Receive(
+                    now,
+                    Receive { proto: *proto, source: *source, destination: self.local, contents: data.as_slice().try_into().unwrap() },
+                );
+                if self.rtc.accepts(&input) {
+                    let _ = self.rtc.handle_input(input);
                 }
                 self.poll(now);
-                if rest.is_empty() {
-                    break;
-                }
+            }
+            if inputs.is_empty() {
+                self.poll(now);
             }
         }
 
@@ -3015,10 +3094,12 @@ mod dtls_load {
                     },
                     Ok(Output::Event(Event::ChannelOpen(cid, _))) if cid == self.tun => self.open = true,
                     Ok(Output::Event(Event::ChannelData(cd))) if cd.id == self.tun => {
-                        if let Some((kind, _, body)) = unmux(&cd.data) {
+                        if let Some((kind, id, body)) = unmux(&cd.data) {
                             match kind {
-                                DATA => self.got.extend_from_slice(body),
-                                CLOSE => self.closed = true,
+                                DATA => self.got.entry(id).or_default().extend_from_slice(body),
+                                CLOSE => {
+                                    self.closed.insert(id);
+                                }
                                 _ => {}
                             }
                         }
@@ -3035,9 +3116,48 @@ mod dtls_load {
         }
     }
 
-    /// One case: a bridge, a phone over `tcp` or UDP, TOTAL bytes up (`upload`) or down.
+    /// One request through the tunnel: `bytes` up (a POST body) or down (a GET answer).
+    #[derive(Clone, Copy, Debug)]
+    struct Req {
+        upload: bool,
+        bytes: usize,
+    }
+
+    /// One case: a bridge, a phone on `path`, TOTAL bytes up (`upload`) or down.
     /// Returns the seconds it took and the DTLS records the bridge refused meanwhile.
-    fn run(upload: bool, tcp: bool) -> (f64, u64) {
+    fn run(upload: bool, path: Path) -> (f64, u64) {
+        let (took, refused) = load(path, &[Req { upload, bytes: TOTAL }]);
+        eprintln!(
+            "dtls-load {} over {}: {} MB in {took:.2} s ({:.1} MB/s); DTLS records refused (Receive queue full): {refused}",
+            if upload { "upload" } else { "download" },
+            match path {
+                Path::Udp => "UDP".to_string(),
+                Path::IceTcp => "ICE-TCP".to_string(),
+                Path::IceTcpVia(hold) => format!("ICE-TCP via the ap ({} ms bunches)", hold.as_millis()),
+            },
+            TOTAL >> 20,
+            TOTAL as f64 / 1e6 / took
+        );
+        (took, refused)
+    }
+
+    /// A bridge and a phone on `path`; every request of `reqs` opened at once (its own tunnel
+    /// stream, as the app's fetches are), each checked byte for byte. Returns the seconds it
+    /// took and the DTLS records the bridge refused meanwhile.
+    fn load(path: Path, reqs: &[Req]) -> (f64, u64) {
+        // the phone is str0m too, with the same deep polls as the bridge's loop (RTC_STACK)
+        let reqs = reqs.to_vec();
+        std::thread::Builder::new()
+            .name("dtls-load-phone".into())
+            .stack_size(RTC_STACK)
+            .spawn(move || load_here(path, &reqs))
+            .unwrap()
+            .join()
+            .unwrap_or_else(|e| std::panic::resume_unwind(e))
+    }
+
+    fn load_here(path: Path, reqs: &[Req]) -> (f64, u64) {
+        let tcp = path != Path::Udp;
         count_dtls_refusals();
         let up = upstream();
         let dir = std::env::temp_dir().join(format!("bfn-dtls-load-{}", uuid_like()));
@@ -3090,7 +3210,11 @@ mod dtls_load {
             tunnel: Some(dial),
         })
         .unwrap();
-        let wire = tcp.then(|| (h.ice_listen.expect("the bridge's ICE-TCP listener"), advertised));
+        let wire = match path {
+            Path::Udp => None,
+            Path::IceTcp => Some((h.ice_listen.expect("the bridge's ICE-TCP listener"), advertised)),
+            Path::IceTcpVia(hold) => Some((bunching_ap(h.ice_listen.expect("the bridge's ICE-TCP listener"), hold), advertised)),
+        };
         let mut phone = Phone::connect(h.http, &tok, wire);
         let t_open = Instant::now();
         while !phone.open {
@@ -3099,46 +3223,60 @@ mod dtls_load {
             std::thread::sleep(Duration::from_millis(2));
         }
 
-        let head = if upload {
-            format!("POST /upload HTTP/1.1\r\nHost: box\r\nContent-Length: {TOTAL}\r\n\r\n")
-        } else {
-            "GET /download HTTP/1.1\r\nHost: box\r\n\r\n".to_string()
-        };
-        while !phone.send(&mux(OPEN, 1, head.as_bytes()).1) {
-            phone.pump();
-        }
         let before = meter::C.dtls_rxq_full.load(Relaxed);
         let t0 = Instant::now();
+        let ids: Vec<u32> = (1..=reqs.len() as u32).collect();
+        for (&id, r) in ids.iter().zip(reqs) {
+            let head = if r.upload {
+                format!("POST /upload HTTP/1.1\r\nHost: box\r\nContent-Length: {}\r\n\r\n", r.bytes)
+            } else {
+                format!("GET /download/{} HTTP/1.1\r\nHost: box\r\n\r\n", r.bytes)
+            };
+            while !phone.send(&mux(OPEN, id, head.as_bytes()).1) {
+                phone.pump();
+            }
+        }
         let chunk = vec![0x5a_u8; 16 * 1024];
-        let mut sent = 0;
-        while !phone.closed {
-            assert!(t0.elapsed() < Duration::from_secs(120), "not finished: {sent} B up, {} B down", phone.got.len());
+        let mut sent = vec![0usize; reqs.len()];
+        while phone.closed.len() < reqs.len() {
+            assert!(
+                t0.elapsed() < Duration::from_secs(120),
+                "not finished: {} B up, {} B down, {}/{} streams closed",
+                sent.iter().sum::<usize>(),
+                phone.got.values().map(Vec::len).sum::<usize>(),
+                phone.closed.len(),
+                reqs.len()
+            );
             phone.pump();
-            while upload && sent < TOTAL {
-                let n = chunk.len().min(TOTAL - sent);
-                if !phone.send(&mux(DATA, 1, &chunk[..n]).1) {
-                    break;
+            // the uploads go up side by side, a chunk each in turn, while the channel takes them
+            let mut more = true;
+            while more {
+                more = false;
+                for (i, (&id, r)) in ids.iter().zip(reqs).enumerate() {
+                    if !r.upload || sent[i] >= r.bytes {
+                        continue;
+                    }
+                    let n = chunk.len().min(r.bytes - sent[i]);
+                    if phone.send(&mux(DATA, id, &chunk[..n]).1) {
+                        sent[i] += n;
+                        more = true;
+                    }
                 }
-                sent += n;
             }
         }
         let took = t0.elapsed().as_secs_f64();
         let refused = meter::C.dtls_rxq_full.load(Relaxed) - before;
-        let answer = String::from_utf8_lossy(&phone.got[..phone.got.len().min(200)]).to_string();
-        assert!(answer.starts_with("HTTP/1.1 200"), "answer: {answer}");
-        if upload {
-            assert!(String::from_utf8_lossy(&phone.got).ends_with(&TOTAL.to_string()), "the upstream did not get every byte: {answer}");
-        } else {
-            let body = phone.got.windows(4).position(|w| w == b"\r\n\r\n").map(|p| phone.got.len() - p - 4);
-            assert_eq!(body, Some(TOTAL), "the phone did not get every byte");
+        for (&id, r) in ids.iter().zip(reqs) {
+            let got = phone.got.remove(&id).unwrap_or_default();
+            let answer = String::from_utf8_lossy(&got[..got.len().min(200)]).to_string();
+            assert!(answer.starts_with("HTTP/1.1 200"), "stream {id} answer: {answer}");
+            if r.upload {
+                assert!(String::from_utf8_lossy(&got).ends_with(&r.bytes.to_string()), "stream {id}: the upstream did not get every byte: {answer}");
+            } else {
+                let body = got.windows(4).position(|w| w == b"\r\n\r\n").map(|p| got.len() - p - 4);
+                assert_eq!(body, Some(r.bytes), "stream {id}: the phone did not get every byte");
+            }
         }
-        eprintln!(
-            "dtls-load {} over {}: {} MB in {took:.2} s ({:.1} MB/s); DTLS records refused (Receive queue full): {refused}",
-            if upload { "upload" } else { "download" },
-            if tcp { "ICE-TCP" } else { "UDP" },
-            TOTAL >> 20,
-            TOTAL as f64 / 1e6 / took
-        );
         let _ = std::fs::remove_dir_all(&dir);
         (took, refused)
     }
@@ -3146,21 +3284,80 @@ mod dtls_load {
     #[test]
     fn an_upload_over_udp_loses_no_dtls_record() {
         let _one = serial();
-        let (_, refused) = run(true, false);
+        let (_, refused) = run(true, Path::Udp);
         assert_eq!(refused, 0, "the bridge's DTLS engine refused {refused} records under load");
     }
 
     #[test]
     fn a_download_over_udp_loses_no_dtls_record() {
         let _one = serial();
-        let (_, refused) = run(false, false);
+        let (_, refused) = run(false, Path::Udp);
         assert_eq!(refused, 0, "the bridge's DTLS engine refused {refused} records under load");
     }
 
     #[test]
     fn an_upload_over_ice_tcp_loses_no_dtls_record() {
         let _one = serial();
-        let (_, refused) = run(true, true);
+        let (_, refused) = run(true, Path::IceTcp);
         assert_eq!(refused, 0, "the bridge's DTLS engine refused {refused} records under load");
+    }
+
+    /// The owner's path on 11-24 (ICE-TCP through the ap's :443) the other way: the phone
+    /// fetching, the bridge sending. What comes back is the phone's SCTP acknowledgements, one
+    /// per two packets, and the ap hands them over in bunches. Straight into the listener (no
+    /// ap) the old loop refused none; through the ap it refused hundreds.
+    #[test]
+    fn a_download_over_ice_tcp_loses_no_dtls_record() {
+        let _one = serial();
+        let (_, refused) = run(false, Path::IceTcpVia(Duration::from_millis(HOLD_MS)));
+        assert_eq!(refused, 0, "the bridge's DTLS engine refused {refused} records under load");
+    }
+
+    /// Live 11-24 07:53–07:54 local (06:53–06:54 UTC), the worst minute of the day: 250 records
+    /// refused on the release before DTLS-QUEUE-FIX, phone on ICE-TCP. The app's fetches of that
+    /// minute, sizes from the meter's own events (bridge-events-2026-11-24.jsonl), all at once:
+    /// two spoken replies (api.voice 1,267,686 and 2,664,673 B), the tree (107,125 B), four
+    /// transcript polls (36,551 B), two diag posts (928 and 166 B up) and a voice request (890 B up).
+    #[test]
+    fn the_11_24_voice_minute_over_ice_tcp_loses_no_dtls_record() {
+        let _one = serial();
+        let down = |bytes| Req { upload: false, bytes };
+        let up = |bytes| Req { upload: true, bytes };
+        let minute = [
+            down(1_267_686),
+            down(2_664_673),
+            down(107_125),
+            down(36_551),
+            down(36_551),
+            down(36_551),
+            down(36_551),
+            up(928),
+            up(166),
+            up(890),
+        ];
+        let (took, refused) = load(Path::IceTcpVia(Duration::from_millis(HOLD_MS)), &minute);
+        eprintln!("dtls-load the 11-24 voice minute over ICE-TCP via the ap ({HOLD_MS} ms bunches): {took:.2} s; DTLS records refused (Receive queue full): {refused}");
+        assert_eq!(refused, 0, "the bridge's DTLS engine refused {refused} records in the replayed minute");
+    }
+
+    /// The ap's bunching in the cases: 40 ms, well inside what the trunk link shows live (link
+    /// ping p50 15 ms, p95 up to 295 ms in a bad minute); the old loop refused records from 10 ms
+    /// up (`explore`).
+    const HOLD_MS: u64 = 40;
+
+    /// `cargo test dtls_load::explore -- --ignored --nocapture`: one spoken reply (2.66 MB) down
+    /// through access points that bunch for 0 (no ap), 10, 40, 100 and 250 ms (or DTLS_HOLDS="…"),
+    /// the refusals for each.
+    #[test]
+    #[ignore]
+    fn explore() {
+        let _one = serial();
+        let holds = std::env::var("DTLS_HOLDS").unwrap_or_else(|_| "0,10,40,100,250".into());
+        for hold in holds.split(',').filter_map(|h| h.trim().parse::<u64>().ok()) {
+            let path = if hold == 0 { Path::IceTcp } else { Path::IceTcpVia(Duration::from_millis(hold)) };
+            let one = [Req { upload: false, bytes: 2_664_673 }];
+            let (took, refused) = load(path, &one);
+            eprintln!("explore hold {hold:>3} ms: one 2.66 MB voice reply down in {took:.2} s, refused {refused}");
+        }
     }
 }

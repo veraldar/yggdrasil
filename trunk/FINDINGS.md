@@ -693,3 +693,43 @@ v9, ap, m1 and m0 GREEN; `sim/trunk-obs-e2e.sh` 17/17.
 208 KB) also overflows during the 2 ms sleep: 24 `RcvbufErrors` in the UDP upload. A phone's real
 path is far slower, and on the carrier it is ICE-TCP, so this is not a live problem. A larger
 `SO_RCVBUF` is the knob if it ever becomes one.
+
+### 11-25 addendum: the 11-24 morning, the download case, the loop's stack (fix-dtls-queue-drops)
+
+**The 11-24 drops were the old loop.** The day report's 533 refusals (07:43–08:00 local, 250 in the
+minute to 07:54) all fell on release 20261123-2204-491aa2e7, before this fix. The bridge has run
+20261124-0841-ae5785c9 since 08:41 that day: 0 refusals in 1,341 metered minutes to 11-25 07:00,
+through 20 spoken replies of 0.5–3 MB and five 4.7 MB artifact loads (bridge-min/-events).
+
+**What filled the queue that morning: a download, not an upload.** The phone (ICE-TCP via :443)
+was fetching MAIN's spoken replies (`/api/tts/stream`, 1.3–2.7 MB each); the warnings show 30
+consecutive app-data records from the phone, i.e. its SCTP acknowledgements. A browser's SCTP
+acknowledges every second packet, and the ap hands the bridge what the phone sent in bunches (each
+chunk off the trunk link is written whole into the ICE-TCP socket, `ap::serve_raw`). The old loop
+fed a whole bunch before polling.
+
+**Why the first tests missed it.** No download over ICE-TCP case; the test phone polled after
+batches of 8 (one SCTP acknowledgement per 8 packets, a quarter of a browser's); and nothing between
+phone and bridge bunched. Now: the test phone polls per datagram (acknowledges like a browser), the
+ICE-TCP download goes through `bunching_ap` (40 ms), and `the_11_24_voice_minute_over_ice_tcp…`
+replays that minute's fetches (sizes from the meter's events) at once. Five runs each, debug
+(the same tests on b14118aa, the code of 491aa2e7; after: also five release runs, all 0):
+
+| case | before (b14118aa) | after |
+|---|---|---|
+| download over ICE-TCP via the ap, 8 MB | 1,286–1,415 refused · 3.71–3.90 s | **0** · 2.86–3.46 s |
+| the 11-24 voice minute via the ap | 625–687 refused · 1.97–2.03 s | **0** · 1.54–1.65 s |
+| download over UDP | 37–90 refused | **0** |
+| upload over ICE-TCP / UDP | 138–298 / 232–282 refused | **0** / **0** |
+
+`cargo test dtls_load::explore -- --ignored --nocapture` (one 2.66 MB reply, ap bunching 0–250 ms):
+before 0, 123, 425, 425, 426 refused; after 0 at every delay.
+
+**The loop's stack (RTC_STACK).** In a debug build every ICE-TCP `dtls_load` case aborted the test
+binary: `thread 'bridge-rtc' has overflowed its stack`. str0m 0.24 `Rtc::do_poll_output` calls
+itself once per SCTP packet it hands to DTLS (lib.rs:1738), 120+ deep in these cases; a level is
+24.6 KB in debug and 1.8 KB in release, on top of the loop's own ~60 KB frame. Release passed at
+512 KiB and failed at 256 KiB, so the live 2 MiB default had about 4x headroom, shrinking with
+transfer size; an overflow aborts the whole bridge. The loop thread is now `bridge-rtc` with a
+16 MiB stack (address space; only touched pages are backed), and the test phone gets the same.
+The earlier "52/52" was a release run, which is why it never showed.
