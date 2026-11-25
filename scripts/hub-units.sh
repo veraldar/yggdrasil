@@ -52,7 +52,9 @@
 # forces one; PUBLIC_URL = HUB_PUBLIC_URL or the app's BIFROST_TRUNK_URL.
 # Rehearsal overrides (G4.4): HUB_HOME HUB_CONF HUB_UNITS HUB_PREFIX (units HUB_PREFIX-*), HUB_*_PORT, HUB_SIM,
 # HUB_BACKUP, HUB_AP_URL, HUB_RESOLVE; unset = today's values, byte for byte. HUB_TEST_SKIP_GATE=1 skips only
-# the gate check, and only for a rehearsal prefix with its own HUB_HOME and HUB_CONF.
+# the gate check, and only for a rehearsal prefix with its own HUB_HOME and HUB_CONF. HUB_BRIDGE_BINDS (a rig
+# only): "SRC:DST …" becomes BindReadOnlyPaths on the $P-bridge unit alone, so a rehearsal bridge can resolve
+# its trunk's name on 127.0.0.1; unset = no line, byte for byte.
 # switch / deploy / stageb-back restart the brain: run from inside it (a session's shell), they go on in
 # a unit of their own (log: ~/.local/share/yggdrasil/hub/logs/switch.log).
 #
@@ -115,6 +117,8 @@ release() {
 
 render() {
   mkdir -p "$UNITS" "$LOGS"
+  local bridge_binds=""
+  for b in ${HUB_BRIDGE_BINDS:-}; do bridge_binds+=$'\nBindReadOnlyPaths='"$b"; done
   cat >"$UNITS/$P-app.service" <<EOF
 [Unit]
 Description=yggdrasil home root: the public app (ap.veraldar.org, devices mode) → brain :4101
@@ -137,7 +141,7 @@ EOF
 Description=yggdrasil home root: the bridge to the trunk (ap.veraldar.org) — app, voice, root links
 After=network-online.target $P-app.service
 
-[Service]
+[Service]$bridge_binds
 ExecStart=$HUB/current/bin/bifrost-net bridge -c $CONF/bridge-public.toml
 Restart=on-failure
 RestartSec=3
@@ -323,8 +327,8 @@ detach() {
     mkdir -p "$LOGS"
     local pass=() v
     for v in HUB_HOME HUB_CONF HUB_UNITS HUB_PREFIX HUB_PUBLIC_URL HUB_AP_URL HUB_RESOLVE HUB_HEALTH HUB_BACKUP HUB_SIM \
-             HUB_BRAIN_PORT HUB_LIBRARIAN_PORT HUB_CCLIVE_PORT HUB_TAILNET_PORT HUB_PUBLIC_PORT HUB_VOICE_PORT \
-             HUB_WG_HTTP HUB_WG_UDP HUB_WG_RELAY HUB_TRUNK_STATE; do
+             HUB_BRIDGE_BINDS HUB_BRAIN_PORT HUB_LIBRARIAN_PORT HUB_CCLIVE_PORT HUB_TAILNET_PORT HUB_PUBLIC_PORT \
+             HUB_VOICE_PORT HUB_WG_HTTP HUB_WG_UDP HUB_WG_RELAY HUB_TRUNK_STATE; do
       if [ -n "${!v:-}" ]; then pass+=("--setenv=$v=${!v}"); fi
     done
     systemd-run --user --unit "$P-units-$1-$(date +%s)-$$" --collect -q -p "StandardOutput=append:$LOGS/switch.log" \
@@ -713,7 +717,7 @@ health_public_v1() {
   for _ in $(seq 1 40); do out=$(curl "${RESOLVE[@]}" -sf -m 8 "$url/t/state" || true); has "$out" '"claimed":true' && break; sleep 1; done
   chk "$url/t/state → 200, claimed" has "$out" '"claimed":true'
   for _ in $(seq 1 20); do
-    read -r code loc < <(curl "${RESOLVE[@]}" -s -o /dev/null -w '%{http_code} %{redirect_url}\n' -m 8 "$url/" || echo "000 -")
+    read -r code loc < <(curl "${RESOLVE[@]}" -s -o /dev/null -H 'Accept: text/html' -w '%{http_code} %{redirect_url}\n' -m 8 "$url/" || echo "000 -")
     [ "$code" = 302 ] && break
     sleep 1
   done
@@ -792,24 +796,41 @@ switch_v1_prepare() {
   setenv "$CONF/v1/app-public.env" BIFROST_TRUNK_STATE "$st"
   setenv "$CONF/v1/app-public.env" BIFROST_TRUNK_URL "$url"
   setenv "$CONF/v1/app-public.env" BIFROST_TRUST_PROXY 1
-  # the bridge: [ap] and the root-link switchboard out, [trunk] in (C5, spec §5.5)
+  # the bridge: [ap] and the root-link switchboard out, [trunk] in (C5 + A4, spec §5.5)
   python3 -c 'import re, sys
 src, dst, url, key, keyfile, rid, st = sys.argv[1:]
-out, skip = [], False
+out, cur, keep, ap_tcp = [], "", [], []
+carry = {"ap": ("upstream", "livekit", "tcp", "ice_tcp"), "bridge.root-link": ("wg_relay", "wg_local")}
 for line in open(src):
     m = re.match(r"^\s*\[([^\]]+)\]\s*$", line)
     if m:
-        skip = m.group(1).strip() in ("ap", "bridge.root-link", "trunk")
-    if not skip:
-        out.append(line)
+        cur = m.group(1).strip()
+        if cur in ("ap", "ap.tcp", "bridge.root-link", "trunk", "trunk.tcp"):
+            continue
+    if cur in ("ap", "bridge.root-link"):
+        km = re.match(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=", line)
+        if km and km.group(1) in carry[cur]:
+            keep.append(line)
+        continue
+    if cur == "ap.tcp":
+        if line.strip() and not line.lstrip().startswith("#"):
+            ap_tcp.append(line)
+        continue
+    if cur in ("trunk", "trunk.tcp"):
+        continue
+    out.append(line)
 while out and not out[-1].strip():
     out.pop()
 out.append(f"\n[trunk]\nurl = \"{url}\"\ntrunk_key = \"{key}\"\nroot_key_file = \"{keyfile}\"\nroot_id = \"{rid}\"\nstate_file = \"{st}\"\n")
+out.extend(keep)
+if ap_tcp:
+    out.append("\n[trunk.tcp]\n")
+    out.extend(ap_tcp)
 open(dst, "w").write("".join(out))' "$CONF/bridge-public.toml" "$CONF/v1/bridge-public.toml" "$url" "$key" "$CONF/v1/root.key" "$rid" "$st" ||
     die "bridge-public.toml: not rendered"
-  # the WireGuard node: peers from the signed directory in trunk-state.json, not roots.json + devices.json (C5)
+  # the WireGuard node: peers from the signed directory in trunk-state.json, not roots.json + devices.json (C5 + A4)
   sed -e '/^roots_file *=/d' -e '/^devices_file *=/d' "$CONF/wg-hub.toml" >"$CONF/v1/wg-hub.toml"
-  printf 'trunk_state_file = "%s"\n' "$st" >>"$CONF/v1/wg-hub.toml"
+  printf 'trunk_state = "%s"\n' "$st" >>"$CONF/v1/wg-hub.toml"
   chmod 600 "$CONF/v1/"*
   echo "-- prepared $CONF/v1 for $id (nothing live changed); switch-v1 $id puts in place (names only):"
   for f in $V1_FILES; do changed_keys "$CONF/$f" "$CONF/v1/$f" | sed "s/^/   $f  /"; done
@@ -880,7 +901,7 @@ switch_v1() {
   if [ "$bad" = 1 ]; then
     echo "== switch-v1 $id: failed — back to ${prev##*/}: config and state/ from $bk, data from $dbk"
     systemctl --user stop "$P-trunk-release-check-*.timer" 2>/dev/null || true
-    systemctl --user stop $P-brain || true
+    systemctl --user stop $P-bridge $P-wg $P-brain 2>/dev/null || true
     restore_v0 "$bk" || echo "!! config / state/ NOT restored from $bk — look before anything else"
     ln -sfn "$prev" "$HUB/current"
     render >/dev/null
@@ -909,7 +930,7 @@ rollback_v0() {
   gate "${sha:-$(rel_commit "$(basename "$(readlink "$HUB/current" || echo none)")")}"
   # the route moves first (spec §11, rollback 1): ap. must be trunk-ap again, which answers 503 until the bridge links
   if [ "$skip" = 0 ]; then
-    read -r code loc < <(curl "${RESOLVE[@]}" -s -o /dev/null -w '%{http_code} %{redirect_url}\n' -m 8 "$AP_URL/" || echo "000 -")
+    read -r code loc < <(curl "${RESOLVE[@]}" -s -o /dev/null -H 'Accept: text/html' -w '%{http_code} %{redirect_url}\n' -m 8 "$AP_URL/" || echo "000 -")
     if login_redirect "$code" "$loc" "$AP_URL"; then
       die "$AP_URL/ still answers like v1 (302 /login): move the route first (sni-443.conf: route ap.veraldar.org 127.0.0.1:4443 proxy · ice 127.0.0.1:4479, then systemctl reload yggdrasil-sni-443) — nothing was changed"
     fi
@@ -919,6 +940,7 @@ rollback_v0() {
   fi
   detach rollback-v0 "$id" "$bk" "${more[@]}"
   systemctl --user stop "$P-trunk-release-check-*.timer" 2>/dev/null || true
+  systemctl --user stop $P-bridge $P-wg 2>/dev/null || true
   restore_v0 "$bk" || { echo "!! config / state/ not restored from $bk"; exit 1; }
   ln -sfn "$HUB/releases/$id" "$HUB/current"
   render
