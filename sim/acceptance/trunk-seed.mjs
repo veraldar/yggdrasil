@@ -198,7 +198,17 @@ function front() {
       `bifrost_refresh=${r}; HttpOnly; SameSite=Strict; Path=/t/auth`,
     ];
   };
-  const tokenOk = (req) => ta.checkToken(cookies(req).bifrost_device || '', ta.parseState(readFileSync(F.state, 'utf8')) ?? { keys: [], kill_epoch: 0, deny: [] }, regionOf(ipOf(req)));
+  // the device a /t/* call speaks for: its cookie — or, under --sign-in auto, the twin's device (the
+  // same rule as the relay: a cookie-less request is signed in on the way through)
+  const deviceToken = (req) =>
+    cookies(req).bifrost_device ||
+    (auto && req.headers['x-trunk-seed-anon'] !== '1' ? autoToken(ipOf(req)) : '');
+  const tokenOk = (req) =>
+    ta.checkToken(
+      deviceToken(req),
+      ta.parseState(readFileSync(F.state, 'utf8')) ?? { keys: [], kill_epoch: 0, deny: [] },
+      regionOf(ipOf(req))
+    );
 
   async function trunkRoute(req, res, u) {
     const p = u.pathname;
@@ -300,6 +310,9 @@ function front() {
         const h = { ...r.headers };
         delete h.connection;
         delete h['keep-alive'];
+        // every refusal the app gives, in trunk.log (path without its query: no ids beyond the path)
+        if ((r.statusCode || 0) >= 400)
+          console.log(`${new Date().toISOString()} ${req.method} ${req.url.split('?')[0]} → ${r.statusCode}`);
         res.writeHead(r.statusCode || 502, h);
         r.pipe(res);
       }
