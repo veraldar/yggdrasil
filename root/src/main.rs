@@ -2495,7 +2495,7 @@ async fn get_agent(State(st): State<AppState>, Path(name): Path<String>) -> Resp
             // what the chain resolves to on this root for a session on the role's own engine
             // (an automatic chain's one entry; a root model this root lacks → its best one)
             let own = prof.harness.as_deref().and_then(harness::Kind::parse);
-            let from = Target { engine: own, model: match own { None => prof.model.clone().filter(|m| root_serves(&st, m)).unwrap_or_else(|| st.config.model.clone()), Some(k) => harness_model_or_default(&st, k, prof.model.as_deref()) } };
+            let from = Target { engine: own, model: match own { None => prof.model.clone().filter(|m| root_serves(&st, m)).unwrap_or_else(|| st.config.model.clone()), Some(k) => harness_model_or_default(&st, k, prof.model.as_deref()) }, variant: None };
             d["fallback_effective"] = json!(if is_pinned_for_fallback(&json!({}), &prof) { Vec::new() } else { effective_chain(&st, &prof, &from).iter().map(Target::show).collect::<Vec<_>>() });
             Json(d).into_response()
         }
@@ -3571,6 +3571,8 @@ impl Run {
 struct Target {
     engine: Option<harness::Kind>,
     model: String,
+    /// a root entry's think level (`glm-5.3-think-high`): re-stamps the session's variant
+    variant: Option<String>,
 }
 
 impl Target {
@@ -3654,17 +3656,32 @@ fn resolve_fallback_target(st: &AppState, prof: &profiles::Profile, failed: Opti
             None => fallback_root_model(st, prof),
             Some(k) => harness_model_or_default(st, k, prof.model.as_deref()),
         };
-        return Some(Target { engine: role_default, model });
+        return Some(Target { engine: role_default, model, variant: None });
     }
-    failed.map(|_| Target { engine: None, model: fallback_root_model(st, prof) })
+    failed.map(|_| Target { engine: None, model: fallback_root_model(st, prof), variant: None })
 }
 
 /// One chain entry as the turn runs it: a root model this root does not serve (another root's
 /// chain, a provider gone) takes the best root model instead.
 fn resolve_entry(st: &AppState, prof: &profiles::Profile, e: &profiles::FallbackEntry) -> Target {
     match e.harness {
-        None => Target { engine: None, model: e.model.clone().filter(|m| root_serves(st, m)).unwrap_or_else(|| fallback_root_model(st, prof)) },
-        Some(k) => Target { engine: Some(k), model: harness_model_or_default(st, k, e.model.as_deref()) },
+        None => {
+            let picked = e.model.as_deref().map(|m| {
+                // `glm-5.3-think-high` = base `glm-5.3` + a variant stamp (the catalog's own
+                // derived id; the model route splits it the same way)
+                let (base, level) = match m.rsplit_once("-think-") {
+                    Some((b, l)) if ["high", "low", "off"].contains(&l) => (b, Some(l)),
+                    _ => (m, None),
+                };
+                if root_serves(st, base) { Some((base.to_string(), level)) } else { None }
+            });
+            let (model, level) = match picked.flatten() {
+                Some((b, l)) => (b, l.map(String::from)),
+                None => (fallback_root_model(st, prof), None),
+            };
+            Target { engine: None, model, variant: level }
+        }
+        Some(k) => Target { engine: Some(k), model: harness_model_or_default(st, k, e.model.as_deref()), variant: None },
     }
 }
 
@@ -3690,7 +3707,7 @@ fn current_target(st: &AppState, id: &str, info: &Value) -> Target {
             harness_model_or_default(st, k, own)
         }
     };
-    Target { engine, model }
+    Target { engine, model, variant: None }
 }
 
 /// Whose plan a target spends: the harness's, the root's upstream (`root`), or a provider's
@@ -3903,9 +3920,9 @@ fn apply_fallback(st: &AppState, id: &str, prof: &profiles::Profile, to: &Target
         s.info["engine"] = json!(to_name);
         match to.engine {
             None => {
-                let variant = s.info["model"]["variant"]
-                    .as_str()
-                    .map(String::from)
+                let variant = to.variant
+                    .clone()
+                    .or_else(|| s.info["model"]["variant"].as_str().map(String::from))
                     .or(prof.variant.clone())
                     .unwrap_or_else(|| st.config.default_variant.clone());
                 let provider = st.config.catalog["default"]
@@ -6951,6 +6968,21 @@ mod image_tests {
         assert_eq!(session_profile(&st, "p1").prompt, profiles::LEAD_PROMPT);
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    /// A chain entry `root/glm-5.3-think-high` resolves to the base model + a variant stamp:
+    /// the catalog's own derived id, serve-checked on the base (not a new upstream model).
+    #[test]
+    fn think_entry_resolves_and_stamps() {
+        let (st, _dir) = roles_state("think", profiles::Profiles::load(None));
+        let entry = |t: &str| profiles::FallbackEntry::parse(t).unwrap();
+        let prof = profiles::builtins().into_iter().find(|p| p.name == "fix").unwrap();
+        let t = resolve_entry(&st, &prof, &entry("root/glm-5.3-think-high"));
+        assert_eq!((t.engine.is_none(), t.model.as_str(), t.variant.as_deref()), (true, "glm-5.3", Some("high")));
+        let t2 = resolve_entry(&st, &prof, &entry("root/glm-5.3-think-max"));
+        assert_eq!((t2.model.as_str(), t2.variant.is_none()), ("glm-5.3", true));
+        let t3 = resolve_entry(&st, &prof, &entry("root/glm-5.2"));
+        assert_eq!((t3.model.as_str(), t3.variant.as_deref()), ("glm-5.2", None));
+    }
 }
 
 #[cfg(test)]
@@ -7781,7 +7813,7 @@ mod fallback_tests {
     }
 
     fn t(engine: Option<harness::Kind>, model: &str) -> Target {
-        Target { engine, model: model.into() }
+        Target { engine, model: model.into(), variant: None }
     }
 
     const KEYS: &[&str] = &["claude", "antigravity", "opencode", "codex", "root"];
@@ -8349,3 +8381,4 @@ echo '{{"event":"result","result":{{"conversation_id":"agy-conv-1","status":"SUC
         let _ = std::fs::remove_dir_all(&sdir);
     }
 }
+
