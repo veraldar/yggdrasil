@@ -102,20 +102,42 @@ const reconnecting = () =>
     }
   );
 
-/** a load issued by a frame inside the app: the iframe navigation (destination 'iframe',
- *  whose resultingClientId is the frame itself — sandbox="allow-same-origin" artifact frames
- *  have no scripts, so they never announce a channel of their own), or any sub-resource of
- *  such a frame (the frame's own clientId, frameType 'nested'). These ride the pinned PAGE's
- *  channel — they never wait out waitState for a state the frame will never post. */
-async function isNested(e) {
-  if (e.request.destination === 'iframe') return true;
+/** a load whose client cannot own a pin channel — waiting for its state is a 10 s burn
+ *  for an announcement that will never come:
+ *   · a frame (destination 'iframe'; sandboxed artifact frames run no scripts), or a
+ *     sub-resource of one (the frame's own clientId, frameType 'nested');
+ *   · a top-level page under /api/* — an opened artifact (new tab, address bar, the
+ *     preview's corner button): its document is the artifact's, the app never loads
+ *     there, so its client (the navigation's resultingClientId) never posts bifrostPin —
+ *     and the media inside it (its clientId, frameType 'top-level', url under /api/*).
+ *  These ride any pinned window's channel at once; with none (fallback, unpaired, a
+ *  first load before any announcement) the network, as ever. */
+async function isChannelless(e) {
+  const d = e.request.destination;
+  if (d === 'iframe') return true;
+  if (d === 'document') {
+    try {
+      return new URL(e.request.url).pathname.startsWith('/api/');
+    } catch {
+      return false;
+    }
+  }
   if (!e.clientId) return false;
   try {
     const c = await self.clients.get(e.clientId);
-    return !!c && c.frameType === 'nested';
+    if (!c) return false;
+    if (c.frameType === 'nested') return true;
+    if (c.frameType === 'top-level') {
+      try {
+        return new URL(c.url).pathname.startsWith('/api/');
+      } catch {
+        return false;
+      }
+    }
   } catch {
-    return false;
+    /* fall through */
   }
+  return false;
 }
 
 async function viaPinned(e) {
@@ -124,8 +146,8 @@ async function viaPinned(e) {
   // a frame inside a pinned page: no wait for its own state (it posts none) — the parent
   // page's channel carries it at once. No pinned window anywhere (a page in fallback, an
   // unpaired browser, the first load before any announcement): the network, as ever.
-  const nested = await isNested(e);
-  if (nested) {
+  const channelless = await isChannelless(e);
+  if (channelless) {
     if (!(await pinnedClient(id))) return fetch(e.request);
   } else
     // a page still opening its channel: its requests wait (bounded) — never the network first
@@ -137,7 +159,7 @@ async function viaPinned(e) {
     }
   const own = pinStates.get(id);
   if (own === 'refused') return refused('the box key did not match the pairing QR');
-  if (!nested && own === 'reconnecting' && !(await pinnedClient(id))) return reconnecting();
+  if (!channelless && own === 'reconnecting' && !(await pinnedClient(id))) return reconnecting();
   const c = await pinnedClient(id);
   if (!c) {
     if ([...pinStates.values()].includes('refused'))

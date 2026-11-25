@@ -144,6 +144,34 @@ try {
   });
   await phonePage.waitForTimeout(1500);
 
+  // ---------------------------------------------------------------- F3 the owner's case: a new TAB,
+  // a top-level navigation to /api/artifact/… — the open-in-new-tab corner button
+  const t3 = Date.now();
+  const tab = await phoneCtx.newPage();
+  await tab.goto(`${AP}/api/artifact/door-tree.html`);
+  const tabMs = Date.now() - t3;
+  const tabBody = (await tab.textContent('body')).length > 100; // a real artifact page, not an error json
+  await tab.waitForTimeout(1500);
+  await tab.close();
+
+  // F4 a media file inside such an opened page: the films' <video> src
+  const t4 = Date.now();
+  const tab2 = await phoneCtx.newPage();
+  await tab2.goto(`${AP}/api/artifact/door-tree.html`);
+  await tab2.waitForTimeout(300);
+  const media = await tab2.evaluate(async () => {
+    const t = performance.now();
+    const v = document.createElement('video');
+    v.preload = 'metadata';
+    v.src = '/api/artifact/door-tree.html'; // any artifact path: SW routing is by URL
+    await new Promise((done) => {
+      v.onloadedmetadata = done;
+      v.onerror = done;
+    });
+    return { ms: Math.round(performance.now() - t) };
+  });
+  await tab2.close();
+
   const ok = r.ms < 1500 && thumbMs < 10_000 && fallThrough.length === 0;
   step(
     'F1',
@@ -158,6 +186,20 @@ try {
     r.ms < 1500 && r.txt === 'controlled',
     r.ms,
     `${r.ms} ms, ${r.txt}`
+  );
+  step(
+    'F3',
+    'new tab, top-level /api/artifact page (the open-in-new-tab corner button): under 3 s, real bytes',
+    tabMs < 3000 && tabBody,
+    tabMs,
+    `${tabMs} ms, body "${tabBody ? 'real artifact' : 'wrong'}"`
+  );
+  step(
+    'F4',
+    'media request from inside an opened /api page: no 10 s wait',
+    media.ms < 3000,
+    media.ms,
+    `${media.ms} ms`
   );
   console.log(`\npair→pinned ${pairedMs} ms`);
 } finally {
