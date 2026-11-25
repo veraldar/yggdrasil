@@ -35,21 +35,53 @@ export type PinState = 'off' | 'connecting' | 'pinned' | 'fallback' | 'reconnect
 /** D3 alarm wording when the trunk directory's door pin changed from the one remembered on this device. */
 export const PIN_CHANGED_ALARM = "this computer's key changed — the channel is blocked";
 export const TRUNK_PIN_KEY = 'bifrost.trunk.pin';
+export const TRUNK_PINS_KEY = 'bifrost.trunk.pins';
 
-export type TrunkPin = { fp: string; rootId?: string; rootName?: string; savedAt: string };
+export type TrunkPin = { fp: string; rootId?: string; rootName?: string; savedAt: string; door?: boolean };
 
-export function loadTrunkPin(): TrunkPin | null {
+export function loadTrunkPins(): Record<string, TrunkPin> {
+  const out: Record<string, TrunkPin> = {};
   try {
-    const raw = JSON.parse(localStorage.getItem(TRUNK_PIN_KEY) || 'null');
-    return raw && typeof raw.fp === 'string' && raw.fp ? (raw as TrunkPin) : null;
+    const raw = JSON.parse(localStorage.getItem(TRUNK_PINS_KEY) || 'null');
+    if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+      for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
+        const p = v as Partial<TrunkPin> | null;
+        if (k && p && typeof p.fp === 'string' && p.fp) {
+          out[k] = {
+            fp: p.fp,
+            rootId: typeof p.rootId === 'string' ? p.rootId : k,
+            rootName: typeof p.rootName === 'string' ? p.rootName : undefined,
+            savedAt: typeof p.savedAt === 'string' ? p.savedAt : '',
+            door: p.door === true ? true : undefined,
+          };
+        }
+      }
+    }
+    // Migrate legacy single-entry bifrost.trunk.pin if present
+    const legacy = JSON.parse(localStorage.getItem(TRUNK_PIN_KEY) || 'null') as Partial<TrunkPin> | null;
+    if (legacy && typeof legacy.fp === 'string' && legacy.fp) {
+      const key = typeof legacy.rootId === 'string' && legacy.rootId ? legacy.rootId : '_door';
+      if (!out[key]) {
+        out[key] = {
+          fp: legacy.fp,
+          rootId: legacy.rootId,
+          rootName: legacy.rootName,
+          savedAt: typeof legacy.savedAt === 'string' ? legacy.savedAt : '',
+          door: true,
+        };
+      }
+      localStorage.setItem(TRUNK_PINS_KEY, JSON.stringify(out));
+      localStorage.removeItem(TRUNK_PIN_KEY);
+    }
   } catch {
-    return null;
+    /* private mode or corrupt storage */
   }
+  return out;
 }
 
-export function saveTrunkPin(p: TrunkPin): void {
+export function saveTrunkPins(pins: Record<string, TrunkPin>): void {
   try {
-    localStorage.setItem(TRUNK_PIN_KEY, JSON.stringify(p));
+    localStorage.setItem(TRUNK_PINS_KEY, JSON.stringify(pins));
   } catch {
     /* private mode */
   }
@@ -842,45 +874,75 @@ async function bootTrunkPinned(): Promise<void> {
     location.hostname === '127.0.0.1' ||
     location.hostname === 'localhost';
   if (!secureOrLoopback || !('RTCPeerConnection' in window)) return;
-  const remembered = loadTrunkPin();
-  let door: MeRoot | undefined;
+  const remembered = loadTrunkPins();
+  let list: MeRoot[] | null = null;
   try {
     const r = await origFetch!('/t/me/roots', { credentials: 'same-origin', cache: 'no-store' });
     if (r.ok) {
-      const list = (await r.json().catch(() => null)) as MeRoot[] | null;
-      if (Array.isArray(list)) {
-        door = list.find(
-          (x) => x?.door === true && typeof x.dtls_fp === 'string' && x.dtls_fp.trim().length > 0
-        );
-      }
+      const parsed = (await r.json().catch(() => null)) as MeRoot[] | null;
+      if (Array.isArray(parsed)) list = parsed;
     }
   } catch {
-    /* offline or transient: fall back to remembered pin if we have one */
+    /* offline or transient: fall back to remembered door pin if we have one */
   }
-  const dirFp = door?.dtls_fp?.trim() || '';
-  if (remembered?.fp && dirFp && normFp(dirFp) !== normFp(remembered.fp)) {
-    // D3: the door computer's key changed from what this device remembered — refuse and alarm, never fallback
-    wireChannelHooks();
-    setState('refused', PIN_CHANGED_ALARM);
-    return;
+  let door: MeRoot | undefined;
+  if (list) {
+    // Check EVERY root entry with an id + dtls_fp against what this device remembered for that rootId.
+    // A changed key on ANY remembered root refuses the channel (never overwrite, never fallback).
+    // A door failover to a different rootId with its own key never false-alarms.
+    for (const entry of list) {
+      const id = typeof entry?.id === 'string' ? entry.id.trim() : '';
+      const fp = typeof entry?.dtls_fp === 'string' ? entry.dtls_fp.trim() : '';
+      if (!fp) continue;
+      if (id && remembered[id]?.fp && normFp(fp) !== normFp(remembered[id].fp)) {
+        wireChannelHooks();
+        setState('refused', PIN_CHANGED_ALARM);
+        return;
+      }
+      if (!id && entry.door === true && remembered._door?.fp && normFp(fp) !== normFp(remembered._door.fp)) {
+        wireChannelHooks();
+        setState('refused', PIN_CHANGED_ALARM);
+        return;
+      }
+      if (entry.door === true && !door) door = entry;
+    }
+    // No key changed: remember every root's dtls_fp keyed by rootId and mark the current door
+    let dirty = false;
+    const now = new Date().toISOString();
+    for (const entry of list) {
+      const id = typeof entry?.id === 'string' ? entry.id.trim() : '';
+      const fp = typeof entry?.dtls_fp === 'string' ? entry.dtls_fp.trim() : '';
+      if (!fp) continue;
+      const key = id || (entry.door === true ? '_door' : '');
+      if (!key) continue;
+      const isDoor = entry.door === true ? true : undefined;
+      const prev = remembered[key];
+      if (!prev || prev.door !== isDoor || (entry.name && prev.rootName !== entry.name)) {
+        remembered[key] = {
+          fp: prev?.fp || fp,
+          rootId: id || prev?.rootId,
+          rootName: entry.name || prev?.rootName,
+          savedAt: prev?.savedAt || now,
+          door: isDoor,
+        };
+        dirty = true;
+      }
+    }
+    if (dirty) saveTrunkPins(remembered);
   }
-  const fp = dirFp || remembered?.fp || '';
+  const rememberedDoor =
+    (door?.id ? remembered[door.id] : undefined) ||
+    Object.values(remembered).find((p) => p.door) ||
+    Object.values(remembered)[0];
+  const fp = door?.dtls_fp?.trim() || rememberedDoor?.fp || '';
   if (!fp) return;
-  if (!remembered?.fp && dirFp) {
-    saveTrunkPin({
-      fp: dirFp,
-      rootId: door?.id,
-      rootName: door?.name,
-      savedAt: new Date().toISOString(),
-    });
-  }
   wireChannelHooks();
   const trunkPin: Pin = {
     fp,
     bridge: '',
-    box: door?.name || remembered?.rootName || '',
+    box: door?.name || rememberedDoor?.rootName || '',
     deviceId: '',
-    pairedAt: remembered?.savedAt || '',
+    pairedAt: rememberedDoor?.savedAt || '',
   };
   void connect(trunkPin, { trunk: true });
   // B26: keep the box's peer credential fresh via /t/auth/refresh (AUTH kind 5 carries the PASETO)
