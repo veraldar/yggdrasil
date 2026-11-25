@@ -1,7 +1,7 @@
 /** /api/engines/[name] → the brain's /engine/:name — PUT {model} sets that engine's default
  *  model and answers the row. The brain's refusal (400 + one human sentence: a model it doesn't
- *  offer, an unknown engine) comes back with its status — the roles page says it where the user
- *  tapped. */
+ *  offer, an unknown engine) comes back with its status — the settings page says it where the
+ *  user tapped. */
 import { NextResponse } from 'next/server';
 import { OC } from '@/lib/oc';
 

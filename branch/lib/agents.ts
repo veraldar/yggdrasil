@@ -88,7 +88,7 @@ const WORD: Record<string, string> = {
 };
 /** the small grey word at the right of a list row: the engine (none on the root) */
 export const engineWord = (e?: string | null) => (e && WORD[e]) || '';
-/** what each engine is, in one line (the roles page's engines block) */
+/** what each engine is, in one line (the settings page's engines block) */
 export const ENGINE_NOTE: Record<string, string> = {
   root: "this computer's own models · tools checked by the brain",
   claude: "Anthropic's CLI · its own tools · 5-hour quota",
@@ -96,6 +96,46 @@ export const ENGINE_NOTE: Record<string, string> = {
   opencode: 'its own tools and providers',
   codex: "OpenAI's CLI · its own tools",
 };
+
+export type EngineControlKind = 'free' | 'chips' | 'select';
+
+/** Partition engines into the main visible rows (root · Claude Code · Antigravity) and the ones
+ *  tucked behind the "more engines" fold (opencode · Codex, or any row flagged `more: true`). */
+export function splitEngines(engines: EngineRow[]): { main: EngineRow[]; more: EngineRow[] } {
+  const isMore = (e: EngineRow) => e.more ?? MORE_ENGINES.has(e.name);
+  return {
+    main: engines.filter((e) => !isMore(e)),
+    more: engines.filter(isMore),
+  };
+}
+
+/** Which inline picker an engine opens on tap: free text when it accepts arbitrary ids
+ *  (no models or only ["default"]), chip buttons up to 8 choices, else a <select>. */
+export function engineControlKind(engine: Pick<EngineRow, 'models'>): EngineControlKind {
+  const models = engine.models || [];
+  if (!models.length || (models.length === 1 && models[0] === 'default')) return 'free';
+  return models.length <= 8 ? 'chips' : 'select';
+}
+
+/** Merge the brain's PUT /api/engines/:name response into the engines list. When the brain
+ *  answers an empty/minimal 200 body, the chosen model still applies locally. */
+export function applyEngineSave(
+  engines: EngineRow[],
+  name: string,
+  saved: unknown,
+  fallbackModel: string | null
+): EngineRow[] {
+  const isRow =
+    !!saved &&
+    typeof saved === 'object' &&
+    'name' in saved &&
+    (saved as { name: unknown }).name === name;
+  return engines.map((e) =>
+    e.name === name
+      ? { ...e, ...(isRow ? (saved as Partial<EngineRow>) : { model: fallbackModel }) }
+      : e
+  );
+}
 
 type HarnessLike = { kind?: unknown; attached?: unknown } | string | null | undefined;
 /** the owner's own terminal conversation, continued here: a list row carries its kind as

@@ -268,16 +268,20 @@ test('roles: from MAIN settings — no claude/agy roles, the engines, make teste
     await page.getByRole('link', { name: 'session settings' }).tap();
     await page.getByRole('link', { name: 'roles ›' }).tap();
     await page.waitForURL(/\/agents$/);
-    // claude and agy are engines now, not roles
+    // claude and agy are engines now, not roles — and engines live in /settings, not /agents
     await expect(page.getByTestId('agent-row').first()).toBeVisible();
+    await expect(page.getByTestId('engines-block')).toHaveCount(0);
     await expect(page.locator('[data-testid="agent-row"][href="/agents/claude"]')).toHaveCount(0);
     await expect(page.locator('[data-testid="agent-row"][href="/agents/agy"]')).toHaveCount(0);
-    // the engines block: Claude Code's own models, each with what it is for
+    // the engines block lives on /settings: Claude Code's own models, each with what it is for
+    await page.goto('/settings');
     const cc = page.locator('[data-testid="engine-row"][data-engine="claude"]');
     await cc.getByRole('button', { name: /Claude Code/ }).tap();
     await expect(cc.getByRole('button', { name: 'haiku', exact: true })).toBeVisible();
     await expect(cc.getByText(/strong/).first()).toBeVisible();
     await cc.getByRole('button', { name: /Claude Code/ }).tap(); // closed, nothing saved
+    await page.getByTestId('agents-link').tap();
+    await page.waitForURL(/\/agents$/);
     // a new root role: read + bash only, glm-5.3-flash
     await page.getByRole('button', { name: 'new role' }).tap();
     await page.getByLabel('new role name').fill(NAME);

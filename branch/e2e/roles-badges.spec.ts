@@ -8,7 +8,7 @@ import { OC } from './brain';
  *  the engine; the engine is a small grey word at the right of the row (claude · agy · opencode ·
  *  codex, none on the root). A session's settings say "role" and "runs on" apart; an engine
  *  switch says what changes first, always with the fresh-start warning. The "agents" page is the
- *  roles page: no `claude` / `agy` roles any more, and an engines block.
+ *  roles page (no `claude` / `agy` roles, no engines block); the engines block lives on /settings.
  *  Twin only (e2e/GUARD.md): PW_BASE_URL = an app whose brain is E2E_OC_URL. Seeds its sessions
  *  through the brain (POST /session {agent, engine}) and deletes them after. */
 // the app's service worker relays /api/* once it controls the page: page.route (two mocked
@@ -177,7 +177,9 @@ test('settings: "role" and "runs on" apart, the right chips pressed; an engine s
   // the model block follows the engine: Antigravity's models only
   const pick = blk(page, 'model').locator('button.oz-pick');
   await pick.tap();
-  await expect(page.getByRole('button', { name: /^antigravity\/gemini-4-carbon/ })).toBeVisible();
+  await expect(
+    page.getByRole('button', { name: /^antigravity\/gemini-4-carbon/ }).first()
+  ).toBeVisible();
   await expect(page.getByRole('button', { name: /^yggdrasil\// })).toHaveCount(0);
   await pick.tap();
   await shot(page, '2-settings-lead-agy');
@@ -325,28 +327,13 @@ test('settings: a terminal conversation has no role and runs on its own engine, 
   await diff.getByRole('button', { name: 'keep' }).tap();
 });
 
-test('the roles page: roles with their badge and default engine, no claude/agy roles, an engines block', async ({
+test('the roles page has no engines block; engines live on /settings and save to the brain', async ({
   page,
   request,
 }) => {
   await page.goto('/settings');
-  await page.getByTestId('agents-link').tap();
-  await page.waitForURL(/\/agents$/);
-  await expect(page.locator('header')).toContainText('roles');
-  const rows = page.getByTestId('agent-row');
-  await expect(rows.first()).toBeVisible();
-  await expect(page.locator('[data-testid="agent-row"][data-role="claude"]')).toHaveCount(0);
-  await expect(page.locator('[data-testid="agent-row"][data-role="agy"]')).toHaveCount(0);
-  expect((await request.get('/api/agents/claude')).status()).toBe(404);
-  const leadRow = page.locator('[data-testid="agent-row"][data-role="lead"]');
-  await expect(leadRow).toContainText('[LEA]');
-  const coord = page.locator('[data-testid="agent-row"][data-role="coordinator"]');
-  await expect(coord).toContainText('[MAI]');
-  await expect(coord).toContainText('locked');
-  await expect(coord.locator('.tag')).toHaveText('root');
-  await expect(page.getByRole('button', { name: 'new role' })).toBeVisible();
 
-  // engines: root · Claude Code · Antigravity; opencode and Codex in the fold
+  // engines live on /settings: root · Claude Code · Antigravity; opencode and Codex in the fold
   const block = page.getByTestId('engines-block');
   await expect(block.getByRole('heading', { name: 'engines', exact: true })).toBeVisible();
   const eng = (n: string) => block.locator(`[data-testid="engine-row"][data-engine="${n}"]`);
@@ -355,7 +342,6 @@ test('the roles page: roles with their badge and default engine, no claude/agy r
   await block.getByText('more engines (installed, unused)').tap();
   await expect(eng('opencode')).toBeVisible();
   await expect(eng('codex')).toBeVisible();
-  await shot(page, '4-roles-page');
 
   // a tap opens Claude Code's models; a pick saves its default at the brain
   const before = ((await (await request.get(`${OC}/engine`)).json()) as Engine[]).find(
@@ -382,4 +368,24 @@ test('the roles page: roles with their badge and default engine, no claude/agy r
   } finally {
     await request.put(`${OC}/engine/claude`, { data: { model: before.model } }).catch(() => {});
   }
+
+  // roles page: roles with their badge and default engine, no claude/agy roles, no engines block
+  await page.getByTestId('agents-link').tap();
+  await page.waitForURL(/\/agents$/);
+  await expect(page.locator('header')).toContainText('roles');
+  const rows = page.getByTestId('agent-row');
+  await expect(rows.first()).toBeVisible();
+  await expect(page.getByTestId('engines-block')).toHaveCount(0);
+  await expect(page.getByTestId('engine-row')).toHaveCount(0);
+  await expect(page.locator('[data-testid="agent-row"][data-role="claude"]')).toHaveCount(0);
+  await expect(page.locator('[data-testid="agent-row"][data-role="agy"]')).toHaveCount(0);
+  expect((await request.get('/api/agents/claude')).status()).toBe(404);
+  const leadRow = page.locator('[data-testid="agent-row"][data-role="lead"]');
+  await expect(leadRow).toContainText('[LEA]');
+  const coord = page.locator('[data-testid="agent-row"][data-role="coordinator"]');
+  await expect(coord).toContainText('[MAI]');
+  await expect(coord).toContainText('locked');
+  await expect(coord.locator('.tag')).toHaveText('root');
+  await expect(page.getByRole('button', { name: 'new role' })).toBeVisible();
+  await shot(page, '4-roles-page');
 });
