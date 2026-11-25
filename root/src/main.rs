@@ -2176,7 +2176,7 @@ async fn switch_agent(State(st): State<AppState>, Path(id): Path<String>, Json(b
     let Some(name) = body["agent"].as_str() else { return bad_request("agent required") };
     let main = st.sessions.lock().unwrap().get(&id).is_some_and(|s| is_main_title(s.info["title"].as_str().unwrap_or_default()));
     if name == "coordinator" && !main {
-        return bad_request("the coordinator is MAIN's alone — pick lead, build, fix, review or research");
+        return bad_request("the coordinator is MAIN's alone — pick lead, build, fix, review, research or marketer");
     }
     if main && name != "coordinator" {
         return bad_request("MAIN is the coordinator — it routes work to sessions; give the work to a session with this role instead");
@@ -6165,6 +6165,74 @@ mod image_tests {
         assert_eq!(new_session(&st, "a new lead", None, Some("lead"), None, None)["engine"], "root");
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&sdir);
+    }
+
+    #[tokio::test]
+    async fn marketer_session_starts_with_default_engine_and_in_schemas() {
+        let (st, dir) = roles_state("marketer", profiles::Profiles::load(None));
+        let schemas = tree::schemas(&st.config.profiles.read().unwrap());
+        let start_schema = schemas.iter().find(|s| s["function"]["name"] == "session_start").unwrap();
+        let agent_desc = start_schema["function"]["parameters"]["properties"]["agent"]["description"].as_str().unwrap();
+        assert!(agent_desc.contains("marketer:"), "session_start schema lists marketer: {agent_desc}");
+
+        // direct creation: marketer starts on its default engine (root)
+        let m = new_session(&st, "Launch copy", None, Some("marketer"), None, None);
+        assert_eq!((m["agent"].as_str(), m["engine"].as_str()), (Some("marketer"), Some("root")));
+        assert_eq!(m["model"]["id"], "glm-5.3");
+        assert!(m.get("harness").is_none());
+        let mid = m["id"].as_str().unwrap();
+        assert_eq!(session_profile(&st, mid).name, "marketer");
+        assert!(session_profile(&st, mid).prompt.starts_with(profiles::MARKETER_PROMPT));
+
+        // explicit engine override still keeps the marketer role
+        let m_claude = new_session_on(&st, "Launch copy on claude", None, Some("marketer"), Some("claude"), None, None);
+        assert_eq!((m_claude["agent"].as_str(), m_claude["engine"].as_str()), (Some("marketer"), Some("claude")));
+        assert_eq!(m_claude["harness"]["kind"], "claude");
+
+        // coordinator session_start with agent=marketer
+        let main = new_session(&st, "[MAIN]", None, None, None, None)["id"].as_str().unwrap().to_string();
+        let out = tree::run(&st, &main, "session_start", &json!({
+            "title": "Release post",
+            "agent": "marketer",
+            "brief": "Draft the v0.9.1 release announcement"
+        }))
+        .await;
+        assert!(out.output.starts_with("STARTED"), "{}", out.output);
+        let started = st
+            .sessions
+            .lock()
+            .unwrap()
+            .values()
+            .find(|s| s.info["title"] == "Release post")
+            .map(|s| s.info.clone())
+            .expect("marketer session created");
+        assert_eq!((started["agent"].as_str(), started["engine"].as_str()), (Some("marketer"), Some("root")));
+        assert_eq!(started["parentID"].as_str(), Some(main.as_str()));
+
+        // marketer spawns its own research sub-session, which reports back to marketer (not MAIN)
+        let mkt_id = started["id"].as_str().unwrap().to_string();
+        assert!(session_profile(&st, &mkt_id).sessions, "marketer manages sub-sessions");
+        let sub_out = tree::run(&st, &mkt_id, "session_start", &json!({
+            "title": "Competitor scan",
+            "agent": "research",
+            "brief": "Compare self-hosted AI assistant landing pages"
+        }))
+        .await;
+        assert!(sub_out.output.starts_with("STARTED"), "{}", sub_out.output);
+        let research = st
+            .sessions
+            .lock()
+            .unwrap()
+            .values()
+            .find(|s| s.info["title"] == "Competitor scan")
+            .map(|s| s.info.clone())
+            .expect("research sub-session created");
+        let res_id = research["id"].as_str().unwrap().to_string();
+        assert_eq!((research["agent"].as_str(), research["engine"].as_str()), (Some("research"), Some("root")));
+        assert_eq!(research["parentID"].as_str(), Some(mkt_id.as_str()));
+        assert!(matches!(tree::report_target(&st, &res_id, None), Some(tree::Target::Local(ref p)) if p == &mkt_id),
+            "research child reports back to marketer");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Settings: the engine switches on its own (fresh harness conversation, the role's model only

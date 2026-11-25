@@ -247,9 +247,9 @@ export function engineDiff(
 export const ENGINE_FRESH =
   '⚠ the new engine starts fresh: it sees only new messages, not this conversation';
 
-/** a role's three-letter tag: LEA(d), BUI(ld), FIX, REV(iew), RES(earch), a custom one's first
- *  three letters — and the coordinator's is MAI wherever it shows (MAIN here, a proxy of another
- *  root's MAIN, the roles page) */
+/** a role's three-letter tag: LEA(d), BUI(ld), FIX, REV(iew), RES(earch), MAR(keter), a custom
+ *  one's first three letters — and the coordinator's is MAI wherever it shows (MAIN here, a proxy
+ *  of another root's MAIN, the roles page) */
 export const agentTag = (agent: string) =>
   agent === 'coordinator'
     ? 'MAI'
@@ -259,7 +259,7 @@ export const agentTag = (agent: string) =>
         .toUpperCase();
 
 /** the built-in roles in the order the owner reads them (the mockup's); a custom one after */
-const ROLE_ORDER = ['coordinator', 'lead', 'build', 'fix', 'review', 'research'];
+const ROLE_ORDER = ['coordinator', 'lead', 'build', 'fix', 'review', 'research', 'marketer'];
 export const byRole = (a: { name: string }, b: { name: string }) => {
   const i = (n: string) => (ROLE_ORDER.includes(n) ? ROLE_ORDER.indexOf(n) : ROLE_ORDER.length);
   return i(a.name) - i(b.name) || a.name.localeCompare(b.name);
@@ -278,6 +278,6 @@ export const HARNESS_TAG: Record<string, string> = {
 
 /** every row carries one (roles rework 11-22): the badge is the ROLE, never the engine.
  *  MAIN is MAI; the owner's own terminal conversation is TRM (never hired for a job); else
- *  the role's (LEA · BUI · FIX · REV · RES · a custom one's first three letters). */
+ *  the role's (LEA · BUI · FIX · REV · RES · MAR · a custom one's first three letters). */
 export const sessionTag = (s: { agent?: string | null; harness?: HarnessLike }, isMain = false) =>
   isMain ? 'MAI' : isAttached(s.harness) ? 'TRM' : agentTag(roleOf(s.agent));
