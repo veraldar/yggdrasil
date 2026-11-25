@@ -26,6 +26,7 @@ use super::crypto::{Kek, SigningKey};
 use super::db::{now_ms, Db};
 use super::http::{self, normalize_path, parse_head, read_head, read_proxy_v1, Io, Req, Resp};
 use super::idp;
+use super::install;
 use super::paseto::{self, Claims, VerifyKey, Why};
 use super::relay;
 use super::shell;
@@ -426,7 +427,8 @@ pub async fn dispatch(st: Arc<State>, inc: Incoming) {
             return idp::api::handle(st, inc).await;
         }
         if np.starts_with("/install") {
-            return inc.answer(shell::install_placeholder(&st, &raw)).await;
+            let r = install::serve(&st, &raw);
+            return inc.answer(r).await;
         }
         if np.starts_with("/.well-known/acme-challenge/") {
             let r = shell::acme(&st, &raw);
