@@ -6,18 +6,36 @@
  * cookie rides it) and a retry — whichever hint the 401 carries. A refused refresh
  * means this device is no longer paired → /pair. Mounted once in the layout; inert in tailnet mode,
  * where the middleware never answers 401.
+ *
+ * v1 (BIFROST_AUTH=trunk, contract C3): a 401 from any v1 verifier (the trunk, this root's app or its
+ * bridge) is exactly `{why, reauth: "refresh"|"login"}` — every v0.9 one carries an `error` field too,
+ * which is how the two are told apart (the same build serves both modes). `refresh` → one single-flight
+ * POST /t/auth/refresh (the trunk, same origin; its refresh cookie is scoped to /t/auth) and a retry;
+ * `login`, or a refused refresh → /login (the trunk's sign-in page).
  */
 import { useEffect } from 'react';
 
-let inflight: Promise<boolean> | null = null;
+const inflight = new Map<string, Promise<boolean>>();
 
-function refreshOnce(orig: typeof fetch): Promise<boolean> {
-  inflight ??= orig('/api/pair/refresh', { method: 'POST' })
-    .then((r) => r.ok)
-    .catch(() => false)
-    .finally(() => setTimeout(() => (inflight = null), 0));
-  return inflight;
+function refreshOnce(orig: typeof fetch, url: string): Promise<boolean> {
+  let p = inflight.get(url);
+  if (!p) {
+    p = orig(url, { method: 'POST' })
+      .then((r) => r.ok)
+      .catch(() => false)
+      .finally(() => setTimeout(() => inflight.delete(url), 0));
+    inflight.set(url, p);
+  }
+  return p;
 }
+
+/** A v1 (C3) 401 body: {why, reauth} and nothing else. */
+const isV1 = (hint: unknown): hint is { why: string; reauth: 'refresh' | 'login' } =>
+  !!hint &&
+  typeof hint === 'object' &&
+  !('error' in hint) &&
+  typeof (hint as { why?: unknown }).why === 'string' &&
+  ((hint as { reauth?: unknown }).reauth === 'refresh' || (hint as { reauth?: unknown }).reauth === 'login');
 
 export function DeviceAuth() {
   useEffect(() => {
@@ -37,10 +55,15 @@ export function DeviceAuth() {
         .clone()
         .json()
         .catch(() => null);
+      if (isV1(hint)) {
+        if (hint.reauth === 'refresh' && (await refreshOnce(orig, '/t/auth/refresh'))) return orig(input, init);
+        location.assign('/login');
+        return res;
+      }
       // one refresh for ANY hint, "pair" included: an access token that ran out and was then cleaned out
       // of the registry (lib/devices.ts prune) is answered "pair", not "refresh", though the device is
       // paired and its refresh credential is good. Only a refused refresh means it is not paired.
-      if (hint?.reauth && (await refreshOnce(orig))) return orig(input, init);
+      if (hint?.reauth && (await refreshOnce(orig, '/api/pair/refresh'))) return orig(input, init);
       if (hint?.reauth) location.assign('/pair?unpaired=1');
       return res;
     };

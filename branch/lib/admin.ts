@@ -13,6 +13,27 @@
 import { timingSafeEqual } from 'crypto';
 import { type Device, checkAccess } from '@/lib/devices';
 import { regionOfReq } from '@/lib/region';
+import { type Why as TrunkWhy, checkTrunkAccess } from '@/lib/trunk-auth';
+
+const trunkMode = () => process.env.BIFROST_AUTH === 'trunk';
+
+/**
+ * The signed-in device a request speaks for, in either device mode: devices (v0.9 registry) or trunk
+ * (a v1 access token, lib/trunk-auth.ts). `kep` = the token's kill epoch (trunk mode only), for
+ * watchers that re-check the device later (lib/voice-revoke.ts). Never the admin token or the console
+ * (neither is a device token: both are refused here).
+ */
+export async function signedInDevice(
+  req: Request
+): Promise<{ ok: true; id: string; kep?: number } | { ok: false; why: string }> {
+  const raw = bearerOf(req) || cookieOf(req, 'bifrost_device');
+  if (trunkMode()) {
+    const v = checkTrunkAccess(raw, regionOfReq(req));
+    return v.ok ? { ok: true, id: v.claims.did, kep: v.claims.kep } : { ok: false, why: v.why };
+  }
+  const gate = await checkAccess(raw, regionOfReq(req));
+  return gate.ok ? { ok: true, id: gate.device.id } : { ok: false, why: gate.why };
+}
 
 export const bearerOf = (req: Request) =>
   req.headers
@@ -44,6 +65,7 @@ export async function adminOrDevice(req: Request): Promise<'admin' | 'device' | 
   const expected = process.env.BIFROST_ADMIN_TOKEN || '';
   if (presented && expected && same(presented, expected)) return 'admin';
   const raw = presented || cookieOf(req, 'bifrost_device');
+  if (raw && trunkMode()) return checkTrunkAccess(raw, regionOfReq(req)).ok ? 'device' : null;
   if (raw) return (await checkAccess(raw, regionOfReq(req))).ok ? 'device' : null;
   return adminOk(req) ? 'admin' : null;
 }
@@ -71,6 +93,10 @@ export async function deviceOf(req: Request): Promise<Device | null> {
  * tailnet is the gate, as for every session route (middleware.ts) — the :8447 front door.
  */
 export async function rootsGate(req: Request): Promise<'ok' | 401 | 403> {
+  if (trunkMode()) {
+    const t = await trunkRootsGate(req);
+    return t === null ? 'ok' : t === 403 ? 403 : 401;
+  }
   if (process.env.BIFROST_AUTH !== 'devices') return 'ok';
   if (await deviceOf(req)) return 'ok';
   const expected = process.env.BIFROST_ADMIN_TOKEN || '';
@@ -78,4 +104,14 @@ export async function rootsGate(req: Request): Promise<'ok' | 401 | 403> {
   if (presented && expected && same(presented, expected)) return 403;
   if (!presented && !cookieOf(req, 'bifrost_device') && adminOk(req)) return 403;
   return 401;
+}
+
+/** rootsGate in trunk mode: null = a signed-in device; 403 the console / admin token; else the 401 why. */
+export async function trunkRootsGate(req: Request): Promise<null | 403 | TrunkWhy> {
+  const expected = process.env.BIFROST_ADMIN_TOKEN || '';
+  const presented = bearerOf(req);
+  if (presented && expected && same(presented, expected)) return 403;
+  if (!presented && !cookieOf(req, 'bifrost_device') && adminOk(req)) return 403;
+  const v = checkTrunkAccess(presented || cookieOf(req, 'bifrost_device'), regionOfReq(req));
+  return v.ok ? null : v.why;
 }

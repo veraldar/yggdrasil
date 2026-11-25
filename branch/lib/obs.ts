@@ -54,7 +54,7 @@ export function event(kind: string, fields: Record<string, unknown> = {}): void 
       ts,
       t: new Date(ts).toISOString().replace(/\.\d{3}Z$/, 'Z'),
       kind,
-      door: process.env.BIFROST_AUTH === 'devices' ? 'public' : 'tailnet',
+      door: process.env.BIFROST_AUTH === 'devices' || process.env.BIFROST_AUTH === 'trunk' ? 'public' : 'tailnet',
     };
     for (const [k, v] of Object.entries(fields)) if (v !== undefined) line[k] = v;
     if (dropped > 0) {

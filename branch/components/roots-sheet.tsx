@@ -10,6 +10,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { LineIcon } from '@/components/line-icon';
+import { useTrunkMode } from '@/lib/auth-mode';
 import { cacheTreeThemes, chosenWorld } from '@/lib/worlds';
 
 /** a press this long on a row (not home) asks to remove it */
@@ -60,8 +61,49 @@ export type PendingJoin = {
   expires_at: string;
   root_id?: string | null;
   approve_url?: string;
+  /** v1: an enrollment pending on the trunk (pendingFromTrunk) */
+  trunk?: boolean;
 };
 export type Tree = { home: Home | null; roots: Root[]; joins?: PendingJoin[] };
+
+/**
+ * v1 (trunk mode, spec §5.5, §13 C7/C8): the computers waiting to join come from the trunk
+ * (GET /t/roots/pending, same origin, the device cookie rides it); "Add to my tree" opens the trunk's
+ * own approval card (/auth/root?e=<id>: step-up, and the terminal code when the regions differ);
+ * Refuse is POST /t/roots/enroll/<id>/refuse; hold-to-remove revokes the root on the trunk
+ * (DELETE /t/roots/<trunk id>, the id from GET /t/me/roots by name). The fields read from a pending
+ * enrollment, tolerant until the shape is pinned in CONTRACTS.md: id, name|hostname, os, host|hostname,
+ * wg_fp|fingerprint, expires_at (RFC 3339 or unix ms).
+ */
+type TrunkPending = {
+  id?: string;
+  name?: string;
+  hostname?: string;
+  host?: string;
+  os?: string;
+  wg_fp?: string | null;
+  fingerprint?: string | null;
+  expires_at?: string | number;
+};
+const TRUNK_ID = /^[A-Za-z0-9_-]{1,64}$/;
+export function pendingFromTrunk(list: unknown): PendingJoin[] {
+  if (!Array.isArray(list)) return [];
+  return (list as TrunkPending[])
+    .filter((p) => p && typeof p.id === 'string' && TRUNK_ID.test(p.id))
+    .map((p) => ({
+      req: p.id!,
+      name: String(p.name || p.hostname || p.id),
+      os: String(p.os || ''),
+      host: String(p.host || p.hostname || ''),
+      code: '',
+      wg_fp: p.wg_fp ?? p.fingerprint ?? null,
+      status: 'pending',
+      expires_at:
+        typeof p.expires_at === 'number' ? new Date(p.expires_at).toISOString() : String(p.expires_at || ''),
+      approve_url: `/auth/root?e=${encodeURIComponent(p.id!)}`,
+      trunk: true,
+    }));
+}
 type Row = Root & { home?: boolean };
 
 const msOf = (t?: number | null) => (!t ? 0 : t < 1e12 ? t * 1000 : t);
@@ -102,6 +144,10 @@ export function RootsSheet({
   const held = useRef(false);
   const treeCb = useRef(onTree);
   treeCb.current = onTree;
+  // v1: behind a trunk the pending roots and the remove go to the trunk (pendingFromTrunk above)
+  const trunk = useTrunkMode();
+  const trunkRef = useRef(trunk);
+  trunkRef.current = trunk;
 
   const loadTree = useCallback(async () => {
     try {
@@ -112,7 +158,7 @@ export function RootsSheet({
       if (!r.ok) return;
       const t = (await r.json()) as Tree;
       setTree(t);
-      setJoins(t.joins ?? []);
+      if (!trunkRef.current) setJoins(t.joins ?? []);
       cacheTreeThemes(t);
       treeCb.current?.(t);
     } catch {
@@ -120,20 +166,50 @@ export function RootsSheet({
     }
   }, []);
 
+  const loadPending = useCallback(async () => {
+    try {
+      const r = await fetch('/t/roots/pending', { cache: 'no-store', signal: AbortSignal.timeout(10_000) });
+      if (r.ok) setJoins(pendingFromTrunk(await r.json()));
+    } catch {
+      /* transient — keep the last answer */
+    }
+  }, []);
+
   useEffect(() => {
-    void loadTree();
+    const load = () => {
+      void loadTree();
+      if (trunk) void loadPending();
+    };
+    load();
     const t = setInterval(() => {
-      if (!document.hidden) void loadTree();
+      if (!document.hidden) load();
     }, POLL_MS);
     return () => clearInterval(t);
-  }, [loadTree]);
+  }, [loadTree, loadPending, trunk]);
 
   /** Approve or refuse a pending machine join in-app; on a tailnet origin without a paired
    *  device cookie, hand off to the join's paired public approve URL instead of failing dead. */
   const decideJoin = useCallback(
     async (j: PendingJoin, what: 'approve' | 'refuse') => {
+      if (j.trunk && what === 'approve' && j.approve_url) {
+        window.location.assign(j.approve_url); // the trunk's card: step-up, then Connect root
+        return;
+      }
       setBusy(true);
       setFailed('');
+      if (j.trunk) {
+        try {
+          const r = await fetch(`/t/roots/enroll/${encodeURIComponent(j.req)}/refuse`, { method: 'POST' });
+          if (!r.ok) setFailed(r.status === 403 ? 'the admin refuses roots' : 'refuse failed');
+          else setJoins((js) => js.filter((x) => x.req !== j.req));
+          void loadPending();
+        } catch {
+          setFailed('could not reach the trunk');
+        } finally {
+          setBusy(false);
+        }
+        return;
+      }
       try {
         const r = await fetch(`/api/roots/join/${encodeURIComponent(j.req)}/${what}`, {
           method: 'POST',
@@ -166,7 +242,7 @@ export function RootsSheet({
         setBusy(false);
       }
     },
-    [loadTree, tree]
+    [loadTree, loadPending, tree]
   );
 
   const hasJoins = joins.length > 0;
@@ -224,12 +300,28 @@ export function RootsSheet({
 
   const remove = (id: string) =>
     go(async () => {
-      const r = await fetch(`/api/roots/${encodeURIComponent(id)}/remove`, { method: 'POST' });
-      if (!r.ok) return setFailed('failed');
+      const r = trunk
+        ? await removeOnTrunk(id)
+        : await fetch(`/api/roots/${encodeURIComponent(id)}/remove`, { method: 'POST' });
+      if (!r.ok) return setFailed(r.status === 403 ? 'the admin removes roots' : 'failed');
       setAsk(null);
       setTree((t) => (t ? { ...t, roots: t.roots.filter((x) => x.id !== id) } : t));
       void loadTree();
     });
+
+  /** v1: revoke the root on the trunk — its trunk id by name from GET /t/me/roots (C6). */
+  async function removeOnTrunk(id: string): Promise<{ ok: boolean; status: number }> {
+    const names = new Set([id, rows.find((x) => x.id === id)?.name].filter(Boolean));
+    const m = await fetch('/t/me/roots', { cache: 'no-store' });
+    if (!m.ok) return { ok: false, status: m.status };
+    const list = (await m.json().catch(() => [])) as Array<{ id?: string; name?: string }>;
+    const hit = Array.isArray(list)
+      ? list.find((x) => typeof x?.name === 'string' && names.has(x.name) && typeof x.id === 'string')
+      : undefined;
+    if (!hit?.id || !TRUNK_ID.test(hit.id)) return { ok: false, status: 404 };
+    const r = await fetch(`/t/roots/${encodeURIComponent(hit.id)}`, { method: 'DELETE' });
+    return { ok: r.ok, status: r.status };
+  }
 
   // ── press: tap opens the computer's page; hold (not home) asks to remove it ──
   function down(e: React.PointerEvent, r: Row) {
