@@ -27,9 +27,33 @@
  * trunk's TLS — fallback is a first-contact answer only) · refused (the box key
  * did not match: a man in the middle — nothing is sent, nothing falls back).
  */
-import { type Pin, PinMismatch, assertPinned, loadPin } from '@/lib/p2p';
+import { buildReady, isTrunk } from '@/lib/auth-mode';
+import { type Pin, PinMismatch, assertPinned, loadPin, normFp } from '@/lib/p2p';
 
 export type PinState = 'off' | 'connecting' | 'pinned' | 'fallback' | 'reconnecting' | 'refused';
+
+/** D3 alarm wording when the trunk directory's door pin changed from the one remembered on this device. */
+export const PIN_CHANGED_ALARM = "this computer's key changed — the channel is blocked";
+export const TRUNK_PIN_KEY = 'bifrost.trunk.pin';
+
+export type TrunkPin = { fp: string; rootId?: string; rootName?: string; savedAt: string };
+
+export function loadTrunkPin(): TrunkPin | null {
+  try {
+    const raw = JSON.parse(localStorage.getItem(TRUNK_PIN_KEY) || 'null');
+    return raw && typeof raw.fp === 'string' && raw.fp ? (raw as TrunkPin) : null;
+  } catch {
+    return null;
+  }
+}
+
+export function saveTrunkPin(p: TrunkPin): void {
+  try {
+    localStorage.setItem(TRUNK_PIN_KEY, JSON.stringify(p));
+  } catch {
+    /* private mode */
+  }
+}
 
 const OPEN = 1;
 const DATA = 2;
@@ -197,7 +221,7 @@ function gathered(pc: RTCPeerConnection, ms: number): Promise<void> {
  *  requests then meet the same 401 and send the phone back to pairing */
 class BoxRefused extends Error {}
 
-async function openLink(pin: Pin): Promise<Link> {
+async function openLink(pin: Pin, opts?: { trunk?: boolean }): Promise<Link> {
   const pc = new RTCPeerConnection({ iceServers: [] });
   const dc = pc.createDataChannel('tun', { ordered: true });
   try {
@@ -216,7 +240,9 @@ async function openLink(pin: Pin): Promise<Link> {
       const hint = await r.json().catch(() => ({}));
       if (hint?.reauth !== 'refresh')
         throw new BoxRefused(`the box refused this phone (${hint?.why || 401})`);
-      const f = await origFetch!('/api/pair/refresh', { method: 'POST' });
+      const f = await origFetch!(opts?.trunk ? '/t/auth/refresh' : '/api/pair/refresh', {
+        method: 'POST',
+      });
       if (!f.ok) throw new BoxRefused('the box refused this phone (refresh)');
       r = await post();
       if (r.status === 401) throw new BoxRefused('the box refused this phone');
@@ -242,11 +268,11 @@ async function openLink(pin: Pin): Promise<Link> {
   }
 }
 
-function connect(pin: Pin): Promise<void> {
+function connect(pin: Pin, opts?: { trunk?: boolean }): Promise<void> {
   opening ??= (async () => {
     setState(wasPinned ? 'reconnecting' : 'connecting', why);
     try {
-      const l = await openLink(pin);
+      const l = await openLink(pin, opts);
       link = l;
       l.onClose = (w) => {
         if (link !== l) return;
@@ -255,7 +281,7 @@ function connect(pin: Pin): Promise<void> {
         // offer is refused): open it again; meanwhile nothing goes to the trunk's TLS
         setState('reconnecting', w);
         retryMs = RETRY_FIRST_MS;
-        setTimeout(() => void connect(pin), retryMs);
+        setTimeout(() => void connect(pin, opts), retryMs);
       };
       wasPinned = true;
       retryMs = RETRY_FIRST_MS;
@@ -264,11 +290,12 @@ function connect(pin: Pin): Promise<void> {
       link = null;
       const w = e instanceof Error ? e.message : String(e);
       if (e instanceof PinMismatch) setState('refused', String(e.message));
-      else if (wasPinned && !(e instanceof BoxRefused)) {
-        // a loss, not a blocking network: keep trying (backoff), keep the trunk's TLS out of it
+      else if ((wasPinned || opts?.trunk) && !(e instanceof BoxRefused)) {
+        // a loss, not a blocking network (or X11/B25: a known directory pin on first contact):
+        // keep trying (backoff), keep the trunk's TLS out of it
         setState('reconnecting', w);
         retryMs = Math.min(RETRY_MAX_MS, retryMs * 2);
-        setTimeout(() => void connect(pin), retryMs);
+        setTimeout(() => void connect(pin, opts), retryMs);
       } else setState('fallback', w);
     } finally {
       opening = null;
@@ -733,8 +760,12 @@ function watchTokens(orig: typeof fetch): typeof fetch {
     try {
       const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
       const p = new URL(url, location.href).pathname;
-      if (res.ok && (p === '/api/pair/refresh' || p === '/api/pair/claim')) {
-        const t = (await res.clone().json())?.accessToken;
+      if (
+        res.ok &&
+        (p === '/api/pair/refresh' || p === '/api/pair/claim' || p === '/t/auth/refresh')
+      ) {
+        const d = await res.clone().json();
+        const t = d?.access_token ?? d?.accessToken;
         if (typeof t === 'string' && link) link.auth(t);
       }
     } catch {
@@ -778,19 +809,11 @@ export function pinSaved(): void {
 }
 
 let booted = false;
+let hooksWired = false;
 
-/** start the pinned channel for this page (idempotent): called by the root layout */
-export function bootPinned(): void {
-  if (booted || typeof window === 'undefined') return;
-  booted = true;
-  origFetch = window.fetch.bind(window);
-  window.fetch = watchTokens(origFetch);
-  patchBeacon();
-  const pin = loadPin();
-  if (!pin?.fp || location.protocol !== 'https:' || !('RTCPeerConnection' in window)) {
-    setState('off');
-    return;
-  }
+function wireChannelHooks() {
+  if (hooksWired) return;
+  hooksWired = true;
   // LiveKit's signaling (and any websocket to the box) rides the channel when it is up
   const Real = RealWS;
   const Patched = function (url: string | URL, protocols?: string | string[]) {
@@ -807,6 +830,88 @@ export function bootPinned(): void {
   window.WebSocket = Patched;
   navigator.serviceWorker?.addEventListener('message', (e) => void carry(e));
   navigator.serviceWorker?.addEventListener('controllerchange', tellWorker);
+}
+
+type MeRoot = { id?: string; name?: string; dtls_fp?: string; door?: boolean };
+
+async function bootTrunkPinned(): Promise<void> {
+  const b = await buildReady();
+  if (!isTrunk(b)) return;
+  const secureOrLoopback =
+    location.protocol === 'https:' ||
+    location.hostname === '127.0.0.1' ||
+    location.hostname === 'localhost';
+  if (!secureOrLoopback || !('RTCPeerConnection' in window)) return;
+  const remembered = loadTrunkPin();
+  let door: MeRoot | undefined;
+  try {
+    const r = await origFetch!('/t/me/roots', { credentials: 'same-origin', cache: 'no-store' });
+    if (r.ok) {
+      const list = (await r.json().catch(() => null)) as MeRoot[] | null;
+      if (Array.isArray(list)) {
+        door = list.find(
+          (x) => x?.door === true && typeof x.dtls_fp === 'string' && x.dtls_fp.trim().length > 0
+        );
+      }
+    }
+  } catch {
+    /* offline or transient: fall back to remembered pin if we have one */
+  }
+  const dirFp = door?.dtls_fp?.trim() || '';
+  if (remembered?.fp && dirFp && normFp(dirFp) !== normFp(remembered.fp)) {
+    // D3: the door computer's key changed from what this device remembered — refuse and alarm, never fallback
+    wireChannelHooks();
+    setState('refused', PIN_CHANGED_ALARM);
+    return;
+  }
+  const fp = dirFp || remembered?.fp || '';
+  if (!fp) return;
+  if (!remembered?.fp && dirFp) {
+    saveTrunkPin({
+      fp: dirFp,
+      rootId: door?.id,
+      rootName: door?.name,
+      savedAt: new Date().toISOString(),
+    });
+  }
+  wireChannelHooks();
+  const trunkPin: Pin = {
+    fp,
+    bridge: '',
+    box: door?.name || remembered?.rootName || '',
+    deviceId: '',
+    pairedAt: remembered?.savedAt || '',
+  };
+  void connect(trunkPin, { trunk: true });
+  // B26: keep the box's peer credential fresh via /t/auth/refresh (AUTH kind 5 carries the PASETO)
+  setInterval(() => {
+    if (state === 'pinned')
+      void origFetch!('/t/auth/refresh', { method: 'POST' }).then(async (r) => {
+        const d = r.ok ? await r.json().catch(() => null) : null;
+        const t = d?.access_token ?? d?.accessToken;
+        if (typeof t === 'string' && link) link.auth(t);
+      });
+  }, REFRESH_EVERY_MS);
+}
+
+/** start the pinned channel for this page (idempotent): called by the root layout */
+export function bootPinned(): void {
+  if (booted || typeof window === 'undefined') return;
+  booted = true;
+  origFetch = window.fetch.bind(window);
+  window.fetch = watchTokens(origFetch);
+  patchBeacon();
+  const pin = loadPin();
+  if (!pin?.fp) {
+    setState('off');
+    void bootTrunkPinned();
+    return;
+  }
+  if (location.protocol !== 'https:' || !('RTCPeerConnection' in window)) {
+    setState('off');
+    return;
+  }
+  wireChannelHooks();
   void connect(pin);
   // keep the box's peer credential fresh (the bridge severs a lapsed one)
   setInterval(() => {

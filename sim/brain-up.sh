@@ -58,8 +58,10 @@ fi
 systemctl --user stop "$UNIT" 2>/dev/null || true
 systemctl --user reset-failed "$UNIT" 2>/dev/null || true
 systemd-run --user --unit="$UNIT" --collect -q \
+  -p Restart=on-failure -p RestartSec=0.3 \
   -p ProtectHome=tmpfs -p "BindPaths=$ROOT" -p "BindReadOnlyPaths=$HOME/.cache/root-sim/_venv$RO_PROFILES" "${HARNESS_PROPS[@]}" \
   --setenv=XDG_DATA_HOME="$ROOT/xdg" \
+  --setenv=YGG_ENV_FILE="$ROOT/yggdrasil.env" \
   -p StandardOutput="append:$ROOT/brain.log" -p StandardError="append:$ROOT/brain.log" \
   --setenv=YGG_UPSTREAM_BASE_URL="${SIM_UPSTREAM_BASE_URL:-$YGG_UPSTREAM_BASE_URL}" --setenv=YGG_UPSTREAM_API_KEY="$YGG_UPSTREAM_API_KEY" \
   --setenv=YGG_UPSTREAM_STYLE="${YGG_UPSTREAM_STYLE:-anthropic}" --setenv=YGG_UPSTREAM_MODEL="${SIM_MODEL:-glm-5.3-flash}" \

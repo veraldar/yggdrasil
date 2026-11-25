@@ -4927,6 +4927,43 @@ fn load_catalog(model: &str) -> Value {
     })
 }
 
+fn load_env_file_overrides() -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    let Some(path) = std::env::var("YGG_ENV_FILE").ok().filter(|s| !s.is_empty()) else {
+        return map;
+    };
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return map;
+    };
+    for raw in text.lines() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let line = line.strip_prefix("export ").unwrap_or(line);
+        let Some((k, v)) = line.split_once('=') else { continue };
+        let k = k.trim();
+        let v = v.trim();
+        let v = v
+            .strip_prefix('"')
+            .and_then(|s| s.strip_suffix('"'))
+            .or_else(|| v.strip_prefix('\'').and_then(|s| s.strip_suffix('\'')))
+            .unwrap_or(v);
+        if matches!(
+            k,
+            "YGG_UPSTREAM_BASE_URL"
+                | "YGG_UPSTREAM_API_KEY"
+                | "YGG_UPSTREAM_MODEL"
+                | "YGG_UPSTREAM_STYLE"
+                | "YGG_MODELS"
+                | "YGG_VISION_MODELS"
+        ) {
+            map.insert(k.to_string(), v.to_string());
+        }
+    }
+    map
+}
+
 #[tokio::main]
 async fn main() {
     for k in ["YGG_CLOCK_EPOCH_MS", "YGG_CLOCK_SHIFT_SECS"] {
@@ -4934,11 +4971,15 @@ async fn main() {
             eprintln!("WARNING: {k} is set — TEST/SIM ONLY; it writes synthetic times into stored message `created`. Unset it in production.");
         }
     }
-    let base_url = std::env::var("YGG_UPSTREAM_BASE_URL").ok().filter(|u| !u.is_empty()).unwrap_or_else(|| {
+    let env_overrides = load_env_file_overrides();
+    let env_get = |k: &str| -> Option<String> {
+        env_overrides.get(k).cloned().or_else(|| std::env::var(k).ok())
+    };
+    let base_url = env_get("YGG_UPSTREAM_BASE_URL").filter(|u| !u.is_empty()).unwrap_or_else(|| {
         eprintln!("YGG_UPSTREAM_BASE_URL is required");
         std::process::exit(2);
     });
-    let model = std::env::var("YGG_UPSTREAM_MODEL").unwrap_or_else(|_| "gpt-4o-mini".into());
+    let model = env_get("YGG_UPSTREAM_MODEL").filter(|m| !m.is_empty()).unwrap_or_else(|| "gpt-4o-mini".into());
     let env_num = |k: &str, default: u64| -> u64 {
         match std::env::var(k) {
             Ok(v) if !v.is_empty() => v.parse().unwrap_or_else(|_| {
@@ -4949,7 +4990,7 @@ async fn main() {
         }
     };
     let rollup_tokens = env_num("YGG_ROLLUP_TOKENS", 200_000); // owner 11-13: 200k
-    let dialect = match std::env::var("YGG_UPSTREAM_STYLE").unwrap_or_default().to_ascii_lowercase().as_str() {
+    let dialect = match env_get("YGG_UPSTREAM_STYLE").unwrap_or_default().to_ascii_lowercase().as_str() {
         "" | "openai" => Dialect::OpenAi,
         "anthropic" => Dialect::Anthropic,
         other => {
@@ -4973,7 +5014,7 @@ async fn main() {
     }
     // root-coord: every model this upstream serves (YGG_MODELS, comma list; the default first)
     let (mut models, mut tiers): (Vec<String>, HashMap<String, &'static str>) = (vec![model.clone()], HashMap::new());
-    for entry in std::env::var("YGG_MODELS").unwrap_or_default().split(',').map(str::trim).filter(|m| !m.is_empty()) {
+    for entry in env_get("YGG_MODELS").unwrap_or_default().split(',').map(str::trim).filter(|m| !m.is_empty()) {
         let (m, tier) = entry.split_once(':').unwrap_or((entry, "full"));
         match tier {
             "lite" => drop(tiers.insert(m.to_string(), "lite")),
@@ -5005,7 +5046,7 @@ async fn main() {
         base_url,
         dialect,
         max_tokens,
-        api_key: std::env::var("YGG_UPSTREAM_API_KEY").ok().filter(|k| !k.is_empty()),
+        api_key: env_get("YGG_UPSTREAM_API_KEY").filter(|k| !k.is_empty()),
         catalog,
         model,
         models,
@@ -5015,7 +5056,7 @@ async fn main() {
         peers: peers::Peers::load(),
         ext: ext::Extensions::load(),
         tiers,
-        vision: std::env::var("YGG_VISION_MODELS").unwrap_or_default().split(',').map(str::trim).filter(|m| !m.is_empty()).map(String::from).collect(),
+        vision: env_get("YGG_VISION_MODELS").unwrap_or_default().split(',').map(str::trim).filter(|m| !m.is_empty()).map(String::from).collect(),
         // 0 = no cap (owner 11-19: no step cap by default; a session may set one in its settings)
         max_steps: env_num("YGG_MAX_STEPS", 0) as usize,
         tools_enabled: std::env::var("YGG_TOOLS").map_or(true, |v| v != "0"),
@@ -5201,7 +5242,8 @@ async fn main() {
         .route("/root/{name}/adopt", post(roots::post_adopt))
         .route("/root/peers/{name}", axum::routing::delete(roots::delete_peer))
         .route("/tree/placed", post(roots::post_placed))
-        .route("/root/model", get(roots::get_model))
+        .route("/root/model", get(roots::get_model).put(roots::put_self_model))
+        .route("/root/{name}/model", axum::routing::put(roots::put_peer_model))
         .route("/root/peers/{name}/model", post(roots::post_share))
         // L8: a call from another root carries the peer token, whatever route it names
         .layer(axum::middleware::from_fn_with_state(state.clone(), peers::gate))
