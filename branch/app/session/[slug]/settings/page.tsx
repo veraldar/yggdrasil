@@ -26,10 +26,19 @@ import {
   byRole,
   engineDiff,
   engineLabel,
+  parseFallbackChain,
   roleDiff,
   roleOf,
   roleTag,
 } from '@/lib/agents';
+import {
+  type ProviderInfo,
+  type UsageState,
+  normalizeProvidersResponse,
+  normalizeUsageResponse,
+  providerForModel,
+  usageTone,
+} from '@/lib/providers';
 import { slugify } from '@/lib/slug';
 import { isMainSlug } from '@/lib/tree-first';
 
@@ -117,6 +126,9 @@ export default function SessionSettingsView() {
   // the engines (/api/engines): their default models and choices; null = not landed (an older
   // brain has none — the chips then fall back to the five names)
   const [engines, setEngines] = useState<EngineRow[] | null>(null);
+  // root providers (GET /provider) + live usage (GET /usage): degrade cleanly on 404
+  const [rootProviders, setRootProviders] = useState<ProviderInfo[]>([]);
+  const [usage, setUsage] = useState<UsageState | null>(null);
   // may this session notify the phone (off by default, MAIN on): null until known
   const [notify, setNotify] = useState<boolean | null>(null);
   useEffect(() => {
@@ -173,7 +185,7 @@ export default function SessionSettingsView() {
     // session record itself is fine
     // A failure is kept per resource and SHOWN in its block (10-19: a
     // failed load read as 'no model' / 'no models' / invented agents)
-    const [sr, mr, ar, hr, er] = await Promise.all([
+    const [sr, mr, ar, hr, er, pr, ur] = await Promise.all([
       grab<SessionInfo>(`/api/session/${slug}`),
       grab<ProviderRow[]>('/api/models'),
       grab<AgentRow[]>('/api/agents'),
@@ -182,8 +194,12 @@ export default function SessionSettingsView() {
         model_labels?: Record<string, Record<string, string>>;
       }>('/api/agents/build'),
       grab<EngineRow[]>('/api/engines'),
+      grab<unknown>('/api/provider'),
+      grab<unknown>('/api/usage'),
     ]);
     if ('data' in er && Array.isArray(er.data) && er.data.length) setEngines(er.data);
+    if ('data' in pr) setRootProviders(normalizeProvidersResponse(pr.data).providers);
+    if ('data' in ur) setUsage(normalizeUsageResponse(ur.data));
     if ('data' in hr) {
       const d = hr.data || {};
       setHarnessModels(d.models_by_harness || {});
@@ -358,21 +374,66 @@ export default function SessionSettingsView() {
   const shownVariant = run?.variant && run.variant !== 'default' ? run.variant : '';
 
   // the model follows the engine: a session on Claude Code / Antigravity / opencode / Codex picks
-  // from that engine's own models, one on the root from the root's upstream
+  // from that engine's own models, one on the root from /api/models + GET /provider
   const onHarness = HARNESSES.has(engine) ? engine : '';
   const modelList = useMemo(() => {
     const q = filter.trim().toLowerCase();
     const eng = engines?.find((e) => e.name === onHarness);
-    const rows = onHarness
-      ? (eng?.models?.length ? eng.models : harnessModels[onHarness] || []).map((id) => ({
+    if (onHarness) {
+      return (eng?.models?.length ? eng.models : harnessModels[onHarness] || [])
+        .map((id) => ({
           id,
           name: eng?.labels?.[id] || modelLabels[onHarness]?.[id] || '',
           variants: [] as string[],
           providerID: onHarness,
+          lan: false,
+          noQuota: false,
+          reachable: null as boolean | null,
         }))
-      : (providers || []).flatMap((p) => p.models.map((m) => ({ ...m, providerID: p.id })));
+        .filter((m) => !q || `${m.providerID}/${m.id} ${m.name}`.toLowerCase().includes(q));
+    }
+    const seen = new Set<string>();
+    const rows: {
+      id: string;
+      name: string;
+      variants: string[];
+      providerID: string;
+      lan: boolean;
+      noQuota: boolean;
+      reachable: boolean | null;
+    }[] = [];
+    for (const p of providers || []) {
+      const rp = rootProviders.find((x) => x.id === p.id);
+      for (const m of p.models) {
+        const key = `${p.id}/${m.id}`;
+        seen.add(key);
+        rows.push({
+          ...m,
+          providerID: p.id,
+          lan: rp?.lan ?? false,
+          noQuota: rp?.noQuota ?? false,
+          reachable: rp?.reachable ?? null,
+        });
+      }
+    }
+    for (const rp of rootProviders) {
+      for (const id of rp.models) {
+        const key = `${rp.id}/${id}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        rows.push({
+          id,
+          name: id,
+          variants: [],
+          providerID: rp.id,
+          lan: rp.lan,
+          noQuota: rp.noQuota,
+          reachable: rp.reachable,
+        });
+      }
+    }
     return rows.filter((m) => !q || `${m.providerID}/${m.id} ${m.name}`.toLowerCase().includes(q));
-  }, [providers, filter, onHarness, engines, harnessModels, modelLabels]);
+  }, [providers, rootProviders, filter, onHarness, engines, harnessModels, modelLabels]);
 
   const patch = useCallback(
     async (body: Record<string, unknown>, block: Block) => {
@@ -556,21 +617,25 @@ export default function SessionSettingsView() {
         {refused?.block === 'role' && <Refusal msg={refused.msg} />}
       </section>
 
-      {/* RUNS ON — the engine, apart from the role: root · Claude Code · Antigravity (opencode and
-          Codex behind a fold). MAIN is always on the root; a terminal conversation on its own */}
+      {/* RUNS ON — the engine, apart from the role: harnesses + root providers grouped by provider
+          (z.ai / mac-studio / … with reachability, LAN and no-quota chips from GET /provider). */}
       <section className="oz-blk" data-testid="engine-block">
         <h2>runs on</h2>
         <div className="oz-chips">
-          {engineChips.map((x) => (
-            <button
-              key={x}
-              aria-pressed={!!info && engine === x}
-              disabled={!info || engineLocked}
-              onClick={() => void pickEngine(x)}
-            >
-              {engineLabel(x)}
-            </button>
-          ))}
+          {engineChips.map((x) => {
+            const pct = usage?.byEngine[x]?.pct;
+            return (
+              <button
+                key={x}
+                aria-pressed={!!info && engine === x}
+                disabled={!info || engineLocked}
+                onClick={() => void pickEngine(x)}
+              >
+                {engineLabel(x)}
+                {pct != null && <small className={usageTone(pct)}>{pct}%</small>}
+              </button>
+            );
+          })}
         </div>
         {moreChips.length > 0 && !engineLocked && (
           <details className="pt-0" data-testid="more-engines">
@@ -578,18 +643,104 @@ export default function SessionSettingsView() {
               more engines
             </summary>
             <div className="oz-chips mt-2">
-              {moreChips.map((x) => (
-                <button
-                  key={x}
-                  aria-pressed={false}
-                  disabled={!info}
-                  onClick={() => void pickEngine(x)}
-                >
-                  {engineLabel(x)}
-                </button>
-              ))}
+              {moreChips.map((x) => {
+                const pct = usage?.byEngine[x]?.pct;
+                return (
+                  <button
+                    key={x}
+                    aria-pressed={false}
+                    disabled={!info}
+                    onClick={() => void pickEngine(x)}
+                  >
+                    {engineLabel(x)}
+                    {pct != null && <small className={usageTone(pct)}>{pct}%</small>}
+                  </button>
+                );
+              })}
             </div>
           </details>
+        )}
+        {rootProviders.length > 0 && (
+          <div className="flex flex-col gap-2 pt-0" data-testid="runs-on-providers">
+            {rootProviders.map((p) => {
+              const isZai = p.type === 'zai' || p.id === 'zai' || p.id === 'yggdrasil';
+              const zaiPct = isZai ? usage?.byEngine.root?.pct : null;
+              const unreachable = p.reachable === false;
+              const list = p.models.length
+                ? p.models
+                : (providers?.find((x) => x.id === p.id)?.models.map((m) => m.id) ?? []);
+              return (
+                <div
+                  key={p.id}
+                  className="oz-pgrp"
+                  data-testid={`runs-on-group-${p.id}`}
+                  data-reachable={p.reachable === true ? 'yes' : unreachable ? 'no' : 'unknown'}
+                >
+                  <div className="oz-pl">
+                    <span>{p.name}</span>
+                    {p.lan && <span className="oz-ptag">LAN</span>}
+                    {p.noQuota && <span className="oz-ptag">no quota</span>}
+                    {p.reachable === true && (
+                      <span className="oz-ptag ok">
+                        reachable{p.latencyMs != null ? ` ${p.latencyMs}ms` : ''}
+                      </span>
+                    )}
+                    {unreachable && <span className="oz-ptag bad">unreachable</span>}
+                    {zaiPct != null && (
+                      <span className={`oz-ptag ${usageTone(zaiPct)}`}>{zaiPct}%</span>
+                    )}
+                  </div>
+                  {list.length > 0 ? (
+                    <div className="oz-chips">
+                      {list.map((m) => {
+                        const active =
+                          engine === 'root' &&
+                          !!run &&
+                          (run.modelID === m ||
+                            run.modelID === `${p.id}/${m}` ||
+                            (run.providerID === p.id && run.modelID === m));
+                        return (
+                          <button
+                            key={`${p.id}/${m}`}
+                            type="button"
+                            aria-pressed={active}
+                            disabled={!info || unreachable || (engineLocked && engine !== 'root')}
+                            onClick={() => {
+                              if (engine !== 'root') {
+                                void pickEngine('root');
+                                return;
+                              }
+                              const pRow = providers?.find((x) => x.id === p.id);
+                              const mRow = pRow?.models.find((x) => x.id === m);
+                              const keep = run?.variant && mRow?.variants.includes(run.variant);
+                              void patch(
+                                {
+                                  model: {
+                                    providerID: p.id,
+                                    modelID: m,
+                                    variant: keep ? run!.variant : undefined,
+                                  },
+                                },
+                                'model'
+                              );
+                            }}
+                          >
+                            {m}
+                            {p.lan && <small>LAN</small>}
+                            {unreachable && <small>unreachable</small>}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  ) : (
+                    <span className="text-[10.5px] text-[var(--oz-dim)]">
+                      {unreachable ? 'unreachable from this computer' : 'no models discovered yet'}
+                    </span>
+                  )}
+                </div>
+              );
+            })}
+          </div>
         )}
         {engineNote && (
           <p className="note" data-testid="engine-note">
@@ -603,6 +754,66 @@ export default function SessionSettingsView() {
         )}
         {refused?.block === 'engine' && <Refusal msg={refused.msg} />}
       </section>
+
+      {/* IF IT RUNS OUT — the role's fallback chain (from GET /agent), read-only here with a
+          link into the role editor */}
+      {info && (
+        <section className="oz-blk" data-testid="session-fallback-block">
+          <h2>if it runs out</h2>
+          {(() => {
+            const rRow = !noRole && agent ? roleRow(agent) : null;
+            const lockedChain = isMain || attached || rRow?.pinned === true;
+            const chain = lockedChain ? [] : parseFallbackChain(rRow?.fallback);
+            if (lockedChain) {
+              return (
+                <p className="note pt-3!">
+                  {isMain
+                    ? 'locked · coordinator never falls back'
+                    : attached
+                      ? 'locked · terminal conversation never falls back'
+                      : 'locked · never falls back'}
+                </p>
+              );
+            }
+            return (
+              <>
+                {chain.length > 0 ? (
+                  <div>
+                    <div className="oz-fb mt-0!">
+                      {chain.map((step, idx) => {
+                        const prov =
+                          step.engine === 'root'
+                            ? providerForModel(step.model, rootProviders)
+                            : null;
+                        return (
+                          <span key={`${step.engine}/${step.model || ''}`} className="oz-fc">
+                            <b className="oz-badge">{idx + 1}</b>
+                            {engineLabel(step.engine)}
+                            {step.model && <em>{step.model}</em>}
+                            {prov?.noQuota && <span>· no quota</span>}
+                          </span>
+                        );
+                      })}
+                    </div>
+                  </div>
+                ) : (
+                  <p className="note pt-3!">automatic fallback</p>
+                )}
+                <p className="note">
+                  the session&apos;s own choice runs first; when it runs out, the role&apos;s chain
+                  takes over.
+                  {agent && !noRole && (
+                    <>
+                      {' '}
+                      <Link href={`/agents/${agent}#fallback`}>edit chain ›</Link>
+                    </>
+                  )}
+                </p>
+              </>
+            );
+          })()}
+        </section>
+      )}
 
       {/* WHAT CHANGES — a role or an engine switch, said before it applies; an engine switch
           always warns that the new engine starts fresh */}
@@ -696,6 +907,7 @@ export default function SessionSettingsView() {
                   <li key={`${m.providerID}/${m.id}`}>
                     <button
                       aria-pressed={active}
+                      disabled={m.reachable === false}
                       onClick={() => {
                         // keep the chosen think level only if the new model
                         // has it too; otherwise fall to the model default
@@ -717,6 +929,11 @@ export default function SessionSettingsView() {
                         {m.providerID}/{m.id}
                         {onHarness && m.name && (
                           <span className="text-[var(--oz-dim)]"> · {m.name}</span>
+                        )}
+                        {m.lan && <span className="text-[var(--oz-dim)]"> · LAN</span>}
+                        {m.noQuota && <span className="text-[var(--oz-dim)]"> · no quota</span>}
+                        {m.reachable === false && (
+                          <span className="text-[var(--oz-danger)]"> · unreachable</span>
                         )}
                         {info?.defaultModel &&
                           modelKey(info.defaultModel) === `${m.providerID}/${m.id}` &&

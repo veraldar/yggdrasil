@@ -13,6 +13,8 @@ type AgentEntry = {
   mode?: string;
   harness?: string | null;
   model?: string | null;
+  fallback?: unknown;
+  pinned?: boolean;
 };
 
 const UTILITY = new Set(['title', 'summary', 'compaction']);
@@ -30,6 +32,8 @@ export async function GET() {
         // root-coord: where it runs (null = the root) and its default model
         harness: a.harness ?? null,
         model: a.model ?? null,
+        fallback: a.fallback ?? null,
+        pinned: a.pinned === true,
       }));
     return NextResponse.json(out);
   } catch (e) {

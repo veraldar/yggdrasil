@@ -18,6 +18,7 @@ import { useTheme } from 'next-themes';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { LineIcon } from '@/components/line-icon';
+import { ProvidersBlock } from '@/components/providers-block';
 import { HOME_ROOT_KEY } from '@/components/roots-sheet';
 import { WorldPicker } from '@/components/world-picker';
 import {
@@ -512,6 +513,9 @@ function RootSettings({ rootId }: { rootId: string }) {
           )}
         </section>
       )}
+
+      {/* providers (per root: z.ai, Ollama on LAN, OpenRouter, …) */}
+      <ProvidersBlock rootId={rootId} isHome={isHome} disabled={!reachable} />
 
       {/* this computer */}
       <section className="oz-blk" data-testid="root-info-block">

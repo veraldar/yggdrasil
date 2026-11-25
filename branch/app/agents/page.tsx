@@ -9,13 +9,36 @@ import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { LineIcon } from '@/components/line-icon';
-import { type AgentRow, type EngineRow, byRole, engineLabel, roleTag } from '@/lib/agents';
+import { ProvidersBlock } from '@/components/providers-block';
+import {
+  type AgentRow,
+  ENGINE_NOTE,
+  type EngineRow,
+  MAX_FALLBACK_CHAIN,
+  MORE_ENGINES,
+  byRole,
+  engineModel,
+  engineLabel,
+  parseFallbackChain,
+  roleTag,
+} from '@/lib/agents';
+import {
+  type ProvidersState,
+  type UsageState,
+  normalizeProvidersResponse,
+  normalizeUsageResponse,
+  providerForModel,
+  usageTone,
+} from '@/lib/providers';
 
 export default function RolesPage() {
   const router = useRouter();
   const [agents, setAgents] = useState<AgentRow[] | null>(null);
   const [err, setErr] = useState('');
   const [engines, setEngines] = useState<EngineRow[] | null>(null);
+  const [usage, setUsage] = useState<UsageState | null>(null);
+  const [provState, setProvState] = useState<ProvidersState | null>(null);
+  const providers = provState?.providers || [];
   const [naming, setNaming] = useState(false);
   const [name, setName] = useState('');
 
@@ -32,6 +55,14 @@ export default function RolesPage() {
           else setErr(d?.error || `HTTP ${r.status}`);
         })
         .catch((e) => !stop && setErr(String(e)));
+      fetch('/api/usage', { cache: 'no-store' })
+        .then((x) => (x.ok ? x.json() : null))
+        .then((d) => !stop && d && setUsage(normalizeUsageResponse(d)))
+        .catch(() => null);
+      fetch('/api/provider', { cache: 'no-store' })
+        .then((x) => (x.ok ? x.json() : null))
+        .then((d) => !stop && d && setProvState(normalizeProvidersResponse(d)))
+        .catch(() => null);
     void load();
     const t = setInterval(() => !document.hidden && void load(), 2000);
     return () => {
@@ -73,7 +104,8 @@ export default function RolesPage() {
             const e = a.harness || 'root';
             const model = a.model || engineModel(e) || 'default';
             // the coordinator is MAIN's: always on the root (its model can still change)
-            const door = a.name === 'coordinator';
+            const door = a.name === 'coordinator' || a.pinned === true;
+            const chain = door ? [] : parseFallbackChain(a.fallback);
             return (
               <li key={a.name}>
                 <Link href={`/agents/${a.name}`} data-testid="agent-row" data-role={a.name}>
@@ -89,7 +121,32 @@ export default function RolesPage() {
                       {model} {door ? <span className="text-[10px]">locked</span> : '›'}
                     </span>
                   </span>
-                  {a.description && <span className="r2">{a.description}</span>}
+                  {door ? (
+                    <span className="oz-fb">locked · never falls back</span>
+                  ) : chain.length > 0 ? (
+                    <span className="oz-fb">
+                      fallback
+                      {chain.map((step, idx) => {
+                        const prov =
+                          step.engine === 'root' ? providerForModel(step.model, providers) : null;
+                        return (
+                          <span key={`${step.engine}/${step.model || ''}`} className="oz-fc">
+                            <b className="oz-badge">{idx + 1}</b>
+                            {engineLabel(step.engine)}
+                            {step.model && <em>{step.model}</em>}
+                            {prov?.noQuota && <span>· no quota</span>}
+                          </span>
+                        );
+                      })}
+                      {chain.length < MAX_FALLBACK_CHAIN && (
+                        <span className="oz-fc plus" aria-hidden="true">
+                          +
+                        </span>
+                      )}
+                    </span>
+                  ) : (
+                    a.description && <span className="r2">{a.description}</span>
+                  )}
                 </Link>
               </li>
             );
@@ -126,6 +183,7 @@ export default function RolesPage() {
           </div>
         )}
       </section>
+      <ProvidersBlock onChanged={setProvState} />
       <SharedPrompt />
     </main>
   );

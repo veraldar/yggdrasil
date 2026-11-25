@@ -10,23 +10,45 @@
 import { useEffect, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import { LineIcon } from '@/components/line-icon';
-import { type AgentDetail, CUSTOMIZABLE, HARNESSES, TOOLS, harnessLabel } from '@/lib/agents';
+import {
+  type AgentDetail,
+  CUSTOMIZABLE,
+  type FallbackStep,
+  HARNESSES,
+  MAX_FALLBACK_CHAIN,
+  TOOLS,
+  fallbackStepsEqual,
+  formatFallbackStep,
+  harnessLabel,
+  parseFallbackChain,
+} from '@/lib/agents';
+import {
+  type ProviderInfo,
+  type UsageState,
+  normalizeProvidersResponse,
+  normalizeUsageResponse,
+  providerForModel,
+  usageTone,
+} from '@/lib/providers';
 
 type Draft = Pick<
   AgentDetail,
   'description' | 'harness' | 'model' | 'variant' | 'prompt' | 'steps' | 'sessions' | 'tools'
->;
+> & {
+  fallback: FallbackStep[];
+};
 const FIELDS = ['description', 'model', 'variant', 'prompt', 'tools', 'steps', 'sessions'] as const;
 
 const draftOf = (d: AgentDetail): Draft => ({
   description: d.description || '',
   harness: d.harness || 'root',
-  model: d.model,
-  variant: d.variant,
+  model: d.model ?? null,
+  variant: d.variant ?? null,
   prompt: d.prompt || '',
-  steps: d.steps,
-  sessions: d.sessions,
-  tools: { ...d.tools },
+  steps: d.steps ?? null,
+  sessions: Boolean(d.sessions),
+  tools: d.tools && typeof d.tools === 'object' ? { ...d.tools } : {},
+  fallback: parseFallbackChain(d.fallback),
 });
 
 export default function AgentEditor() {
@@ -38,6 +60,9 @@ export default function AgentEditor() {
   // every harness's own model list (the brain reads them: claude's aliases, `opencode models`…)
   const [byHarness, setByHarness] = useState<Record<string, string[]>>({});
   const [labels, setLabels] = useState<Record<string, Record<string, string>>>({});
+  const [providers, setProviders] = useState<ProviderInfo[]>([]);
+  const [usage, setUsage] = useState<UsageState | null>(null);
+  const [addFallbackOpen, setAddFallbackOpen] = useState(false);
   const [isNew, setIsNew] = useState(false);
   const [err, setErr] = useState('');
   const [refused, setRefused] = useState('');
@@ -49,13 +74,23 @@ export default function AgentEditor() {
     if (!name) return;
     let stop = false;
     (async () => {
-      const r = await fetch(`/api/agents/${name}`, { cache: 'no-store' }).catch(() => null);
+      const [r, pr, ur] = await Promise.all([
+        fetch(`/api/agents/${name}`, { cache: 'no-store' }).catch(() => null),
+        fetch('/api/provider', { cache: 'no-store' })
+          .then((x) => (x.ok ? x.json() : null))
+          .catch(() => null),
+        fetch('/api/usage', { cache: 'no-store' })
+          .then((x) => (x.ok ? x.json() : null))
+          .catch(() => null),
+      ]);
       const d = await r?.json().catch(() => null);
       if (stop) return;
+      if (pr) setProviders(normalizeProvidersResponse(pr).providers);
+      if (ur) setUsage(normalizeUsageResponse(ur));
       if (r?.ok && d) {
         setDetail(d);
         setDraft(draftOf(d));
-        setModels(d.models || []);
+        setModels(Array.isArray(d.models) ? d.models : []);
         setByHarness(d.models_by_harness || {});
         setLabels(d.model_labels || {});
         return;
@@ -80,6 +115,7 @@ export default function AgentEditor() {
           steps: null,
           sessions: false,
           tools: Object.fromEntries(TOOLS.map((t) => [t, t === 'read'])),
+          fallback: [],
         });
       } else setErr(d?.error || `couldn't load ${name}`);
     })();
@@ -90,11 +126,12 @@ export default function AgentEditor() {
 
   const h = draft?.harness || 'root';
   // the fields follow the harness picked: the brain's answer is for the saved one
+  // (older brains without `customizable` / `locked` fall back safely instead of crashing)
   const custom =
     detail && !isNew && h === (detail.harness || 'root')
-      ? detail.customizable
-      : CUSTOMIZABLE[h] || [];
-  const locked = detail?.locked || [];
+      ? (Array.isArray(detail.customizable) ? detail.customizable : CUSTOMIZABLE[h] ?? [])
+      : CUSTOMIZABLE[h] ?? [];
+  const locked = Array.isArray(detail?.locked) ? detail.locked : [];
   const shows = (f: string) => custom.includes(f) || locked.includes(f);
   const can = (f: string) => custom.includes(f) && !locked.includes(f);
   const lockNote = (f: string) => (
@@ -108,6 +145,34 @@ export default function AgentEditor() {
     setRefused('');
   };
 
+  const fallbackLocked =
+    name === 'coordinator' || detail?.pinned === true || locked.includes('fallback');
+
+  const moveFallback = (index: number, delta: -1 | 1) => {
+    if (!draft) return;
+    const next = [...draft.fallback];
+    const target = index + delta;
+    if (target < 0 || target >= next.length) return;
+    [next[index], next[target]] = [next[target], next[index]];
+    set({ fallback: next });
+  };
+
+  const removeFallback = (index: number) => {
+    if (!draft) return;
+    set({ fallback: draft.fallback.filter((_, i) => i !== index) });
+  };
+
+  const addFallbackStep = (step: FallbackStep) => {
+    if (!draft || draft.fallback.length >= MAX_FALLBACK_CHAIN) return;
+    if (draft.fallback.some((x) => x.engine === step.engine && (x.model || null) === (step.model || null))) {
+      setAddFallbackOpen(false);
+      return;
+    }
+    const next = [...draft.fallback, step];
+    set({ fallback: next });
+    setAddFallbackOpen(false);
+  };
+
   async function save() {
     if (!draft) return;
     const moved = isNew || draft.harness !== (detail?.harness || 'root');
@@ -118,6 +183,12 @@ export default function AgentEditor() {
       if (f === 'steps' && v === null) continue;
       if (isNew || JSON.stringify(v) !== JSON.stringify(detail ? draftOf(detail)[f] : undefined))
         body[f] = v;
+    }
+    if (!fallbackLocked) {
+      const prevFallback = detail ? parseFallbackChain(detail.fallback) : [];
+      if (isNew ? draft.fallback.length > 0 : !fallbackStepsEqual(draft.fallback, prevFallback)) {
+        body.fallback = draft.fallback.map(formatFallbackStep);
+      }
     }
     setSaving(true);
     try {
@@ -191,6 +262,232 @@ export default function AgentEditor() {
             </div>
             {locked.includes('harness') && lockNote('harness')}
             <p className="note">a session can still take another engine in its own settings</p>
+          </section>
+
+          <section className="oz-blk" id="fallback" data-testid="fallback-block">
+            <h2>fallback when it runs out</h2>
+            {fallbackLocked ? (
+              <p className="note pt-3!" data-testid="fallback-locked">
+                locked · never falls back
+              </p>
+            ) : (
+              <>
+                {draft.fallback.length > 0 ? (
+                  <ul className="oz-fb-ed" data-testid="fallback-list">
+                    {draft.fallback.map((step, i) => {
+                      const prov =
+                        step.engine === 'root' ? providerForModel(step.model, providers) : null;
+                      const engUsage = usage?.byEngine[step.engine];
+                      return (
+                        <li
+                          key={`${step.engine}/${step.model || 'default'}-${i}`}
+                          data-testid="fallback-row"
+                          data-step={formatFallbackStep(step)}
+                        >
+                          <span className="h" aria-hidden="true">
+                            ⠿
+                          </span>
+                          <b className="oz-badge">{i + 1}</b>
+                          <span className="tx">
+                            <span>
+                              {harnessLabel(step.engine)}
+                              {prov && prov.name !== 'yggdrasil' ? ` · ${prov.name}` : ''}
+                            </span>
+                            <small>
+                              {step.model || 'default'}
+                              {prov?.noQuota
+                                ? ' · no quota'
+                                : engUsage?.pct != null
+                                  ? ` · ${engUsage.pct}%`
+                                  : ''}
+                            </small>
+                          </span>
+                          <button
+                            type="button"
+                            className="oz-k sm"
+                            disabled={i === 0}
+                            aria-label={`move fallback ${i + 1} up`}
+                            data-testid={`fallback-up-${i}`}
+                            onClick={() => moveFallback(i, -1)}
+                          >
+                            ↑
+                          </button>
+                          <button
+                            type="button"
+                            className="oz-k sm"
+                            disabled={i === draft.fallback.length - 1}
+                            aria-label={`move fallback ${i + 1} down`}
+                            data-testid={`fallback-down-${i}`}
+                            onClick={() => moveFallback(i, 1)}
+                          >
+                            ↓
+                          </button>
+                          <button
+                            type="button"
+                            className="oz-k sm red"
+                            aria-label={`remove fallback ${i + 1}`}
+                            data-testid={`fallback-rm-${i}`}
+                            onClick={() => removeFallback(i)}
+                          >
+                            ×
+                          </button>
+                        </li>
+                      );
+                    })}
+                  </ul>
+                ) : (
+                  <p className="note pt-3!" data-testid="fallback-empty">
+                    none set — automatic fallback
+                  </p>
+                )}
+
+                {draft.fallback.length < MAX_FALLBACK_CHAIN ? (
+                  <div className={draft.fallback.length > 0 ? 'pt-0' : 'pt-0'}>
+                    <button
+                      type="button"
+                      aria-expanded={addFallbackOpen}
+                      data-testid="fallback-add-btn"
+                      onClick={() => setAddFallbackOpen((o) => !o)}
+                      className="oz-k ok h-9 w-full justify-start px-3 text-[12px]"
+                    >
+                      <LineIcon name="plus" size={13} /> add fallback · {draft.fallback.length} of{' '}
+                      {MAX_FALLBACK_CHAIN}
+                    </button>
+
+                    {addFallbackOpen && (
+                      <div className="mt-2.5 flex flex-col gap-2" data-testid="fallback-picker">
+                        {/* Root providers grouped by provider (GET /provider, or root models fallback on 404) */}
+                        {providers.length > 0 ? (
+                          providers.map((p) => {
+                            const isDefaultEnv = p.id === 'yggdrasil' || p.id === 'zai';
+                            const list = p.models.length ? p.models : isDefaultEnv ? models : [];
+                            if (!list.length) return null;
+                            const zaiPct = isDefaultEnv ? usage?.byEngine.root?.pct : null;
+                            return (
+                              <div
+                                key={p.id}
+                                className="oz-pgrp"
+                                data-testid={`fallback-group-${p.id}`}
+                              >
+                                <div className="oz-pl">
+                                  <span>root · {p.name}</span>
+                                  {p.lan && <span className="oz-ptag">LAN</span>}
+                                  {p.noQuota && <span className="oz-ptag">no quota</span>}
+                                  {p.reachable === true && (
+                                    <span className="oz-ptag ok">reachable</span>
+                                  )}
+                                  {p.reachable === false && (
+                                    <span className="oz-ptag bad">unreachable</span>
+                                  )}
+                                  {zaiPct != null && (
+                                    <span className={`oz-ptag ${usageTone(zaiPct)}`}>{zaiPct}%</span>
+                                  )}
+                                </div>
+                                <div className="oz-chips">
+                                  {list.map((m) => {
+                                    const stepModel = isDefaultEnv ? m : `${p.id}/${m}`;
+                                    const already = draft.fallback.some(
+                                      (s) => s.engine === 'root' && s.model === stepModel
+                                    );
+                                    return (
+                                      <button
+                                        key={`${p.id}/${m}`}
+                                        type="button"
+                                        disabled={already || p.reachable === false}
+                                        onClick={() =>
+                                          addFallbackStep({ engine: 'root', model: stepModel })
+                                        }
+                                      >
+                                        {m}
+                                        {p.lan && <small>LAN</small>}
+                                        {p.reachable === false && <small>unreachable</small>}
+                                      </button>
+                                    );
+                                  })}
+                                </div>
+                              </div>
+                            );
+                          })
+                        ) : models.length > 0 ? (
+                          <div className="oz-pgrp" data-testid="fallback-group-root">
+                            <div className="oz-pl">
+                              <span>root</span>
+                              {usage?.byEngine.root?.pct != null && (
+                                <span className={`oz-ptag ${usageTone(usage.byEngine.root.pct)}`}>
+                                  {usage.byEngine.root.pct}%
+                                </span>
+                              )}
+                            </div>
+                            <div className="oz-chips">
+                              {models.slice(0, 8).map((m) => {
+                                const already = draft.fallback.some(
+                                  (s) => s.engine === 'root' && s.model === m
+                                );
+                                return (
+                                  <button
+                                    key={m}
+                                    type="button"
+                                    disabled={already}
+                                    onClick={() => addFallbackStep({ engine: 'root', model: m })}
+                                  >
+                                    root <em>{m}</em>
+                                  </button>
+                                );
+                              })}
+                            </div>
+                          </div>
+                        ) : null}
+
+                        {/* Harness groups (Antigravity, Claude Code, opencode, Codex) */}
+                        {(['antigravity', 'claude', 'opencode', 'codex'] as const).map((eng) => {
+                          const list = (byHarness[eng] || []).filter((m) => m !== 'default');
+                          const choices = list.length > 0 ? list.slice(0, 6) : ['default'];
+                          const engPct = usage?.byEngine[eng]?.pct;
+                          return (
+                            <div
+                              key={eng}
+                              className="oz-pgrp"
+                              data-testid={`fallback-group-${eng}`}
+                            >
+                              <div className="oz-pl">
+                                <span>{harnessLabel(eng)}</span>
+                                {engPct != null && (
+                                  <span className={`oz-ptag ${usageTone(engPct)}`}>{engPct}%</span>
+                                )}
+                              </div>
+                              <div className="oz-chips">
+                                {choices.map((m) => {
+                                  const modelVal = m === 'default' ? null : m;
+                                  const already = draft.fallback.some(
+                                    (s) => s.engine === eng && (s.model || null) === modelVal
+                                  );
+                                  return (
+                                    <button
+                                      key={`${eng}/${m}`}
+                                      type="button"
+                                      disabled={already}
+                                      onClick={() =>
+                                        addFallbackStep({ engine: eng, model: modelVal })
+                                      }
+                                    >
+                                      {harnessLabel(eng)} <em>{m}</em>
+                                    </button>
+                                  );
+                                })}
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  <p className="note" data-testid="fallback-cap">
+                    {MAX_FALLBACK_CHAIN} of {MAX_FALLBACK_CHAIN} — max reached
+                  </p>
+                )}
+              </>
+            )}
           </section>
 
           {shows('description') && (

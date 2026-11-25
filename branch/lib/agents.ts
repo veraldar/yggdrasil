@@ -6,6 +6,15 @@
 
 export type Rule = { permission: string; pattern: string; action: string };
 
+export type FallbackStep = {
+  /** normalized engine key: root | claude | antigravity | opencode | codex */
+  engine: string;
+  /** model id (may be provider/model on root, e.g. mac-studio/qwen3.8-27b, or bare like glm-5.3) */
+  model: string | null;
+};
+
+export const MAX_FALLBACK_CHAIN = 3;
+
 export type AgentDetail = {
   name: string;
   description: string;
@@ -22,6 +31,10 @@ export type AgentDetail = {
   locked: string[];
   customizable: string[];
   models: string[]; // the models this root serves
+  /** fallback chain from brain: string[] ("agy/gemini-4-neon-high"), legacy object/string, or null */
+  fallback?: unknown;
+  /** coordinator or pinned role: never falls back */
+  pinned?: boolean;
   /** everything the model reads before the conversation (per tier when this root serves a lite model) */
   system?: { tier: string; models: string[]; text: string }[];
 };
@@ -32,6 +45,8 @@ export type AgentRow = {
   description: string;
   harness?: string | null; // null = runs on the root
   model?: string | null;
+  fallback?: unknown;
+  pinned?: boolean;
 };
 
 export const HARNESSES = ['root', 'claude', 'opencode', 'codex', 'antigravity'] as const;
@@ -281,3 +296,63 @@ export const HARNESS_TAG: Record<string, string> = {
  *  the role's (LEA · BUI · FIX · REV · RES · MAR · a custom one's first three letters). */
 export const sessionTag = (s: { agent?: string | null; harness?: HarnessLike }, isMain = false) =>
   isMain ? 'MAI' : isAttached(s.harness) ? 'TRM' : agentTag(roleOf(s.agent));
+
+/** Normalize an engine alias (e.g. "agy" → "antigravity", "claude-code" → "claude"). */
+export function normalizeEngineKey(raw?: string | null): string {
+  const s = (raw || '').trim().toLowerCase();
+  if (!s || s === 'root') return 'root';
+  if (s === 'agy' || s === 'antigravity') return 'antigravity';
+  if (s === 'claude' || s === 'claude-code' || s === 'claude code') return 'claude';
+  if (s === 'opencode') return 'opencode';
+  if (s === 'codex') return 'codex';
+  return s;
+}
+
+/** Parse one fallback item (string "agy/gemini-4-neon-high" or {engine/harness, model}). */
+function parseFallbackItem(item: unknown): FallbackStep | null {
+  if (typeof item === 'string') {
+    const t = item.trim();
+    if (!t || t === 'none' || t === 'off') return null;
+    const idx = t.indexOf('/');
+    if (idx < 0) return { engine: normalizeEngineKey(t), model: null };
+    const eng = normalizeEngineKey(t.slice(0, idx));
+    const mdl = t.slice(idx + 1).trim();
+    return { engine: eng, model: mdl || null };
+  }
+  if (item && typeof item === 'object') {
+    const o = item as { engine?: unknown; harness?: unknown; model?: unknown };
+    const rawEng = typeof o.engine === 'string' ? o.engine : typeof o.harness === 'string' ? o.harness : '';
+    const t = rawEng.trim();
+    if (t === 'none' || t === 'off') return null;
+    const mdl = typeof o.model === 'string' && o.model.trim() ? o.model.trim() : null;
+    if (!t && !mdl) return null;
+    return { engine: normalizeEngineKey(t), model: mdl };
+  }
+  return null;
+}
+
+/** Parse brain fallback field (array of strings/objects, or legacy single string/object/null). */
+export function parseFallbackChain(raw: unknown): FallbackStep[] {
+  if (!raw || raw === 'none' || raw === 'off') return [];
+  const items = Array.isArray(raw) ? raw : [raw];
+  const out: FallbackStep[] = [];
+  for (const item of items) {
+    if (out.length >= MAX_FALLBACK_CHAIN) break;
+    const step = parseFallbackItem(item);
+    if (!step) continue;
+    if (!out.some((x) => x.engine === step.engine && x.model === step.model)) out.push(step);
+  }
+  return out;
+}
+
+/** Format one fallback step for PUT /agent/:name: e.g. "agy/gemini-4-neon-high", "root/glm-5.3", "claude/sonnet". */
+export function formatFallbackStep(step: FallbackStep): string {
+  const eng = step.engine === 'antigravity' ? 'agy' : step.engine || 'root';
+  const mdl = step.model && step.model !== 'default' ? step.model.trim() : '';
+  return mdl ? `${eng}/${mdl}` : eng;
+}
+
+export function fallbackStepsEqual(a: FallbackStep[], b: FallbackStep[]): boolean {
+  if (a.length !== b.length) return false;
+  return a.every((x, i) => x.engine === b[i].engine && (x.model || null) === (b[i].model || null));
+}
