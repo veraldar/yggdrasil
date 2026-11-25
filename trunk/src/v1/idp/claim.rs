@@ -315,3 +315,71 @@ pub fn complete(st: &State, account: &str, device: &str, ip: IpAddr) {
     remove_file(st);
     super::audit(st, Entry::new("claim.complete").account(account).device(device).ip(ip).target("account", account));
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::v1::idp::session::tests::test_state;
+
+    fn cur(st: &State) -> String {
+        st.idp.claim.lock().unwrap().code.clone().unwrap()
+    }
+
+    fn other(code: &str) -> String {
+        format!("{:06}", (code.parse::<u32>().unwrap() + 1) % 1_000_000)
+    }
+
+    #[test]
+    fn five_wrong_in_total_across_rotations_lock_until_reset() {
+        let (st, dir) = test_state(false);
+        start(&st);
+        let ip: IpAddr = "203.0.113.1".parse().unwrap();
+        for i in 0..4 {
+            let c = cur(&st);
+            assert_eq!(begin(&st, &other(&c), ip), Err(Err::Wrong(4 - i)));
+            rotate(&st, now_ms());
+        }
+        let c = cur(&st);
+        assert_eq!(begin(&st, &other(&c), ip), Err(Err::Locked), "the 5th in total");
+        assert_eq!(begin(&st, &c, ip), Err(Err::Locked), "the right code is refused while locked");
+        assert!(current(&st).is_err());
+        reset(&st).unwrap();
+        let c = cur(&st);
+        assert!(begin(&st, &c, ip).is_ok());
+        assert_ne!(cur(&st), c, "a code that began a claim is spent (rotated)");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn the_previous_code_counts_for_the_overlap_only() {
+        let (st, dir) = test_state(false);
+        start(&st);
+        let ip: IpAddr = "203.0.113.1".parse().unwrap();
+        let old = cur(&st);
+        rotate(&st, now_ms());
+        assert!(begin(&st, &old, ip).is_ok(), "within 15 s the previous code still works");
+        let old = cur(&st);
+        rotate(&st, now_ms());
+        st.idp.claim.lock().unwrap().prev.as_mut().unwrap().1 = now_ms() - 1;
+        assert_eq!(begin(&st, &old, ip), Err(Err::Wrong(4)), "after the overlap it is a wrong code");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn the_code_file_is_0600_and_gone_once_claimed() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let (st, dir) = test_state(false);
+        start(&st);
+        let f = dir.join("cred/claim");
+        assert_eq!(std::fs::metadata(&f).unwrap().permissions().mode() & 0o777, 0o600);
+        let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&f).unwrap()).unwrap();
+        assert_eq!(v["code"].as_str().unwrap(), cur(&st));
+        let hash: String = st.db.with(|c| c.query_row("SELECT code_hash FROM claim", [], |r| r.get(0))).unwrap();
+        assert_eq!(hash, st.kek.pepper("claim", cur(&st).as_bytes()), "only a peppered hash in the db");
+        complete(&st, "acc_x", "dev_x", "203.0.113.1".parse().unwrap());
+        tick(&st, now_ms());
+        assert!(!f.exists());
+        assert_eq!(begin(&st, "000000", "203.0.113.1".parse().unwrap()), Err(Err::Gone));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+}

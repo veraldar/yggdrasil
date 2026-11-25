@@ -113,6 +113,15 @@ class Client:
     def get(self, path, **k):
         return self.req("GET", path, **k)
 
+    def signed(self, method, path, body=None, **k):
+        """What the page script does: an expired (or moved) access token is refreshed once."""
+        r = self.req(method, path, body, **k)
+        if r.status == 401 and isinstance(r.data, dict) and r.data.get("reauth") == "refresh":
+            f = self.req("POST", "/t/auth/refresh", {}, xff=k.get("xff"))
+            if f.status == 200:
+                r = self.req(method, path, body, **k)
+        return r
+
     def post(self, path, body=None, **k):
         return self.req("POST", path, body if body is not None else {}, **k)
 

@@ -97,9 +97,15 @@ function nextPath() {
 // ---- /claim ------------------------------------------------------------------------------
 
 async function claimPage() {
+  // the agent may open the link in a tab already on /claim: a new fragment is a new claim
+  window.addEventListener('hashchange', () => location.reload());
   const ticket = new URLSearchParams(location.hash.slice(1)).get('t') || '';
   const steps = ['c-wait', 'c-approve', 'c-signup', 'c-totp', 'c-codes'];
-  const only = (...ids) => steps.forEach((s) => show($(s), ids.includes(s)));
+  const pills = { 'c-wait': 'admin claim', 'c-approve': 'agent claim', 'c-signup': 'admin claim', 'c-totp': '2FA required', 'c-codes': 'claimed ✓' };
+  const only = (...ids) => {
+    steps.forEach((s) => show($(s), ids.includes(s)));
+    if (pills[ids[0]]) $('claim-pill').textContent = pills[ids[0]];
+  };
   if (!ticket) { only('c-wait'); return; }
   const info = await post('/t/claim/ticket', { ticket });
   if (info.status === 410) { location.replace('/claim'); return; }
@@ -148,7 +154,7 @@ async function claimPage() {
   $('c-refuse-btn').addEventListener('click', async () => {
     const r = await post('/t/claim/refuse', { ticket });
     if (r.status === 200) {
-      location.hash = '';
+      history.replaceState(null, '', '/claim');
       only('c-wait');
       say($('c-wait-err'), 'Refused. The claim code rotated; nothing was created.', 'ok');
     } else {
@@ -165,6 +171,7 @@ async function claimPage() {
     putSvg($('c-qr'), r.data.qr_svg);
     $('c-secret').textContent = (r.data.secret || '').replace(/(.{4})/g, '$1 ').trim();
     only('c-totp');
+    show($('c-ribbon'), false);
     show($('c-ribbon2'));
     $('c-code').focus();
   });
@@ -177,7 +184,6 @@ async function claimPage() {
     history.replaceState(null, '', '/claim');
     show($('c-ribbon'), false);
     show($('c-ribbon2'), false);
-    $('claim-pill').textContent = 'claimed ✓';
     putCodes($('c-codes-grid'), r.data.recovery_codes);
     only('c-codes');
   });
@@ -185,7 +191,11 @@ async function claimPage() {
 
 // ---- /login --------------------------------------------------------------------------------
 
-function loginPage() {
+async function loginPage() {
+  // a page sent here by an expired (or moved) access token: the refresh cookie (path /t/auth)
+  // may still be good — try it once, quietly, before asking for the password
+  const f = await post('/t/auth/refresh');
+  if (f.status === 200) { location.replace(nextPath()); return; }
   let mode = 'totp';
   const setMode = (m) => {
     mode = m;
@@ -260,7 +270,7 @@ async function accountPage() {
     $('a-dev-via').textContent = a.device.created_via + ' · ' + new Date(a.device.created_at).toLocaleDateString();
     const fresh = $('a-dev-fresh');
     if (a.device.fresh) {
-      fresh.textContent = 'confirmed · changes open until ' + new Date(a.device.fresh_until).toLocaleTimeString();
+      fresh.textContent = 'fresh until ' + new Date(a.device.fresh_until).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
       fresh.className = 'v ok';
     } else {
       fresh.textContent = 'changes need a fresh code';
@@ -382,6 +392,8 @@ async function emptyPage() {
 
 async function offlinePage() {
   whoami();
+  // back to the door as soon as one answers (the trunk sends us here again while none does)
+  setTimeout(() => location.replace('/'), 10000);
 }
 
 const pages = { claim: claimPage, login: loginPage, account: accountPage, empty: emptyPage, offline: offlinePage };

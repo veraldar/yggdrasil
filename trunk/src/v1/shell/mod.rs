@@ -51,6 +51,13 @@ pub fn asset(name: &str) -> Resp {
     Resp::new(200, ctype, body).header("Cache-Control", "public, max-age=3600")
 }
 
+/// Percent-encode for a query value (everything but unreserved and `/`).
+pub fn url_enc(s: &str) -> String {
+    s.bytes()
+        .map(|b| if b.is_ascii_alphanumeric() || b"-._~/".contains(&b) { (b as char).to_string() } else { format!("%{b:02X}") })
+        .collect()
+}
+
 pub fn esc(s: &str) -> String {
     s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;").replace('\'', "&#39;")
 }

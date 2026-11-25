@@ -12,7 +12,7 @@ html { -webkit-text-size-adjust: 100%; background: var(--oz-bg); color: var(--oz
 body { margin: 0; min-height: 100vh; font-family: var(--mono); font-size: 14px; line-height: 1.55; background: var(--oz-bg); color: var(--oz-text); overflow-x: hidden; }
 main { max-width: 480px; margin: 0 auto; padding: 0 var(--oz-gap) 48px; overflow-wrap: break-word; }
 a { color: var(--oz-info); }
-button, input { font: inherit; }
+button, input { font-family: inherit; }
 [hidden] { display: none !important; }
 
 /* header: the app's 52-px line, BIFROST left, pills right */
@@ -25,7 +25,7 @@ button, input { font: inherit; }
 
 /* blocks (brand.css .oz-blk: h2 head + padded children) */
 .oz-blk > h2 { margin: 0; display: flex; align-items: baseline; gap: 6px; }
-.oz-blk > h2 .r { margin-left: auto; letter-spacing: normal; text-transform: none; font-size: 11px; }
+.oz-blk > h2 .r { margin-left: auto; letter-spacing: normal; text-transform: none; font-size: 11px; white-space: nowrap; }
 .oz-blk > h2 .r.warn { color: var(--oz-active); }
 .oz-blk > h2 .r.ok { color: var(--oz-success); }
 .oz-blk p { margin: 0 0 10px; }
@@ -41,8 +41,11 @@ button, input { font: inherit; }
 .oz-k.ok:disabled { cursor: default; }
 .oz-k.red { background: var(--oz-surface); }
 .row { display: flex; gap: 8px; align-items: stretch; }
-.row > .grow { flex: 1 1 auto; }
-a.oz-k { text-decoration: none; }
+.row > .grow { flex: 1 1 auto; min-width: 0; }
+.row > .oz-k:not(.grow) { flex: none; }
+a.oz-k { text-decoration: none; color: var(--oz-dim); }
+a.oz-k.ok, .oz-k.ok { color: var(--oz-success); }
+.row .oz-k, .dl-row .oz-k { white-space: nowrap; }
 
 /* the code the agent verified (display only) */
 .code-slots { display: flex; align-items: center; justify-content: center; gap: 6px; margin: 4px 0 12px; }
@@ -75,7 +78,7 @@ a.oz-k { text-decoration: none; }
 .link { background: none; border: 0; padding: 0; color: var(--oz-info); text-decoration: underline; cursor: pointer; font-size: 12px; }
 
 /* messages */
-.msg { margin: 10px 0 0; padding: 8px 10px; font-size: 12.5px; border: 1px solid var(--oz-border); background: var(--oz-bg); }
+.oz-blk .msg, .msg { margin: 10px 0 0; padding: 8px 10px; font-size: 12.5px; border: 1px solid var(--oz-border); background: var(--oz-bg); }
 .msg.err { color: var(--oz-danger); border-color: color-mix(in srgb, var(--oz-danger) 45%, transparent); }
 .msg.ok { color: var(--oz-success); border-color: color-mix(in srgb, var(--oz-success) 45%, transparent); }
 .note { margin-top: 12px; padding: 8px 10px; border: 1px dashed color-mix(in srgb, var(--oz-info) 55%, transparent); background: color-mix(in srgb, var(--oz-info) 7%, var(--oz-surface)); font-size: 11.5px; color: var(--oz-dim); }
@@ -110,5 +113,6 @@ input.os-r { position: absolute; opacity: 0; pointer-events: none; }
 .dl-cmd { background: var(--term-bg); color: var(--term-text); padding: 10px 11px; font-size: 12.5px; line-height: 1.5; margin: 0 0 10px; word-break: break-all; user-select: all; }
 .dl-cmd .dim { color: var(--term-dim); }
 .dl-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
-.dl-row .dim { font-size: 11px; }
+.dl-row .dim { font-size: 11px; text-align: right; }
+.dl-row .oz-k { flex: none; }
 .listen { color: var(--oz-success); }
