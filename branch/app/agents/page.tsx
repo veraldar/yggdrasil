@@ -3,22 +3,13 @@
 /** /agents — the ROLES page (roles rework 11-22; the URL stays): each role with its badge, the
  *  engine it runs on by default (the root, or Claude Code / Antigravity / opencode / Codex), its
  *  model, what it is for. A row opens its editor (/agents/[name]); '+ new role' names one and
- *  opens it empty. Below: the ENGINES — one row each with its default model, a tap opens its
- *  model choices and saves (opencode and Codex behind "more engines"). Reached from MAIN's
- *  settings ('roles ›') and the app settings. */
+ *  opens it empty. Engines live in /settings. Reached from MAIN's settings ('roles ›') and the
+ *  app settings. */
 import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { LineIcon } from '@/components/line-icon';
-import {
-  type AgentRow,
-  ENGINE_NOTE,
-  type EngineRow,
-  MORE_ENGINES,
-  byRole,
-  engineLabel,
-  roleTag,
-} from '@/lib/agents';
+import { type AgentRow, type EngineRow, byRole, engineLabel, roleTag } from '@/lib/agents';
 
 export default function RolesPage() {
   const router = useRouter();
@@ -135,150 +126,8 @@ export default function RolesPage() {
           </div>
         )}
       </section>
-      {engines && <Engines engines={engines} onSaved={setEngines} />}
       <SharedPrompt />
     </main>
-  );
-}
-
-/** The engines: what can run a session, each with its default model — a tap opens its choices
- *  and a pick saves at once (PUT /api/engines/:name). opencode and Codex sit in a fold. */
-function Engines({
-  engines,
-  onSaved,
-}: {
-  engines: EngineRow[];
-  onSaved: (e: EngineRow[]) => void;
-}) {
-  const [open, setOpen] = useState('');
-  const [refused, setRefused] = useState<{ name: string; msg: string } | null>(null);
-  const [text, setText] = useState('');
-  const more = (e: EngineRow) => e.more ?? MORE_ENGINES.has(e.name);
-
-  async function save(name: string, model: string | null) {
-    setRefused(null);
-    const r = await fetch(`/api/engines/${name}`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model }),
-    }).catch(() => null);
-    const d = await r?.json().catch(() => null);
-    if (!r?.ok)
-      return setRefused({ name, msg: d?.error || `save failed (${r?.status ?? 'offline'})` });
-    // the brain answers the row; an empty answer still means saved — the pick shows
-    const row: EngineRow =
-      d && typeof d === 'object' && d.name === name
-        ? d
-        : { ...engines.find((e) => e.name === name)!, model };
-    onSaved(engines.map((e) => (e.name === name ? { ...e, ...row } : e)));
-    setOpen('');
-  }
-
-  const rowOf = (e: EngineRow) => {
-    const label = e.label || engineLabel(e.name);
-    const isOpen = open === e.name;
-    const cur = e.model || 'default';
-    const free = !e.models?.length || (e.models.length === 1 && e.models[0] === 'default');
-    return (
-      <li key={e.name} className="eng" data-testid="engine-row" data-engine={e.name}>
-        <button
-          aria-expanded={isOpen}
-          onClick={() => {
-            setOpen(isOpen ? '' : e.name);
-            setRefused(null);
-            setText(e.model || '');
-          }}
-        >
-          <span className="r1">
-            <span className="truncate">{label}</span>
-            <span className="m">
-              {e.model || 'its default'} {isOpen ? '▲' : '›'}
-            </span>
-          </span>
-          {ENGINE_NOTE[e.name] && <span className="r2">{ENGINE_NOTE[e.name]}</span>}
-        </button>
-        {isOpen &&
-          (free ? (
-            // free text: the engine takes any id it knows (empty = its own pick)
-            <div className="flex gap-1.5 pb-2">
-              <input
-                value={text}
-                onChange={(x) => setText(x.target.value)}
-                onKeyDown={(x) => x.key === 'Enter' && void save(e.name, text.trim() || null)}
-                placeholder="empty = its default"
-                aria-label={`${label} default model`}
-                className="oz-field"
-              />
-              <button
-                onClick={() => void save(e.name, text.trim() || null)}
-                className="oz-k ok px-3"
-              >
-                save
-              </button>
-            </div>
-          ) : e.models.length <= 8 ? (
-            <div className="oz-chips pb-2">
-              {e.models.map((m) => (
-                <button
-                  key={m}
-                  aria-pressed={cur === m}
-                  onClick={() => void save(e.name, m === 'default' ? null : m)}
-                >
-                  {m}
-                </button>
-              ))}
-            </div>
-          ) : (
-            <div className="pb-2">
-              <select
-                value={e.models.includes(cur) ? cur : ''}
-                onChange={(x) =>
-                  x.target.value &&
-                  void save(e.name, x.target.value === 'default' ? null : x.target.value)
-                }
-                aria-label={`${label} default model`}
-                className="oz-field"
-              >
-                {!e.models.includes(cur) && <option value="">{cur}</option>}
-                {e.models.map((m) => (
-                  <option key={m} value={m}>
-                    {m}
-                    {e.labels?.[m] ? ` — ${e.labels[m]}` : ''}
-                  </option>
-                ))}
-              </select>
-            </div>
-          ))}
-        {isOpen && e.labels?.[cur] && (
-          <p className="pb-2 text-[10.5px] text-[var(--oz-dim)]">{e.labels[cur]}</p>
-        )}
-        {refused?.name === e.name && (
-          <p role="alert" className="pb-2 text-[11px] text-[var(--oz-danger)]">
-            {refused.msg}
-          </p>
-        )}
-      </li>
-    );
-  };
-
-  const main = engines.filter((e) => !more(e));
-  const rest = engines.filter(more);
-  return (
-    <section className="oz-blk" data-testid="engines-block">
-      <h2>engines</h2>
-      <ul className="oz-alist">{main.map(rowOf)}</ul>
-      {rest.length > 0 && (
-        <details className="pt-0" data-testid="more-engines">
-          <summary className="cursor-pointer text-[11px] text-[var(--oz-dim)]">
-            more engines (installed, unused)
-          </summary>
-          <ul className="oz-alist mt-1">{rest.map(rowOf)}</ul>
-        </details>
-      )}
-      <p className="note">
-        a role runs on its default engine; a session can still take another in its own settings
-      </p>
-    </section>
   );
 }
 

@@ -649,7 +649,7 @@
   .oz-alist .tag { flex: none; padding: 0 6px; font-size: 10px; line-height: 16px; border: 1px solid var(--oz-border); color: var(--oz-dim); }
   .oz-alist .m { flex: none; margin-left: auto; font-size: 11px; color: var(--oz-dim); }
   .oz-alist .r2 { display: block; margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 10.5px; color: var(--oz-dim); }
-  /* the roles page's engines: a row that opens its model choices in place */
+  /* the settings page's engines: a row that opens its model choices in place */
   .oz-alist li.eng { border-bottom: 1px var(--oz-rule) var(--oz-border); }
   .oz-alist li.eng:last-child { border-bottom: 0; }
   .oz-alist li.eng > button { display: block; width: 100%; min-width: 0; padding: 8px 2px; text-align: left; font-size: 12px; }

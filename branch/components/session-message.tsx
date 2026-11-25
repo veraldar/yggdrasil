@@ -5,6 +5,7 @@ import Link from 'next/link';
 import { Streamdown } from 'streamdown';
 import { LineIcon } from '@/components/line-icon';
 import { Marked } from '@/components/marked';
+import { artifactName, artifactRefs, openInNewTabLabel } from '@/lib/artifact-refs';
 import { type FileChip, fmtSize } from '@/lib/file-ref';
 import { type RouteTarget, linkRouteTags } from '@/lib/route-tags';
 import { slugify } from '@/lib/slug';
@@ -74,45 +75,41 @@ function htmlBlocks(text: string): string[] {
   return out;
 }
 
-/** Artifact references the chat renders as rich inline viewers. Images stay
- *  with Streamdown's markdown images; ```html fences have their own iframe
- *  path. Everything else the agent drops into artifacts/ must arrive through
- *  the chat — the user is on the phone and cannot open paths. */
-const VIEWER_KIND: Record<string, 'html' | 'md' | 'text' | 'pdf' | 'audio'> = {
-  html: 'html',
-  md: 'md',
-  txt: 'text', json: 'text', csv: 'text', log: 'text', xml: 'text',
-  yaml: 'text', yml: 'text', toml: 'text', ini: 'text', conf: 'text',
-  css: 'text', js: 'text', mjs: 'text', ts: 'text', tsx: 'text', jsx: 'text',
-  py: 'text', sh: 'text', rb: 'text', go: 'text', rs: 'text', java: 'text',
-  c: 'text', h: 'text', cpp: 'text', diff: 'text', patch: 'text',
-  pdf: 'pdf',
-  wav: 'audio', mp3: 'audio',
-};
-
-function artifactRefs(text: string): { src: string; kind: string }[] {
-  const out: { src: string; kind: string }[] = [];
-  const seen = new Set<string>();
-  // the query rides along: `?root=<r>&session=<s>` names the root a session there made it on
-  const re = /\/api\/artifact\/([a-zA-Z0-9][a-zA-Z0-9._-]*)(\?[^\s)\]"'<>`]*)?/g;
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(text))) {
-    const ext = (m[1].match(/\.([a-z0-9]+)$/i)?.[1] || '').toLowerCase();
-    const kind = VIEWER_KIND[ext];
-    const src = `/api/artifact/${m[1]}${(m[2] || '').replace(/[.,;:!]+$/, '')}`;
-    if (kind && !seen.has(src)) {
-      seen.add(src);
-      out.push({ src, kind });
-    }
-  }
-  return out;
+/** Small corner button inside an inline artifact preview that opens the
+ *  artifact in a new browser tab — matches the artifacts list page's corner
+ *  button (components/app/artifacts-screen.tsx). */
+function OpenTabLink({
+  src,
+  name,
+  className = '',
+}: {
+  src: string;
+  name: string;
+  className?: string;
+}) {
+  const label = openInNewTabLabel(name);
+  return (
+    <a
+      href={src}
+      target="_blank"
+      rel="noopener noreferrer"
+      data-artifact-open=""
+      data-testid="artifact-open-tab"
+      onPointerDown={(e) => e.stopPropagation()}
+      aria-label={label}
+      title={label}
+      className={`oz-k sm text-[var(--oz-text)] ${className}`}
+    >
+      <LineIcon name="external" size={12} />
+    </a>
+  );
 }
 
 /** Inline viewer for one artifact reference. md/text are fetched and shown
  *  (md via markdown); html/audio/pdf get native-ish embeds. Silent while the
  *  file is missing (agent may still be writing it mid-stream). */
 function ArtifactView({ src, kind }: { src: string; kind: string }) {
-  const name = src.split('?')[0].split('/').pop() || src;
+  const name = artifactName(src);
   const [text, setText] = useState<string | null>(null);
   const needsText = kind === 'md' || kind === 'text';
   useEffect(() => {
@@ -129,12 +126,15 @@ function ArtifactView({ src, kind }: { src: string; kind: string }) {
 
   if (kind === 'html') {
     return (
-      <iframe
-        sandbox=""
-        src={src}
-        title={name}
-        className="mt-1 h-64 w-full border border-[var(--oz-border)] bg-white"
-      />
+      <div data-testid="artifact-preview" data-artifact-kind="html" className="relative mt-1">
+        <iframe
+          sandbox=""
+          src={src}
+          title={name}
+          className="block h-64 w-full border border-[var(--oz-border)] bg-white"
+        />
+        <OpenTabLink src={src} name={name} className="absolute top-1.5 right-1.5 z-10" />
+      </div>
     );
   }
   if (kind === 'audio') {
@@ -142,12 +142,7 @@ function ArtifactView({ src, kind }: { src: string; kind: string }) {
   }
   if (kind === 'pdf') {
     return (
-      <a
-        href={src}
-        target="_blank"
-        rel="noreferrer"
-        className="oz-chip mt-1 text-[var(--oz-info)]"
-      >
+      <a href={src} target="_blank" rel="noreferrer" className="oz-chip mt-1 text-[var(--oz-info)]">
         <LineIcon name="artifact" size={13} />
         {name} — tap to view
       </a>
@@ -156,13 +151,14 @@ function ArtifactView({ src, kind }: { src: string; kind: string }) {
   if (text === null) return null;
   const body = text.length > 20000 ? `${text.slice(0, 20000)}…` : text;
   return (
-    <div className="oz-box mt-1 px-2 py-1">
-      <div className="flex items-center gap-1.5 text-[10px] text-[var(--oz-dim)]">
-        <LineIcon name="attach" size={11} />
-        {name}
+    <div data-testid="artifact-preview" data-artifact-kind={kind} className="oz-box mt-1 px-2 py-1">
+      <div className="flex min-w-0 items-center gap-1.5 text-[10px] text-[var(--oz-dim)]">
+        <LineIcon name="attach" size={11} className="shrink-0" />
+        <span className="min-w-0 flex-1 truncate">{name}</span>
+        <OpenTabLink src={src} name={name} className="shrink-0" />
       </div>
       {kind === 'md' ? (
-        <div className="max-h-96 overflow-auto">
+        <div className="mt-1 max-h-96 overflow-auto">
           <Streamdown>{body}</Streamdown>
         </div>
       ) : (
@@ -248,7 +244,8 @@ export function SessionMessage({
     onCommit: (dir) => {
       if (onOpenHistory && mi !== undefined) onOpenHistory(mi, dir);
     },
-    ignoreStart: (t) => !!(t instanceof HTMLElement && t.closest('[data-lightbox]')),
+    ignoreStart: (t) =>
+      !!(t instanceof Element && t.closest('[data-lightbox], [data-artifact-open]')),
   });
 
   return (
@@ -293,7 +290,9 @@ export function SessionMessage({
           </span>
         )}
         {stamp && <time>{stamp}</time>}
-        {queued && <span className="oz-breathe text-[10px] text-[var(--oz-success)]">● queued</span>}
+        {queued && (
+          <span className="oz-breathe text-[10px] text-[var(--oz-success)]">● queued</span>
+        )}
       </div>
       {isUser ? (
         fileChunks(m.text).map((c, i) =>
@@ -302,10 +301,7 @@ export function SessionMessage({
               <Marked text={c.body} q={q} />
             </span>
           ) : (
-            <details
-              key={i}
-              className="oz-box my-1 px-2 py-1 text-xs"
-            >
+            <details key={i} className="oz-box my-1 px-2 py-1 text-xs">
               <summary className="flex cursor-pointer items-center gap-1.5 text-[var(--oz-dim)]">
                 <LineIcon name="attach" size={11} />
                 {c.name}
@@ -334,10 +330,7 @@ export function SessionMessage({
           forms, no same-origin); tap toggles the raw code view */}
       {htmls.map((src, i) => (
         <div key={`h${i}`} className="mt-1">
-          <button
-            onClick={() => setRawIdx(rawIdx === i ? -1 : i)}
-            className="oz-k sm"
-          >
+          <button onClick={() => setRawIdx(rawIdx === i ? -1 : i)} className="oz-k sm">
             {rawIdx === i ? 'show rendered' : 'show code'}
           </button>
           {rawIdx === i ? (
