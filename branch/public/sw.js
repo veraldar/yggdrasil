@@ -86,30 +86,80 @@ const reconnecting = () =>
     headers: { 'content-type': 'application/json', 'x-bifrost-via': 'reconnecting', 'retry-after': '1' },
   });
 
+/** a load whose client cannot own a pin channel — waiting for its state is a 10 s burn
+ *  for an announcement that will never come:
+ *   · a frame (destination 'iframe'; sandboxed artifact frames run no scripts), or a
+ *     sub-resource of one (the frame's own clientId, frameType 'nested');
+ *   · a top-level page under /api/* — an opened artifact (new tab, address bar, the
+ *     preview's corner button): its document is the artifact's, the app never loads
+ *     there, so its client (the navigation's resultingClientId) never posts bifrostPin —
+ *     and the media inside it (its clientId, frameType 'top-level', url under /api/*).
+ *  These ride any pinned window's channel at once; with none (fallback, unpaired, a
+ *  first load before any announcement) the network, as ever. */
+async function isChannelless(e) {
+  const d = e.request.destination;
+  if (d === 'iframe') return true;
+  if (d === 'document') {
+    try {
+      return new URL(e.request.url).pathname.startsWith('/api/');
+    } catch {
+      return false;
+    }
+  }
+  if (!e.clientId) return false;
+  try {
+    const c = await self.clients.get(e.clientId);
+    if (!c) return false;
+    if (c.frameType === 'nested') return true;
+    if (c.frameType === 'top-level') {
+      try {
+        return new URL(c.url).pathname.startsWith('/api/');
+      } catch {
+        return false;
+      }
+    }
+  } catch {
+    /* fall through */
+  }
+  return false;
+}
+
 async function viaPinned(e) {
   const id = e.clientId || e.resultingClientId || '';
   if (!(await loadMode())) return fetch(e.request);
-  // a page still opening its channel: its requests wait (bounded) — never the network first
-  for (let i = 0; i < 2; i++) {
-    const s = pinStates.get(id);
-    if (s === 'connecting' || s === 'reconnecting' || (s === undefined && id && i === 0)) await waitState(id, 10000);
-    else break;
+  const channelless = await isChannelless(e);
+  if (channelless) {
+    if (!(await pinnedClient(id))) return fetch(e.request);
+  } else {
+    // a page still opening its channel: its requests wait (bounded) — never the network first
+    for (let i = 0; i < 2; i++) {
+      const s = pinStates.get(id);
+      if (s === 'connecting' || s === 'reconnecting' || (s === undefined && id && i === 0))
+        await waitState(id, 10000);
+      else break;
+    }
   }
   const own = pinStates.get(id);
   if (own === 'refused') return refused('the box key did not match the pairing QR');
-  if (own === 'reconnecting' && !(await pinnedClient(id))) return reconnecting();
+  if (!channelless && own === 'reconnecting' && !(await pinnedClient(id))) return reconnecting();
   const c = await pinnedClient(id);
   if (!c) {
-    if ([...pinStates.values()].includes('refused')) return refused('the box key did not match the pairing QR');
+    if ([...pinStates.values()].includes('refused'))
+      return refused('the box key did not match the pairing QR');
     return fetch(e.request);
   }
   const u = new URL(e.request.url);
   const headers = [];
   e.request.headers.forEach((v, k) => headers.push([k, v]));
+  // sec-fetch-dest is unreadable in a fetch event (Chromium hides it from
+  // request.headers) — stamp e.request.destination so the route distinguishes
+  // document opens from iframe loads over the pinned tunnel.
+  if (e.request.destination) headers.push(['x-bifrost-dest', e.request.destination]);
   const body = ['GET', 'HEAD'].includes(e.request.method) ? null : await e.request.arrayBuffer();
   const ch = new MessageChannel();
   const answer = new Promise((done) => {
     ch.port1.onmessage = (m) => done(m.data);
+    setTimeout(() => done({ state: 'no-answer' }), 4_000);
   });
   c.postMessage({ bifrostTunnel: { method: e.request.method, url: u.pathname + u.search, headers, body } }, [
     ch.port2,

@@ -15,7 +15,6 @@
  *  — the same page, its list from GET /api/roots/<name>/artifacts, its files fetched from that
  *  computer (`?root=`), back to that computer's own page. A computer that is off keeps its
  *  last known list, greyed: nothing opens. */
-
 import { useCallback, useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
 import { Streamdown } from 'streamdown';
@@ -30,6 +29,7 @@ import {
   markSeen,
   seenInit,
 } from '@/lib/artifact-read';
+import { type ThumbTicket, thumbQueue } from '@/lib/thumb-queue';
 import { useRootWorld } from '@/lib/worlds';
 
 /** a row of the gallery: the home list's ArtifactEntry, or what another computer lists */
@@ -108,12 +108,7 @@ function Viewer({ file, src }: { file: Entry; src: string }) {
   }
   if (kind === 'pdf') {
     return (
-      <a
-        href={src}
-        target="_blank"
-        rel="noreferrer"
-        className="oz-chip text-[var(--oz-info)]"
-      >
+      <a href={src} target="_blank" rel="noreferrer" className="oz-chip text-[var(--oz-info)]">
         <LineIcon name="artifact" size={13} />
         {file.name} — tap to view
       </a>
@@ -128,30 +123,97 @@ function Viewer({ file, src }: { file: Entry; src: string }) {
           <Streamdown>{body}</Streamdown>
         </div>
       ) : (
-        <pre className="whitespace-pre-wrap break-words text-xs text-[var(--oz-text)]/85">{body}</pre>
+        <pre className="text-xs break-words whitespace-pre-wrap text-[var(--oz-text)]/85">
+          {body}
+        </pre>
       )}
     </div>
   );
 }
 
 /** Live thumbnail for an html artifact: the real page in a scriptless
- *  iframe, scaled into a 3:2 card (top-left corner at 25%). Lazy —
- *  offscreen cards don't load their page until scrolled to. The iframe is
- *  pointer-transparent: a thumbnail must never steal a scroll — on the
- *  phone the embedded page would swallow the swipe and scroll itself. */
+ *  iframe, scaled into a 3:2 card (top-left corner at 25%).
+ *
+ *  Viewport-gated (IntersectionObserver, 120px lookahead) + bounded concurrency
+ *  (thumbQueue, max 4 in flight): Chromium's native loading="lazy" uses a
+ *  ~2500px margin, which eagerly fired all 45+ cards (6.7 MB) at once on a
+ *  360px phone and jammed the single ordered pinned DataChannel for 10+ s.
+ *  Now only visible/imminent cards mount their iframe, 4 at a time, and cards
+ *  scrolled past before starting drop out of the queue.
+ *
+ *  sandbox="allow-same-origin" keeps scripts off while letting sw.js carry the
+ *  load over the pinned channel end-to-end. */
 function HtmlThumb({ name, src }: { name: string; src: string }) {
+  const hostRef = useRef<HTMLDivElement | null>(null);
+  const ticketRef = useRef<ThumbTicket | null>(null);
+  const grantedRef = useRef(false);
+  const [mounted, setMounted] = useState(false);
+
+  useEffect(() => {
+    if (mounted) return;
+    const el = hostRef.current;
+    const enqueue = () => {
+      if (ticketRef.current || grantedRef.current) return;
+      ticketRef.current = thumbQueue.request(() => {
+        grantedRef.current = true;
+        setMounted(true);
+      });
+    };
+    const dequeue = () => {
+      if (!ticketRef.current || grantedRef.current) return;
+      ticketRef.current.cancel();
+      ticketRef.current = null;
+    };
+    if (!el || typeof IntersectionObserver === 'undefined') {
+      enqueue();
+      return dequeue;
+    }
+    const io = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((e) => e.isIntersecting)) enqueue();
+        else dequeue();
+      },
+      { rootMargin: '120px 0px' }
+    );
+    io.observe(el);
+    return () => {
+      io.disconnect();
+      dequeue();
+    };
+  }, [mounted]);
+
+  useEffect(() => {
+    return () => {
+      ticketRef.current?.cancel();
+      ticketRef.current = null;
+    };
+  }, []);
+
+  const finish = () => {
+    ticketRef.current?.done();
+    ticketRef.current = null;
+  };
+
   return (
-    <div className="relative aspect-[3/2] w-full overflow-hidden bg-[var(--oz-surface-hover)]">
-      <iframe
-        sandbox=""
-        loading="lazy"
-        scrolling="no"
-        aria-hidden="true"
-        tabIndex={-1}
-        src={src}
-        title={`${name} preview`}
-        className="pointer-events-none absolute left-0 top-0 h-[400%] w-[400%] origin-top-left scale-[.25] border-0 bg-white"
-      />
+    <div
+      ref={hostRef}
+      data-testid="artifact-thumb"
+      data-thumb-mounted={mounted ? '1' : '0'}
+      className="relative aspect-[3/2] w-full overflow-hidden bg-[var(--oz-surface-hover)]"
+    >
+      {mounted && (
+        <iframe
+          sandbox="allow-same-origin"
+          scrolling="no"
+          aria-hidden="true"
+          tabIndex={-1}
+          src={src}
+          title={`${name} preview`}
+          onLoad={finish}
+          onError={finish}
+          className="pointer-events-none absolute top-0 left-0 h-[400%] w-[400%] origin-top-left scale-[.25] border-0 bg-white"
+        />
+      )}
     </div>
   );
 }
@@ -209,8 +271,7 @@ function Gallery({ root }: { root: string }) {
         }
       );
       const d = (await r.json()) as
-        | Entry[]
-        | { home?: boolean; reachable?: boolean; artifacts?: Entry[] };
+        Entry[] | { home?: boolean; reachable?: boolean; artifacts?: Entry[] };
       if (!r.ok) return;
       const list = Array.isArray(d) ? d : (d.artifacts ?? []);
       const isRemote = !!root && !Array.isArray(d) && d.home !== true;
@@ -401,7 +462,10 @@ function Gallery({ root }: { root: string }) {
                     className={`oz-row ${isUnread ? 'unread' : ''} ${off ? 'oz-gone' : ''}`}
                   >
                     <div className="oz-r1">
-                      <span className="w-4 shrink-0 text-center text-[var(--oz-dim)]" aria-hidden="true">
+                      <span
+                        className="w-4 shrink-0 text-center text-[var(--oz-dim)]"
+                        aria-hidden="true"
+                      >
                         {glyphOf(f.name)}
                       </span>
                       {isUnread && <span aria-label="unseen">●</span>}
