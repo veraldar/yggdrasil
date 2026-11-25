@@ -1,0 +1,14 @@
+# G4.6 box only: docker's /dev is a copy made at container start, so loop devices the kernel makes later have no
+# node here; Incus's loop-file pool needs them. A real VPS has a real /dev and needs nothing like this.
+# Early boot (DefaultDependencies=no): ordered before incus.socket without pulling basic.target into a cycle.
+[Unit]
+Description=loop device nodes (rehearsal box only)
+DefaultDependencies=no
+After=systemd-tmpfiles-setup-dev.service
+Before=sysinit.target incus.socket incus.service
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/sh -c 'for i in $(seq 0 15); do [ -e /dev/loop$i ] || mknod -m 660 /dev/loop$i b 7 $i; done'
+[Install]
+WantedBy=sysinit.target

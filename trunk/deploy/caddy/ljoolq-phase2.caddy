@@ -1,0 +1,14 @@
+# >>> trunk-v1 ljoolq phase 2 (trunk/deploy/caddy/ljoolq-phase2.caddy · spec §10 V3) — put in place of phase 1 by caddy-merge.py
+# The trunk terminates its own TLS now (sni-443 v2 routes the name to the container): this Caddy keeps only
+# plain http for the name — the trunk's own ACME http-01 tokens (certbot --webroot inside the container) go to
+# it, everything else is redirected to https. Only a token-shaped name is passed on (spec §7).
+http://ljoolq.veraldar.org {
+	@trunk_acme path_regexp ^/\.well-known/acme-challenge/[A-Za-z0-9_-]{16,128}$
+	handle @trunk_acme {
+		reverse_proxy @CONTAINER@:8080
+	}
+	handle {
+		redir https://{host}{uri} permanent
+	}
+}
+# <<< trunk-v1 ljoolq phase 2
