@@ -32,8 +32,9 @@ sim/v1-ladder.sh --show <gate file>          # the table
 - **Environment.** Rigs get only an allowlisted environment (PATH, HOME, the locale, XDG, DBUS, …) plus their own `env`.
   Nothing named `YGG_*`, `BIFROST_*`, `CLAUDE*` or `ANTHROPIC*`, no keys, no `CARGO_TARGET_DIR` and no ssh agent reaches
   a rig. The runner may be a child of the live brain.
-- **Where things go.** `TMPDIR` is `~/.cache/trunk-v1/tmp/ladder/<sha12>/<gate>/run<n>/tmp`, and a rig's state dir is
-  `…/run<n>/state`. Both are kept when the run is red and removed when it is green. Logs go to `gates/<sha>/<gate>/`.
+- **Where things go.** `TMPDIR` is `~/.cache/trunk-v1/tmp/ladder/<sha8>.<gate>.<n>/t`, and a rig's state dir is
+  `…/s`. Both are kept when the run is red and removed when it is green. Logs go to `gates/<sha>/<gate>/`.
+  The path is kept short because rigs put unix sockets there: about 45 characters are left under the 107 `SUN_LEN` allows.
 - **Cleanup.** After every step the runner stops, by exact name, the transient units the step names and removes the
   docker containers and networks it names. That happens on failure too, and only for steps whose preflight passed.
 

@@ -232,13 +232,19 @@ def kill_group(p):
             continue
 
 
+def run_dirs(sha, gid, n):
+    """Short on purpose: rigs put unix sockets under TMPDIR (SUN_LEN 108) — ~/.cache/trunk-v1/tmp/ladder/<sha8>.<gate>.<n>/{t,s}"""
+    run_tmp = os.path.join(TMPROOT, f"{sha[:8]}.{gid}.{n}")
+    return run_tmp, os.path.join(run_tmp, "s"), os.path.join(run_tmp, "t")
+
+
 def one_run(gate, steps, n, ctx, parsers):
     gid = gate["id"]
-    run_tmp = os.path.join(ctx["tmproot"], gid, f"run{n}")
+    run_tmp, state, tmp = run_dirs(ctx["sha"], gid, n)
     shutil.rmtree(run_tmp, ignore_errors=True)
-    os.makedirs(os.path.join(run_tmp, "state"))
-    os.makedirs(os.path.join(run_tmp, "tmp"))
-    rctx = dict(ctx, state=os.path.join(run_tmp, "state"), tmp=os.path.join(run_tmp, "tmp"))
+    os.makedirs(state)
+    os.makedirs(tmp)
+    rctx = dict(ctx, state=state, tmp=tmp)
     run = {"n": n, "start": now(), "end": None, "exit": None, "counts": {"pass": 0, "fail": 0, "skip": 0},
            "log": None, "steps": [], "tmp": run_tmp}
     logs = []

@@ -178,6 +178,11 @@ with tempfile.TemporaryDirectory(dir=os.environ.get("TMPDIR")) as t:
     check("--fresh: re-created, the cache gone", wt3 == wt and not os.path.exists(os.path.join(wt, "target")) and L.tree_state(wt, sha1)[1] == [])
     g("worktree", "remove", "--force", wt)
 
+# ---------------------------------------------------------------- per-run dirs: room for a unix socket (G3.7, 11-25)
+run_tmp, st_dir, tmp_dir = L.run_dirs("35a7fb886befdc3a8262824e0d3c2c2f8c3bc8be", "G3.7", 6)
+check("per-run TMPDIR leaves >= 45 chars of a 107-char unix socket path", len(tmp_dir) + 1 + 45 <= 107, (len(tmp_dir), tmp_dir))
+check("per-run dirs live under ~/.cache/trunk-v1/tmp/ladder", tmp_dir.startswith(os.path.join(L.TMPROOT, "")) and st_dir.startswith(run_tmp))
+
 # ---------------------------------------------------------------- environment
 os.environ.update(YGG_DATA_DIR="/live/data", YGG_LISTEN="127.0.0.1:4101", YGG_UPSTREAM_API_KEY="k", BIFROST_AUTH="devices",
                   CLAUDECODE="1", CLAUDE_CODE_SESSION_ID="s", ANTHROPIC_API_KEY="k", CARGO_TARGET_DIR="/elsewhere", SSH_AUTH_SOCK="/x")
