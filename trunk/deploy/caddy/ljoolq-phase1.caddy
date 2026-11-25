@@ -1,0 +1,17 @@
+# >>> trunk-v1 ljoolq phase 1 (trunk/deploy/caddy/ljoolq-phase1.caddy · spec §10 V0–V2) — added by caddy-merge.py; removing this block undoes it
+# https for ljoolq.veraldar.org: sni-443 has no route for the name, so its `default` hands the TLS to this Caddy
+# (:8443), which terminates it and proxies to the test trunk's container. Plain http is redirected to https on
+# 443, as veraldar.org already is (the provider blocks 8443). Caddy answers its own ACME http-01 challenges for
+# the name before any site handler runs.
+ljoolq.veraldar.org:8443 {
+	reverse_proxy @CONTAINER@:8080 {
+		# the roots' /t/root websockets ride through here: a later `caddy reload` lets them live 10 minutes
+		# instead of cutting them at once (Caddy's default)
+		stream_close_delay 10m
+	}
+}
+
+http://ljoolq.veraldar.org {
+	redir https://{host}{uri} permanent
+}
+# <<< trunk-v1 ljoolq phase 1

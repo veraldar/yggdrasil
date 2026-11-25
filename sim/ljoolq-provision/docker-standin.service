@@ -1,0 +1,11 @@
+# G4.6 stand-in for the VPS's dockerd (the speech server runs in Docker there): what dockerd does to the
+# firewall at each start — an empty DOCKER-USER chain jumped first from FORWARD, and FORWARD's policy DROP.
+[Unit]
+Description=stand-in for dockerd's firewall (FORWARD DROP, empty DOCKER-USER)
+After=network.target ufw.service
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/sh -c 'iptables -N DOCKER-USER 2>/dev/null || iptables -F DOCKER-USER; iptables -A DOCKER-USER -j RETURN; iptables -C FORWARD -j DOCKER-USER 2>/dev/null || iptables -I FORWARD -j DOCKER-USER; iptables -P FORWARD DROP'
+[Install]
+WantedBy=multi-user.target

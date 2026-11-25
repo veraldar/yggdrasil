@@ -1,0 +1,21 @@
+# >>> trunk-v1 M7 ap ACME split (trunk/deploy/caddy/ap-acme-split.caddy · spec §11 step 3) — put in place of the http://ap.veraldar.org block by caddy-merge.py
+# ACME http-01 for the trunk access point: a token file on this host (trunk-ap's own renewals, certbot --csr
+# --webroot /var/www/acme) is served from disk exactly as before; a token-shaped name that is NOT on disk goes
+# to the v1 trunk's container (its `trunk.sh --add-name ap.veraldar.org`); every other request is answered from
+# /var/www/acme as before (a 404 where there is no file).
+http://ap.veraldar.org {
+	root * /var/www/acme
+	@trunk_acme {
+		path_regexp ^/\.well-known/acme-challenge/[A-Za-z0-9_-]{16,128}$
+		not file {
+			root /var/www/acme
+		}
+	}
+	handle @trunk_acme {
+		reverse_proxy @CONTAINER@:8080
+	}
+	handle {
+		file_server
+	}
+}
+# <<< trunk-v1 M7 ap ACME split
