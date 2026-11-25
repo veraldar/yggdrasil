@@ -148,6 +148,36 @@ with tempfile.TemporaryDirectory(dir=os.environ.get("TMPDIR")) as wt:
     check("all there: runs", L.preflight({"cmd": "bash sim/there.sh"}, ctx) == (None, ""))
     check("absolute {wt} paths are not taken for repo paths", L.repo_paths("python3 x.py --app {wt}/branch sim/scenarios/a.json") == ["sim/scenarios/a.json"])
 
+# ---------------------------------------------------------------- the throwaway worktree
+import subprocess
+with tempfile.TemporaryDirectory(dir=os.environ.get("TMPDIR")) as t:
+    repo = os.path.join(t, "repo")
+    os.makedirs(repo)
+    g = lambda *a, cwd=repo: subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false", *a],
+                                            cwd=cwd, capture_output=True, text=True, check=True).stdout.strip()
+    g("init", "-q")
+    open(os.path.join(repo, ".gitignore"), "w").write("target/\n")
+    open(os.path.join(repo, "a.txt"), "w").write("one\n")
+    g("add", "-A"); g("commit", "-qm", "one")
+    sha1 = g("rev-parse", "HEAD")
+    open(os.path.join(repo, "a.txt"), "w").write("two\n")
+    g("commit", "-qam", "two")
+    L.WTS = os.path.join(t, "wt")
+    wt = L.worktree(repo, sha1, fresh=False)
+    head, dirty = L.tree_state(wt, sha1)
+    check("worktree: a new detached checkout of exactly <sha>, clean", head == sha1 and not dirty and wt == os.path.join(L.WTS, sha1), (head, dirty))
+    os.makedirs(os.path.join(wt, "target")); open(os.path.join(wt, "target", "cache.bin"), "w").write("x")
+    open(os.path.join(wt, "a.txt"), "w").write("changed by a rig\n")
+    open(os.path.join(wt, "junk.log"), "w").write("x")
+    g("checkout", "-q", "--detach", "HEAD~0", cwd=wt)
+    wt2 = L.worktree(repo, sha1, fresh=False)
+    head, dirty = L.tree_state(wt2, sha1)
+    check("worktree reused: tracked change undone, untracked junk gone, still exactly <sha>", wt2 == wt and head == sha1 and not dirty, (head, dirty))
+    check("worktree reused: the ignored build cache stays", os.path.exists(os.path.join(wt, "target", "cache.bin")))
+    wt3 = L.worktree(repo, sha1, fresh=True)
+    check("--fresh: re-created, the cache gone", wt3 == wt and not os.path.exists(os.path.join(wt, "target")) and L.tree_state(wt, sha1)[1] == [])
+    g("worktree", "remove", "--force", wt)
+
 # ---------------------------------------------------------------- environment
 os.environ.update(YGG_DATA_DIR="/live/data", YGG_LISTEN="127.0.0.1:4101", YGG_UPSTREAM_API_KEY="k", BIFROST_AUTH="devices",
                   CLAUDECODE="1", CLAUDE_CODE_SESSION_ID="s", ANTHROPIC_API_KEY="k", CARGO_TARGET_DIR="/elsewhere", SSH_AUTH_SOCK="/x")
