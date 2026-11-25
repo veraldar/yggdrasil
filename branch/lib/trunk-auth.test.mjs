@@ -264,27 +264,41 @@ test('trunkState: re-read on a new stamp only; missing → fail closed; a torn f
   }
 });
 
-// ── the shared vectors (IDP stream writes them; the Rust verifier runs the same file) ────────────────
+// ── the shared vectors (IDP stream, trunk/src/v1/paseto.rs build_vectors; the Rust verifier runs them too) ──
 const SHARED = new URL('../../docs/trunk-v1/vectors/paseto.json', import.meta.url);
-test('shared vectors docs/trunk-v1/vectors/paseto.json', { skip: !existsSync(SHARED) && 'not written yet (IDP stream)' }, () => {
-  const v = JSON.parse(readFileSync(SHARED, 'utf8'));
-  const pubRaw = Buffer.from(v.keypair?.public ?? v.public_key ?? v.public, 'base64url');
-  const kid = t.kidOf(pubRaw);
-  if (v.footer) assert.deepEqual(typeof v.footer === 'string' ? JSON.parse(v.footer) : v.footer, { kid });
-  const a = {
-    keys: [{ kid, alg: 'ed25519', public: pubRaw.toString('base64url'), retired_at: null }],
-    kill_epoch: 0,
-    deny: [],
-    ...(v.state || {}),
-  };
-  const ok = t.v4PublicVerify(v.token, t.publicKeyFromRaw(pubRaw));
-  assert.ok(ok, 'the vector token verifies');
-  if (v.claims) assert.deepEqual(JSON.parse(ok.message), v.claims);
-  for (const c of v.cases || []) {
-    const st = { ...a, ...(c.state || {}) };
-    const now = c.now !== undefined ? (typeof c.now === 'number' ? c.now : Date.parse(c.now)) : Date.parse(v.claims?.iat ?? '') + 1000;
-    const got = t.checkToken(c.token ?? v.token, st, c.region ?? v.claims?.rgn, now);
-    assert.equal(got.ok ? 'ok' : got.why, c.why ?? 'ok', c.name);
-    if (!got.ok && c.reauth) assert.equal(t.REAUTH[got.why], c.reauth, c.name);
+const V = existsSync(SHARED) ? JSON.parse(readFileSync(SHARED, 'utf8')) : null;
+
+test('shared vectors: the keypair, kid, footer and token are C3’s', { skip: !V && 'not written yet (IDP stream)' }, () => {
+  const pubRaw = t.b64urlDecode(V.public_b64url);
+  assert.equal(t.kidOf(pubRaw), V.kid);
+  assert.equal(V.footer, JSON.stringify({ kid: V.kid }));
+  for (const k of V.keys) assert.equal(t.kidOf(t.b64urlDecode(k.public)), k.kid, `kid of ${k.public}`);
+  const out = t.v4PublicVerify(V.token, t.publicKeyFromRaw(pubRaw));
+  assert.ok(out, 'the token verifies');
+  assert.equal(out.footer.toString(), V.footer);
+  assert.deepEqual(JSON.parse(out.message), V.claims);
+  assert.deepEqual(t.claimsOf(out.message), V.claims, 'exactly C3 claims');
+  // the same bytes signed here with the seed give the same token (Ed25519 is deterministic)
+  const seed = t.secretKeyFromSeed(t.b64urlDecode(V.secret_seed_b64url));
+  assert.equal(t.v4PublicSign(out.message, seed, V.footer), V.token);
+});
+
+test('shared vectors: every case, the same verdict and reauth as the Rust verifier', { skip: !V && 'not written yet (IDP stream)' }, () => {
+  assert.ok(V.cases.length >= 10);
+  for (const c of V.cases) {
+    // the authority as this app reads it from trunk-state.json (C5) — through the same parser
+    const auth = t.parseState(JSON.stringify({ version: 1, keys: V.keys, kill_epoch: c.ctx.kill_epoch, deny: c.ctx.deny }));
+    assert.ok(auth, c.name);
+    assert.equal(auth.keys.length, V.keys.length, `${c.name}: every key kept`);
+    const got = t.checkToken(c.token, auth, c.ctx.region, c.ctx.now * 1000);
+    if (c.expect.ok) {
+      assert.equal(got.ok, true, `${c.name}: ${got.why}`);
+      assert.equal(got.claims.did, c.expect.did, c.name);
+      assert.equal(got.claims.role, c.expect.role, c.name);
+      assert.equal(got.claims.sub, c.expect.sub, c.name);
+    } else {
+      assert.equal(got.ok ? 'ok' : got.why, c.expect.why, c.name);
+      assert.equal(t.REAUTH[got.why], c.expect.reauth, c.name);
+    }
   }
 });
