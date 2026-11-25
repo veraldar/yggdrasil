@@ -19,8 +19,11 @@
  */
 import { RoomServiceClient } from 'livekit-server-sdk';
 import { deviceLive } from '@/lib/devices';
+import { authority, deviceStanding } from '@/lib/trunk-auth';
 
-type Watch = { room: string; identity: string; until: number };
+// kep: trunk mode (v1) — the kill epoch of the access token the voice was minted for. A v1 device is
+// live while it is not on the bridge's deny-list and the trunk's kill epoch has not passed its token's.
+type Watch = { room: string; identity: string; until: number; kep?: number };
 type State = {
   watches: Map<string, Watch>;
   timer: ReturnType<typeof setInterval> | null;
@@ -38,14 +41,20 @@ export function watchVoice(
   api: { host: string; key: string; secret: string },
   room: string,
   identity: string,
-  ttlMs: number
+  ttlMs: number,
+  kep?: number
 ): void {
   client ??= new RoomServiceClient(api.host, api.key, api.secret);
-  state.watches.set(`${room}\n${identity}`, { room, identity, until: Date.now() + ttlMs + 60_000 });
+  state.watches.set(`${room}\n${identity}`, { room, identity, until: Date.now() + ttlMs + 60_000, kep });
   if (!state.timer) {
     state.timer = setInterval(() => void sweep(), SWEEP_MS);
     state.timer.unref?.();
   }
+}
+
+async function live(device: string, kep: number | undefined): Promise<boolean> {
+  if (process.env.BIFROST_AUTH === 'trunk') return deviceStanding(device, kep ?? 0, authority());
+  return deviceLive(device);
 }
 
 async function sweep(): Promise<void> {
@@ -64,7 +73,7 @@ async function sweep(): Promise<void> {
       } catch {
         continue; // not in the room (yet, or any more)
       }
-      if (!device || (await deviceLive(device))) continue;
+      if (!device || (await live(device, w.kep))) continue;
       try {
         await client.removeParticipant(w.room, w.identity);
         console.log(`[voice] device ${device} revoked — removed ${w.identity} from room ${w.room}`);

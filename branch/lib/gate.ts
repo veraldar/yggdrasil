@@ -8,6 +8,7 @@ import { type Deny, checkAccess } from '@/lib/devices';
 import { event as obsEvent } from '@/lib/obs';
 import { rateTake } from '@/lib/ratelimit';
 import { peerOf, regionOfReq } from '@/lib/region';
+import { REAUTH as TRUNK_REAUTH, checkTrunkAccess } from '@/lib/trunk-auth';
 
 const REAUTH: Record<Deny, 'refresh' | 'pair'> = {
   expired: 'refresh',
@@ -35,7 +36,70 @@ const tooMany = (retryAfter: number) =>
     { status: 429, headers: { 'Retry-After': String(retryAfter) } }
   );
 
+/**
+ * v1 (BIFROST_AUTH=trunk, spec §5.3/§5.5): what the trunk itself serves on this origin — its shell pages
+ * and /t/* — and what moved there from this app (/pair, /devices, /join, /api/pair/*, /api/roots/join*).
+ * Behind the trunk none of it reaches this app; reached here anyway it is a plain 404 (never app HTML,
+ * and never a redirect to /login, which would loop: /login is one of them).
+ */
+const TRUNK_API = /^\/api\/(pair|roots\/join)(\/|$)/;
+const TRUNK_PAGE = /^\/(pair|devices|join|login|claim|account|add-root|auth|audit|offline|install|t)(\/|$)/;
+export const servedByTrunk = (path: string) => TRUNK_API.test(path) || TRUNK_PAGE.test(path);
+
+const notHere = () =>
+  new NextResponse('not found\n', {
+    status: 404,
+    headers: { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store' },
+  });
+
+/** The bearer or the bifrost_device cookie (the same order in every mode). */
+const presented = (req: NextRequest) =>
+  req.headers.get('authorization')?.replace(/^Bearer\s+/i, '') ||
+  req.cookies.get('bifrost_device')?.value ||
+  '';
+
+/**
+ * trunk mode, /api/*: a v1 access token (C3) or the box's own console / the admin token (B20/B21:
+ * loopback admin stays on the root). 401 is C3's body exactly: {why, reauth: refresh|login}.
+ */
+async function trunkDeviceGate(req: NextRequest): Promise<NextResponse> {
+  const path = req.nextUrl.pathname;
+  if (TRUNK_API.test(path)) return notHere();
+  if (!req.cookies.get('bifrost_device')?.value && adminOk(req)) return NextResponse.next();
+  const region = regionOfReq(req);
+  const v = checkTrunkAccess(presented(req), region);
+  if (!v.ok) {
+    if (v.why !== 'missing') {
+      obsEvent('deny', { src: 'app', why: v.why, hint: TRUNK_REAUTH[v.why], device: v.did, region, path: routeClass(path) });
+    }
+    return NextResponse.json(
+      { why: v.why, reauth: TRUNK_REAUTH[v.why] },
+      { status: 401, headers: { 'Cache-Control': 'no-store' } }
+    );
+  }
+  const rl = rateTake(`dev:${v.claims.did}`);
+  return rl.ok ? NextResponse.next() : tooMany(rl.retryAfter);
+}
+
+/**
+ * trunk mode, pages: signed in (or only expired / roamed: the app refreshes on its first call, as in
+ * devices mode) → the page; the box's console → the page; anyone else → 302 /login (same origin: the
+ * trunk serves it), relative on the wire, so it holds behind the trunk whatever this server's host is.
+ */
+async function trunkPageGate(req: NextRequest): Promise<NextResponse> {
+  if (servedByTrunk(req.nextUrl.pathname)) return notHere();
+  const cookie = req.cookies.get('bifrost_device')?.value || '';
+  if (!cookie && adminOk(req)) return NextResponse.next();
+  const v = checkTrunkAccess(presented(req), regionOfReq(req));
+  if (v.ok || TRUNK_REAUTH[v.why] === 'refresh') return NextResponse.next();
+  // Next's middleware adapter takes an absolute URL only, and relativizes one on the request's own host
+  // (server.mjs keeps that host `localhost`): the browser gets `Location: /login`
+  const login = new URL('/login', req.url);
+  return NextResponse.redirect(login, { status: 302, headers: { 'Cache-Control': 'no-store', Vary: 'Cookie' } });
+}
+
 export async function deviceGate(req: NextRequest): Promise<NextResponse> {
+  if (process.env.BIFROST_AUTH === 'trunk') return trunkDeviceGate(req);
   if (process.env.BIFROST_AUTH !== 'devices') {
     return NextResponse.next();
   }
@@ -102,10 +166,16 @@ export function routeClass(p: string): string {
  * A paired phone can land there too: its cookie is withheld on a link followed from another site
  * (SameSite=Strict). /pair asks the box again from inside the site, where the cookie rides, and loads
  * the address again.
- * Not gated (middleware.ts matcher): /pair itself, /_next, files with an ending, /api (deviceGate).
+ * Not gated: /pair itself (here), /_next, files with an ending (middleware.ts matcher), /api (deviceGate).
+ * Trunk mode (v1): trunkPageGate above.
  */
 export async function pageGate(req: NextRequest): Promise<NextResponse> {
+  if (process.env.BIFROST_AUTH === 'trunk') return trunkPageGate(req);
   if (process.env.BIFROST_AUTH !== 'devices') return NextResponse.next();
+  // /pair itself is where an unpaired visitor lands: never gated (the matcher used to leave it out;
+  // it reaches here since trunk mode answers it 404)
+  const p = req.nextUrl.pathname;
+  if (p === '/pair' || p.startsWith('/pair/')) return NextResponse.next();
   const cookie = req.cookies.get('bifrost_device')?.value || '';
   if (!cookie && adminOk(req)) return NextResponse.next();
   const raw = req.headers.get('authorization')?.replace(/^Bearer\s+/i, '') || cookie;

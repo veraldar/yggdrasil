@@ -22,6 +22,12 @@
  *
  * Pages too (11-21): in devices mode a visitor who is not paired is served the /pair page in place of
  * any page of the app — lib/gate.ts pageGate. Tailnet mode: untouched.
+ *
+ *   trunk (v1, spec §5.3) → every /api/* request needs a v1 access token (PASETO v4.public signed by
+ *     the trunk, checked against the bridge's trunk-state.json: lib/trunk-auth.ts, contract C3) from
+ *     the bifrost_device cookie or Bearer, or comes from the box's own console / the admin token.
+ *     401 {why, reauth: refresh|login}; a page without a token → 302 /login (the trunk serves it).
+ *     What moved to the trunk (/pair, /devices, /join, /api/pair/*, /api/roots/join*) answers 404.
  */
 import type { NextRequest } from 'next/server';
 import { deviceGate, pageGate } from '@/lib/gate';
@@ -30,9 +36,10 @@ export const config = {
   matcher: [
     // every /api route but an upload piece (it runs the same gate itself: lib/gate.ts)
     '/api/((?!file/upload/[^/]+$).*)',
-    // every PAGE but /pair (where an unpaired visitor lands), Next's own files and anything with a
-    // file ending (icons, the manifest, sw.js): lib/gate.ts pageGate
-    '/((?!api/|_next/|pair$|pair/|.*\\.[A-Za-z0-9]+$).*)',
+    // every PAGE but Next's own files and anything with a file ending (icons, the manifest, sw.js):
+    // lib/gate.ts pageGate (devices mode passes /pair, where an unpaired visitor lands; trunk mode
+    // answers it 404 — it moved to the trunk)
+    '/((?!api/|_next/|.*\\.[A-Za-z0-9]+$).*)',
   ],
   // devices.ts uses node:crypto + fs — the registry check needs the node runtime
   runtime: 'nodejs',

@@ -1,14 +1,22 @@
 /** The roots sheet's routes, shared: the gate and the one call each makes to the hub brain. */
 import { NextResponse } from 'next/server';
 import { fetch as undiciFetch } from 'undici';
-import { rootsGate } from '@/lib/admin';
+import { rootsGate, trunkRootsGate } from '@/lib/admin';
 import { OC } from '@/lib/oc';
 import { NO_STORE } from '@/lib/pairing';
 import { needsUpdate, rootLacksRoute } from '@/lib/root-outdated';
 import { ROOT_NAME } from '@/lib/roots';
+import { REAUTH as TRUNK_REAUTH } from '@/lib/trunk-auth';
 
 /** null = go on; else the refusal to answer with */
 export async function gate(req: Request): Promise<NextResponse | null> {
+  if (process.env.BIFROST_AUTH === 'trunk') {
+    const t = await trunkRootsGate(req);
+    if (t === null) return null;
+    return t === 403
+      ? NextResponse.json({ error: 'a signed-in device sees the roots' }, { status: 403 })
+      : NextResponse.json({ why: t, reauth: TRUNK_REAUTH[t] }, { status: 401 });
+  }
   const g = await rootsGate(req);
   if (g === 'ok') return null;
   return g === 403

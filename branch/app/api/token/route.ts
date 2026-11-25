@@ -7,10 +7,8 @@ import {
   type VideoGrant,
 } from 'livekit-server-sdk';
 import { lookup } from 'node:dns/promises';
-import { bearerOf, cookieOf } from '@/lib/admin';
-import { checkAccess } from '@/lib/devices';
+import { signedInDevice } from '@/lib/admin';
 import { resolveId } from '@/lib/oc';
-import { regionOfReq } from '@/lib/region';
 import { watchVoice } from '@/lib/voice-revoke';
 
 // must match branch/voice/agent.py: @server.rtc_session(agent_name=...)
@@ -48,7 +46,8 @@ function unavailable(why: string) {
   return NextResponse.json({ error: 'voice-unavailable', why }, { status: 503, headers: NO_STORE });
 }
 
-const devicesMode = () => process.env.BIFROST_AUTH === 'devices';
+// devices (v0.9) or trunk (v1): the public door, where a signed-in DEVICE is the gate
+const devicesMode = () => process.env.BIFROST_AUTH === 'devices' || process.env.BIFROST_AUTH === 'trunk';
 
 /** why voice cannot work from here, or null when it can. Tokens are minted
  *  where the network is the gate (the tailnet), on a dev server, or — devices
@@ -69,13 +68,13 @@ function whyUnavailable(): string | null {
   return null;
 }
 
-/** devices mode: the paired device this request speaks for (the same
+/** devices / trunk mode: the paired device this request speaks for (the same
  *  credential and region the middleware just checked), or null — the box's own
- *  console and the admin token pass the gate without one, and get no voice. */
-async function deviceOf(req: Request): Promise<string | null> {
-  const raw = bearerOf(req) || cookieOf(req, 'bifrost_device');
-  const gate = await checkAccess(raw, regionOfReq(req));
-  return gate.ok ? gate.device.id : null;
+ *  console and the admin token pass the gate without one, and get no voice.
+ *  `kep`: a v1 token's kill epoch, which the revoke watch checks again (lib/voice-revoke). */
+async function deviceOf(req: Request): Promise<{ id: string; kep?: number } | null> {
+  const d = await signedInDevice(req);
+  return d.ok ? { id: d.id, kep: d.kep } : null;
 }
 
 const NOT_PAIRED =
@@ -155,7 +154,7 @@ export async function POST(req: Request) {
         identity: participantIdentity,
         name: participantName,
         // devices mode: who this voice belongs to — revoking the device removes it (lib/voice-revoke)
-        ...(device ? { attributes: { device } } : {}),
+        ...(device ? { attributes: { device: device.id } } : {}),
       },
       roomName,
       roomConfig
@@ -180,7 +179,8 @@ export async function POST(req: Request) {
         { host: apiHost, key: API_KEY!, secret: API_SECRET! },
         roomName,
         participantIdentity,
-        TOKEN_TTL_MS
+        TOKEN_TTL_MS,
+        device.kep
       );
     try {
       const dispatchClient = new AgentDispatchClient(apiHost, API_KEY, API_SECRET);
