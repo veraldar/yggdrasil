@@ -5,21 +5,15 @@
  * changes: the app shell and first contact (pairing) still come from the network. */
 
 self.addEventListener('install', () => self.skipWaiting());
-self.addEventListener('activate', (e) =>
-  e.waitUntil(
-    (async () => {
-      self.clients.claim();
-      // this SW never caches the app shell — so any cache left by an older
-      // SW (a precache era) is stale weight: purge everything that isn't ours
-      try {
-        const keep = 'bifrost-pin';
-        await Promise.all(
-          (await caches.keys()).filter((k) => k !== keep).map((k) => caches.delete(k))
-        );
-      } catch {}
-    })()
-  )
-);
+self.addEventListener('activate', (e) => e.waitUntil((async () => {
+  self.clients.claim();
+  // this SW never caches the app shell — so any cache left by an older
+  // SW (a precache era) is stale weight: purge everything that isn't ours
+  try {
+    const keep = 'bifrost-pin';
+    await Promise.all((await caches.keys()).filter((k) => k !== keep).map((k) => caches.delete(k)));
+  } catch {}
+})()));
 
 /* page id → its pinned-channel state: off | connecting | pinned | fallback | reconnecting | refused */
 const pinStates = new Map();
@@ -42,10 +36,7 @@ async function loadMode() {
 function saveMode(on) {
   if (pinMode === on) return;
   pinMode = on;
-  caches
-    .open('bifrost-pin')
-    .then((c) => c.put(MODE_KEY, new Response(on ? '1' : '0')))
-    .catch(() => {});
+  caches.open('bifrost-pin').then((c) => c.put(MODE_KEY, new Response(on ? '1' : '0'))).catch(() => {});
 }
 
 self.addEventListener('message', (e) => {
@@ -90,17 +81,10 @@ const refused = (why) =>
 /* the page had the channel and lost it (the box restarting): the request is not sent at all —
  * never to the trunk's TLS; the page opens the channel again and the app retries */
 const reconnecting = () =>
-  new Response(
-    JSON.stringify({ error: 'pin-reconnecting', why: 'the pinned channel is coming back' }),
-    {
-      status: 503,
-      headers: {
-        'content-type': 'application/json',
-        'x-bifrost-via': 'reconnecting',
-        'retry-after': '1',
-      },
-    }
-  );
+  new Response(JSON.stringify({ error: 'pin-reconnecting', why: 'the pinned channel is coming back' }), {
+    status: 503,
+    headers: { 'content-type': 'application/json', 'x-bifrost-via': 'reconnecting', 'retry-after': '1' },
+  });
 
 /** a load whose client cannot own a pin channel — waiting for its state is a 10 s burn
  *  for an announcement that will never come:
@@ -143,13 +127,10 @@ async function isChannelless(e) {
 async function viaPinned(e) {
   const id = e.clientId || e.resultingClientId || '';
   if (!(await loadMode())) return fetch(e.request);
-  // a frame inside a pinned page: no wait for its own state (it posts none) — the parent
-  // page's channel carries it at once. No pinned window anywhere (a page in fallback, an
-  // unpaired browser, the first load before any announcement): the network, as ever.
   const channelless = await isChannelless(e);
   if (channelless) {
     if (!(await pinnedClient(id))) return fetch(e.request);
-  } else
+  } else {
     // a page still opening its channel: its requests wait (bounded) — never the network first
     for (let i = 0; i < 2; i++) {
       const s = pinStates.get(id);
@@ -157,6 +138,7 @@ async function viaPinned(e) {
         await waitState(id, 10000);
       else break;
     }
+  }
   const own = pinStates.get(id);
   if (own === 'refused') return refused('the box key did not match the pairing QR');
   if (!channelless && own === 'reconnecting' && !(await pinnedClient(id))) return reconnecting();
@@ -170,48 +152,25 @@ async function viaPinned(e) {
   const headers = [];
   e.request.headers.forEach((v, k) => headers.push([k, v]));
   // sec-fetch-dest is unreadable in a fetch event (Chromium hides it from
-  // request.headers) — the app needs the load's destination to serve a doc
-  // open without the CSP sandbox an iframe load must not get (11-25). The SW
-  // knows e.request.destination: stamp it; the pinned page forwards it, the
-  // route reads it (x-bifrost-dest before sec-fetch-dest).
+  // request.headers) — stamp e.request.destination so the route distinguishes
+  // document opens from iframe loads over the pinned tunnel.
   if (e.request.destination) headers.push(['x-bifrost-dest', e.request.destination]);
   const body = ['GET', 'HEAD'].includes(e.request.method) ? null : await e.request.arrayBuffer();
   const ch = new MessageChannel();
   const answer = new Promise((done) => {
     ch.port1.onmessage = (m) => done(m.data);
-    // the carrying page may be gone or never wired: never hold the load
-    // hostage — fall through to the network (the trunk's TLS) after a
-    // short, bounded wait
     setTimeout(() => done({ state: 'no-answer' }), 4_000);
   });
-  c.postMessage(
-    { bifrostTunnel: { method: e.request.method, url: u.pathname + u.search, headers, body } },
-    [ch.port2]
-  );
+  c.postMessage({ bifrostTunnel: { method: e.request.method, url: u.pathname + u.search, headers, body } }, [
+    ch.port2,
+  ]);
   const a = await answer;
   if (a && typeof a.status === 'number') {
-    return new Response(a.body || null, {
-      status: a.status,
-      statusText: a.statusText || '',
-      headers: a.headers,
-    });
+    return new Response(a.body || null, { status: a.status, statusText: a.statusText || '', headers: a.headers });
   }
   if (a && a.state === 'refused') return refused('the box key did not match the pairing QR');
   if (a && a.state === 'reconnecting') return reconnecting();
-  // the channel could not carry it: the trunk's TLS, as before. One line in
-  // the app's diag (kind "pin") so a slow open decomposes from data: which
-  // requests fell through, and why (11-24 fix-3 diagnosis — this was the one
-  // inferred leg; now it is measured).
-  const why =
-    own === 'fallback'
-      ? 'fallback'
-      : a && a.error
-        ? `carry:${String(a.error).slice(0, 120)}`
-        : a
-          ? 'carry:no-answer'
-          : 'no-page';
-  console.info('[sw] pin fall-through', e.request.method, u.pathname, why);
-  return fetch(e.request);
+  return fetch(e.request); // the channel could not carry it: the trunk's TLS, as before
 }
 
 self.addEventListener('fetch', (e) => {

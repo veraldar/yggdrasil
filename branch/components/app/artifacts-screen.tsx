@@ -29,6 +29,7 @@ import {
   markSeen,
   seenInit,
 } from '@/lib/artifact-read';
+import { type ThumbTicket, thumbQueue } from '@/lib/thumb-queue';
 import { useRootWorld } from '@/lib/worlds';
 
 /** a row of the gallery: the home list's ArtifactEntry, or what another computer lists */
@@ -131,30 +132,88 @@ function Viewer({ file, src }: { file: Entry; src: string }) {
 }
 
 /** Live thumbnail for an html artifact: the real page in a scriptless
- *  iframe, scaled into a 3:2 card (top-left corner at 25%). Lazy —
- *  offscreen cards don't load their page until scrolled to. The iframe is
- *  pointer-transparent: a thumbnail must never steal a scroll — on the
- *  phone the embedded page would swallow the swipe and scroll itself.
+ *  iframe, scaled into a 3:2 card (top-left corner at 25%).
  *
- *  sandbox="allow-same-origin" (first-open fix, 11-24): a fully sandboxed
- *  iframe is an opaque origin, no service worker controls it, and its
- *  request bypassed the pinned channel straight to the edge relay (measured:
- *  api.artifact ran 1032 edge vs 196 tunnel while every other route rode the
- *  tunnel). Scripts stay off — allow-scripts is a separate flag — but the
- *  document is same-origin, so sw.js carries its load end-to-end. */
+ *  Viewport-gated (IntersectionObserver, 120px lookahead) + bounded concurrency
+ *  (thumbQueue, max 4 in flight): Chromium's native loading="lazy" uses a
+ *  ~2500px margin, which eagerly fired all 45+ cards (6.7 MB) at once on a
+ *  360px phone and jammed the single ordered pinned DataChannel for 10+ s.
+ *  Now only visible/imminent cards mount their iframe, 4 at a time, and cards
+ *  scrolled past before starting drop out of the queue.
+ *
+ *  sandbox="allow-same-origin" keeps scripts off while letting sw.js carry the
+ *  load over the pinned channel end-to-end. */
 function HtmlThumb({ name, src }: { name: string; src: string }) {
+  const hostRef = useRef<HTMLDivElement | null>(null);
+  const ticketRef = useRef<ThumbTicket | null>(null);
+  const grantedRef = useRef(false);
+  const [mounted, setMounted] = useState(false);
+
+  useEffect(() => {
+    if (mounted) return;
+    const el = hostRef.current;
+    const enqueue = () => {
+      if (ticketRef.current || grantedRef.current) return;
+      ticketRef.current = thumbQueue.request(() => {
+        grantedRef.current = true;
+        setMounted(true);
+      });
+    };
+    const dequeue = () => {
+      if (!ticketRef.current || grantedRef.current) return;
+      ticketRef.current.cancel();
+      ticketRef.current = null;
+    };
+    if (!el || typeof IntersectionObserver === 'undefined') {
+      enqueue();
+      return dequeue;
+    }
+    const io = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((e) => e.isIntersecting)) enqueue();
+        else dequeue();
+      },
+      { rootMargin: '120px 0px' }
+    );
+    io.observe(el);
+    return () => {
+      io.disconnect();
+      dequeue();
+    };
+  }, [mounted]);
+
+  useEffect(() => {
+    return () => {
+      ticketRef.current?.cancel();
+      ticketRef.current = null;
+    };
+  }, []);
+
+  const finish = () => {
+    ticketRef.current?.done();
+    ticketRef.current = null;
+  };
+
   return (
-    <div className="relative aspect-[3/2] w-full overflow-hidden bg-[var(--oz-surface-hover)]">
-      <iframe
-        sandbox="allow-same-origin"
-        loading="lazy"
-        scrolling="no"
-        aria-hidden="true"
-        tabIndex={-1}
-        src={src}
-        title={`${name} preview`}
-        className="pointer-events-none absolute top-0 left-0 h-[400%] w-[400%] origin-top-left scale-[.25] border-0 bg-white"
-      />
+    <div
+      ref={hostRef}
+      data-testid="artifact-thumb"
+      data-thumb-mounted={mounted ? '1' : '0'}
+      className="relative aspect-[3/2] w-full overflow-hidden bg-[var(--oz-surface-hover)]"
+    >
+      {mounted && (
+        <iframe
+          sandbox="allow-same-origin"
+          scrolling="no"
+          aria-hidden="true"
+          tabIndex={-1}
+          src={src}
+          title={`${name} preview`}
+          onLoad={finish}
+          onError={finish}
+          className="pointer-events-none absolute top-0 left-0 h-[400%] w-[400%] origin-top-left scale-[.25] border-0 bg-white"
+        />
+      )}
     </div>
   );
 }

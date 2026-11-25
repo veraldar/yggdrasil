@@ -10,7 +10,7 @@
 import { NextResponse } from 'next/server';
 import { readFile, stat } from 'fs/promises';
 import path from 'path';
-import { gzipSync } from 'zlib';
+import { isCompressibleType, maybeGzip } from '@/lib/artifact-gzip';
 import { ARTIFACT_TYPES, resolveArtifact, safeArtifactName } from '@/lib/artifacts';
 import { ROOT_RE } from '@/lib/file-ref';
 import { ocFetch, ocRaw } from '@/lib/oc';
@@ -30,34 +30,20 @@ async function homeRoot(): Promise<string | null> {
   return name;
 }
 
-/** gzipped copy, kept until the file changes (first-open fix 2, 11-24): the
- *  phone asks for text artifacts with Accept-Encoding: gzip and got raw bytes
- *  (measured 11-24) — md shrinks 51–58%, html 26–67%. Cache key: name+mtime+size
- *  from the entry the gallery lists, so a rewrite invalidates it; caps: only
- *  text-ish types, and files small enough that gzipSync stays off the event
- *  loop's critical path (bigger text would stream better uncompressed than
- *  block the app). */
-const GZIP_MAX = 512 * 1024;
-const gzCache = new Map<string, { at: string; bytes: Uint8Array }>();
-
-function gzipFor(
+async function respondCompressed(
   req: Request,
-  name: string,
   type: string,
   raw: Uint8Array,
-  tag: string
-): Uint8Array | null {
-  if (!/(^|; )gzip(;|$)/.test(req.headers.get('accept-encoding') || '')) return null;
-  if (!type.startsWith('text/') && type !== 'application/json' && type !== 'application/xml')
-    return null;
-  if (raw.length > GZIP_MAX || raw.length < 1024) return null; // under 1 KB the framing eats the win
-  const key = `${name}:${tag}`;
-  const hit = gzCache.get(key);
-  if (hit && hit.at === tag) return hit.bytes;
-  const bytes = gzipSync(raw, { level: 6 });
-  if (gzCache.size > 64) gzCache.clear(); // simple bound: 64 live artifacts is plenty
-  gzCache.set(key, { at: tag, bytes });
-  return bytes;
+  headers: Record<string, string>,
+  cacheKey?: string
+): Promise<Response> {
+  if (isCompressibleType(type)) headers['Vary'] = 'Accept-Encoding';
+  const gz = await maybeGzip(req.headers.get('accept-encoding'), type, raw, cacheKey);
+  if (gz) {
+    headers['Content-Encoding'] = 'gzip';
+    return new Response(new Uint8Array(gz).buffer as ArrayBuffer, { headers });
+  }
+  return new Response(new Uint8Array(raw).buffer as ArrayBuffer, { headers });
 }
 
 /** One artifact's answer, wherever its bytes came from (local file or another root). */
@@ -68,25 +54,19 @@ async function serve(
   bytes: () => Promise<Uint8Array>,
   stream: (() => ReadableStream<Uint8Array>) | null,
   source: string,
-  tag = `${name}:${source}`
+  tag?: string
 ): Promise<Response> {
   // top-level navigation (address bar / new tab / gallery corner button):
   // md renders as a phone-readable page, other text wraps raw in the
   // app's black — browsers paint raw text white, and an opened .log must
   // still read like bifrost. Chat fetches (sec-fetch-dest: empty, accept: */*)
   // get the raw bytes they .text() — the md viewer in the chat renders markdown
-  // itself. Note: when the PWA service worker (public/sw.js) intercepts /api/*
-  // navigations, Chromium downgrades sec-fetch-dest to "empty" (or drops it on
-  // the pinned tunnel), while Accept still carries text/html.
-  // through the pinned tunnel Chromium's sec-fetch-dest is unreadable (the SW
-  // stamps what it knows as x-bifrost-dest — lib/pinned.ts forwards it)
+  // itself. Through the pinned tunnel Chromium's sec-fetch-dest is unreadable
+  // (the SW stamps e.request.destination as x-bifrost-dest — lib/pinned.ts
+  // forwards it). An iframe load carries Accept: text/html too, so exclude
+  // dest === 'iframe' to avoid sending CSP sandbox onto thumbnail frames.
   const dest = req.headers.get('x-bifrost-dest') || req.headers.get('sec-fetch-dest');
   const accept = req.headers.get('accept') || '';
-  // a frame's load is NOT a doc open (11-25 regression fix): an iframe
-  // navigation carries Accept: text/html too, and treating it as a doc
-  // sent it the CSP sandbox header — an opaque frame again, invisible to
-  // sw.js, back on the edge relay (the exact bug allow-same-origin
-  // closed). The chat's fetches (dest 'empty', accept */*) stay raw.
   const doc =
     dest === 'document' ||
     (dest !== 'iframe' && (!dest || dest === 'empty') && accept.includes('text/html'));
@@ -94,16 +74,22 @@ async function serve(
   const md = type.startsWith('text/markdown');
   if (md && doc) {
     try {
-      return new Response(renderMdPage(name, Buffer.from(await bytes()).toString('utf-8')), {
-        headers: {
+      const rendered = new TextEncoder().encode(
+        renderMdPage(name, Buffer.from(await bytes()).toString('utf-8'))
+      );
+      return await respondCompressed(
+        req,
+        'text/html; charset=utf-8',
+        rendered,
+        {
           'Content-Type': 'text/html; charset=utf-8',
           'Cache-Control': 'no-store',
           'X-Artifact-Source': source,
-          // as sandboxed as the chat's html frames: no scripts, no
-          // access to the app's origin
+          // no scripts, origin stays so embedded media rides the SW's pinned channel
           'Content-Security-Policy': 'sandbox allow-same-origin',
         },
-      });
+        tag ? `${name}:${tag}:md-doc` : undefined
+      );
     } catch {
       /* the parser refused the file: it still reads, below, as plain text */
     }
@@ -117,43 +103,46 @@ async function serve(
       .replace(/&/g, '&amp;')
       .replace(/</g, '&lt;')
       .replace(/>/g, '&gt;');
-    const page =
+    const page = new TextEncoder().encode(
       `<!doctype html><meta charset="utf-8">` +
-      `<meta name="viewport" content="width=device-width,initial-scale=1">` +
-      `<title>${name}</title>` +
-      `<style>html{background:#080810}body{margin:0;background:#080810;color:#fff;` +
-      `font:13px/1.6 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;padding:16px;` +
-      `white-space:pre-wrap;word-break:break-word}</style>` +
-      `<body>${esc}</body>`;
-    return new Response(page, {
-      headers: { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' },
-    });
-  }
-  const gz = stream ? null : gzipFor(req, name, type, await bytes(), tag);
-  if (gz) {
-    return new Response(new Uint8Array(gz).buffer as ArrayBuffer, {
-      headers: {
-        'Content-Type': type,
+        `<meta name="viewport" content="width=device-width,initial-scale=1">` +
+        `<title>${name}</title>` +
+        `<style>html{background:#080810}body{margin:0;background:#080810;color:#fff;` +
+        `font:13px/1.6 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;padding:16px;` +
+        `white-space:pre-wrap;word-break:break-word}</style>` +
+        `<body>${esc}</body>`
+    );
+    return await respondCompressed(
+      req,
+      'text/html; charset=utf-8',
+      page,
+      {
+        'Content-Type': 'text/html; charset=utf-8',
         'Cache-Control': 'no-store',
-        'Content-Encoding': 'gzip',
-        'X-Artifact-Source': source,
-        ...(html && doc ? { 'Content-Security-Policy': 'sandbox allow-same-origin' } : {}),
       },
-    });
+      tag ? `${name}:${tag}:txt-doc` : undefined
+    );
   }
-  return new Response(stream ? stream() : new Uint8Array(await bytes()), {
-    headers: {
-      'Content-Type': type,
-      // long enough to cache during a chat, short enough to pick up rewrites
-      'Cache-Control': 'no-store',
-      'X-Artifact-Source': source,
-      // an html page opened on its own (gallery tap, new tab) renders
-      // as sandboxed as the chat's frames (allow-same-origin, no
-      // allow-scripts, 11-24/11-25): no scripts, and the origin stays so
-      // the page's media rides the SW's pinned channel too
-      ...(html && doc ? { 'Content-Security-Policy': 'sandbox allow-same-origin' } : {}),
-    },
-  });
+  const headers: Record<string, string> = {
+    'Content-Type': type,
+    // long enough to cache during a chat, short enough to pick up rewrites
+    'Cache-Control': 'no-store',
+    'X-Artifact-Source': source,
+    // an html page opened on its own (gallery tap, new tab) renders
+    // as sandboxed as the chat's frames (allow-same-origin, no allow-scripts):
+    // no scripts, and the origin stays so its media rides the SW's pinned channel
+    ...(html && doc ? { 'Content-Security-Policy': 'sandbox allow-same-origin' } : {}),
+  };
+  if (stream) {
+    return new Response(stream(), { headers });
+  }
+  return await respondCompressed(
+    req,
+    type,
+    await bytes(),
+    headers,
+    tag ? `${name}:${tag}:raw` : undefined
+  );
 }
 
 /** an artifact a session on another root made: the brain brings it here, then its bytes */
@@ -219,8 +208,7 @@ export async function GET(req: Request, ctx: { params: Promise<{ name: string }>
   const hit = await resolveArtifact(name);
   if (hit) {
     try {
-      const data = await readFile(hit.file);
-      const st = await stat(hit.file).catch(() => null);
+      const [data, st] = await Promise.all([readFile(hit.file), stat(hit.file).catch(() => null)]);
       const tag = st ? `${st.mtimeMs}:${st.size}` : `${data.length}`;
       return await serve(req, name, hit.type, async () => data, null, hit.source, tag);
     } catch {

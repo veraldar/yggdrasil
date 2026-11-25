@@ -409,6 +409,18 @@ export function tunnelFetch(r: TunnelRequest, signal?: AbortSignal): Promise<Res
         if (left === 0) finish();
       } else deliver(b);
     };
+    const canGunzip = typeof DecompressionStream === 'function';
+    const extra: Array<[string, string]> = [];
+    // Fetch API strips Accept-Encoding from SW e.request.headers — advertise
+    // gzip on tunnelled GETs so HTML/MD/JSON artifacts shrink 55–85% over the
+    // single ordered SCTP DataChannel, then decompress transparently below.
+    if (
+      canGunzip &&
+      r.method === 'GET' &&
+      !r.headers.some(([k]) => k.toLowerCase() === 'accept-encoding')
+    ) {
+      extra.push(['Accept-Encoding', 'gzip']);
+    }
     const onHead = (h: Head, rest: Uint8Array) => {
       const hv = (k: string) => h.headers.find(([n]) => n.toLowerCase() === k)?.[1] || '';
       if (/chunked/i.test(hv('transfer-encoding'))) chunked = dechunker();
@@ -425,18 +437,30 @@ export function tunnelFetch(r: TunnelRequest, signal?: AbortSignal): Promise<Res
               s.abort();
             },
           });
+      const gzipped =
+        canGunzip && !nullBody && hv('content-encoding').toLowerCase().trim() === 'gzip';
+      const outStream =
+        stream && gzipped
+          ? stream.pipeThrough(
+              new DecompressionStream('gzip') as unknown as TransformStream<Uint8Array, Uint8Array>
+            )
+          : stream;
       const headers = new Headers();
       for (const [k, v] of h.headers) {
         const lk = k.toLowerCase();
-        if (!['transfer-encoding', 'connection', 'content-length', 'set-cookie'].includes(lk))
-          headers.append(k, v);
+        if (
+          ['transfer-encoding', 'connection', 'content-length', 'set-cookie'].includes(lk) ||
+          (gzipped && lk === 'content-encoding')
+        )
+          continue;
+        headers.append(k, v);
       }
       headers.set('x-bifrost-via', 'pinned');
-      resolve(new Response(stream, { status: h.status, statusText: h.statusText, headers }));
+      resolve(new Response(outStream, { status: h.status, statusText: h.statusText, headers }));
       if (rest.length) body(rest);
       if (left === 0 || nullBody) finish();
     };
-    const s = l.stream(headOf(r), {
+    const s = l.stream(headOf(r, extra), {
       data: (b) => {
         if (!head) return body(b);
         head = cat(head, b);
