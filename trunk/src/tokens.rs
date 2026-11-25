@@ -390,6 +390,40 @@ pub fn bearer(header_value: &str) -> Option<&str> {
 mod tests {
     use super::*;
 
+    /// The bridge in trunk mode (v1): the same gate API, answered from the trunk's state (C3).
+    #[cfg(feature = "bridge")]
+    #[test]
+    fn trunk_mode_gate() {
+        use crate::v1::proto::{kid_of, paseto_v4_sign, rfc3339, SignKey};
+        let st = crate::v1::state::TrunkState::open(None, "https://t", "tk", "rt_a");
+        let k = SignKey::generate();
+        st.update(|s| s.keys.push(crate::v1::state::Key { kid: kid_of(&k.public()), alg: "ed25519".into(), public: k.public_b64u(), retired_at: None }));
+        let store = TokenStore::open_trunk(st.clone());
+        let now = now_ms();
+        let claims = serde_json::json!({ "iss": "https://t", "sub": "acc_1", "did": "dev_1", "role": "member", "rgn": "loopback", "kep": 0,
+                                         "iat": rfc3339(now), "exp": rfc3339(now + 600_000), "jti": "j" });
+        let tok = paseto_v4_sign(&k, &claims, serde_json::json!({ "kid": kid_of(&k.public()) }).to_string().as_bytes());
+        let g = store.check(&tok, "loopback").unwrap();
+        assert_eq!((g.device.as_str(), g.roots.len()), ("dev_1", 0));
+        assert!(g.exp_ms > now);
+        assert_eq!(store.check(&tok, "net:1.2.0.0/16").unwrap_err(), Deny::Region);
+        assert_eq!(store.check("", "loopback").unwrap_err(), Deny::Missing);
+        assert_eq!(store.device_of(&tok).as_deref(), Some("dev_1"));
+        assert!(store.device_live("dev_1") && store.is_trunk());
+        // the trunk revokes the device: the 500 ms sweep (device_live) and the gate both see it
+        st.update(|s| s.deny.push(crate::v1::state::DenyEntry { did: "dev_1".into(), until: now + 60_000 }));
+        assert!(!store.device_live("dev_1"));
+        assert_eq!(store.check(&tok, "loopback").unwrap_err(), Deny::Revoked);
+        st.update(|s| {
+            s.deny.clear();
+            s.kill_epoch = 1;
+        });
+        assert_eq!(store.kill_epoch(), 1);
+        assert_eq!(store.check(&tok, "loopback").unwrap_err(), Deny::Revoked);
+        assert_eq!(Deny::Revoked.reauth(), "login", "v1 words");
+        assert_eq!(Deny::Expired.reauth(), "refresh");
+    }
+
     #[test]
     fn iso_times_parse() {
         assert_eq!(parse_iso_ms("1970-01-01T00:00:00.000Z"), Some(0));

@@ -672,6 +672,85 @@ fn webpki_client() -> tokio_rustls::TlsConnector {
 mod tests {
     use super::*;
 
+    fn offline_link(trunk: &SignKey) -> Arc<Link> {
+        let state = TrunkState::open(None, "http://127.0.0.1:9", &trunk.public_b64u(), "rt_me");
+        let tokens = Arc::new(crate::tokens::TokenStore::open_trunk(state.clone()));
+        let dial = Arc::new(crate::ap::DialConfig {
+            url: "http://127.0.0.1:9".into(),
+            pin: String::new(),
+            token: String::new(),
+            upstream: "127.0.0.1:9".into(),
+            livekit: None,
+            tcp: Default::default(),
+            rootlink: None,
+            branch: None,
+            tokens,
+            ice_demux: None,
+        });
+        Link::spawn(LinkConfig {
+            url: "http://127.0.0.1:9".into(),
+            pin: None,
+            trunk_key: trunk.public_b64u(),
+            root_id: "rt_me".into(),
+            root_key: Arc::new(SignKey::generate()),
+            state,
+            dial,
+            wg: None,
+            ufrags: Arc::default(),
+        })
+        .unwrap()
+    }
+
+    /// C4: authority only from the trunk's signature; replays of older state are not taken.
+    #[test]
+    fn unsigned_forged_or_older_authority_is_dropped() {
+        let trunk = SignKey::generate();
+        let evil = SignKey::generate();
+        let l = offline_link(&trunk);
+        let st = || l.state().snapshot();
+        let key = json!([{ "kid": "k_x", "alg": "ed25519", "public": "AAAA", "retired_at": null }]);
+        // unsigned / signed by another key: nothing changes
+        for m in [
+            json!({ "t": "keys", "seq": 1, "keys": key }),
+            proto::sign_json(&evil, json!({ "t": "keys", "seq": 1, "keys": key })),
+            json!({ "t": "kill", "epoch": 5, "lockdown": true }),
+            proto::sign_json(&evil, json!({ "t": "revoke", "did": "dev_x", "until": now_ms() + 60_000 })),
+            proto::sign_json(&evil, json!({ "t": "root.revoked", "root_id": "rt_me" })),
+            json!({ "t": "directory", "directory": proto::sign_directory(&evil, 9, 1, &[]) }),
+        ] {
+            l.on_ctrl(&m);
+        }
+        let s = st();
+        assert!(s.keys.is_empty() && s.kill_epoch == 0 && s.deny.is_empty() && s.directory.is_null() && s.link.state != "revoked", "{s:?}");
+        // genuine: taken
+        l.on_ctrl(&proto::sign_json(&trunk, json!({ "t": "keys", "seq": 5, "keys": key })));
+        l.on_ctrl(&proto::sign_json(&trunk, json!({ "t": "kill", "epoch": 2, "lockdown": true })));
+        l.on_ctrl(&proto::sign_json(&trunk, json!({ "t": "revoke", "did": "dev_x", "until": now_ms() + 60_000 })));
+        let d7 = proto::sign_directory(&trunk, 7, 1, &[]);
+        l.on_ctrl(&proto::sign_json(&trunk, json!({ "t": "directory", "directory": d7 })));
+        let s = st();
+        assert_eq!((s.keys.len(), s.kill_epoch, s.lockdown, s.deny.len(), s.directory["seq"].as_u64()), (1, 2, true, 1, Some(7)));
+        // an inner directory forged under a genuine outer signature: refused
+        let forged = proto::sign_json(&trunk, json!({ "t": "directory", "directory": proto::sign_directory(&evil, 8, 1, &[]) }));
+        l.on_ctrl(&forged);
+        assert_eq!(st().directory["seq"].as_u64(), Some(7));
+        // replays of older state: an older directory, older keys, a lower kill epoch
+        l.on_ctrl(&proto::sign_json(&trunk, json!({ "t": "directory", "directory": proto::sign_directory(&trunk, 6, 1, &[]) })));
+        l.on_ctrl(&proto::sign_json(&trunk, json!({ "t": "keys", "seq": 4, "keys": [] })));
+        l.on_ctrl(&proto::sign_json(&trunk, json!({ "t": "kill", "epoch": 1, "lockdown": false })));
+        let s = st();
+        assert_eq!((s.directory["seq"].as_u64(), s.keys.len(), s.kill_epoch, s.lockdown), (Some(7), 1, 2, true));
+        // a root.revoked for another root is not ours; ours is
+        l.on_ctrl(&proto::sign_json(&trunk, json!({ "t": "root.revoked", "root_id": "rt_other" })));
+        assert_ne!(st().link.state, "revoked");
+        l.on_ctrl(&proto::sign_json(&trunk, json!({ "t": "root.revoked", "root_id": "rt_me" })));
+        assert_eq!(st().link.state, "revoked");
+        // the welcome's own copies may only tighten
+        l.on_welcome(&json!({ "kill_epoch": 1, "deny": [{ "did": "dev_y", "until": now_ms() + 1000 }], "keys": [{ "kid": "k_evil" }] }), "trk_1");
+        let s = st();
+        assert_eq!((s.kill_epoch, s.deny.len(), s.keys.len(), s.trunk.trunk_id.as_str()), (2, 2, 1, "trk_1"));
+    }
+
     #[test]
     fn origins() {
         assert_eq!(parse_origin("https://ljoolq.veraldar.org"), Ok((true, "ljoolq.veraldar.org".into(), 443)));
