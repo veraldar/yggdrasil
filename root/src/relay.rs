@@ -628,7 +628,7 @@ async fn follow(st: AppState, root: String, fo: Arc<Follower>) {
             Err(e) => {
                 fails += 1;
                 if fails == 1 || fails % 10 == 0 {
-                    eprintln!("relay: feed of {root}: {e}");
+                    eprintln!("{}", feed_lost(&root, &e));
                 }
                 if !lost_said && now_ms().saturating_sub(last_ok) >= lost_ms() {
                     lost_said = true;
@@ -808,6 +808,11 @@ pub fn forget(st: &AppState, proxy: &str) {
     }
 }
 
+/// The log line when a root's live feed cannot be followed: `relay: no live feed from lab: …`.
+fn feed_lost(root: &str, e: &str) -> String {
+    format!("relay: no live feed from {root}: {e}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -865,5 +870,15 @@ mod tests {
         assert_eq!(no_answer("lab", "root lab unreachable: error sending request"), "no answer from lab");
         assert_eq!(no_answer("lab", "root lab: 504 Gateway Timeout {}"), "no answer from lab");
         assert_eq!(no_answer("lab", "root lab: 400 Bad Request {\"error\":\"no text or file parts\"}"), "root lab: 400 Bad Request {\"error\":\"no text or file parts\"}");
+    }
+}
+
+#[cfg(test)]
+mod wording_tests {
+    #[test]
+    fn a_lost_feed_reads_as_a_sentence() {
+        let e = crate::peers::unknown_root("lab", &[]);
+        assert_eq!(super::feed_lost("lab", &e), "relay: no live feed from lab: no root named \"lab\" is known here (known roots: none)");
+        assert_eq!(crate::peers::unknown_root("x", &["mac-studio".into(), "debian-box".into()]), "no root named \"x\" is known here (known roots: mac-studio, debian-box)");
     }
 }

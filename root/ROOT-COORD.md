@@ -166,6 +166,28 @@ detail (incl. `customizable`, `locked`, `models`); `PUT /agent/:name` creates or
 persisted to `YGG_PROFILES`, live at once); `DELETE` removes agents you made. Switching a session's agent
 stamps the agent's model + thinking (+ harness); the model can be changed afterwards.
 
+## Harness chains, usage, any provider (v10, 11-24)
+
+Each role has a fallback chain, at most 3 entries, `engine/model`: `"fallback": ["agy/gemini-4-neon-high",
+"root/glm-5.3", "claude/sonnet"]` (`root/<provider>/<model>` = the root engine on a provider). `[]` =
+automatic (the role's own engine, else the root), `"none"` = never. Every older form still reads as
+entry 1 (`"engine"`, `{engine, model}`, `fallback_harness`/`fallback_model`). Built-in suggestions: lead,
+fix → agy, root/glm-5.3 · build, review → root/glm-5.3, claude/sonnet · research → agy. Only the
+coordinator (and a `pinned` role or session, a terminal's conversation) never moves.
+
+Before every turn the engine's usage is read from cache (`usage.rs`: Claude's oauth/usage, z.ai's
+quota/limit; 5 min, never on the turn's path): ≥ 90% or a quota error already seen → the first chain entry
+that clears takes the turn. A quota error mid-turn — mid-work too — moves on at once with a brief of what is
+done (steps, files, one line per step); one try per entry, 3 hops; all out = one line, the next turn reads
+again. The card shows only who served; `info.meta.fallback` keeps `{from, to, reason, chain: [...]}`.
+
+`GET /agent/:name` adds `fallback`, `fallback_effective` (what it resolves to here), `fallback_cap`;
+`PUT` takes the array. `GET /usage` → per engine `{pct, resets_at, window, windows, source, out?, error?}`.
+`GET /provider` → providers.json + the env upstream: type, baseURL, key SOURCE (never the key), models
+(listed or discovered), health, `reachable {ok, ms}`, `locality` (local | lan | remote), `metered`.
+`PUT /provider {name, type, baseURL, apiKey, models: "auto" | [ids]}` adds/edits (validated, 0600);
+`DELETE /provider/:name`. A root model `provider/model` routes through provider.rs (cooling, degrade).
+
 ## Endpoints added
 
 `GET /tree` · `GET /root` · `GET /harness/claude/sessions` · `GET/PUT /shared-prompt` · `GET /extensions` · `GET /session/:id/inbox` · `POST /session/:id/close` · `GET/PUT/DELETE /agent/:name` ·

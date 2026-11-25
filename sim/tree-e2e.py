@@ -707,7 +707,7 @@ def main():
         agy_e = {e["name"]: e for e in req(HOME_PORT, "GET", "/engine")}["antigravity"]
         check("the Antigravity engine: its own model pick by default", agy_e["model"] is None and agy_e["label"] == "Antigravity", agy_e)
         agy = req(HOME_PORT, "PUT", "/agent/agy-custom", {"harness": "antigravity", "description": "Antigravity"})
-        check("a role can run on Antigravity by default", agy["harness"] == "antigravity" and agy["customizable"] == ["description", "model"], (agy.get("harness"), agy.get("customizable")))
+        check("a role can run on Antigravity by default", agy["harness"] == "antigravity" and agy["customizable"] == ["description", "model", "fallback"], (agy.get("harness"), agy.get("customizable")))
         mbh = agy["models_by_harness"]
         check("Gemini CLI is no longer a harness", "gemini" not in mbh and set(mbh) == {"root", "claude", "opencode", "codex", "antigravity"}, list(mbh))
         am = mbh["antigravity"]
