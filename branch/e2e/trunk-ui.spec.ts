@@ -14,6 +14,10 @@ test.beforeAll(async ({ request }) => {
   TRUNK = !!r?.ok() && /json/.test(r.headers()['content-type'] || '');
 });
 
+test.afterEach(async ({ page }) => {
+  await page.unrouteAll({ behavior: 'ignoreErrors' });
+});
+
 /** the door said its mode: /api/build answered (FreshReload publishes it to lib/auth-mode.ts) */
 const settled = (page: Page) => page.waitForResponse((r) => new URL(r.url()).pathname === '/api/build');
 
