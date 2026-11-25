@@ -94,3 +94,29 @@ below for a planted hub; for the hand-made one, by hand:
   `SPEACHES_URL` + `TTS_MODEL_EN`/`TTS_VOICE_EN`, `BIFROST_WG_PUB_FILE`.
 - Restart order: brain, wg node, bridge, app, LiveKit, agent. The phone needs no re-pairing (the
   bridge's DTLS identity and devices.json are unchanged).
+
+## sni-443 v2 (trunk v1, spec §5.7 and §10 V3) — rehearsed at home only
+
+`sni-443.py` v2 reads `sni-443.conf` again on SIGHUP (`systemctl reload yggdrasil-sni-443`, the unit's
+`ExecReload`): connections already forwarded are never touched, new ones follow the new config; a
+config that does not read, or whose `listen` lines changed, is refused and the old one stays (one
+`sni-443: reload refused …` journal line). Check a file before the reload:
+`python3 sni-443.py -c <file> --check`.
+
+During the coexistence of two trunks (§10 phase 2 → §11 switchover) one more line asks the v1 trunk
+who owns an ICE-TCP connection's ufrag, 200 ms at most; 404, an error or no answer = today's `ice` line:
+
+    ice       127.0.0.1:4479
+    ice_owner http://<container>:8080/t/ice/owner <container>:4479 200ms
+
+Proof: `python3 trunk/deploy/sni-443-test.py` (G3.9) — today's cases unchanged, the ask (200 / 404 /
+slow / hung / 500 / junk / down), SIGHUP under 20 live connections and a storm of 20 reloads (zero
+dropped), the parser, and a replay of today's config (the VPS copy, kept outside the repo, and this
+kit's render) through the branch point's copy and the pre-meter copy, case by case.
+
+**Stats compat.** The VPS runs the 11-19 copy, older than the meter: it has no `SNI443_STATS` and sends
+nothing. v2 sends one UDP datagram a minute to `127.0.0.1:4481` (counts only); the VPS's trunk-ap had
+no listener there on 11-25 (`ss -ltnpu`), so the kernel drops it and the send error is ignored. What is
+new on the VPS with v2: a `sni-443: minute {…}` journal line for each minute with traffic. To keep the
+journal as it is, put `Environment=SNI443_STATS=off` in the unit. Nothing here is applied by anything:
+installing v2 on the VPS is step V3, after a complete green gate file (spec R2).
