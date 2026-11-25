@@ -122,6 +122,8 @@ pub fn audit(st: &State, e: audit::Entry) {
 /// audit retention, expired tickets.
 pub fn spawn_background(st: Arc<State>) {
     claim::start(&st);
+    let warm = st.clone();
+    tokio::task::spawn_blocking(move || warm.idp.hasher.warm());
     tokio::spawn(async move {
         let mut last_daily = 0i64;
         let mut last_prune = 0i64;

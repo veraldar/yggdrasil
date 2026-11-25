@@ -81,7 +81,7 @@ a.oz-k.ok, .oz-k.ok { color: var(--oz-success); }
 .oz-blk .msg, .msg { margin: 10px 0 0; padding: 8px 10px; font-size: 12.5px; border: 1px solid var(--oz-border); background: var(--oz-bg); }
 .msg.err { color: var(--oz-danger); border-color: color-mix(in srgb, var(--oz-danger) 45%, transparent); }
 .msg.ok { color: var(--oz-success); border-color: color-mix(in srgb, var(--oz-success) 45%, transparent); }
-.note { margin-top: 12px; padding: 8px 10px; border: 1px dashed color-mix(in srgb, var(--oz-info) 55%, transparent); background: color-mix(in srgb, var(--oz-info) 7%, var(--oz-surface)); font-size: 11.5px; color: var(--oz-dim); }
+.oz-blk .note, .note { margin: 12px 0 0; padding: 8px 10px; border: 1px dashed color-mix(in srgb, var(--oz-info) 55%, transparent); background: color-mix(in srgb, var(--oz-info) 7%, var(--oz-surface)); font-size: 11.5px; color: var(--oz-dim); }
 .note b { color: var(--oz-info); }
 .ribbon { display: flex; align-items: center; gap: 8px; margin: 2px 0 12px; font-size: 11px; color: var(--oz-info); }
 .ribbon::before, .ribbon::after { content: ''; flex: 1 1 auto; height: 1px; background: color-mix(in srgb, var(--oz-info) 40%, transparent); }

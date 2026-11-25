@@ -20,7 +20,10 @@ from its own client address (X-Forwarded-For). Nothing live is touched.
   step-up   fresh 600 s (fast 10 s) gates 2FA changes; step-up by TOTP; password change
   console   account list / reset-password / reset-2fa (→ enrol at next sign-in) / unlock,
             backup + backup check, audit verify; an edited audit row is caught
+  roots     has_roots flips with WIRE's first root row; then pages go to the door (/offline)
   helper    sim/trunk-v1/claim-admin.py claims a second trunk end to end
+  tls       the phase-2 listener: PROXY v1 believed only from trusted_proxies, then TLS; the client
+            address is the PROXY line's (XFF ignored)
 
     sim/trunk-v1-auth.py [--bin trunk/target/release/bifrost-net] [--keep]
 
@@ -554,6 +557,64 @@ def t_has_roots(t):
     check("roots: a revoked root does not count", c.get("/t/state").j("has_roots") is False)
 
 
+def t_tls(binp, root):
+    """The phase-2 listener: own TLS, PROXY v1 first, believed only from trusted_proxies."""
+    import socket, ssl
+    d = os.path.join(root, "tls")
+    os.makedirs(d, exist_ok=True)
+    subprocess.run([binp, "ap-cert", os.path.join(d, "cert"), "localhost", "127.0.0.1"], check=True, capture_output=True)
+    from trunklib import free_port
+    tls_port = free_port(18850, 18899)
+    extra = 'listen_tls = "127.0.0.1:%d"\nproxy_protocol = true\ncert_path = "%s/cert/cert.pem"\nkey_path = "%s/cert/key.pem"\n' % (tls_port, d, d)
+    t3 = Trunk(binp, os.path.join(d, "trunk"), extra=extra)
+    # only 127.0.0.2 is the router; 127.0.0.1 is not
+    with open(t3.cfg) as f:
+        cfg = f.read().replace('trusted_proxies = ["127.0.0.1/32"]', 'trusted_proxies = ["127.0.0.2/32"]')
+    with open(t3.cfg, "w") as f:
+        f.write(cfg)
+    t3.start()
+    try:
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+
+        def ask(src, proxy_line, req):
+            s = socket.socket()
+            s.settimeout(5)
+            s.bind((src, 0))
+            s.connect(("127.0.0.1", tls_port))
+            try:
+                s.sendall(proxy_line)
+                tl = ctx.wrap_socket(s, server_hostname="localhost")
+                tl.sendall(req)
+                buf = b""
+                while True:
+                    b = tl.recv(65536)
+                    if not b:
+                        break
+                    buf += b
+                return buf
+            except (OSError, ssl.SSLError) as e:
+                return repr(e).encode()
+            finally:
+                s.close()
+
+        get = b"GET /t/state HTTP/1.1\r\nHost: localhost\r\n\r\n"
+        out = ask("127.0.0.2", b"PROXY TCP4 203.0.113.50 127.0.0.1 40000 443\r\n", get)
+        check("tls: PROXY v1 from the router, then TLS → /t/state", out.startswith(b"HTTP/1.1 200") and b'"claimed":false' in out and b"Strict-Transport-Security" in out, out[:120])
+        out = ask("127.0.0.1", b"PROXY TCP4 203.0.113.50 127.0.0.1 40000 443\r\n", get)
+        check("tls: a PROXY line from anyone else → the connection is dropped", not out.startswith(b"HTTP/"), out[:120])
+        code = claim_code_from_file(t3)
+        body = json.dumps({"code": wrong(code)}).encode()
+        req = b"POST /t/claim/begin HTTP/1.1\r\nHost: localhost\r\nOrigin: %s\r\nX-Forwarded-For: 6.6.6.6\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n%s" % (t3.public_url.encode(), len(body), body)
+        out = ask("127.0.0.2", b"PROXY TCP4 198.51.100.77 127.0.0.1 40000 443\r\n", req)
+        ok, tail = t3.ctl("audit", "tail", "1")
+        row = json.loads(tail) if ok and tail else {}
+        check("tls: the client address is the PROXY line's (XFF ignored on TLS)", out.startswith(b"HTTP/1.1 401") and row.get("ip") == "198.51.100.0/24", (out[:60], row.get("ip")))
+    finally:
+        t3.stop()
+
+
 def t_helper(binp, root):
     t2 = Trunk(binp, os.path.join(root, "helper")).start()
     try:
@@ -600,6 +661,7 @@ def main():
         t_has_roots(t)
         t_tamper(t)
         t_helper(a.bin, root)
+        t_tls(a.bin, root)
     except Exception as e:  # a rig error is a failure, never a pass
         import traceback
         traceback.print_exc()

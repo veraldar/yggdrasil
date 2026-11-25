@@ -114,6 +114,11 @@ impl Hasher {
         self.gated(move || verify_sync(&pw, &stored)).await
     }
 
+    /// Make the dummy hash now (startup), so the first unknown-email sign-in costs what every other does.
+    pub fn warm(&self) {
+        self.dummy.get_or_init(|| hash_sync(&crate::v1::crypto::secret("", 24)));
+    }
+
     /// The same work as a real check, for an email that has no account (generic errors, same time).
     pub async fn verify_dummy(&self, pw: &str) -> bool {
         let stored = self.dummy.get_or_init(|| hash_sync(&crate::v1::crypto::secret("", 24))).clone();
