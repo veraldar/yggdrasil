@@ -1,0 +1,29 @@
+<header class="oz-head"><span class="oz-brand">BIFROST</span><span class="head-r"><span class="pill" id="e-roots">roots 0</span><a class="pill" href="/account" id="e-email">account</a></span></header>
+
+<section class="oz-blk">
+  <h2>no roots connected yet</h2>
+  <div>
+    <p>Install a root on your computer. It signs in automatically through this browser — no QR or connect line.</p>
+    <input class="os-r" type="radio" name="os" id="os-lin" checked>
+    <input class="os-r" type="radio" name="os" id="os-mac">
+    <input class="os-r" type="radio" name="os" id="os-win">
+    <div class="os-tabs"><label for="os-lin">Linux</label><label for="os-mac">macOS</label><label for="os-win">Windows</label></div>
+    <div class="os-pane os-p-lin">
+      <div class="dl-cmd"><span class="dim">$ </span>curl -fsSL {{ORIGIN}}/install/root.sh | bash</div>
+      <div class="dl-row"><a class="oz-k ok" href="/install/root.sh" download>Download Linux (.sh)</a><span class="dim">x86_64 · arm64 · WSL2</span></div>
+    </div>
+    <div class="os-pane os-p-mac">
+      <div class="dl-cmd"><span class="dim">$ </span>curl -fsSL {{ORIGIN}}/install/root.sh | bash</div>
+      <div class="dl-row"><button class="oz-k" type="button" disabled>Download macOS (.pkg)</button><span class="dim">coming — use the line above</span></div>
+    </div>
+    <div class="os-pane os-p-win">
+      <div class="dl-cmd"><span class="dim">&gt; </span>yggdrasil-root-setup.exe</div>
+      <div class="dl-row"><a class="oz-k ok" href="/install/root.exe" download>Download Windows (.exe)</a><span class="dim">Windows 10 / 11</span></div>
+    </div>
+  </div>
+</section>
+
+<section class="oz-blk">
+  <h2>waiting for first root<span class="r listen oz-breathe" id="e-listen">listening…</span></h2>
+  <div><p class="dim">This page updates on its own as soon as your computer connects.</p></div>
+</section>

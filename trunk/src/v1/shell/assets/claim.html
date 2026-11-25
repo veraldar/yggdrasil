@@ -1,0 +1,74 @@
+<header class="oz-head"><span class="oz-brand">BIFROST</span><span class="head-r"><span class="pill info" id="claim-pill">admin claim</span></span></header>
+
+<section class="oz-blk" id="c-wait" hidden>
+  <h2>waiting for your agent</h2>
+  <div>
+    <p>This trunk is not claimed yet. Your on-device agent reads the claim code on the server and opens this page with a one-time link — nothing to type here.</p>
+    <p class="dim small">No agent? On the server run <b>sudo trunk-ctl claim-link</b> and open the link it prints.</p>
+    <p class="msg err" id="c-wait-err" hidden></p>
+  </div>
+</section>
+
+<section class="oz-blk" id="c-approve" hidden>
+  <h2>approve this trunk?<span class="r warn" id="c-left"></span></h2>
+  <div>
+    <p class="lead" id="c-approve-lead">Your on-device agent verified the rotating local code — confirm to claim admin (nothing to type):</p>
+    <div class="code-slots" id="c-slots" aria-label="the claim code"></div>
+    <ul class="kv">
+      <li><span class="k">trunk</span><span class="v">{{HOST}}</span></li>
+      <li><span class="k">verified by</span><span class="v ok" id="c-via">local agent ✓</span></li>
+    </ul>
+    <div class="row">
+      <button class="oz-k ok grow" id="c-approve-btn" type="button">Approve &amp; create admin →</button>
+      <button class="oz-k" id="c-refuse-btn" type="button">Refuse</button>
+    </div>
+    <p class="msg err" id="c-approve-err" hidden></p>
+  </div>
+</section>
+
+<p class="ribbon" id="c-ribbon" hidden>approved by owner · rotation stops for good once claimed</p>
+
+<section class="oz-blk" id="c-signup" hidden>
+  <h2>create admin account</h2>
+  <div>
+    <p class="lead">The first account to sign in owns this trunk. Nobody else can register.</p>
+    <div class="oauth-stack" id="c-oauth" hidden></div>
+    <p class="sep">email + password + 2FA</p>
+    <form class="f-stack" id="c-signup-form" autocomplete="on">
+      <label class="f-field"><span class="f-lbl"><span>email</span><span>your own address</span></span>
+        <input class="oz-field" id="c-email" name="email" type="email" autocomplete="username" required></label>
+      <label class="f-field"><span class="f-lbl"><span>password</span><span>12–128 characters · argon2id</span></span>
+        <input class="oz-field" id="c-password" name="password" type="password" autocomplete="new-password" minlength="12" maxlength="128" required></label>
+      <button class="oz-k ok full" id="c-signup-btn" type="submit">Create admin &amp; set up 2FA →</button>
+    </form>
+    <p class="msg err" id="c-signup-err" hidden></p>
+    <p class="note"><b>Passkeys (WebAuthn)</b> — phishing-resistant sign-in arrives in a later update; you will add one in your account page.</p>
+  </div>
+</section>
+
+<p class="ribbon" id="c-ribbon2" hidden>2FA required before the admin claim completes</p>
+
+<section class="oz-blk" id="c-totp" hidden>
+  <h2>enroll authenticator (totp)<span class="r">step 2 of 2</span></h2>
+  <div>
+    <div class="enroll">
+      <div class="qr" id="c-qr"></div>
+      <div><b>Scan in any authenticator app</b><p>1Password, Aegis, Apple Passwords or Google Authenticator. Enter the 6-digit code to confirm.</p></div>
+    </div>
+    <details class="manual"><summary>can't scan? type the key</summary><span class="secret" id="c-secret"></span></details>
+    <form class="row" id="c-totp-form">
+      <input class="oz-field code grow" id="c-code" inputmode="numeric" autocomplete="one-time-code" maxlength="7" placeholder="000000" aria-label="6-digit code" required>
+      <button class="oz-k ok" id="c-totp-btn" type="submit">Verify &amp; finish</button>
+    </form>
+    <p class="msg err" id="c-totp-err" hidden></p>
+  </div>
+</section>
+
+<section class="oz-blk" id="c-codes" hidden>
+  <h2>backup recovery codes<span class="r warn">shown once</span></h2>
+  <div>
+    <p class="lead">Save these offline — each works once if you lose your authenticator:</p>
+    <div class="recovery-grid" id="c-codes-grid"></div>
+    <a class="oz-k ok full" href="/" id="c-done">I saved them — open my trunk →</a>
+  </div>
+</section>
