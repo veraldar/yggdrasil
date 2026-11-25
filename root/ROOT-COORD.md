@@ -19,7 +19,7 @@ you ⇄ [MAIN] coordinator            the transcript you read: only you + MAIN
 
 - **Agent = what a session is**: role prompt (+ a short one for lite models), tool permissions
   (opencode ruleset, enforced at dispatch), model, thinking level, step cap, fold, `sessions`
-  (manages others), `harness`. Built in: coordinator · lead · build · fix · research · review · claude · agy.
+  (manages others), `harness`. Built in: coordinator · lead · build · fix · research · review · marketer.
   `YGG_PROFILES` overlays fields and adds agents. Model and thinking: the agent's default, the
   session's explicit choice wins, stamped at creation (the agent too — the list shows `[BUI]`, `[FIX]`…).
 - **One shared prompt, stored once**: every agent reads the same shared system prompt first — the
@@ -161,7 +161,7 @@ What used to be "profiles" is one concept, **agents**. Every agent runs on a har
 model, thinking, system prompt, tools, steps, manages-sessions are all customizable) or `claude` /
 `opencode` / `codex` / `antigravity` (description + model; Claude Code also takes extra instructions via
 `--append-system-prompt`; Antigravity reads the shared prompt on its first message). Built in: coordinator (MAIN's alone, tools locked), lead, build, fix, research,
-review (read-only; writes only its report), **claude** (Claude Code on Opus), **agy** (Antigravity CLI, own model pick). `GET /agent/:name` is the editor's
+review (read-only; writes only its report), marketer (marketing copy, announcements, docs/README polish, demo scripts; drafts to artifacts by default, marketing edits only in its own worktree). `GET /agent/:name` is the editor's
 detail (incl. `customizable`, `locked`, `models`); `PUT /agent/:name` creates or edits (partial body,
 persisted to `YGG_PROFILES`, live at once); `DELETE` removes agents you made. Switching a session's agent
 stamps the agent's model + thinking (+ harness); the model can be changed afterwards.

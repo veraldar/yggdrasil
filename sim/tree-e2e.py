@@ -536,8 +536,11 @@ def main():
 
         # 6b. roles: read, create, refuse, switch (model stamped, tools enforced), engines, lock, delete
         listed_names = [a["name"] for a in req(HOME_PORT, "GET", "/agent")]
-        check("the roles list holds the six roles, no claude, agy or AGI (roles rework: engines now)",
-              {"coordinator", "lead", "build", "fix", "review", "research"} <= set(listed_names) and not {"claude", "agy", "AGI"} & set(listed_names), listed_names)
+        check("the roles list holds the seven roles, no claude, agy or AGI (roles rework: engines now)",
+              {"coordinator", "lead", "build", "fix", "review", "research", "marketer"} <= set(listed_names) and not {"claude", "agy", "AGI"} & set(listed_names), listed_names)
+        mk = req(HOME_PORT, "GET", "/agent/marketer")
+        check("marketer role detail: built-in on root, does not manage sessions",
+              mk.get("builtin") is True and mk.get("harness") == "root" and mk.get("sessions") is False, mk)
         for old in ("claude", "agy"):
             try:
                 req(HOME_PORT, "GET", f"/agent/{old}")
@@ -591,6 +594,10 @@ def main():
         out = [p for p in r["parts"] if p["type"] == "tool"][0]["state"]["output"]
         lr = next((x for x in req(HOME_PORT, "GET", "/session") if x["title"] == "lead on the root"), {})
         check("MAIN's session_start takes an engine: a lead on the root", out.startswith("STARTED") and lr.get("agent") == "lead" and lr.get("engine") == "root", (out, lr.get("agent"), lr.get("engine")))
+        r = say(tool([["session_start", {"title": "launch copy", "agent": "marketer", "brief": "Reply with exactly: MARKETER-OK"}]]))
+        out = [p for p in r["parts"] if p["type"] == "tool"][0]["state"]["output"]
+        mr = next((x for x in req(HOME_PORT, "GET", "/session") if x["title"] == "launch copy"), {})
+        check("MAIN's session_start starts a marketer session on its default engine", out.startswith("STARTED") and mr.get("agent") == "marketer" and mr.get("engine") == "root", (out, mr.get("agent"), mr.get("engine")))
         r = say(tool([["session_start", {"title": "on emacs", "agent": "build", "engine": "emacs", "brief": "Reply with exactly: NO"}]]))
         out = [p for p in r["parts"] if p["type"] == "tool"][0]["state"]["output"]
         check("…an engine that is not one is refused, with the list", "unknown engine" in out and "antigravity" in out, out)
