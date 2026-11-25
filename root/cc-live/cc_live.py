@@ -53,6 +53,7 @@ Standard library only.
 import argparse
 import base64
 import fcntl
+import fnmatch
 import hmac
 import json
 import os
@@ -87,6 +88,11 @@ TOKEN = ""
 LIVE_FILE = ""
 CWD_PREFIX = ""  # --cwd-prefix: only conversations in this folder (a sim's helper, never the owner's others)
 PROJECTS = os.path.expanduser("~/.claude/projects")
+PROC = "/proc"
+# the brain's own units: a turn it runs (`claude -p`, opencode, agy) is its child, in its cgroup.
+# hub-brain.service: the home root since stage B (11-20, scripts/hub-units.sh); rootsim-*: a sim's
+# brain (sim/brain-up.sh, sim/acceptance/twin-up.sh) and the preview before stage B
+HERE_UNITS = ("hub-brain.service", "rootsim-*")
 UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 SHORT = re.compile(r"^[0-9a-z][0-9a-z-]{0,40}$")
 COLS, ROWS = 100, 40
@@ -237,13 +243,21 @@ def claude_recent(n=20):
 
 
 def where(pid):
-    """Who has a conversation open: "here" when the process is the brain's own turn (it runs in a
-    rootsim-* unit), else "cmd" (a terminal)."""
+    """Who has a conversation open: "here" when the process is the brain's own turn (its cgroup is
+    one of HERE_UNITS), "cmd" when it runs anywhere else (a terminal, tmux, ssh), None when the
+    process is gone (it holds nothing)."""
     try:
-        with open(f"/proc/{int(pid)}/cgroup") as f:
-            return "here" if "rootsim-" in f.read() else "cmd"
+        with open(f"{PROC}/{int(pid)}/cgroup") as f:
+            text = f.read()
+    except (FileNotFoundError, ProcessLookupError):
+        return None
     except (OSError, ValueError, TypeError):
         return "cmd"
+    for ln in text.splitlines():  # "0::/user.slice/…/app.slice/hub-brain.service" (v1: one per controller)
+        for unit in ln.split(":", 2)[-1].split("/"):
+            if any(fnmatch.fnmatchcase(unit, u) for u in HERE_UNITS):
+                return "here"
+    return "cmd"
 
 
 TMUX = shutil.which("tmux") or "tmux"
@@ -327,11 +341,15 @@ def live_all():
     panes = tmux_panes()
     for r in AGENTS.list():
         bg = r.get("kind") == "background"
-        out[f"claude:{r['sessionId']}"] = {"how": "bg" if bg else where(r.get("pid")), "pid": r.get("pid"), "cwd": r.get("cwd", "")}
+        how = "bg" if bg else where(r.get("pid"))
+        if how:
+            out[f"claude:{r['sessionId']}"] = {"how": how, "pid": r.get("pid"), "cwd": r.get("cwd", "")}
     for kind, mod in READERS.items():
         try:
             for sid, v in (mod.live() or {}).items():
-                out[f"{kind}:{sid}"] = {"how": where(v.get("pid")), "pid": v.get("pid"), "cwd": v.get("cwd", "")}
+                how = where(v.get("pid"))
+                if how:
+                    out[f"{kind}:{sid}"] = {"how": how, "pid": v.get("pid"), "cwd": v.get("cwd", "")}
         except Exception as e:  # a reader's bug never takes the helper down
             log(f"{kind} live(): {e!r}")
     if CWD_PREFIX:

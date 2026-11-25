@@ -224,5 +224,75 @@ class LiveFile(unittest.TestCase):
             C.LIVE_FILE, C.live_all = old_file, old_all
 
 
+# /proc/<pid>/cgroup as seen on the home root (11-25): the brain's own turns since stage B (11-20),
+# a sim's brain, a terminal tab, a tmux server started from one, a login over ssh
+APP = "0::/user.slice/user-1000.slice/user@1000.service/app.slice/"
+CGROUPS = {
+    101: APP + "hub-brain.service\n",
+    102: APP + "rootsim-preview.service\n",
+    103: APP + "rootsim-acc-7.service\n",
+    104: APP + "app-ghostty-surface-transient-2683158.scope\n",
+    105: APP + "tmux-spawn-6c1e9a3b-0d1f-4e8a-9b7c-2f3e4d5a6b7c.scope\n",
+    106: "0::/user.slice/user-1000.slice/session-3.scope\n",
+    107: APP + "hub-cclive.service\n",  # another hub unit: not where the brain runs turns
+    108: APP + "app-ghostty-surface-transient-1.scope/hub-brain.service.d\n",  # a name inside, not the unit
+}
+
+
+class Where(unittest.TestCase):
+    """Who has a conversation open: the brain's own turn ("here") or a terminal ("cmd")."""
+
+    def setUp(self):
+        self.proc = tempfile.mkdtemp()
+        for pid, text in CGROUPS.items():
+            os.makedirs(os.path.join(self.proc, str(pid)))
+            with open(os.path.join(self.proc, str(pid), "cgroup"), "w") as f:
+                f.write(text)
+        self.old = C.PROC
+        C.PROC = self.proc
+
+    def tearDown(self):
+        C.PROC = self.old
+
+    def test_the_brains_own_turns_are_here(self):
+        self.assertEqual(C.where(101), "here", "a turn of the home root (hub-brain.service, stage B)")
+        self.assertEqual(C.where(102), "here", "a turn of a rootsim-* brain (the old preview, a sim)")
+        self.assertEqual(C.where(103), "here")
+
+    def test_terminals_are_cmd(self):
+        for pid in (104, 105, 106, 107, 108):
+            self.assertEqual(C.where(pid), "cmd", CGROUPS[pid])
+        self.assertEqual(C.where(None), "cmd", "no pid known: held, to be safe")
+
+    def test_a_process_that_is_gone_holds_nothing(self):
+        self.assertIsNone(C.where(999))
+
+    def test_the_brain_never_refuses_its_own_turn(self):
+        """11-25: a send queued behind a turn of ses_667937a5 (claude 30586066…) was refused with
+        "open in a terminal right now": that turn's own `claude -p` ran in hub-brain.service and
+        went into the live file as "cmd"."""
+        own, term, gone = "30586066-64e0-48d0-a537-27810384b93e", "cb57ab89-0f01-4006-8e21-99a2b645e7a5", "41a0ab45-7b11-4aa5-a8c1-a05c0e72066c"
+        rows = [{"sessionId": own, "kind": "interactive", "pid": 101, "cwd": "/home/u/Work/x"},
+                {"sessionId": term, "kind": "interactive", "pid": 104, "cwd": "/home/u"},
+                {"sessionId": gone, "kind": "interactive", "pid": 999, "cwd": "/home/u"}]
+        f = os.path.join(tempfile.mkdtemp(), "harness-live.json")
+        saved = C.LIVE_FILE, C.AGENTS.list, C.READERS, C.tmux_panes
+        C.LIVE_FILE, C.AGENTS.list, C.READERS, C.tmux_panes = f, lambda fresh=1.5: rows, {}, lambda: {}
+        try:
+            C.Live().get()
+            live = json.load(open(f))["live"]
+        finally:
+            C.LIVE_FILE, C.AGENTS.list, C.READERS, C.tmux_panes = saved
+        self.assertNotIn(f"claude:{own}", live, "the brain's own turn is not open in a terminal")
+        self.assertNotIn(f"claude:{gone}", live, "a process that is gone holds nothing open")
+        self.assertEqual(live.get(f"claude:{term}", {}).get("how"), "cmd", "a terminal's claude still holds its conversation")
+
+    def test_the_unit_the_hub_runs_the_brain_in(self):
+        """hub-units.sh names the brain's unit; a rename there must reach where()."""
+        units = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "scripts", "hub-units.sh")).read()
+        self.assertIn('"$UNITS/hub-brain.service"', units)
+        self.assertIn("hub-brain.service", C.HERE_UNITS)
+
+
 if __name__ == "__main__":
     unittest.main()
