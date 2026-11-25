@@ -26,6 +26,9 @@ EXIT_OK, EXIT_ERR, EXIT_REFUSED, EXIT_EXPIRED, EXIT_USAGE = 0, 1, 3, 4, 64
 SAFE_ID = re.compile(r"^[A-Za-z0-9._-]{1,80}$")
 WG_KEY = re.compile(r"^[A-Za-z0-9+/]{43}=$")
 POLL_SECS = 2.0
+YGG_RELEASE=''        # stamped by scripts/release.sh ('' = a checkout)
+YGG_RELEASE_TEST=''   # '1' = a test release (a throwaway key)
+YGG_SIGNER = 'release@yggdrasil namespaces="yggdrasil-release" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIJyKwTSmRf3Cy1cHpzKHl3teRvCQtgK8/dcFRvlNCDJg'
 
 
 def say(msg):

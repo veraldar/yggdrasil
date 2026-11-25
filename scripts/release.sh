@@ -314,6 +314,12 @@ for f in "$ROOT"/root/install/*; do
   case $(basename "$f") in join-test.*|PKGBUILD) continue ;; esac
   install -m "$( [ -x "$f" ] && echo 755 || echo 644 )" "$f" "$STAGE/root/install/"
 done
+mkdir -p "$STAGE/root/extensions/librarian" "$STAGE/root/cc-live"
+install -m 755 "$ROOT/root/extensions/librarian/librarian.py" "$STAGE/root/extensions/librarian/librarian.py"
+install -m 755 "$ROOT/root/cc-live/cc_live.py" "$STAGE/root/cc-live/cc_live.py"
+for f in harness_agy.py harness_opencode.py transcript.py vt.py; do
+  [ -f "$ROOT/root/cc-live/$f" ] && install -m 644 "$ROOT/root/cc-live/$f" "$STAGE/root/cc-live/$f"
+done
 install -m 755 "$ROOT/trunk/install/trunk.sh" "$STAGE/trunk/install/trunk.sh"
 install -m 755 "$ROOT/trunk/deploy/sni-443.py" "$STAGE/trunk/deploy/sni-443.py"
 install -m 755 "$ROOT/trunk/scripts/root-dial.py" "$STAGE/trunk/scripts/root-dial.py"

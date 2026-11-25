@@ -35,7 +35,7 @@ LINE="release@yggdrasil namespaces=\"yggdrasil-release\" $PUB"
 cd "$REH/c" || exit 2
 git config user.email rehearsal@local; git config user.name rehearsal   # who makes the tag here
 printf '%s release@yggdrasil\n' "$PUB" >RELEASE-KEY.pub; printf '%s\n' "$LINE" >allowed_signers
-for f in root/install/install.sh root/install/join.sh trunk/install/trunk.sh root/install/rootjoin.py; do
+for f in root/install/install.sh root/install/join.sh root/install/root.sh trunk/install/trunk.sh root/install/rootjoin.py root/install/rootjoin-v1.py; do
   python3 - "$f" "$LINE" <<'PY' || exit 2
 import re, sys
 p, line = sys.argv[1], sys.argv[2]
@@ -56,7 +56,7 @@ YGG_RELEASE_KEY=$REH/standin DIST=$REH/dist bash scripts/release.sh "$VERSION" "
 D=$REH/dist/$VERSION
 check r1 "release.sh $VERSION ${MAC[*]} on the real path: exit 0 ($rc), not a TEST release" \
   bash -c "[ $rc = 0 ] && ! grep -q 'TEST release' '$REH/release.log' && grep -q 'is signed (SHA256SUMS.sig' '$REH/release.log'"
-want=(install.sh join.sh trunk.sh sni-443.py SHA256SUMS SHA256SUMS.sig "yggdrasil-$VERSION-linux-x86_64.tar.gz"
+want=(install.sh join.sh root.sh trunk.sh sni-443.py SHA256SUMS SHA256SUMS.sig "yggdrasil-$VERSION-linux-x86_64.tar.gz"
   "bifrost-net-$VERSION-linux-x86_64" "bifrost-net-root-$VERSION-linux-x86_64" "Veraldar-Setup-$VERSION.exe")
 [ ${#MAC[@]} = 0 ] || want+=("yggdrasil-$VERSION-macos-aarch64.tar.gz")
 check r2 "every asset is there: ${want[*]}" bash -c "cd '$D' && for f in ${want[*]}; do [ -s \"\$f\" ] || { echo missing \$f; exit 1; }; done"
@@ -76,12 +76,12 @@ if [ ${#MAC[@]} != 0 ]; then
       grep -qx 'yggdrasil $VERSION' \$m/RELEASE && grep -q '^built on macOS' \$m/RELEASE"
 fi
 check r6 "the installers: real-stamped (YGG_RELEASE='$VERSION', YGG_RELEASE_TEST=''), embedding the stand-in key" \
-  bash -c "for f in install.sh join.sh trunk.sh; do grep -qx \"YGG_RELEASE='$VERSION'\" '$D'/\$f && grep -qx \"YGG_RELEASE_TEST=''\" '$D'/\$f &&
+  bash -c "for f in install.sh join.sh root.sh trunk.sh; do grep -qx \"YGG_RELEASE='$VERSION'\" '$D'/\$f && grep -qx \"YGG_RELEASE_TEST=''\" '$D'/\$f &&
     grep -qF '$PUB' '$D'/\$f || exit 1; done"
-check r7 "the Windows installer embeds this release's join.sh byte for byte (YGG_RELEASE='$VERSION' inside)" \
+check r7 "the Windows installer embeds this release's root.sh byte for byte (YGG_RELEASE='$VERSION' inside)" \
   bash -c "rm -rf '$REH/exe' && mkdir -p '$REH/exe' && docker run --rm -v '$D:/d:ro' -v '$REH/exe:/o' debian:stable-slim bash -c \
     'apt-get update -qq && apt-get install -y -qq p7zip-full >/dev/null && 7z x -y -o/o /d/Veraldar-Setup-$VERSION.exe >/dev/null && chown -R $(id -u):$(id -g) /o' &&
-    j=\$(find '$REH/exe' -name join.sh | head -1) && [ -n \"\$j\" ] && cmp -s \"\$j\" '$D/join.sh'"
+    j=\$(find '$REH/exe' -name root.sh | head -1) && [ -n \"\$j\" ] && cmp -s \"\$j\" '$D/root.sh'"
 echo; column -t -s $'\t' "$RESULTS"
 echo "dist: $D   key: $REH/standin   logs: $REH"
 ! grep -q '^FAIL' "$RESULTS"
