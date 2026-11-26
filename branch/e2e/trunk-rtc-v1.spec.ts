@@ -428,8 +428,11 @@ test('G3.2 v1 trunk rtc: QR pairing, voice over the trunk, ufrag routing, revoke
     const c = await phoneBrowser.newContext({ ignoreHTTPSErrors: true, serviceWorkers: 'block' });
     try {
       await c.addCookies([{ name: 'bifrost_device', value: token, url: AP, httpOnly: true, secure: AP.startsWith('https'), sameSite: 'Strict' }]);
+      // a blank page of the trunk's origin, served by the rig itself (every trunk answer carries the
+      // API CSP, default-src 'none', which would block the fetch); the fetch below is real
+      await c.route(`${AP}/__rig_blank`, (r) => r.fulfill({ status: 200, contentType: 'text/html', body: '<!doctype html><title>rig</title>' }));
       const p = await c.newPage();
-      await p.goto(`${AP}/t/state`);
+      await p.goto(`${AP}/__rig_blank`);
       return await pageFetch(p, path, init);
     } finally {
       await c.close().catch(() => {});
