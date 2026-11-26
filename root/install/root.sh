@@ -59,6 +59,10 @@ die()  { printf '\033[1;31mxx\033[0m  %s\n' "$1" >&2; exit "${2:-1}"; }
 usage() { sed -n '2,42p' "$0" | sed 's/^# \{0,1\}//'; }
 
 ARGS=("$@")
+# Hard guard: this script re-execs itself at most twice (into the unpacked release, then --update into
+# the new version). More means a re-exec bug: stop plainly instead of spinning.
+YGG_ROOT_REEXEC=$(( ${YGG_ROOT_REEXEC:-0} + 1 )); export YGG_ROOT_REEXEC
+[ "$YGG_ROOT_REEXEC" -le 4 ] || { printf 'xx  root.sh re-executed itself %s times — a bug; stopping (args: %s)\n' "$YGG_ROOT_REEXEC" "$*" >&2; exit 70; }
 TRUNK='' PIN='' NAME='' DIR='' SKIP='' WANT_VERSION='' UPSTREAM_FILE='' QR_PNG='' MODEL_PROVIDER_ARG='' MODEL_ARG=''
 BRAIN_PORT='' APP_PORT='' BRIDGE_PORT='' PROJECT_DIR='' START=1 YES=0 UPDATE=0 STOP=0 UNINSTALL=0 MAJOR=0
 need() { [ $# -ge 2 ] && [ -n "$2" ] || die "$1 needs a value" 64; }
@@ -258,7 +262,14 @@ if [ $UPDATE = 1 ]; then
     Read the new release notes, then: bash root.sh --update --major" 64
   fi
   rm -rf "$REL_DIR"
-  WANT_VERSION=$NEWV exec bash "$0" --version "v$NEWV" ${ARGS[@]+"${ARGS[@]}"}
+  # re-run as a plain run of the new version: --update/--major/--version must not come along, or the
+  # new process takes this very branch again.
+  REARGS=(); skip_next=0
+  for a in ${ARGS[@]+"${ARGS[@]}"}; do
+    if [ $skip_next = 1 ]; then skip_next=0; continue; fi
+    case $a in --update|--major) ;; --version) skip_next=1 ;; *) REARGS+=("$a") ;; esac
+  done
+  WANT_VERSION=$NEWV exec bash "$0" --version "v$NEWV" ${REARGS[@]+"${REARGS[@]}"}
 fi
 
 # ------------------------------------------------------------------------ --stop / --uninstall
