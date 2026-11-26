@@ -48,10 +48,11 @@ for x in json.load(open(os.path.join(here, "approvals.json"))):
     elif stt == "approved": line.append("not landed yet")
     lk = f'<div class="d"><a href="/api/artifact/{e(x["link"])}">{e(x["link"])}</a></div>' if x.get("link") else ""
     ls = f' · session {e(live.get(x["sid"], "?"))}' if live is not None and x.get("sid") else ""
+    nt = (f'<div class="n">{e(x["note"])}</div>' if x.get("note") else "") + (f'<div class="n">▶ {e(x["action"])}</div>' if x.get("action") and x["state"] == "pending" else "")
     pend = "pending" if stt == "pending" else "ok"
     acards.append(f'<div class="c ap {pend}"><div class="t"><span class="k">{e(x["code"])}</span><span class="w">asked {e(x["asked"])}</span></div>'
                   f'<div class="q">{e(x["ask"])}</div><div class="o">{e(x["who"])} ({e(x["role"])}){ls}</div>'
-                  f'<div class="d">unblocks: {e(x["unblocks"])}</div>{lk}<div class="st">{" → ".join(line)}</div></div>')
+                  f'<div class="d">unblocks: {e(x["unblocks"])}</div>{nt}{lk}<div class="st">{" → ".join(line)}</div></div>')
 npend = sum(1 for x in json.load(open(os.path.join(here, "approvals.json"))) if x["state"] == "pending")
 if not acards: acards = ['<div class="c ok"><div class="q">Nothing is waiting on you.</div></div>']
 approvals = ('<h2>## approvals — waiting on you</h2><div class="s">reply in chat with the card code: “ok A1” approves, “no A1” denies</div>'

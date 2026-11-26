@@ -1,14 +1,84 @@
 [
- {"code":"A1","ask":"May I apply the §3 spec edits in docs/trunk-v1/APP4-s3-spec-diffs.patch (base.spec.ts:48 file chips, base.spec.ts:115 hf-strip button, list-order fresh-list policy)?",
-  "who":"v1 · APP-4","role":"build","sid":"78e83e","asked":"11-26 21:11",
-  "unblocks":"G2.4 as-committed still has 3 reds; tests are waiting on this.",
-  "state":"pending"},
- {"code":"A2","ask":"The twin.lock at ~/.cache/trunk-v1/twin.lock is NOT stale — it is held by a foreign ship1126app twin holding :4250/:8250. May I take over/clean up that foreign twin, or leave it alone?",
-  "who":"Settings v2.1","role":"build","sid":"ca3f64","asked":"11-26 21:25",
-  "unblocks":"5 undiagnosed spec fails + 3 unproven edited specs; shots skipped.",
-  "state":"pending"},
- {"code":"A3","ask":"Review the two roles-cleanup proposal docs and answer the 12 questions in the doc — “yes to all” accepts every recommendation.",
-  "who":"Roles cleanup proposals","role":"research","asked":"11-22","link":"roles-cleanup-proposal.md",
-  "unblocks":"the roles cleanup (all 12 recommendations).",
-  "state":"pending"}
+ {
+  "code": "A1",
+  "ask": "May I apply the §3 spec edits in docs/trunk-v1/APP4-s3-spec-diffs.patch (base.spec.ts:48 file chips, base.spec.ts:115 hf-strip button, list-order fresh-list policy)?",
+  "who": "v1 · APP-4",
+  "role": "build",
+  "sid": "78e83e",
+  "asked": "11-26 21:11",
+  "unblocks": "G2.4 as-committed still has 3 reds; tests are waiting on this.",
+  "state": "pending"
+ },
+ {
+  "code": "A2",
+  "ask": "The twin.lock at ~/.cache/trunk-v1/twin.lock is NOT stale — it is held by a foreign ship1126app twin holding :4250/:8250. May I take over/clean up that foreign twin, or leave it alone?",
+  "who": "Settings v2.1",
+  "role": "build",
+  "sid": "ca3f64",
+  "asked": "11-26 21:25",
+  "unblocks": "5 undiagnosed spec fails + 3 unproven edited specs; shots skipped.",
+  "state": "pending"
+ },
+ {
+  "code": "A3",
+  "ask": "Review the two roles-cleanup proposal docs and answer the 12 questions in the doc — “yes to all” accepts every recommendation.",
+  "who": "Roles cleanup proposals",
+  "role": "research",
+  "asked": "11-22",
+  "link": "roles-cleanup-proposal.md",
+  "unblocks": "the roles cleanup (all 12 recommendations).",
+  "state": "pending"
+ },
+ {
+  "code": "A4",
+  "ask": "VPS clean-up (spec §14 Q2): may the old `vps-boot-*` leftovers on the VPS be removed in the first VPS step (V0), before ljoolq is set up?",
+  "who": "New trunk build lead",
+  "role": "lead",
+  "sid": "4f5704",
+  "asked": "11-26 21:30",
+  "unblocks": "final trunk v1 steps + VPS switchover.",
+  "state": "pending"
+ },
+ {
+  "code": "A5",
+  "ask": "Switchover time (spec §14 Q3): moving `ap.veraldar.org` to the v1 trunk cuts it for about 5 seconds, plus a planned window of under 10 minutes. What time should it happen?",
+  "action": "reply with a time, e.g. 'A5 14:00'",
+  "who": "New trunk build lead",
+  "role": "lead",
+  "sid": "4f5704",
+  "asked": "11-26 21:30",
+  "unblocks": "final trunk v1 steps + VPS switchover.",
+  "state": "pending"
+ },
+ {
+  "code": "A6",
+  "ask": "Old containers: may I remove the 12 `msm-*` docker containers left over from 11-21? They aren't from this build; the tests use their own `v1msm` names.",
+  "who": "New trunk build lead",
+  "role": "lead",
+  "sid": "4f5704",
+  "asked": "11-26 21:30",
+  "unblocks": "final trunk v1 steps + VPS switchover.",
+  "state": "pending"
+ },
+ {
+  "code": "A7",
+  "ask": "Password-only claim limitation: v1 only lets you add a Google or GitHub sign-in when you first claim the trunk. A trunk claimed with a password can't add one afterwards. Is that OK for v1?",
+  "who": "New trunk build lead",
+  "role": "lead",
+  "sid": "4f5704",
+  "asked": "11-26 21:30",
+  "unblocks": "final trunk v1 steps + VPS switchover.",
+  "state": "pending"
+ },
+ {
+  "code": "A8",
+  "ask": "Real Google/GitHub sign-in: do you want it working at launch? That needs you to provide the client id and secret for each; both have only been tested against a mock so far. If no, the buttons stay hidden.",
+  "note": "approving A8 means you hand over the client id + secret in that session later.",
+  "who": "New trunk build lead",
+  "role": "lead",
+  "sid": "4f5704",
+  "asked": "11-26 21:30",
+  "unblocks": "final trunk v1 steps + VPS switchover.",
+  "state": "pending"
+ }
 ]
