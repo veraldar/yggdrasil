@@ -163,3 +163,11 @@ Unknown keys are an error (same rule as today's bridge config).
   (alongside `ok`, `exp`, and the `HttpOnly` `bifrost_device` / `bifrost_refresh` cookies), so `branch/lib/pinned.ts` can send the
   renewed short-lived PASETO over the WebRTC tunnel's `AUTH` (kind 5) frame (spec §13 B26). The refresh token stays `HttpOnly` only
   and is never returned in JSON.
+- **A8 (lead, 11-26 — accepted from IDP M4; details in `idp-api.md` "M4")**
+  (C2) an `[[oauth]]` provider takes optional `kind` (`oidc` | `google` | `github`), `scopes`, `authorize_url`, `token_url`,
+  `api_url`; `issuer` is optional for the `google` / `github` presets; a provider whose secret file in `cred_dir` is missing gets
+  no button. `GET /t/state` `providers` is `[{id, name}]` (was a list of ids). Routes: `/t/auth/oauth/:p/start|callback`,
+  `/t/auth/passkey/begin|finish`, `/t/account/passkeys/begin|finish`; spec §7's `/t/passkey/options|verify` and
+  `/t/account/passkeys/options` are served as aliases; the redirect URI to register is `<public_url>/t/auth/oauth/<id>/callback`.
+  Every host in `origins` may write (not only use passkeys) — needed for `ap.` after the switchover (spec §11 step 6). Table
+  names: `oauth_ids` (spec name kept), `auth_challenges` = migration `002` (IDP range); migrations are tracked per number.
