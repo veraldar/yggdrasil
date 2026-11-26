@@ -925,6 +925,72 @@ pub fn reset_from_message(msg: &str, offset_min: i32, now: u64) -> Option<u64> {
     None
 }
 
+/// When an engine's quota error says it is back, for ANY engine (harness or root): what
+/// `reset_from_message` reads, plus Antigravity's `Resets in 59m18s` / `Resets in 112h13m39s` and
+/// Claude Code's `resets 6:10pm (Europe/Paris)` / `resets 02:59` (the next such time of day in the
+/// root's zone). `None` when the message names no moment.
+pub fn reset_hint(msg: &str, offset_min: i32, now: u64) -> Option<u64> {
+    if let Some(t) = reset_from_message(msg, offset_min, now) {
+        return Some(t);
+    }
+    let lower = msg.to_ascii_lowercase();
+    if let Some(i) = lower.find("resets in ") {
+        let tail: String = lower[i + 10..].chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '.').collect();
+        if let Some(d) = parse_duration_ms(tail.trim_end_matches('.')) {
+            return Some(now + d);
+        }
+    }
+    if let Some(i) = lower.find("resets ") {
+        return next_time_of_day(&lower[i + 7..], now);
+    }
+    None
+}
+
+/// `6:10pm`, `11:30 pm`, `02:59` at the start of `s` → the next such moment in the local zone.
+fn next_time_of_day(s: &str, now: u64) -> Option<u64> {
+    let s = s.trim_start();
+    let digits = |s: &str| s.chars().take_while(|c| c.is_ascii_digit()).count();
+    let hn = digits(s);
+    if hn == 0 || hn > 2 || !s[hn..].starts_with(':') {
+        return None;
+    }
+    let rest = &s[hn + 1..];
+    let mn = digits(rest);
+    if mn != 2 {
+        return None;
+    }
+    let (mut h, m): (i32, i32) = (s[..hn].parse().ok()?, rest[..mn].parse().ok()?);
+    let ampm = rest[mn..].trim_start();
+    if ampm.starts_with("pm") && h < 12 {
+        h += 12;
+    } else if ampm.starts_with("am") && h == 12 {
+        h = 0;
+    }
+    if h > 23 || m > 59 {
+        return None;
+    }
+    let t = (now / 1000) as libc::time_t;
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    unsafe extern "C" {
+        fn tzset();
+    }
+    unsafe {
+        tzset();
+        if libc::localtime_r(&t, &mut tm).is_null() {
+            return None;
+        }
+    }
+    tm.tm_hour = h;
+    tm.tm_min = m;
+    tm.tm_sec = 0;
+    tm.tm_isdst = -1;
+    let mut at = unsafe { libc::mktime(&mut tm) } as i64 * 1000;
+    if at <= now as i64 {
+        at += 86_400_000;
+    }
+    (at > 0).then_some(at as u64)
+}
+
 /// Reset hints in headers; the LATEST one wins (whichever limit ran out is the binding one).
 pub fn reset_from_headers(h: &reqwest::header::HeaderMap, now: u64) -> Option<u64> {
     let get = |k: &str| h.get(k).and_then(|v| v.to_str().ok()).map(str::trim);
@@ -1752,6 +1818,25 @@ mod tests {
         let mut h = reqwest::header::HeaderMap::new();
         h.insert("anthropic-ratelimit-tokens-reset", "2026-10-28T19:44:03Z".parse().unwrap());
         assert_eq!(reset_from_headers(&h, now), Some(1_793_216_643_000));
+    }
+
+    #[test]
+    fn reset_hint_reads_every_engines_wording() {
+        let now = now_ms();
+        // Antigravity
+        let agy = "antigravity: Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 112h13m39s.";
+        assert_eq!(reset_hint(agy, 0, now), Some(now + (112 * 3600 + 13 * 60 + 39) * 1000));
+        assert_eq!(reset_hint("quota. Resets in 59m18s.", 0, now), Some(now + (59 * 60 + 18) * 1000));
+        // Claude Code: the next such time of day, within the coming 24 h
+        let cc = reset_hint("You've hit your 5-hour limit · resets 6:10pm (Europe/Paris)", 0, now).unwrap();
+        assert!(cc > now && cc <= now + 86_400_000 + 1000, "{cc} vs {now}");
+        assert!(local_time(cc).contains(" 18:10"), "{}", local_time(cc));
+        let cc = reset_hint("hit your limit, resets 02:59", 0, now).unwrap();
+        assert!(local_time(cc).contains(" 02:59"), "{}", local_time(cc));
+        // still the root's own wording
+        assert_eq!(reset_hint("Please try again in 20s.", 0, now), Some(now + 20_000));
+        // nothing named
+        assert_eq!(reset_hint("RESOURCE_EXHAUSTED: quota exceeded", 0, now), None);
     }
 
     #[test]

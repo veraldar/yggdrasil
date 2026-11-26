@@ -58,6 +58,13 @@ pub struct Usage {
 }
 
 impl Usage {
+    /// The windows that have not reset since the read: one that has is empty again (a 03:03 turn
+    /// judged Claude by a 90% number read before its window reset at 02:59).
+    pub fn live(&self) -> Usage {
+        let now = now_ms();
+        Usage { windows: self.windows.iter().filter(|w| w.resets_at.is_none_or(|r| r > now)).cloned().collect(), source: self.source, at: self.at }
+    }
+
     /// The binding window for `model` (the fullest one that counts for it): (pct, resets_at, label).
     pub fn binding(&self, model: Option<&str>) -> Option<(u8, Option<u64>, String)> {
         let m = model.map(str::to_ascii_lowercase);
@@ -414,7 +421,7 @@ pub fn judge(usage: Option<&Usage>, out: Option<(u64, String)>, model: Option<&s
 
 /// The cache-backed verdict for `key` (starts a background read when stale).
 pub fn avail(http: &reqwest::Client, key: &str, src: &Source, model: Option<&str>) -> Avail {
-    let u = peek(http, key, src);
+    let u = peek(http, key, src).map(|u| u.live());
     judge(u.as_ref(), out_until(key), model)
 }
 
@@ -559,7 +566,7 @@ mod tests {
                 let s1 = s1.clone();
                 async move {
                     s1.lock().unwrap().push(format!("claude {} {}", h["authorization"].to_str().unwrap(), h["anthropic-beta"].to_str().unwrap()));
-                    axum::Json(json!({ "five_hour": { "utilization": 95.0, "resets_at": "2026-11-24T23:00:00Z" } }))
+                    axum::Json(json!({ "five_hour": { "utilization": 95.0, "resets_at": "2099-11-24T23:00:00Z" } }))
                 }
             }))
             .route("/api/monitor/usage/quota/limit", get(move |h: HeaderMap| {
