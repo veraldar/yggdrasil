@@ -56,6 +56,8 @@ test('signin-ladder: stranger → /login → sign in → home → typed turn →
 
     const word = `V1-LADDER-${Date.now().toString(36)}`;
     await page.getByRole('button', { name: 'new session', exact: true }).tap();
+    await page.getByPlaceholder('session name…').fill('v1-ladder-turn');
+    await page.getByRole('button', { name: 'create & open' }).tap();
     await page.waitForURL(/\/session\//, { timeout: 20_000 });
     const box = page.locator('textarea').first();
     await expect(box).toBeVisible({ timeout: 15_000 });

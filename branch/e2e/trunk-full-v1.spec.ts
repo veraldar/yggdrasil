@@ -135,6 +135,7 @@ test(`trunk-full-v1 (${SCENARIO})`, async ({ browser, request }) => {
       if (SCENARIO === 's17' && name === 'lab') {
         brainEnv.ANTHROPIC_BASE_URL = `http://127.0.0.1:${CCM_PORT}`;
         brainEnv.ANTHROPIC_API_KEY = 'cc-rig-key';
+        brainEnv.IS_SANDBOX = '1';
       }
       bg(`brain-${name}`, YGG_BIN, [], brainEnv);
     }
@@ -241,8 +242,12 @@ test(`trunk-full-v1 (${SCENARIO})`, async ({ browser, request }) => {
 
       // open the proxy on the phone, attach the 6.4 MB PDF, ask for marker word
       await phone.goto(`/session/pdf-reader?id=${encodeURIComponent(proxy!.id)}`);
-      const fileInput = phone.locator('input[type="file"]').first();
-      await fileInput.setInputFiles(pdf.path);
+      const [chooser] = await Promise.all([
+        phone.waitForEvent('filechooser', { timeout: 15_000 }),
+        phone.getByRole('button', { name: 'attach' }).tap(),
+      ]);
+      await chooser.setFiles(pdf.path);
+      await phone.waitForTimeout(500);
       const box = phone.getByPlaceholder('message…');
       await box.fill('what is the marker word in this pdf');
       await phone.getByRole('button', { name: 'send', exact: true }).tap();

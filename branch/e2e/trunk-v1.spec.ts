@@ -185,9 +185,10 @@ test('G3.6 storyboard end to end (15 steps)', async ({ browser, request }) => {
     const approveUrl = sHome.approve_url.startsWith('http') ? sHome.approve_url : `${BASE}${sHome.approve_url}`;
     await owner.goto(approveUrl);
     await noOverflow360(owner, '/auth/root');
-    const approveBtn = owner.locator('button[type="submit"], button.ok, #approve-btn').first();
+    const approveBtn = owner.locator('#r-connect');
     await expect(approveBtn).toBeVisible({ timeout: 15_000 });
     await approveBtn.click();
+    await expect(owner.locator('#r-done')).toBeVisible({ timeout: 15_000 });
     const pHome = await request.post(`${BASE}/t/roots/enroll/${sHome.id}/poll`, { data: { secret: sHome.poll_secret } });
     expect(pHome.status()).toBe(200);
     const rHome = await pHome.json();
@@ -319,6 +320,8 @@ test('G3.6 storyboard end to end (15 steps)', async ({ browser, request }) => {
     await expect(phone.getByRole('button', { name: 'new session', exact: true })).toBeVisible({ timeout: 20_000 });
     const word = `G36-TURN-${Date.now().toString(36)}`;
     await phone.getByRole('button', { name: 'new session', exact: true }).tap();
+    await phone.getByPlaceholder('session name…').fill('g36-turn');
+    await phone.getByRole('button', { name: 'create & open' }).tap();
     await phone.waitForURL(/\/session\//, { timeout: 20_000 });
     const box = phone.locator('textarea').first();
     await expect(box).toBeVisible({ timeout: 15_000 });
