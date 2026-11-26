@@ -439,7 +439,10 @@ pub fn mask(s: &str) -> String {
     let chars: Vec<char> = s.chars().collect();
     let mut out = String::with_capacity(s.len());
     let mut i = 0usize;
-    let starts = |chars: &[char], i: usize, p: &str| p.chars().zip(chars[i..].iter()).all(|(a, b)| a == *b);
+    let starts = |chars: &[char], i: usize, p: &str| {
+        let len = p.chars().count();
+        chars.len().saturating_sub(i) >= len && p.chars().zip(chars[i..].iter()).all(|(a, b)| a == *b)
+    };
     while i < chars.len() {
         // data:image/…;base64,DATA → [image N KB]
         if starts(&chars, i, "data:image/") {
@@ -548,6 +551,17 @@ mod tests {
         // the assignment pattern inside the URL still hides the value part after /key= … acceptable:
         // the host and path stay visible
         assert!(url.starts_with("read https://example.com/"), "{url}");
+        // trailing prefix chars (e.g. a 36-char UUID ending in 'b', 'B', 's', 'd') must never panic
+        for s in [
+            "00000000-0000-0000-0000-00000000000b",
+            "ends-with-bf",
+            "ends-with-B",
+            "ends-with-Bear",
+            "ends-with-sk",
+            "ends-with-data:",
+        ] {
+            assert_eq!(mask(s), s);
+        }
     }
 
     #[test]
