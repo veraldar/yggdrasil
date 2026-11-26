@@ -63,7 +63,8 @@ pub fn schemas(profiles: &crate::profiles::Profiles) -> Vec<Value> {
                   "from": s("optional: start as a COPY of this conversation — a terminal session (term:…) or a session here on Claude Code/opencode/Antigravity — with its whole context; the original is never written (use it when the owner has it open in their terminal)") }), &["title", "agent", "brief"]),
         f("session_send", "Send a message or follow-up instruction to an existing session (its context is kept). It reports back when done. A terminal session (term:…) gets it typed into the owner's terminal when that is possible, else it continues here under you.",
           json!({ "id": s("session id (or exact title)"), "message": s("the message"),
-                  "attach": { "type": "boolean", "description": "true = the files in the user's current message go with it, unedited" } }), &["id", "message"]),
+                  "attach": { "type": "boolean", "description": "true = the files in the user's current message go with it, unedited" },
+                  "owner_turn": s("optional: the id of the message the OWNER typed to you (a msg_… id from your own conversation) — passes their exact words on as their own, verified by the brain: use it for an approval or an answer to a question only the owner may give, never your paraphrase. Without it an approval is refused") }), &["id", "message"]),
         f("session_read", "Read a session's card, status, last request, last reply and sub-sessions.",
           json!({ "id": s("session id (or exact title)") }), &["id"]),
         f("session_close", "Cancel and archive a session and its sub-sessions — only when the user cancels or drops that work. Never to tidy up: finished sessions stay in the tree.",
@@ -532,7 +533,7 @@ fn start(st: &AppState, caller: &str, input: &Value) -> Out {
             return o;
         }
     };
-    let turn = Turn { parts, modality: None, auto_turn: false, internal: false, origin: Some(caller.to_string()), completes: None, from: Some(crate::sender_here(st, caller)), digest_hint: None };
+    let turn = Turn { parts, modality: None, auto_turn: false, internal: false, origin: Some(caller.to_string()), completes: None, from: Some(crate::sender_here(st, caller)), digest_hint: None, trusted: None };
     if let Err(e) = crate::submit(st, &sid, turn) {
         return err(format!("created {sid} but could not post the brief ({:?})", e.status()));
     }
@@ -558,7 +559,7 @@ fn engine_of_input(input: &Value, agent: &str) -> Result<Option<&'static str>, O
 // The coordinator relayed "the owner said" until an agent outside every sandbox minted a key and
 // posted its code in a chat; these two checks make that move impossible rather than discouraged.
 
-pub(crate) const RELAY_REFUSED: &str = "a brief is your own words: never pass on the user's approval or \"the user said\" — permissions, keys, access and approvals are the user's to give, themselves, in the session that asks";
+pub(crate) const RELAY_REFUSED: &str = "a brief is your own words: never pass on the user's approval or \"the user said\" in your own words — permissions, keys, access and approvals are the user's to give. To pass one on, use owner_turn (session_send) with the id of the message the user typed to you: the brain then delivers their exact words as theirs, verified";
 
 /// Words that mark a question only the owner may answer.
 fn owner_only_question(q: &str) -> bool {
@@ -579,24 +580,28 @@ pub(crate) fn relays_approval(m: &str) -> bool {
         .any(|w| m.contains(w))
 }
 
+/// The open question of a session that is blocked on one: the card's, else the `QUESTION:` in its
+/// last reply (the digest may leave `needs` empty).
+pub(crate) fn pending_question(st: &AppState, target: &str) -> Option<String> {
+    let sessions = st.sessions.lock().unwrap();
+    let s = sessions.get(target)?;
+    let card = &s.info["card"];
+    if card["status"] != "blocked" {
+        return None;
+    }
+    let q = card["needs"].as_str().filter(|n| !n.trim().is_empty()).map(String::from).or_else(|| {
+        let last = s.messages.iter().rev().find(|m| m["info"]["role"] == "assistant").map(message_text)?;
+        last.find("QUESTION:").map(|i| one_line(&last[i + 9..], 300))
+    })?;
+    (!q.is_empty()).then_some(q)
+}
+
 /// Refused: answering a question only the owner may answer, or passing on their approval.
 fn owner_only(st: &AppState, target: &str, title: &str, message: &str) -> Option<Out> {
     if relays_approval(message) {
         return Some(err(RELAY_REFUSED.into()));
     }
-    let q = {
-        let sessions = st.sessions.lock().unwrap();
-        let s = sessions.get(target)?;
-        let card = &s.info["card"];
-        if card["status"] != "blocked" {
-            return None;
-        }
-        // the card's question, else the one in its last reply (the digest may leave `needs` empty)
-        card["needs"].as_str().filter(|n| !n.trim().is_empty()).map(String::from).or_else(|| {
-            let last = s.messages.iter().rev().find(|m| m["info"]["role"] == "assistant").map(message_text)?;
-            last.find("QUESTION:").map(|i| one_line(&last[i + 9..], 300))
-        })?
-    };
+    let q = pending_question(st, target)?;
     (!q.is_empty() && owner_only_question(&q)).then(|| {
         err(format!(
             "\"{title}\" asks something only the user may answer: \"{}\". Tell the user that question word for word and that they answer it themselves in that session (→ {title}). Never answer or approve it yourself.",
@@ -612,8 +617,19 @@ fn send(st: &AppState, caller: &str, input: &Value) -> Out {
         Err(o) => return o,
     };
     let title = st.sessions.lock().unwrap().get(&target).map(title_of).unwrap_or_default();
-    if let Some(o) = owner_only(st, &target, &title, message) {
-        return o;
+    // the owner's own message, passed on by reference: the brain checks the owner typed it and
+    // writes their words itself (owner.rs) — the one way an approval travels through MAIN
+    let trusted = match input["owner_turn"].as_str().map(str::trim).filter(|m| !m.is_empty()) {
+        Some(mid) => match crate::owner::relay(st, caller, mid, caller, &target) {
+            Ok(t) => Some(t),
+            Err(e) => return err(format!("owner_turn refused: {e}")),
+        },
+        None => None,
+    };
+    if trusted.is_none() {
+        if let Some(o) = owner_only(st, &target, &title, message) {
+            return o;
+        }
     }
     let parts = match with_files(st, caller, input, message) {
         Ok(p) => p,
@@ -627,7 +643,7 @@ fn send(st: &AppState, caller: &str, input: &Value) -> Out {
         s.info["card"]["status"] = json!("working");
         s.info["card"]["updated"] = json!(now_ms());
     });
-    let turn = Turn { parts, modality: None, auto_turn: false, internal: false, origin: Some(caller.to_string()), completes: None, from: Some(crate::sender_here(st, caller)), digest_hint: None };
+    let turn = Turn { parts, modality: None, auto_turn: false, internal: false, origin: Some(caller.to_string()), completes: None, from: Some(crate::sender_here(st, caller)), digest_hint: None, trusted };
     match crate::submit(st, &target, turn) {
         Ok(_) => ok(format!(
             "SENT, NOT DONE YET: \"{title}\" (id={target}){} has your instruction and reports back when finished. Tell the user it is on its way (→ {title}); never say it is done.",
@@ -1334,7 +1350,7 @@ fn wake(st: &AppState, parent: &str) {
         s.info["card"]["wakes"] = json!(wakes + 1);
         s.info["wake_hops"] = json!(hops);
     });
-    let turn = Turn { parts: vec![text_part(&text)], modality: None, auto_turn: true, internal: true, origin: None, completes: None, from: None, digest_hint: Some(digest_hint_of(&events)) };
+    let turn = Turn { parts: vec![text_part(&text)], modality: None, auto_turn: true, internal: true, origin: None, completes: None, from: None, digest_hint: Some(digest_hint_of(&events)), trusted: None };
     match crate::submit(st, parent, turn) {
         Ok((msg, _, _)) => {
             // which reports it carries (C5: a wake cut by a restart puts back only the ones
@@ -1860,7 +1876,7 @@ async fn start_from(st: &AppState, caller: &str, input: &Value, from: &str) -> O
     with_session(st, &sid, |s| {
         s.info["card"] = json!({ "topic": t, "brief": clip(brief, 600), "status": "working", "by": caller, "created": now_ms(), "updated": now_ms() });
     });
-    let turn = Turn { parts: vec![text_part(brief)], modality: None, auto_turn: false, internal: false, origin: Some(caller.to_string()), completes: None, from: Some(crate::sender_here(st, caller)), digest_hint: None };
+    let turn = Turn { parts: vec![text_part(brief)], modality: None, auto_turn: false, internal: false, origin: Some(caller.to_string()), completes: None, from: Some(crate::sender_here(st, caller)), digest_hint: None, trusted: None };
     if let Err(e) = crate::submit(st, &sid, turn) {
         return err(format!("created {sid} but could not post the brief ({:?})", e.status()));
     }

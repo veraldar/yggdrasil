@@ -390,6 +390,22 @@ export default function SessionView({
   const [voiceNa, setVoiceNa] = useState(() => !!voiceOff());
   const [voiceNaNote, setVoiceNaNote] = useState(false);
   const [error, setError] = useState('');
+  const [approving, setApproving] = useState(false);
+  /** the Approve button: only a paired device's tap; the brain verifies it (owner.rs) */
+  const approveAsk = async () => {
+    setApproving(true);
+    try {
+      const r = await fetch(`/api/session/${slug}/approve`, { method: 'POST', headers: pinHeaders() });
+      if (!r.ok) {
+        const d = await r.json().catch(() => null);
+        setError(String(d?.error || `approve failed (${r.status})`));
+      }
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setApproving(false);
+    }
+  };
   const [attachments, setAttachments] = useState<Attach[]>([]);
   // the same list, current between renders (picks and uploads finish out of step)
   const attachmentsRef = useRef<Attach[]>([]);
@@ -3177,7 +3193,11 @@ export default function SessionView({
           its question for you, then the summary (tap: the whole of it) */}
       {me && card && (() => {
         const engText = engineWord(card.engine || me.engine || '');
+        // a question only the owner may answer: one tap on a paired device (the brain checks the
+        // device and writes the approval itself — no session passes it on, none can press it)
+        const askOpen = card.status === 'blocked' && !!card.needs?.trim();
         return (
+          <>
           <button
             type="button"
             data-testid="session-card"
@@ -3205,6 +3225,18 @@ export default function SessionView({
               <span className="s">{card.summary || card.headline}</span>
             )}
           </button>
+          {askOpen && (
+            <button
+              type="button"
+              data-testid="approve-btn"
+              disabled={approving}
+              onClick={() => void approveAsk()}
+              className="oz-k mt-1 w-full"
+            >
+              {approving ? 'approving…' : 'Approve'}
+            </button>
+          )}
+          </>
         );
       })()}
 

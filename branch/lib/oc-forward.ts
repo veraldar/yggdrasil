@@ -4,6 +4,7 @@
  *  queue pickup because opencode's own queue stalls forever after an abort). */
 import { type FileRef, cleanRefs, refPart } from './file-ref';
 import { ocFetch } from './oc';
+import { VOUCHER_HEADER } from './owner';
 import { bustCache } from './oc-cache';
 import { abortedAt, markRunEnd, markRunStart } from './oc-live';
 import { dequeue } from './oc-queue';
@@ -17,6 +18,9 @@ export type SendBody = {
   /** files the brain keeps (uploaded through /api/file/upload): REF each */
   refs?: FileRef[];
   modality?: string;
+  /** a one-time voucher the brain minted for the owner's device (lib/owner.ts): the stored message
+   *  is then stamped as typed by the owner. Not a credential; spent on its first post. */
+  voucher?: string;
 };
 
 export function buildParts(body: SendBody): any[] {
@@ -78,6 +82,7 @@ export function forward(sid: string, slug: string, body: SendBody, isRetry = fal
     try {
       await ocFetch(`/session/${sid}/message`, {
         method: 'POST',
+        ...(body.voucher && { headers: { [VOUCHER_HEADER]: body.voucher } }),
         // modality rides through when a caller tags the turn (voice-turn-brevity);
         // plain text sends carry none
         body: JSON.stringify({

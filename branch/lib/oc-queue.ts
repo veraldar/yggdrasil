@@ -19,6 +19,8 @@ export type QueueItem = {
   images: string[];
   files: { name: string; content: string }[];
   refs?: FileRef[];
+  /** the owner's one-time voucher (lib/owner.ts) — useless without the brain, spent once */
+  voucher?: string;
   at: number;
 };
 

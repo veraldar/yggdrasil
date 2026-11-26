@@ -21,6 +21,7 @@ import { enqueue, queuedItems } from '@/lib/oc-queue';
 import { bustSearchResults, bustTranscript, stripCtx } from '@/lib/oc-transcript';
 import { ensureWatchdog, lastEventAt } from '@/lib/oc-watchdog';
 import { PENDING_TTL_MS } from '@/lib/pending-ttl';
+import { VOUCHER_HEADER, mintVoucher } from '@/lib/owner';
 
 export const dynamic = 'force-dynamic';
 
@@ -263,6 +264,9 @@ export async function POST(req: Request, ctx: { params: Promise<{ id: string }> 
       );
     }
     body.refs = refs;
+    // the owner typed this on a paired device: the brain vouches for it (stamps the stored message),
+    // which is what lets MAIN pass an approval on by reference. Undefined = a console / tailnet send.
+    body.voucher = await mintVoucher(req);
     const parts = buildParts(body);
     if (!parts.length) return NextResponse.json({ error: 'empty' }, { status: 400 });
 
@@ -276,6 +280,7 @@ export async function POST(req: Request, ctx: { params: Promise<{ id: string }> 
           images: body.images || [],
           files: body.files || [],
           ...(refs.length && { refs }),
+          ...(body.voucher && { voucher: body.voucher }),
         });
         console.log(`[queue] enqueue ${sid} (depth ${queuedItems(sid).length})`);
         bustCache();
@@ -295,6 +300,7 @@ export async function POST(req: Request, ctx: { params: Promise<{ id: string }> 
 
     const reply = await ocFetch(`/session/${sid}/message`, {
       method: 'POST',
+      ...(body.voucher && { headers: { [VOUCHER_HEADER]: body.voucher } }),
       body: JSON.stringify({
         parts,
         ...(body.modality === 'voice' ? { modality: 'voice' } : {}),

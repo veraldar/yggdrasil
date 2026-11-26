@@ -179,6 +179,8 @@ After=network-online.target
 [Service]
 WorkingDirectory=%h
 EnvironmentFile=$CONF/brain.env
+# owner proof (owner.rs): the brain checks a device token against the registry's hashes itself
+Environment=YGG_DEVICES_FILE=$HUB/state/devices.json:$HUB/state/devices-tailnet.json
 ExecStart=$HUB/current/bin/yggdrasil
 ExecStop=-/usr/bin/curl -s --connect-timeout 2 -m 70 -X POST $BRAIN/admin/drain -H 'Content-Type: application/json' -d '{"max_s": 60}'
 TimeoutStopSec=90
