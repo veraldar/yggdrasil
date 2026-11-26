@@ -108,3 +108,10 @@ Passkeys: `rp_id` (default: the public host) must be that host or a parent of ev
 Audit actions added: `auth.oauth`, `auth.oauth_fail`, `oauth.link`, `account.create {via:"oauth"}`,
 `passkey.add`, `passkey.add_fail`, `passkey.remove`, `auth.passkey_fail`; `auth.login` detail now
 `{first, second[, provider]}` with first ∈ password, oauth, passkey and second ∈ totp, recovery, passkey.
+
+## Phone by QR — the landing (fix after M4)
+`POST /t/pair/redeem {token, name?}` → `{ok, device:{id,name,role}, next}` + cookies. `next` is where a
+fresh sign-in lands (spec §5.6 F5 step 3): `/` while a root that runs the app is online (the door;
+its first contact is the tree door, S8) or while no root is enrolled yet (the empty-trunk page);
+`/offline` when roots exist but none is online. The phone's `/pair` page shows "joined …" and goes
+to `next` by itself (no tap). The trunk never plants MAIN (the door's `/api/onboard` does).
