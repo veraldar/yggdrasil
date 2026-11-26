@@ -38,7 +38,7 @@ test('MAIN header: artifacts key, badge = home, opens artifacts, back → MAIN, 
   const list = (await (await request.get(`${HOME}/session`)).json()) as { title: string }[];
   if (!list.some((s) => s.title === '[MAIN]')) await request.post(`${HOME}/session`, { data: { title: '[MAIN]' } });
   await setup(page);
-  await page.goto('/home');
+  await page.goto(MODE === 'before' ? '/' : '/home');
   await expect(page.getByTestId('artifact-badge')).toHaveText('3', { timeout: 20_000 });
   await main(page);
   if (MODE === 'before') {
@@ -65,12 +65,12 @@ test('MAIN header: artifacts key, badge = home, opens artifacts, back → MAIN, 
   await expect(page.getByTestId('artifacts-key')).toHaveCount(0);
 });
 
-test('MAIN header with the voice-test chip on: still one row, no overflow', async ({ page }) => {
+test('voice tests on: /session/main opens the test room (not MAIN) — chip, no artifacts key, no overflow', async ({ page }) => {
   await setup(page, true);
   await main(page);
   if (MODE === 'before') return;
   await expect(page.getByTestId('voice-test-chip')).toBeVisible();
-  await expect(page.getByTestId('artifacts-key')).toBeVisible();
+  await expect(page.getByTestId('artifacts-key')).toHaveCount(0);
   await noOverflow(page);
   if (OUT) await page.screenshot({ path: join(OUT, 'after-6-main-header-voicetest.png') });
 });
