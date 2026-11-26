@@ -1,0 +1,14 @@
+[
+ {"what":"Engines into settings","when":"11-25 07:07","who":"Engines into settings","sid":"28a4e5","status":"done","branch":"settings-row-buttons","commit":"dc0ff90a"},
+ {"what":"Smarter engine fallback","when":"11-26 17:26","who":"Build smarter engine fallback","sid":"0045e8","status":"done","branch":"engine-fallback-smart","commit":"c961a3d0"},
+ {"what":"Settings v2.1 — every row one bare button","when":"11-26 19:34","who":"Settings v2.1","sid":"ca3f64","status":"blocked","note":"stuck rig lock","branch":"settings-buttons-v21","commit":"79c6f710","commit_label":"code at"},
+ {"what":"v1 APP-5 — apply architect §3 edits","when":"11-26 19:11","who":"v1 · APP-5","sid":"66cf7f","status":"blocked","note":"stuck rig lock; twin proofs queued","branch":"v1-app","commit":"5a0a224f","commit_label":"code at"},
+ {"what":"v1 APP-4 — G2.4 pre-existing reds","when":"11-26 16:10","who":"v1 · APP-4","sid":"78e83e","status":"blocked","note":"waiting for your OK on the spec patch"},
+ {"what":"Blackout fix — pending question no longer blocks MAIN","when":"11-25 19:53","who":"Architect role instruction","sid":"f8c47a","status":"done","note":"awaiting merge","branch":"owner-approval-flow","commit":"d012d2fa"},
+ {"what":"Roots page: fix theme","when":"11-23 22:42","who":"fix-root-detail-theme","status":"done","note":"in tree-next, not pushed to origin","branch":"fix-root-detail-theme","commit":"7e12a18b"},
+ {"what":"Roots: copy-link keys","when":"11-26 16:41","who":"Roots page URL + theme spec","sid":"00439a","status":"done","branch":"artifact-copy-ui","commit":"b37fe433"},
+ {"what":"Refresh key as an icon","when":"11-26 16:29","who":"Refresh key icon + width","sid":"80b7f9","status":"done","branch":"fix-refresh-key-icon","commit":"19d95780"},
+ {"what":"Hide injected machinery in chat","when":"11-23 13:43","who":"hide-station-user-r1","status":"done","branch":"hide-station-user-r1","commit":"83f31d2a"},
+ {"what":"Privacy pitch deck — visual first","when":"11-26 20:41","who":"Vision + landing","sid":"1f9c5d","status":"done","link":"privacy-pitch.html"},
+ {"what":"Vision one-pager","when":"11-26 20:41","who":"Vision + landing","sid":"1f9c5d","status":"done","link":"vision-onepager.html"}
+]
