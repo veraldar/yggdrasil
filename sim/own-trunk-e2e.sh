@@ -227,7 +227,7 @@ if stage a; then
     skip a0b "changed binary refused" "needs OT_DIST_KEY"
   fi
 
-  vps ot-vps-a "cd /root && $REL bash trunk.sh --name $A --self-signed -y" >"$STATE/log/a1-trunk.log" 2>&1; rc=$?
+  vps ot-vps-a "cd /root && $REL bash trunk.sh --name $A --rp-id ${A#*.} --self-signed -y" >"$STATE/log/a1-trunk.log" 2>&1; rc=$?
   PIN_A=$(pin_of "$STATE/log/a1-trunk.log")
   check a1 "trunk.sh v1 --name $A --self-signed → exit 0, unclaimed /t/state, prints claim instructions, serves /install/root.sh + 404 root.exe" \
     bash -c "[ $rc = 0 ] && grep -q 'sudo trunk-ctl claim-code' '$STATE/log/a1-trunk.log' && \
@@ -258,6 +258,19 @@ if stage a; then
       docker exec ot-vps-a grep -q 'extra_names *=.*\"extra.trunk.tree.test\"' /etc/yggdrasil-trunk/trunk.toml && \
       [ \"\$(docker exec ot-vps-a bash -c 'sha256sum </etc/yggdrasil-trunk/key.pem')\" = '$KEYSUM' ] && \
       [ \"\$(docker exec ot-vps-a bash -c 'sha256sum </etc/yggdrasil-trunk/trunk-kek')\" = '$KEKSUM' ]"
+
+  # rp_id (spec §11 step 6): installed with --rp-id <parent>; a sibling under it is accepted, one outside
+  # it is refused before anything changes, and the passkey domain can never be changed afterwards.
+  vps ot-vps-a "cd /root && $REL bash trunk.sh --add-name sibling.${A#*.} -y" >"$STATE/log/a4b-sibling.log" 2>&1; rc1=$?
+  vps ot-vps-a "cd /root && $REL bash trunk.sh --add-name other.example.org -y" >"$STATE/log/a4c-outside.log" 2>&1; rc2=$?
+  vps ot-vps-a "cd /root && $REL bash trunk.sh --rp-id example.org -y" >"$STATE/log/a4d-rpchange.log" 2>&1; rc3=$?
+  check a4r "--rp-id ${A#*.}: rp_id in trunk.toml; sibling.${A#*.} starts; other.example.org and a changed --rp-id are refused (64)" \
+    bash -c "[ $rc1 = 0 ] && [ $rc2 = 64 ] && [ $rc3 = 64 ] && \
+      docker exec ot-vps-a grep -qx 'rp_id          = \"${A#*.}\"' /etc/yggdrasil-trunk/trunk.toml && \
+      docker exec ot-vps-a grep -q 'sibling.${A#*.}' /etc/yggdrasil-trunk/trunk.toml && \
+      ! docker exec ot-vps-a grep -q 'example.org' /etc/yggdrasil-trunk/trunk.toml && \
+      grep -q 'Nothing was changed' '$STATE/log/a4c-outside.log' '$STATE/log/a4d-rpchange.log' && \
+      docker exec ot-vps-a systemctl is-active -q yggdrasil-trunk"
 
   docker cp ot-vps-a:/etc/yggdrasil-trunk/cert.pem "$STATE/sim/trunk-a.pem" >/dev/null && chmod 644 "$STATE/sim/trunk-a.pem"
   if [ $REALSTAMP = 0 ]; then
