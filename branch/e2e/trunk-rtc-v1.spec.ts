@@ -562,7 +562,7 @@ test('G3.2 v1 trunk rtc: QR pairing, voice over the trunk, ufrag routing, revoke
       released = t.released;
       voiceTurn = t.turn;
       const said = textOf(voiceTurn);
-      expect(said, said).toMatch(/2 ?\+ ?2|two plus two/i);
+      expect(said, said).toMatch(/\b(2|two) ?(\+|plus) ?(2|two)\b/i);
       const tok = A.tokens.find((x) => x.status === 200);
       expect(tok, JSON.stringify(A.tokens)).toBeTruthy();
       const body = JSON.parse(tok!.body);
@@ -813,7 +813,7 @@ test('G3.2 v1 trunk rtc: QR pairing, voice over the trunk, ufrag routing, revoke
       expect(r.via, 'not over a pinned channel').toBeNull();
       const before = (await messages(mainId)).filter((m) => m.info.role === 'user').length;
       const t = await talk(B2.page, before);
-      expect(textOf(t.turn)).toMatch(/2 ?\+ ?2|two plus two/i);
+      expect(textOf(t.turn)).toMatch(/\b(2|two) ?(\+|plus) ?(2|two)\b/i);
       const rtc = eyeRequests(eyeSince(t1)).filter((l) => l.startsWith('GET /rtc'));
       expect(rtc.length, '/rtc went through the trunk relay (the eye saw it)').toBeGreaterThan(0);
       const lkv = await lkPcs(B2.page);

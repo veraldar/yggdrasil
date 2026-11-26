@@ -196,7 +196,7 @@ try {
   await step('V3', "both hold the mic at the same time: A's words reach home's MAIN, B's reach lab's MAIN", async () => {
     must(M.home && M.lab, 'needs V1 + V2');
     const [a, b] = await Promise.all([talk(A, 'home', M.home), talk(B, 'lab', M.lab)]);
-    for (const [r, x] of [['home', a], ['lab', b]]) must(/2 ?\+ ?2|two plus two/i.test(x.said), `${r} heard "${x.said}"`);
+    for (const [r, x] of [['home', a], ['lab', b]]) must(/\b(2|two) ?(\+|plus) ?(2|two)\b/i.test(x.said), `${r} heard "${x.said}"`);
     T.home = a;
     T.lab = b;
     return `home: hold→talk ${a.talkMs} ms, release→MAIN ${a.heardMs} ms ("${a.said.slice(0, 40)}") · lab: hold→talk ${b.talkMs} ms, release→MAIN ${b.heardMs} ms ("${b.said.slice(0, 40)}")`;
