@@ -450,7 +450,12 @@ fn request_origin(st: &State, req: &Req) -> String {
 
 /// A `next` that stays on this origin (the login page's rule).
 pub fn safe_next(n: &str) -> Option<String> {
-    let ok = n.starts_with('/') && !n.starts_with("//") && !n.starts_with("/t/") && !n.contains(['\\', '\r', '\n', '#']) && n.len() <= 256;
+    let ok = n.starts_with('/')
+        && !n.starts_with("//")
+        && !n.starts_with("/t/")
+        && !n.contains(['\\', '#'])
+        && !n.chars().any(|c| c.is_control() || c.is_whitespace())
+        && n.len() <= 256;
     ok.then(|| n.to_string())
 }
 
@@ -632,13 +637,15 @@ pub async fn callback(st: &Arc<State>, pid: &str, req: &Req, ip: IpAddr) -> Resp
         ticket: g("ticket"),
         next: g("next"),
     };
-    let tk = f.ticket.as_deref();
-    // the flow must come back to the provider it went to, in the browser that started it
+    // the flow must come back to the provider it went to, in the browser that started it — and
+    // only that browser may be sent back to /claim with the ticket (someone holding a leaked
+    // `state` without the binding cookie learns nothing)
     let bind = req.cookie(BIND_COOKIE).unwrap_or_default();
     let bind_ok = !bind.is_empty() && g("bind").is_some_and(|h| ct_eq(h.as_bytes(), b64u(&sha256(bind.as_bytes())).as_bytes()));
     if f.provider != pid || !bind_ok {
-        return refuse(st, ip, pid, &f.intent, Fail::State, "", tk);
+        return refuse(st, ip, pid, &f.intent, Fail::State, "", None);
     }
+    let tk = f.ticket.as_deref();
     if req.query("error").is_some() {
         return refuse(st, ip, pid, &f.intent, Fail::Denied, "", tk);
     }
@@ -813,9 +820,24 @@ mod tests {
     }
 
     #[test]
+    fn an_oauth_claim_cannot_replace_an_account_whose_claim_is_completing() {
+        let (st, dir) = crate::v1::idp::session::tests::test_state(true);
+        let a = account::create_oauth_admin(&st, "first@example.org", "https://idp.example", "s1").unwrap();
+        // the owner started again before confirming TOTP: the pending account is replaced
+        let b = account::create_oauth_admin(&st, "owner@example.org", "https://idp.example", "s2").unwrap();
+        assert_ne!(a, b);
+        // TOTP confirmed (the claim is completing): nothing replaces it any more
+        st.db.with(|c| c.execute("UPDATE totp SET enrolled_at = 1", [])).unwrap();
+        assert!(account::create_oauth_admin(&st, "evil@example.org", "https://idp.example", "s3").is_err());
+        let n: i64 = st.db.with(|c| c.query_row("SELECT count(*) FROM accounts WHERE id = ?1", [&b], |r| r.get(0))).unwrap();
+        assert_eq!(n, 1);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn next_paths_stay_on_this_origin() {
         assert_eq!(safe_next("/devices").as_deref(), Some("/devices"));
-        for bad in ["//evil.example", "https://evil.example", "/t/auth/refresh", "/a\\b", "x", "/a#b"] {
+        for bad in ["//evil.example", "https://evil.example", "/t/auth/refresh", "/a\\b", "x", "/a#b", "/\t/evil.example", "/\n/evil.example", "/ /evil.example"] {
             assert!(safe_next(bad).is_none(), "{bad}");
         }
     }

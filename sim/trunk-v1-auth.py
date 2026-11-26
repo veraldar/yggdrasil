@@ -929,6 +929,12 @@ def oauth_claim(t, mock, provider, xff):
     check("oauth claim (%s): start before approve → 409" % provider, r.status == 409, r)
     c.post("/t/claim/approve", {"ticket": ticket})
     if provider == "mock":
+        # someone holding a leaked `state` (but not this browser's binding cookie) learns nothing
+        thief = t.client(xff="100.64.230.1")
+        r, _ = oauth_flow(t, mock, c, provider, intent="claim", ticket=ticket, other=thief)
+        loc = r.headers.get("Location", "") if r.status == 302 else ""
+        check("oauth claim (mock): a leaked state finished in another browser → refused, the claim ticket not revealed",
+              loc == "/login#e=oauth" and ticket not in loc and "bifrost_device" not in thief.jar, (r, loc))
         page_shots([{"name": "m4-claim-oauth", "url": t.public_url + "/claim#t=" + ticket, "wait": "#c-oauth .oauth-btn"}])
     r, path = oauth_flow(t, mock, c, provider, intent="claim", ticket=ticket)
     if provider == "mock":
@@ -1097,6 +1103,9 @@ def t_oauth(binp, root):
         r, _ = oauth_flow(t2, mock, b3, "mock")
         refused_as(t2, "the OIDC identity bound on another trunk", r, "unknown_identity", b3)
 
+        # the same sign-in in a real Chromium: the SameSite=Lax binding cookie survives the cross-site return
+        last["t1"] = node_checks("oauth", "oauth-browser.cjs", [t1.public_url, json.dumps({"secret": sec1, "last_step": last["t1"]})], last["t1"])
+
         # the state expires (fast: 60 s) — checked by the unit tests; here: lockdown stops OAuth sign-in
         ok, out = t1.ctl("kill", "--lockdown")
         r = fresh().get("/t/auth/oauth/mock/start?intent=login")
@@ -1149,11 +1158,10 @@ def page_shots(items):
         check("shot %s (360 px): drawn, no console error, nothing wider than the screen" % r["name"], r["ok"], r["problems"])
 
 
-def t_passkeys(t):
-    """The browser half of the passkey cases (sim/trunk-v1/passkeys.cjs, Chromium + CDP virtual authenticator)."""
-    os.makedirs(SHOTS, exist_ok=True)
-    params = {"email": EMAIL, "password": PASSWORD, "secret": S.totp, "last_step": S.last_step}
-    p = subprocess.Popen(["node", os.path.join(HERE, "trunk-v1", "passkeys.cjs"), t.public_url, SHOTS, json.dumps(params)],
+def node_checks(label, script, args, last_step):
+    """Run a Chromium script that prints {"check", "ok", "detail"} lines, then {"done", "last_step"}.
+    → the last TOTP step it used (the trunk takes each step once)."""
+    p = subprocess.Popen(["node", os.path.join(HERE, "trunk-v1", script)] + list(args),
                          stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=node_env())
     done = False
     try:
@@ -1166,16 +1174,24 @@ def t_passkeys(t):
             except ValueError:
                 continue
             if "check" in o:
-                check("passkeys: " + o["check"], o["ok"], o.get("detail"))
+                check(label + ": " + o["check"], o["ok"], o.get("detail"))
             elif o.get("done"):
                 done = True
-                S.last_step = max(S.last_step, o.get("last_step", 0))
+                last_step = max(last_step, o.get("last_step", 0))
         p.wait(timeout=300)
     finally:
         if p.poll() is None:
-            p.terminate()
+            p.terminate()  # our own child, by PID
     if not done:
-        check("passkeys: passkeys.cjs finished", False, p.stderr.read()[-800:] if p.stderr else "")
+        check(label + ": %s finished" % script, False, p.stderr.read()[-800:] if p.stderr else "")
+    return last_step
+
+
+def t_passkeys(t):
+    """The browser half of the passkey cases (sim/trunk-v1/passkeys.cjs, Chromium + CDP virtual authenticator)."""
+    os.makedirs(SHOTS, exist_ok=True)
+    params = {"email": EMAIL, "password": PASSWORD, "secret": S.totp, "last_step": S.last_step}
+    S.last_step = node_checks("passkeys", "passkeys.cjs", [t.public_url, SHOTS, json.dumps(params)], S.last_step)
     ok, out = t.ctl("audit", "verify")
     check("passkeys: the audit chain still verifies", ok, out)
 

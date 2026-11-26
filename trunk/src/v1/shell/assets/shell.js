@@ -89,9 +89,10 @@ function busy(btn, on) {
 function digitsOnly(v) { return String(v || '').replace(/\D/g, ''); }
 
 // a `next` that stays on this origin
+// (no backslash, whitespace or control character: browsers drop tabs and newlines, "/\t/x" → "//x")
 function nextPath() {
   const n = new URLSearchParams(location.search).get('next') || '/';
-  return /^\/(?!\/)[^\\]*$/.test(n) && !n.startsWith('/t/') ? n : '/';
+  return /^\/(?!\/)[^\\\s\u0000-\u001f\u007f]*$/.test(n) && !n.startsWith('/t/') ? n : '/';
 }
 
 // ---- OAuth buttons and WebAuthn (passkeys) ---------------------------------------------------

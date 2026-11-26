@@ -269,9 +269,17 @@ impl Intent {
     }
 }
 
-fn locked_out(st: &State, account: &str, ip: IpAddr) -> Option<Resp> {
+/// The locks a ceremony respects. A passwordless sign-in is anyone's to try (and a passkey cannot
+/// be guessed): it answers to the network's lock only — never to the account's second-factor lock,
+/// which anonymous failures must not be able to set (that would lock the owner out of TOTP).
+fn locked_out(st: &State, account: &str, intent: Intent, ip: IpAddr) -> Option<Resp> {
     let now = now_ms();
-    limits::locked(&st.db, &limits::mfa_key(account), now).or_else(|| limits::locked(&st.db, &limits::net_key(ip), now)).map(too_many)
+    let net = limits::locked(&st.db, &limits::net_key(ip), now);
+    match intent {
+        Intent::Login => net,
+        Intent::StepUp | Intent::Mfa => limits::locked(&st.db, &limits::mfa_key(account), now).or(net),
+    }
+    .map(too_many)
 }
 
 /// POST /t/auth/passkey/begin {intent, mfa_ticket?} → {challenge, options}
@@ -302,7 +310,7 @@ pub fn auth_begin(st: &State, who: Result<Who, Resp>, intent: Intent, mfa_ticket
             }
         }
     };
-    if let Some(r) = locked_out(st, &account, ip) {
+    if let Some(r) = locked_out(st, &account, intent, ip) {
         return r;
     }
     let creds: Vec<Passkey> = rows(st, &account).into_iter().map(|(_, p)| p).collect();
@@ -325,10 +333,14 @@ pub fn auth_begin(st: &State, who: Result<Who, Resp>, intent: Intent, mfa_ticket
     }
 }
 
-/// A refused assertion: counts toward the account's second-factor lockout and the network's.
+/// A refused assertion: counts toward the network's lock, and — when a first factor or a signed-in
+/// device stands behind it (mfa, step-up) — toward the account's second-factor lockout.
 fn refused(st: &State, account: &str, intent: Intent, why: &str, ip: IpAddr) -> Resp {
     let now = now_ms();
-    let lock = limits::fail(&st.db, &limits::mfa_key(account), LKind::Mfa, &st.idp.t, now);
+    let lock = match intent {
+        Intent::Login => None,
+        Intent::StepUp | Intent::Mfa => limits::fail(&st.db, &limits::mfa_key(account), LKind::Mfa, &st.idp.t, now),
+    };
     let nlock = limits::fail(&st.db, &limits::net_key(ip), LKind::Net, &st.idp.t, now);
     super::audit(st, Entry::new("auth.passkey_fail").account(account).ip(ip).detail(json!({ "intent": intent.as_str(), "why": why })));
     if let Some(s) = lock {
@@ -360,7 +372,7 @@ pub fn auth_finish(st: &State, who: Result<Who, Resp>, intent: Intent, handle: &
             Err(r) => return r.clone(),
         }
     }
-    if let Some(r) = locked_out(st, &account, ip) {
+    if let Some(r) = locked_out(st, &account, intent, ip) {
         return r;
     }
     let state: Option<PasskeyAuthentication> = t.data.get("auth").cloned().and_then(|v| serde_json::from_value(v).ok());
@@ -379,19 +391,30 @@ pub fn auth_finish(st: &State, who: Result<Who, Resp>, intent: Intent, handle: &
     if !res.user_verified() {
         return refused(st, &account, intent, "uv", ip);
     }
-    // store the moved counter (and backup state) on the credential that answered
+    // webauthn-rs compared the counter with the copy sealed into this ceremony at `begin`; the
+    // stored counter may have moved since (another ceremony finished first). Store the new counter
+    // only if it is still ahead of the stored one — atomically, so a clone that began early (or
+    // two racing finishes) cannot reuse a counter value. Counters that stay 0 (synced passkeys)
+    // have nothing to compare.
     let now = now_ms();
+    let ctr = res.counter() as i64;
     let mut used = None;
     for (id, mut pk) in rows(st, &account) {
         if pk.cred_id() == res.cred_id() {
             pk.update_credential(&res);
-            if let Ok(blob) = serde_json::to_vec(&pk) {
-                let _ = st.db.with(|c| {
+            let blob = serde_json::to_vec(&pk).unwrap_or_default();
+            let n = st
+                .db
+                .with(|c| {
                     c.execute(
-                        "UPDATE passkeys SET public_key = ?1, sign_count = ?2, last_used = ?3 WHERE id = ?4",
-                        params![blob, res.counter() as i64, now, id],
+                        "UPDATE passkeys SET public_key = ?1, sign_count = ?2, last_used = ?3
+                         WHERE id = ?4 AND (sign_count < ?2 OR (?2 = 0 AND sign_count = 0))",
+                        params![blob, ctr, now, id],
                     )
-                });
+                })
+                .unwrap_or(0);
+            if n == 0 {
+                return refused(st, &account, intent, "counter", ip);
             }
             used = Some(id);
         }

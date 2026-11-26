@@ -171,14 +171,24 @@ fn account_by_email(st: &State, email: &str) -> Option<(String, Option<String>, 
 
 // ---- F1: signup and TOTP confirm (claim ticket only) ----------------------------------------
 
-/// Before the claim completes, an account that never reached its TOTP confirm is replaced.
-fn clear_unclaimed(tx: &rusqlite::Transaction) -> rusqlite::Result<()> {
+/// Before the claim completes, an account that never reached its TOTP confirm is replaced. Checked
+/// inside the caller's transaction: once a TOTP is confirmed (the claim is completing) or the trunk
+/// is claimed, nothing is replaced → Ok(false).
+fn clear_unclaimed(tx: &rusqlite::Transaction) -> rusqlite::Result<bool> {
+    let done: i64 = tx.query_row(
+        "SELECT (SELECT count(*) FROM meta WHERE k = 'claimed_at') + (SELECT count(*) FROM totp WHERE enrolled_at IS NOT NULL)",
+        [],
+        |r| r.get(0),
+    )?;
+    if done > 0 {
+        return Ok(false);
+    }
     tx.execute("DELETE FROM totp", [])?;
     tx.execute("DELETE FROM recovery_codes", [])?;
     tx.execute("DELETE FROM oauth_ids", [])?;
     tx.execute("DELETE FROM passkeys", [])?;
     tx.execute("DELETE FROM accounts", [])?;
-    Ok(())
+    Ok(true)
 }
 
 /// The OAuth claim (oauth::claim_with): the admin account bound to (issuer, subject), its e-mail
@@ -189,13 +199,19 @@ pub fn create_oauth_admin(st: &State, email: &str, issuer: &str, subject: &str) 
     }
     let id = crate::v1::crypto::new_id("acc");
     let now = now_ms();
-    st.db.with(|c| {
+    let made = st.db.with(|c| {
         let tx = c.transaction()?;
-        clear_unclaimed(&tx)?;
+        if !clear_unclaimed(&tx)? {
+            return Ok(false);
+        }
         tx.execute("INSERT INTO accounts (id, email, pw_hash, role, status, created_at) VALUES (?1, ?2, NULL, 'admin', 'active', ?3)", params![id, email, now])?;
         tx.execute("INSERT INTO oauth_ids (account_id, issuer, subject, email, created_at) VALUES (?1, ?2, ?3, ?4, ?5)", params![id, issuer, subject, email, now])?;
-        tx.commit()
+        tx.commit()?;
+        Ok(true)
     })?;
+    if !made {
+        return Err("already claimed".into());
+    }
     store_totp(st, &id, &random_bytes::<20>(), None, 0)?;
     Ok(id)
 }
@@ -250,15 +266,20 @@ pub async fn signup(st: &State, ticket: &str, email: &str, pw: &str, ip: IpAddr)
     let made = st.db.with(|c| {
         let tx = c.transaction()?;
         // a signup that never reached TOTP confirm is replaced (the owner started again)
-        clear_unclaimed(&tx)?;
+        if !clear_unclaimed(&tx)? {
+            return Ok(false);
+        }
         tx.execute(
             "INSERT INTO accounts (id, email, pw_hash, role, status, created_at) VALUES (?1, ?2, ?3, 'admin', 'active', ?4)",
             params![id, email, hash, now_ms()],
         )?;
-        tx.commit()
+        tx.commit()?;
+        Ok(true)
     });
-    if let Err(e) = made {
-        return Resp::json(500, &json!({ "error": e }));
+    match made {
+        Ok(true) => {}
+        Ok(false) => return Resp::json(403, &json!({ "error": "this trunk is claimed — nobody else can register", "why": "claimed" })),
+        Err(e) => return Resp::json(500, &json!({ "error": e })),
     }
     if let Err(e) = store_totp(st, &id, &seed, None, 0) {
         return Resp::json(500, &json!({ "error": e }));

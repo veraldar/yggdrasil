@@ -67,9 +67,9 @@ async function totp() {
   });
   // the page's own fetch (same origin, cookies, Origin header) — what the shell script does
   // /t/audit answers newest first. (an expired access token — 20 s on a rig — is refreshed once, as the shell's authed() does)
-  const api = (method, path, body) => page.evaluate(async ([m, p, b]) => {
+  const api = (method, path, body, xff) => page.evaluate(async ([m, p, b, x]) => {
     const go = async () => {
-      const init = { method: m, credentials: 'same-origin', headers: {} };
+      const init = { method: m, credentials: 'same-origin', headers: x ? { 'x-forwarded-for': x } : {} };
       if (b !== null) { init.headers['content-type'] = 'application/json'; init.body = JSON.stringify(b); }
       const r = await fetch(p, init);
       let d = null;
@@ -82,7 +82,7 @@ async function totp() {
       if (f.status === 200) r = await go();
     }
     return r;
-  }, [method, path, body === undefined ? null : body]);
+  }, [method, path, body === undefined ? null : body, xff || null]);
   const me = () => api('GET', '/t/me');
   const audit = async (n) => ((await api('GET', '/t/audit?limit=' + (n || 5))).data || {}).entries || [];
   const noOverflow = () => page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1);
@@ -171,12 +171,16 @@ async function totp() {
     return { id: credId, rawId: credId, type: 'public-key', extensions: {},
       response: { authenticatorData: b64u(authData), clientDataJSON: b64u(cd), signature: b64u(sig), userHandle: cred.userHandle ? b64u(Buffer.from(cred.userHandle, 'base64')) : null } };
   };
-  const tryForge = async (o, intent) => {
+  // refusals come from their own /24 (x-forwarded-for; the rig trusts 127.0.0.1) so they do not
+  // add up on the browser's network lock (20 failures/h)
+  let netN = 10;
+  const elsewhere = () => '100.70.' + (netN++) + '.1';
+  const tryForge = async (o, intent, xff, extra) => {
     intent = intent || 'login';
-    const b = await api('POST', '/t/auth/passkey/begin', { intent });
+    const b = await api('POST', '/t/auth/passkey/begin', Object.assign({ intent }, extra || {}), xff);
     if (b.status !== 200) return { begin: b };
     const ch = b.data.options.publicKey.challenge;
-    const f = await api('POST', '/t/auth/passkey/finish', { intent, challenge: b.data.challenge, credential: forge(ch, o) });
+    const f = await api('POST', '/t/auth/passkey/finish', Object.assign({ intent, challenge: b.data.challenge, credential: forge(ch, o) }, extra || {}), xff);
     return { f, handle: b.data.challenge, ch };
   };
   const whyOf = async () => { const r = (await audit(3)).find((e) => e.action === 'auth.passkey_fail'); return r && r.detail.why; };
@@ -189,27 +193,48 @@ async function totp() {
     ['no user verification (UP only)', { counter: counter + 1, flags: 0x01 }, 'uv'],
     ['a counter that did not move (cloned authenticator)', { counter }, 'counter'],
   ]) {
-    r = await tryForge(o);
+    r = await tryForge(o, 'login', elsewhere());
     const w = await whyOf();
     check('passkey refused: ' + name + ' → 401, audited (' + why + ')', r.f && r.f.status === 401 && r.f.data.why === 'passkey' && w === why, [r.f, w]);
   }
   // clear the failure count with a good one, then the challenge cases
   r = await tryForge({ counter: ++counter });
   check('a good assertion after refusals → 200 (and resets the failure count)', r.f && r.f.status === 200, r.f);
-  let f = await api('POST', '/t/auth/passkey/finish', { intent: 'login', challenge: good.handle, credential: forge(good.ch, { counter: ++counter }) });
+  let f = await api('POST', '/t/auth/passkey/finish', { intent: 'login', challenge: good.handle, credential: forge(good.ch, { counter: ++counter }) }, elsewhere());
   check('passkey refused: a used challenge (one-use) → 401 challenge', f.status === 401 && f.data.why === 'challenge', f);
   const su = await api('POST', '/t/auth/passkey/begin', { intent: 'step-up' });
-  f = await api('POST', '/t/auth/passkey/finish', { intent: 'login', challenge: su.data.challenge, credential: forge(su.data.options.publicKey.challenge, { counter: ++counter }) });
+  f = await api('POST', '/t/auth/passkey/finish', { intent: 'login', challenge: su.data.challenge, credential: forge(su.data.options.publicKey.challenge, { counter: ++counter }) }, elsewhere());
   check('passkey refused: a step-up challenge used to sign in → 401 challenge', su.status === 200 && f.status === 401 && f.data.why === 'challenge', [su.status, f]);
-  r = await tryForge({ counter: ++counter, type: 'webauthn.create' });
+  r = await tryForge({ counter: ++counter, type: 'webauthn.create' }, 'login', elsewhere());
   check('passkey refused: client data of type webauthn.create → 401', r.f && r.f.status === 401, r.f);
-  // lockout: 5 bad signatures in a row (the one above counted) → 429, audited
+  // a ceremony begun before the counter moved: webauthn-rs checks the copy sealed at begin, the
+  // trunk checks the stored counter too (a clone that began early cannot reuse a counter value)
+  const early = await api('POST', '/t/auth/passkey/begin', { intent: 'login' }, elsewhere());
+  r = await tryForge({ counter: ++counter });
+  f = await api('POST', '/t/auth/passkey/finish', { intent: 'login', challenge: early.data.challenge, credential: forge(early.data.options.publicKey.challenge, { counter }) }, elsewhere());
+  let w0 = await whyOf();
+  check('passkey refused: a counter value already used, from a ceremony begun before it moved → 401 (counter)', r.f.status === 200 && f.status === 401 && w0 === 'counter', [r.f.status, f, w0]);
+  // anonymous refusals never lock the owner's second factor (they count per network only)
+  for (let i = 0; i < 6; i++) {
+    const b = await api('POST', '/t/auth/passkey/begin', { intent: 'login' }, elsewhere());
+    await api('POST', '/t/auth/passkey/finish', { intent: 'login', challenge: b.data.challenge, credential: { id: 'x' } }, elsewhere());
+  }
+  const lg = await api('POST', '/t/auth/login', { email: P.email, password: P.password });
+  const mf = await api('POST', '/t/auth/mfa', { mfa_ticket: lg.data.mfa_ticket, totp: await totp() });
+  rows = await audit(12);
+  check('6 anonymous refused passkey sign-ins do not lock TOTP (no lockout.mfa; password + TOTP still works)', mf.status === 200 && !rows.some((e) => e.action === 'lockout.mfa'), [mf, rows.map((e) => e.action)]);
+  // lockout: 5 refused passkeys as the second factor (the password was right) → 429, the TOTP lock, audited
+  const lt = await api('POST', '/t/auth/login', { email: P.email, password: P.password });
   let last = null;
-  for (let i = 0; i < 4; i++) last = (await tryForge({ counter: ++counter, badSig: true })).f;
+  for (let i = 0; i < 5; i++) last = (await tryForge({ counter: ++counter, badSig: true }, 'mfa', null, { mfa_ticket: lt.data.mfa_ticket })).f;
   rows = await audit(4);
-  check('passkey lockout: 5 refused assertions → 429 + lockout.mfa (the TOTP lockout, shared)', last && last.status === 429 && rows.some((e) => e.action === 'lockout.mfa'), [last, rows.map((e) => e.action)]);
-  const locked = await api('POST', '/t/auth/passkey/begin', { intent: 'login' });
-  check('passkey lockout: no new prompt while locked', locked.status === 429, locked);
+  check('passkey lockout: 5 refused second-factor passkeys → 429 + lockout.mfa (shared with TOTP)', last && last.status === 429 && rows.some((e) => e.action === 'lockout.mfa'), [last, rows.map((e) => e.action)]);
+  const locked = await api('POST', '/t/auth/passkey/begin', { intent: 'mfa', mfa_ticket: lt.data.mfa_ticket });
+  const tl = await api('POST', '/t/auth/mfa', { mfa_ticket: lt.data.mfa_ticket, totp: '000000' });
+  check('passkey lockout: no new second-factor prompt and no TOTP while locked', locked.status === 429 && tl.status === 429, [locked, tl]);
+  // the open-redirect guard of /login's ?next= (browsers drop tabs: "/\t/x" → "//x")
+  const nx = await page.evaluate(() => { const u = location.href; history.replaceState(null, '', '/login?next=' + encodeURIComponent('/\t/evil.example')); const v = nextPath(); history.replaceState(null, '', u); return v; });
+  check('?next= with a tab is not followed (→ /)', nx === '/', nx);
   await sleep(16000); // TRUNK_TEST_FAST: 15 min → 15 s
 
   // 6 · a cloned authenticator: put the credential back with an old counter → refused

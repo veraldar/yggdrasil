@@ -138,6 +138,10 @@ impl OAuth {
 
 /// An endpoint a provider may use: https, or plain http to a loopback address (a rig's mock).
 pub fn provider_url_ok(u: &str) -> bool {
+    // it ends up in a Location header: no control characters, no spaces
+    if u.is_empty() || u.len() > 2048 || u.chars().any(|c| c.is_control() || c.is_whitespace()) {
+        return false;
+    }
     let Some(o) = origin_of(u) else { return false };
     if o.starts_with("https://") {
         return true;
@@ -287,10 +291,17 @@ impl Config {
         self.public_url.trim_end_matches('/').to_string()
     }
 
-    /// Origins a browser write may carry: public_url plus https://<each extra name>.
+    /// Origins a browser write may carry: public_url, https://<each extra name>, and each of
+    /// `origins` (spec §11 step 6 adds `ap.` there at switchover; its pages must be able to write).
     pub fn write_origins(&self) -> Vec<String> {
         let mut v = vec![self.origin()];
         v.extend(self.extra_names.iter().map(|n| format!("https://{n}")));
+        for o in &self.origins {
+            let o = o.trim_end_matches('/').to_ascii_lowercase();
+            if !v.contains(&o) {
+                v.push(o);
+            }
+        }
         v
     }
 
@@ -302,17 +313,10 @@ impl Config {
         strip_port(&self.host()).to_string()
     }
 
-    /// Origins a passkey ceremony may come from: public_url, each extra name, and `origins`
-    /// (exact matches; no subdomain or port wildcards).
+    /// Origins a passkey ceremony may come from: the same list (exact matches; no subdomain or
+    /// port wildcards).
     pub fn passkey_origins(&self) -> Vec<String> {
-        let mut v = self.write_origins();
-        for o in &self.origins {
-            let o = o.trim_end_matches('/').to_ascii_lowercase();
-            if !v.contains(&o) {
-                v.push(o);
-            }
-        }
-        v
+        self.write_origins()
     }
 
     pub fn host(&self) -> String {
@@ -427,9 +431,14 @@ client_secret_file = "oauth-google"
         let moved = format!("{MIN}\nrp_id = \"veraldar.org\"\nextra_names = [\"ap.veraldar.org\"]\norigins = [\"https://ljoolq.veraldar.org\"]\n");
         let c = Config::parse(&moved).unwrap();
         assert_eq!(c.passkey_origins(), vec!["https://ljoolq.veraldar.org", "https://ap.veraldar.org"]);
+        let ap = Config::parse(&format!("{MIN}\nrp_id = \"veraldar.org\"\norigins = [\"https://ap.veraldar.org\"]\n")).unwrap();
+        assert_eq!(ap.write_origins(), vec!["https://ljoolq.veraldar.org", "https://ap.veraldar.org"], "a host in origins may write too (switchover)");
         assert!(Config::parse(&format!("{MIN}\nrp_id = \"example.org\"\n")).is_err());
         assert!(Config::parse(&format!("{MIN}\nrp_id = \"veraldar.org\"\norigins = [\"https://evil.example\"]\n")).is_err());
         assert!(Config::parse(&format!("{MIN}\nrp_id = \"ar.org\"\n")).is_err(), "a suffix that is not a parent domain");
+        assert!(!provider_url_ok("https://idp.example/authorize\r\nSet-Cookie: x=1"));
+        assert!(!provider_url_ok("https://idp.example/a b"));
+        assert!(provider_url_ok("https://idp.example/authorize?x=1") && provider_url_ok("http://localhost:18890/a"));
         assert_eq!(strip_port("[::1]:80"), "[::1]");
         assert_eq!(strip_port("host"), "host");
     }
