@@ -197,7 +197,7 @@ check n0 "newer() & major_of(): pre-release < release, 1.x vs 2.x — in trunk.s
 # =========================================================================================== stage a
 if stage a; then
   say "stage a: fresh VPS, trunk.sh v1 --self-signed (signed, static user, claim, /install/root.sh, update + --major)"
-  new_vps ot-vps-a "$IP_A" "$A" "extra.tree.test"; to_box ot-vps-a
+  new_vps ot-vps-a "$IP_A" "$A" "extra.trunk.tree.test"; to_box ot-vps-a
   docker cp "$DIST/trunk.sh" ot-vps-a:/root/trunk.sh >/dev/null
   vps ot-vps-a "sed \"s/^YGG_RELEASE_TEST='1'/YGG_RELEASE_TEST=''/\" /root/trunk.sh >/root/trunk-real.sh &&
     cp /root/trunk.sh /root/trunk-changed.sh && echo '# one line more' >>/root/trunk-changed.sh"
@@ -252,10 +252,10 @@ if stage a; then
 
   KEYSUM=$(vps ot-vps-a 'sha256sum </etc/yggdrasil-trunk/key.pem')
   KEKSUM=$(vps ot-vps-a 'sha256sum </etc/yggdrasil-trunk/trunk-kek')
-  vps ot-vps-a "cd /root && $REL bash trunk.sh --add-name extra.tree.test -y" >"$STATE/log/a4-addname.log" 2>&1; rc=$?
+  vps ot-vps-a "cd /root && $REL bash trunk.sh --add-name extra.trunk.tree.test -y" >"$STATE/log/a4-addname.log" 2>&1; rc=$?
   check a4 "SPKI pin matches, --add-name writes extra_names, re-run keeps key + kek + pin" \
     bash -c "[ $rc = 0 ] && [ \"\$(docker exec ot-vps-a /usr/local/lib/yggdrasil-trunk/bifrost-net ap-pin /etc/yggdrasil-trunk/cert.pem)\" = 'pin = \"sha-256 $PIN_A\"' ] && \
-      docker exec ot-vps-a grep -q 'extra_names *=.*\"extra.tree.test\"' /etc/yggdrasil-trunk/trunk.toml && \
+      docker exec ot-vps-a grep -q 'extra_names *=.*\"extra.trunk.tree.test\"' /etc/yggdrasil-trunk/trunk.toml && \
       [ \"\$(docker exec ot-vps-a bash -c 'sha256sum </etc/yggdrasil-trunk/key.pem')\" = '$KEYSUM' ] && \
       [ \"\$(docker exec ot-vps-a bash -c 'sha256sum </etc/yggdrasil-trunk/trunk-kek')\" = '$KEKSUM' ]"
 
