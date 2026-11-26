@@ -6,6 +6,7 @@ import { Streamdown } from 'streamdown';
 import { LineIcon } from '@/components/line-icon';
 import { Marked } from '@/components/marked';
 import { artifactName, artifactRefs, openInNewTabLabel } from '@/lib/artifact-refs';
+import { useCopyLink } from '@/lib/copy-link';
 import { type FileChip, fmtSize } from '@/lib/file-ref';
 import { type RouteTarget, linkRouteTags } from '@/lib/route-tags';
 import { slugify } from '@/lib/slug';
@@ -105,6 +106,25 @@ function OpenTabLink({
   );
 }
 
+/** Full-width key under an inline artifact: tap = its full URL on the clipboard. */
+function CopyLinkBar({ src, name }: { src: string; name: string }) {
+  const { copied, copy } = useCopyLink(src);
+  return (
+    <button
+      type="button"
+      onClick={copy}
+      onPointerDown={(e) => e.stopPropagation()}
+      data-artifact-open=""
+      data-testid="artifact-copy"
+      aria-label={copied ? `${name} link copied` : `copy link to ${name}`}
+      className={`oz-k sm mt-1 w-full ${copied ? 'ok' : 'text-[var(--oz-text)]'}`}
+    >
+      <LineIcon name={copied ? 'check' : 'copy'} size={12} />
+      {copied ? 'copied' : 'copy link'}
+    </button>
+  );
+}
+
 /** Inline viewer for one artifact reference. md/text are fetched and shown
  *  (md via markdown); html/audio/pdf get native-ish embeds. Silent while the
  *  file is missing (agent may still be writing it mid-stream). */
@@ -126,50 +146,73 @@ function ArtifactView({ src, kind }: { src: string; kind: string }) {
 
   if (kind === 'html') {
     return (
-      <div data-testid="artifact-preview" data-artifact-kind="html" className="relative mt-1">
-        <iframe
-          // allow-same-origin (11-24): the load must ride the pinned channel —
-          // a fully sandboxed iframe is opaque-origin, invisible to sw.js, and
-          // went straight to the edge relay. allow-scripts stays off.
-          sandbox="allow-same-origin"
-          src={src}
-          title={name}
-          className="block h-64 w-full border border-[var(--oz-border)] bg-white"
-        />
-        <OpenTabLink src={src} name={name} className="absolute top-1.5 right-1.5 z-10" />
-      </div>
+      <>
+        <div data-testid="artifact-preview" data-artifact-kind="html" className="relative mt-1">
+          <iframe
+            // allow-same-origin (11-24): the load must ride the pinned channel —
+            // a fully sandboxed iframe is opaque-origin, invisible to sw.js, and
+            // went straight to the edge relay. allow-scripts stays off.
+            sandbox="allow-same-origin"
+            src={src}
+            title={name}
+            className="block h-64 w-full border border-[var(--oz-border)] bg-white"
+          />
+          <OpenTabLink src={src} name={name} className="absolute top-1.5 right-1.5 z-10" />
+        </div>
+        <CopyLinkBar src={src} name={name} />
+      </>
     );
   }
   if (kind === 'audio') {
-    return <audio controls src={src} className="mt-1 w-full" preload="none" />;
+    return (
+      <>
+        <audio controls src={src} className="mt-1 w-full" preload="none" />
+        <CopyLinkBar src={src} name={name} />
+      </>
+    );
   }
   if (kind === 'pdf') {
     return (
-      <a href={src} target="_blank" rel="noreferrer" className="oz-chip mt-1 text-[var(--oz-info)]">
-        <LineIcon name="artifact" size={13} />
-        {name} — tap to view
-      </a>
+      <>
+        <a
+          href={src}
+          target="_blank"
+          rel="noreferrer"
+          className="oz-chip mt-1 text-[var(--oz-info)]"
+        >
+          <LineIcon name="artifact" size={13} />
+          {name} — tap to view
+        </a>
+        <CopyLinkBar src={src} name={name} />
+      </>
     );
   }
   if (text === null) return null;
   const body = text.length > 20000 ? `${text.slice(0, 20000)}…` : text;
   return (
-    <div data-testid="artifact-preview" data-artifact-kind={kind} className="oz-box mt-1 px-2 py-1">
-      <div className="flex min-w-0 items-center gap-1.5 text-[10px] text-[var(--oz-dim)]">
-        <LineIcon name="attach" size={11} className="shrink-0" />
-        <span className="min-w-0 flex-1 truncate">{name}</span>
-        <OpenTabLink src={src} name={name} className="shrink-0" />
-      </div>
-      {kind === 'md' ? (
-        <div className="mt-1 max-h-96 overflow-auto">
-          <Streamdown>{body}</Streamdown>
+    <>
+      <div
+        data-testid="artifact-preview"
+        data-artifact-kind={kind}
+        className="oz-box mt-1 px-2 py-1"
+      >
+        <div className="flex min-w-0 items-center gap-1.5 text-[10px] text-[var(--oz-dim)]">
+          <LineIcon name="attach" size={11} className="shrink-0" />
+          <span className="min-w-0 flex-1 truncate">{name}</span>
+          <OpenTabLink src={src} name={name} className="shrink-0" />
         </div>
-      ) : (
-        <pre className="mt-1 max-h-64 overflow-auto text-[10px] whitespace-pre-wrap text-[var(--oz-dim)]">
-          {body}
-        </pre>
-      )}
-    </div>
+        {kind === 'md' ? (
+          <div className="mt-1 max-h-96 overflow-auto">
+            <Streamdown>{body}</Streamdown>
+          </div>
+        ) : (
+          <pre className="mt-1 max-h-64 overflow-auto text-[10px] whitespace-pre-wrap text-[var(--oz-dim)]">
+            {body}
+          </pre>
+        )}
+      </div>
+      <CopyLinkBar src={src} name={name} />
+    </>
   );
 }
 
