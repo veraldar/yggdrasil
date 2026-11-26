@@ -91,7 +91,7 @@ test('roots sheet → a computer\'s page: its settings, theme saved on lab, sess
   });
 
   await test.step('home → the roots key → home first (home · swatch · on), then lab (swatch · on · linux)', async () => {
-    await page.goto('/');
+    await page.goto('/home');
     await openSheet(page);
     const sheet = page.getByTestId('roots-sheet');
     await expect(sheet).toBeVisible();
@@ -99,10 +99,11 @@ test('roots sheet → a computer\'s page: its settings, theme saved on lab, sess
     await expect(rows).toHaveCount(2);
     await expect(rows.nth(0)).toHaveAttribute('data-root', 'home');
     await expect(rows.nth(0)).toContainText('home');
-    await expect(rows.nth(0).getByTestId('root-swatch')).toBeVisible();
+    await expect(rows.nth(0)).toHaveAttribute('data-theme', /^[a-z]+$/);
+    await expect(rows.nth(0).getByTestId('root-swatch')).toHaveCount(0);
     await expect(rows.nth(0).getByTestId('root-state')).toHaveText('on');
     await expect(rows.nth(1)).toHaveAttribute('data-root', 'lab');
-    await expect(rows.nth(1).getByTestId('root-swatch')).toBeVisible();
+    await expect(rows.nth(1)).toHaveAttribute('data-theme', /^[a-z]+$/);
     await expect(rows.nth(1).getByTestId('root-state')).toHaveText('on');
     await expect(rows.nth(1)).toContainText('linux');
     await shot(page, 'sheet');
@@ -170,7 +171,7 @@ test('roots sheet → a computer\'s page: its settings, theme saved on lab, sess
   });
 
   await test.step('back home: that session carries the [lab] tag + swatch; no MAIN of lab on the list', async () => {
-    await page.goto('/');
+    await page.goto('/home');
     const row = page.locator('.oz-row', { hasText: TITLE });
     await expect(row).toBeVisible({ timeout: 20_000 });
     await expect(row.getByTestId('root-tag')).toHaveText('[lab]');
@@ -189,7 +190,7 @@ test('roots sheet → a computer\'s page: its settings, theme saved on lab, sess
     await hold(page, page.locator('[data-testid="root-row"][data-root="home"]'));
     await expect(page.getByTestId('roots-sheet')).toHaveCount(0, { timeout: 15_000 });
     await expect(page.getByTestId('root-confirm')).toHaveCount(0);
-    expect(new URL(page.url()).pathname).toBe('/');
+    expect(new URL(page.url()).pathname).toBe('/home');
     await openSheet(page);
     await hold(page, lab);
     const ask = page.getByTestId('root-confirm');
@@ -210,7 +211,7 @@ test('roots sheet → a computer\'s page: its settings, theme saved on lab, sess
     expect(Date.parse(rec.revoked_at)).toBeGreaterThan(Date.now() - 120_000);
     const after = (await (await request.get(`${HOME}/root`)).json()) as { roots?: RootJ[] };
     expect(after.roots?.some((x) => x.name === 'lab')).toBe(false);
-    await page.goto('/');
+    await page.goto('/home');
     await openSheet(page);
     await expect(page.getByTestId('root-row')).toHaveCount(1);
   });
@@ -320,7 +321,7 @@ test.describe('away', () => {
     await page.route('**/api/roots/mac-studio/artifacts', (r) =>
       r.fulfill({ json: { root: 'mac-studio', reachable: false, artifacts: [] } })
     );
-    await page.goto('/');
+    await page.goto('/home');
     await openSheet(page);
     const mac = page.locator('[data-testid="root-row"][data-root="mac-studio"]');
     await expect(mac.getByTestId('root-state')).toHaveText('last seen 5 min ago');
