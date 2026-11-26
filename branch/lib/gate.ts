@@ -65,16 +65,30 @@ export async function deviceGate(req: NextRequest): Promise<NextResponse> {
   const region = regionOfReq(req);
   const gate = await checkAccess(raw, region);
   if (!gate.ok) {
-    // the meter: a refusal and the hint it sends back (a bare missing token is a stranger:
-    // not an event)
-    if (gate.why !== 'missing') {
-      obsEvent('deny', { src: 'app', why: gate.why, hint: REAUTH[gate.why], device: gate.device, region, path: routeClass(path) });
+    // the meter: a refusal and the hint it sends back. A bare missing token is a stranger (not an
+    // event) — unless it is a page load: that is a link tapped open whose cookie did not ride, the
+    // owner's 11-26 case, which the proxy's log shows only as "missing" with no address or cause.
+    const nav = isNavigation(req);
+    if (gate.why !== 'missing' || nav) {
+      obsEvent('deny', {
+        src: 'app',
+        why: gate.why,
+        hint: REAUTH[gate.why],
+        device: gate.device,
+        region,
+        path: routeClass(path),
+        nav,
+        // what the browser says it is doing (names only, never values of credentials)
+        site: req.headers.get('sec-fetch-site') || '',
+        dest: req.headers.get('sec-fetch-dest') || '',
+        sw: req.headers.has('x-bifrost-dest'),
+      });
     }
     // a link tapped open (an artifact in a new tab) is a page load: it carries no Authorization, only
     // the cookie — which SameSite=Strict withholds on a link followed from another site, and which
     // outlives its token. A JSON 401 there is a dead end (owner 11-26); /pair asks the box again from
     // inside the site (the refresh cookie rides) and loads this address again — as for a page.
-    if (isNavigation(req)) return toPair(req);
+    if (nav) return toPair(req);
     return NextResponse.json(
       { error: 'device token required', why: gate.why, reauth: REAUTH[gate.why] },
       { status: 401 }
