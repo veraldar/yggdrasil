@@ -36,10 +36,11 @@ const PHONE = '203.0.113.9';
 const RGN = 'net:203.0.0.0/16';
 const key = ta.secretKeyFromSeed(Buffer.alloc(32, 9));
 const pubRaw = ta.rawPublic(key);
+const ISS = 'https://ljoolq.veraldar.org';
 const writeState = (over = {}) => {
   const s = {
     version: 1,
-    trunk: { url: 'https://ljoolq.veraldar.org', trunk_id: 'trk_t', trunk_key: 'k' },
+    trunk: { url: ISS, trunk_id: 'trk_t', trunk_key: 'k', issuers: [ISS] },
     root: { id: 'rt_t', name: 'twin' },
     link: { state: 'up', since: Date.now(), written: Date.now() },
     keys: [{ kid: ta.kidOf(pubRaw), alg: 'ed25519', public: pubRaw.toString('base64url'), retired_at: null }],
@@ -56,7 +57,7 @@ const writeState = (over = {}) => {
 writeState();
 const settle = () => new Promise((r) => setTimeout(r, ta.STATE_CHECK_MS + 20));
 
-const token = (claims = {}, opts = {}) => ta.mintToken(key, { did: 'dev_phone', rgn: RGN, kep: 1, ...claims }, opts);
+const token = (claims = {}, opts = {}) => ta.mintToken(key, { did: 'dev_phone', rgn: RGN, kep: 1, iss: ISS, ...claims }, opts);
 const req = (url, { peer = PHONE, cookie, bearer, method = 'GET' } = {}) => {
   const headers = new Headers({ 'x-bifrost-peer': peer });
   if (cookie) headers.set('cookie', `bifrost_device=${cookie}`);
