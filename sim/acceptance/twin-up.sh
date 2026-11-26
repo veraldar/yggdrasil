@@ -10,6 +10,7 @@
 #   C3 tokens; every cookie-less request is signed in as the twin's device, TWIN_SIGN_IN=cookie turns
 #   that off). Drive the app through the front: PW_BASE_URL=http://127.0.0.1:19050. Default
 #   TWIN_AUTH=tailnet: exactly the twin as before (next start, BIFROST_AUTH=tailnet, no front).
+# TWIN_VOICE_AGENT=1 (with TWIN_LIVEKIT=1): the voice agent beside that LiveKit (for the PTT / hands-free specs).
 # TWIN_ARTIFACTS_DIR: the app's artifacts dir (default <twin>/artifacts); the worktree's artifacts/ for
 #   specs that drop files there (artifacts, chat-files).
 # Everything lives in ~/.cache/root-sim/acc-<run>/.   twin-up.sh <run> down  — stop the units.
@@ -32,8 +33,8 @@ if [ "$DO" != down ]; then
   done
 fi
 if [ "$DO" = down ]; then
-  systemctl --user stop rootsim-acc-$RUN-librarian rootsim-acc-$RUN-tap acc-$RUN-livekit acc-$RUN-app acc-$RUN-trunk rootsim-acc-$RUN rootsim-acc-$RUN-secrets 2>/dev/null || true
-  for u in rootsim-acc-$RUN-librarian rootsim-acc-$RUN-tap acc-$RUN-livekit acc-$RUN-app acc-$RUN-trunk rootsim-acc-$RUN rootsim-acc-$RUN-secrets; do systemctl --user reset-failed "$u" 2>/dev/null || true; done
+  systemctl --user stop rootsim-acc-$RUN-librarian rootsim-acc-$RUN-tap acc-$RUN-livekit acc-$RUN-agent acc-$RUN-app acc-$RUN-trunk rootsim-acc-$RUN rootsim-acc-$RUN-secrets 2>/dev/null || true
+  for u in rootsim-acc-$RUN-librarian rootsim-acc-$RUN-tap acc-$RUN-livekit acc-$RUN-agent acc-$RUN-app acc-$RUN-trunk rootsim-acc-$RUN rootsim-acc-$RUN-secrets; do systemctl --user reset-failed "$u" 2>/dev/null || true; done
   echo "twin $RUN down"; exit 0
 fi
 BIN=${DO:-$ROOT/root/target/release/yggdrasil}
@@ -107,6 +108,32 @@ YAML
   for _ in $(seq 1 40); do curl -sf -m 1 "http://127.0.0.1:$LK_PORT/" >/dev/null 2>&1 && break; sleep 0.25; done
   # livekit.localhost resolves to 127.0.0.1 in Chromium (RFC 6761) and matches base.spec.ts's ws url check
   LK_ENV=(-E LIVEKIT_URL="ws://livekit.localhost:$LK_PORT" -E LIVEKIT_API_URL="http://127.0.0.1:$LK_PORT" -E LIVEKIT_API_KEY=devkey -E LIVEKIT_API_SECRET=secret)
+fi
+
+# 2c. optional voice agent next to that LiveKit (TWIN_VOICE_AGENT=1, needs TWIN_LIVEKIT=1; default 0:
+#     the twin as before). The agent joins a session's room and answers its RPCs (free_state, ptt_begin…),
+#     which hands-free / PTT specs need; no speech server — nothing here speaks or listens for real.
+if [ "${TWIN_VOICE_AGENT:-0}" = 1 ]; then
+  [ -n "$LK_PORT" ] || { echo "TWIN_VOICE_AGENT=1 needs TWIN_LIVEKIT=1"; exit 1; }
+  AGENT_VENV=${AGENT_VENV:-$HOME/.cache/trunk-rtc/agent-venv}
+  [ -x "$AGENT_VENV/bin/python" ] || { echo "TWIN_VOICE_AGENT=1: agent venv not found at $AGENT_VENV (sim/trunk-rtc/setup.sh)"; exit 1; }
+  AG_PORT=""
+  for cand in $(seq 19060 19069); do
+    if ! ss -ltn 2>/dev/null | grep -qE "[:.]${cand}[[:space:]]"; then AG_PORT=$cand; break; fi
+  done
+  [ -n "$AG_PORT" ] || { echo "TWIN_VOICE_AGENT=1: no free port in 19060-19069"; exit 1; }
+  systemctl --user stop acc-$RUN-agent 2>/dev/null || true
+  systemctl --user reset-failed acc-$RUN-agent 2>/dev/null || true
+  # AGENT_LOAD=off: the worker's availability must not follow this machine's cpu load
+  systemd-run --user --unit acc-$RUN-agent --collect -q --working-directory="$ROOT/branch/voice" \
+    -E HF_HUB_OFFLINE=1 -E TRANSFORMERS_OFFLINE=1 -E LIVEKIT_URL="ws://127.0.0.1:$LK_PORT" \
+    -E LIVEKIT_API_KEY=devkey -E LIVEKIT_API_SECRET=secret -E OPENCODE_URL="$BR" \
+    -E SPEACHES_URL="http://127.0.0.1:1/v1" -E AGENT_HTTP_PORT=$AG_PORT -E AGENT_TTS=off \
+    -E APP_URL="http://127.0.0.1:8250" -E AGENT_LOAD_THRESHOLD=inf -E AGENT_LOAD=off \
+    -p StandardOutput=append:"$T/agent.log" -p StandardError=append:"$T/agent.log" \
+    "$AGENT_VENV/bin/python" agent.py start >/dev/null
+  for _ in $(seq 1 60); do grep -q "registered worker" "$T/agent.log" 2>/dev/null && break; sleep 0.5; done
+  grep -q "registered worker" "$T/agent.log" 2>/dev/null || echo "warn: the voice agent has not registered with LiveKit (see $T/agent.log)"
 fi
 
 # 3. the app: the worktree's build — tailnet mode (the twin is loopback-only), or trunk mode (v1)

@@ -1,0 +1,48 @@
+diff --git i/branch/e2e/base.spec.ts w/branch/e2e/base.spec.ts
+index fac8916b..87390508 100644
+--- i/branch/e2e/base.spec.ts
++++ w/branch/e2e/base.spec.ts
+@@ -65,8 +65,8 @@ test('attachments: image + file chips, remove, send via REST', async ({ page })
+   await page.getByRole('button', { name: 'remove dot.png' }).click();
+   await expect(page.getByText('dot.png')).toHaveCount(0);
+   await page.getByRole('button', { name: 'send', exact: true }).click();
+-  // the sent file lands in the transcript as its own collapsible chunk
+-  await expect(page.locator('[data-mi] summary', { hasText: 'note.md' })).toBeVisible({
++  // the sent file lands in the transcript as a chip (name + size) that opens it (P2: file chips, msg-file)
++  await expect(page.getByTestId('msg-file').filter({ hasText: 'note.md' })).toBeVisible({
+     timeout: 30_000,
+   });
+ });
+@@ -116,7 +116,8 @@ test('hands-free mode arms without error', async ({ page }) => {
+   await page.goto(`/session/${NAME}?id=${sessionId}`);
+   // tap the composer mic (req 09-30): the tap toggles hands-free on
+   await page.getByRole('button', { name: 'push to talk' }).click();
+-  await expect(page.getByText(/hands-free/).first()).toBeVisible({
++  // no visible word in hands-free (owner 11-04 hf-strip law): the strip's bars + the exit are the proof
++  await expect(page.getByRole('button', { name: 'leave hands-free' })).toBeVisible({
+     timeout: 30_000,
+   });
+   // wait out the free-dock ghost guard (400ms) — see freeGhostGuardRef
+diff --git i/branch/e2e/list-order.spec.ts w/branch/e2e/list-order.spec.ts
+index 436b12fa..9d1cee6c 100644
+--- i/branch/e2e/list-order.spec.ts
++++ w/branch/e2e/list-order.spec.ts
+@@ -131,6 +131,18 @@ test("a reply never moves a session up; the owner's own message does", async ({
+   await page.screenshot({ path: 'test-results/order-1-reply-stays.png' });
+   // the owner writes in A: A goes up
+   await say(request, A, 'Reply with exactly: a-3');
++  // `say` can return on the list's cached idle row before the turn is on it: wait for the owner's
++  // newer message in the list itself, from a fresh list (the app keeps it a minute)
++  await expect
++    .poll(
++      async () => {
++        await freshList(request);
++        const [a, b] = [await rowOf(request, A.id), await rowOf(request, B.id)];
++        return (a?.userAt || 0) > (b?.userAt || 0);
++      },
++      { timeout: 30_000 }
++    )
++    .toBe(true);
+   await page.goto('/');
+   await expect(page.locator('.oz-row .t', { hasText: A.name })).toBeVisible();
+   order = await titles(page);
