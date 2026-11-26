@@ -56,8 +56,14 @@ test('signed in on the trunk → the app, as today (the sessions list from the r
   await signIn(page, did('in'));
   await expect(page).toHaveURL(/\/$/);
   await home(page);
-  const names = (await context.cookies()).map((c) => `${c.name}@${c.path}`).sort();
-  expect(names).toEqual(['bifrost_device@/', 'bifrost_refresh@/t/auth']);
+  const jar = await context.cookies();
+  const names = jar.map((c) => `${c.name}@${c.path}`).sort();
+  // bifrost_mode (lib/gate.ts TRUNK_MODE_COOKIE): the page's script-readable trunk-mode marker for the P11
+  // boot hold in lib/pinned.ts — the value `trunk` and nothing else; the two credentials stay HttpOnly
+  expect(names).toEqual(['bifrost_device@/', 'bifrost_mode@/', 'bifrost_refresh@/t/auth']);
+  const mode = jar.find((c) => c.name === 'bifrost_mode')!;
+  expect([mode.value, mode.httpOnly]).toEqual(['trunk', false]);
+  expect(jar.filter((c) => c.name !== 'bifrost_mode').every((c) => c.httpOnly)).toBe(true);
 });
 
 test('B10: an expired access token → a single-flight POST /t/auth/refresh, then the calls go through', async ({ page }) => {
