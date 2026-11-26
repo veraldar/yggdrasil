@@ -65,8 +65,8 @@ test('attachments: image + file chips, remove, send via REST', async ({ page }) 
   await page.getByRole('button', { name: 'remove dot.png' }).click();
   await expect(page.getByText('dot.png')).toHaveCount(0);
   await page.getByRole('button', { name: 'send', exact: true }).click();
-  // the sent file lands in the transcript as its own collapsible chunk
-  await expect(page.locator('[data-mi] summary', { hasText: 'note.md' })).toBeVisible({
+  // the sent file lands in the transcript as a chip (name + size) that opens it (file chips, msg-file)
+  await expect(page.locator('[data-mi]').getByTestId('msg-file').filter({ hasText: 'note.md' })).toBeVisible({
     timeout: 30_000,
   });
 });
@@ -116,9 +116,10 @@ test('hands-free mode arms without error', async ({ page }) => {
   await page.goto(`/session/${NAME}?id=${sessionId}`);
   // tap the composer mic (req 09-30): the tap toggles hands-free on
   await page.getByRole('button', { name: 'push to talk' }).click();
-  await expect(page.getByText(/hands-free/).first()).toBeVisible({
-    timeout: 30_000,
-  });
+  // no visible word in hands-free (owner 11-04 hf-strip law, 11-11 round3). The word showed only once the
+  // voice was ready and listening: that state is now the strip without its `wait` class, the exit beside it
+  await expect(page.getByTestId('free-strip')).not.toHaveClass(/\bwait\b/, { timeout: 30_000 });
+  await expect(page.getByRole('button', { name: 'leave hands-free' })).toBeVisible();
   // wait out the free-dock ghost guard (400ms) — see freeGhostGuardRef
   await page.waitForTimeout(450);
   await page.getByRole('button', { name: 'leave hands-free' }).click();

@@ -72,6 +72,7 @@ test('hands-free: keyword protocol status, no cancel button, screenshot', async 
   await expect(phase).toBeVisible({ timeout: 30_000 });
   // ready: the strip's "connecting…" gives way to the bars
   await expect(page.getByTestId('free-strip')).not.toContainText('connecting', { timeout: 30_000 });
+  await expect(page.getByTestId('free-strip')).not.toHaveClass(/\bwait\b/, { timeout: 30_000 });
   // the cancel button is gone; turns are committed by saying "over"
   await expect(page.getByTestId('free-cancel')).toHaveCount(0);
   // hands-free listening carries no visible word (owner 11-04 hf-strip law, 11-11 round3): the cycle is
