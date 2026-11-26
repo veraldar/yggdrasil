@@ -993,7 +993,9 @@ export function bootPinned(): void {
     if (trunkPage() && pinnable()) {
       wireChannelHooks();
       setState('connecting', "asking the trunk for this computer's key");
-      void bootTrunkPinned(true);
+      void bootTrunkPinned(true).catch(() => {
+        if (state === 'connecting') setState('off');
+      });
       return;
     }
     setState('off');
