@@ -851,7 +851,20 @@ test('G3.2 v1 trunk rtc: QR pairing, voice over the trunk, ufrag routing, revoke
       expect(cutMs, 'the plain /rtc severed').toBeGreaterThanOrEqual(0);
       expect(cutMs, `plain /rtc severed in ${cutMs} ms`).toBeLessThanOrEqual(1000);
       const byBridge = (log(join(HOME_DIR, 'bridge.log')).match(/\/rtc of device \S+ severed/g) || []).length > cutBefore;
-      const t = await pageFetch(B2.page, '/api/token', { method: 'POST', body: { room: ROOM } });
+      // the revoked app answers its own 401 by going to /login (B10): a page.evaluate can land in
+      // that navigation ("Execution context was destroyed", G3.2 R7 on 3fe0812e) — wait for the page
+      // to settle and ask again, as R6 does (bounded)
+      let t = { status: 0, via: null as string | null, body: {} as J };
+      const until401 = Date.now() + 20_000;
+      while (Date.now() < until401) {
+        try {
+          t = await pageFetch(B2.page, '/api/token', { method: 'POST', body: { room: ROOM } });
+          break;
+        } catch (e) {
+          if (!/context was destroyed|navigat/i.test(String(e))) throw e;
+          await B2.page.waitForLoadState('load').catch(() => {});
+        }
+      }
       expect(t.status).toBe(401);
       expect(t.body.why).toBe('revoked');
       expect(t.body.reauth).toBe('login');
