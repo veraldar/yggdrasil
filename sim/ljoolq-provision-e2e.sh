@@ -86,7 +86,7 @@ ok "$([ $rc != 0 ] && grep -q 'gate check refused' "$STATE/refuse3" && [ ! -e "$
 
 # ── 2. up ─────────────────────────────────────────────────────────────────────────────────────────────────
 say "2. up (Incus from Debian, pool, bridge, firewall, profile, container, v1 trunk.sh inside)"
-INST_ARGS="--name ljoolq.veraldar.org --behind-proxy --bind 10.99.0.2 --trusted-proxy 10.99.0.1/32 --self-signed --binary /root/ljoolq-install/bifrost-net --no-firewall --no-auto-updates -y"
+INST_ARGS="--name ljoolq.veraldar.org --rp-id veraldar.org --behind-proxy --bind 10.99.0.2 --trusted-proxy 10.99.0.1/32 --self-signed --binary /root/ljoolq-install/bifrost-net --no-firewall --no-auto-updates -y"
 UP=(up "$SHA" --installer "$ROOT/trunk/install/trunk.sh" --push "$BIN"
     --installer-args "$INST_ARGS" --check-url http://10.99.0.2:8080/t/state --check-codes 200)
 t0=$(date +%s)
@@ -94,6 +94,11 @@ prov "${UP[@]}"; rc=$?
 ok "$rc" "ljoolq-provision.sh up exits 0 ($(( $(date +%s) - t0 )) s)" "$(tail -3 "$STATE/last" | tr '\n' ' ')"
 ok "$(grep -q 'TEST OVERRIDE: the gate check is SKIPPED' "$STATE/last"; echo $?)" "its output says the gate check (only) was skipped"
 grep '^==>' "$STATE/last" | sed 's/^/   /'
+# rp_id: the passkeys' domain is the parent (spec §11 step 6), so ap. can be added at the switchover
+ok "$(inct "grep -qx 'rp_id          = \"veraldar.org\"' /etc/yggdrasil-trunk/trunk.toml"; echo $?)" "the v1 trunk inside has rp_id = \"veraldar.org\" (not the name)"
+inct 'cd /root/ljoolq-install && bash trunk.sh --add-name ap.veraldar.org --binary /root/ljoolq-install/bifrost-net -y' >>"$LOG" 2>&1; rcn=$?
+sleep 3; code=$(bx "curl -s -o /dev/null -w '%{http_code}' http://10.99.0.2:8080/t/state")
+ok "$([ $rcn = 0 ] && [ "$code" = 200 ] && inct "grep -q 'ap.veraldar.org' /etc/yggdrasil-trunk/trunk.toml && grep -qx 'rp_id          = \"veraldar.org\"' /etc/yggdrasil-trunk/trunk.toml && systemctl is-active -q yggdrasil-trunk"; echo $?)" "--add-name ap.veraldar.org: the trunk restarts and answers ($code), rp_id unchanged" "rc $rcn"
 [ "$rc" = 0 ] || { echo "VERDICT: RED (up failed — the rest needs it) · log $LOG"; exit 1; }
 
 say "3. what it made"
