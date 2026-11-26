@@ -1,0 +1,14 @@
+[
+ {"code":"A1","ask":"May I apply the §3 spec edits in docs/trunk-v1/APP4-s3-spec-diffs.patch (base.spec.ts:48 file chips, base.spec.ts:115 hf-strip button, list-order fresh-list policy)?",
+  "who":"v1 · APP-4","role":"build","sid":"78e83e","asked":"11-26 21:11",
+  "unblocks":"G2.4 as-committed still has 3 reds; tests are waiting on this.",
+  "state":"pending"},
+ {"code":"A2","ask":"The twin.lock at ~/.cache/trunk-v1/twin.lock is NOT stale — it is held by a foreign ship1126app twin holding :4250/:8250. May I take over/clean up that foreign twin, or leave it alone?",
+  "who":"Settings v2.1","role":"build","sid":"ca3f64","asked":"11-26 21:25",
+  "unblocks":"5 undiagnosed spec fails + 3 unproven edited specs; shots skipped.",
+  "state":"pending"},
+ {"code":"A3","ask":"Review the two roles-cleanup proposal docs and answer the 12 questions in the doc — “yes to all” accepts every recommendation.",
+  "who":"Roles cleanup proposals","role":"research","asked":"11-22","link":"roles-cleanup-proposal.md",
+  "unblocks":"the roles cleanup (all 12 recommendations).",
+  "state":"pending"}
+]

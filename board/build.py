@@ -35,6 +35,27 @@ for a in asks:
     cards.append(f'<div class="c {st}"><div class="t"><span class="k">{LABEL[st].split(" /")[0] if st!="blocked" else "blocked"}</span>'
                  f'<span class="w">{e(a["when"])}</span></div><div class="q">{e(a["what"])}</div>{note}'
                  f'<div class="o">{e(a["who"])}{ls}</div>{delivery}</div>')
+# approvals: approvals.json, state = pending | approved | denied (+ "at" time) ; "commit"/"branch" once the work lands
+AST = {"pending": "pending", "approved": "approved", "denied": "denied"}
+acards = []
+for x in json.load(open(os.path.join(here, "approvals.json"))):
+    stt = x["state"]
+    line = ["pending"]
+    if stt in ("approved", "denied"): line = [f'{stt} {e(x.get("at",""))}'.strip()]
+    if x.get("commit"):
+        ok, _ = git("cat-file", "-e", x["commit"] + "^{commit}")
+        line.append(f'done <code>{e(x["commit"])}</code>' + ("" if ok == 0 else " ⚠ not found"))
+    elif stt == "approved": line.append("not landed yet")
+    lk = f'<div class="d"><a href="/api/artifact/{e(x["link"])}">{e(x["link"])}</a></div>' if x.get("link") else ""
+    ls = f' · session {e(live.get(x["sid"], "?"))}' if live is not None and x.get("sid") else ""
+    pend = "pending" if stt == "pending" else "ok"
+    acards.append(f'<div class="c ap {pend}"><div class="t"><span class="k">{e(x["code"])}</span><span class="w">asked {e(x["asked"])}</span></div>'
+                  f'<div class="q">{e(x["ask"])}</div><div class="o">{e(x["who"])} ({e(x["role"])}){ls}</div>'
+                  f'<div class="d">unblocks: {e(x["unblocks"])}</div>{lk}<div class="st">{" → ".join(line)}</div></div>')
+npend = sum(1 for x in json.load(open(os.path.join(here, "approvals.json"))) if x["state"] == "pending")
+if not acards: acards = ['<div class="c ok"><div class="q">Nothing is waiting on you.</div></div>']
+approvals = ('<h2>## approvals — waiting on you</h2><div class="s">reply in chat with the card code: “ok A1” approves, “no A1” denies</div>'
+             + "".join(acards))
 now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
 summ = " · ".join(f"{counts[s]} {s}" for s in ORDER if s in counts)
 page = f'''<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Requests</title>
@@ -46,8 +67,10 @@ h1{{font-size:16px;margin:0 0 2px}} .s{{color:#5a6a48;font-size:12px;margin-bott
 .t{{display:flex;justify-content:space-between;font-size:11px;text-transform:uppercase;letter-spacing:.05em}}
 .blocked .k{{color:#c0392b}} .stalled .k{{color:#b9770e}} .running .k{{color:#2e86c1}} .done .k{{color:#2e8b57}} .w{{color:#6b7a58}}
 .q{{font-weight:700;margin:2px 0}} .o{{font-size:12px;color:#4a5a38}} .n{{font-size:12px;color:#8a3a10}} .d{{font-size:12px;margin-top:2px;overflow-wrap:break-word}}
+h2{{font-size:14px;margin:14px 0 4px}} .c.ap{{border-left-color:#2e8b57}} .c.ap.pending{{border-left-color:#c0392b;background:#fff8e6}}
+.ap.pending .k{{color:#c0392b;font-weight:700}} .st{{font-size:12px;font-weight:700;margin-top:4px}}
 code{{background:#e3ebcd;padding:0 3px;border-radius:3px}} a{{color:#1d5a8c}}
-</style></head><body><h1>Requests</h1><div class="s">snapshot {now} · {e(summ)}<br>refresh: ask MAIN “refresh the requests board”, then reload</div>
-{"".join(cards)}</body></html>'''
+</style></head><body><h1>Requests</h1><div class="s">snapshot {now} · {npend} to approve · {e(summ)}<br>refresh: ask MAIN “refresh the requests board”, then reload</div>
+{approvals}<h2>## requests</h2>{"".join(cards)}</body></html>'''
 open(OUT, "w").write(page)
 print("wrote", OUT, len(page), "bytes;", summ, "| live sessions:", "n/a" if live is None else len(live))
