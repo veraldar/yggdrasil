@@ -13,7 +13,7 @@ shape, transcript hygiene, latency) and an LLM judge against a fixed rubric.
 The brain is booted by brain-up.sh (sandboxed, real upstream). Exit 0 = PASS, 1 = FAIL,
 3 = rig error (never a pass).
 """
-import argparse, json, os, re, subprocess, sys, time, urllib.request, urllib.error, statistics, shutil, textwrap
+import argparse, atexit, json, os, re, subprocess, sys, time, urllib.request, urllib.error, statistics, shutil, textwrap
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PERSONA_MODEL = os.environ.get("HSIM_PERSONA_MODEL", "sonnet")
@@ -229,6 +229,14 @@ def main():
     if a.fresh and os.path.isdir(root):
         subprocess.run([f"{HERE}/brain-up.sh", name, "down"])
         shutil.rmtree(root)
+    # host fixtures a scenario depends on (made by the run, torn down at exit — only what setup started)
+    if sc.get("setup"):
+        sp = subprocess.run(["bash", "-c", sc["setup"]], cwd=os.path.dirname(HERE), capture_output=True, text=True, timeout=300)
+        log("setup: " + (sp.stdout + sp.stderr).strip()[-400:])
+        if sp.returncode != 0:
+            sys.exit(3)  # a rig error, never a pass
+        if sc.get("teardown"):
+            atexit.register(lambda: subprocess.run(["bash", "-c", sc["teardown"]], cwd=os.path.dirname(HERE), capture_output=True, timeout=120))
     env = dict(os.environ, **{k: str(v) for k, v in sc.get("brain_env", {}).items()})
     env.setdefault("SIM_PROFILES", os.path.join(HERE, "profiles.sim.json"))
     # peer roots: each its own sandboxed brain on port+1.., all knowing each other by name

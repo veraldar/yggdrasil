@@ -1,16 +1,16 @@
 {
  "id": "terminal",
  "title": "Ask MAIN about your own terminal sessions: read one, type into one open in tmux, continue one that is closed",
- "persona": "A developer who works in terminals (Claude Code in tmux, Antigravity) and checks on them from the phone. Short phone messages.",
+ "persona": "A developer who works in terminals (Claude Code in tmux) and checks on them from the phone. Short phone messages.",
  "goals": [
   "Ask main what your Claude Code session in the cc-live-scratch folder (it is open in your terminal, in tmux) was last asked and what it answered.",
-  "Have main type into that same Claude Code terminal session so it replies with exactly: SIM-TYPED-OK \u2014 it must go into that session, not a new one.",
-  "Have main continue your Antigravity conversation from the same cc-live-scratch folder (it is not open anywhere) so that it replies with exactly: AGY-CONT-OK."
+  "Have main type into that same Claude Code terminal session so it replies with exactly: SIM-TYPED-OK — it must go into that session, not a new one.",
+  "Have main continue another, older Claude Code conversation from the same cc-live-scratch folder (not the one open in tmux; that one is not open anywhere) so that it replies with exactly: CC-CONT-OK."
  ],
  "script": [
   "Ask main about your Claude Code terminal session in cc-live-scratch.",
   "Ask main to type the SIM-TYPED-OK request into it.",
-  "Ask main to continue the Antigravity conversation from that folder with the AGY-CONT-OK request.",
+  "Ask main to continue one of your older, closed Claude Code conversations from that folder with the CC-CONT-OK request.",
   "Check it happened, then finish."
  ],
  "brain_env": {
@@ -18,20 +18,22 @@
   "SIM_BINDS": "/home/dweeb_xyz/Work/cc-live-scratch",
   "YGG_HARNESS_HELPER": "http://127.0.0.1:4322",
   "YGG_HARNESS_HELPER_TOKEN": "sim-term-token-1115-7f3a9c",
-  "YGG_HARNESS_LIVE": "/home/dweeb_xyz/.cache/root-sim/hsim-term-1115/harness-live.json"
+  "YGG_HARNESS_LIVE": "/home/dweeb_xyz/.cache/root-sim/hsim-term-fixture/harness-live.json"
  },
  "max_minutes": 15,
  "max_turns": 10,
  "checks": [
   {
-   "name": "typed into the tmux Claude Code session",
-   "cmd": "grep -c 'SIM-TYPED-OK' /home/dweeb_xyz/.claude/projects/*cc-live-scratch/070d6b89-df88-495a-b061-1a0a80cfbea0.jsonl",
-   "expect": "^([2-9]|[1-9][0-9])"
+   "name": "typed into the tmux Claude Code session (this run's lines: the typed request + the reply)",
+   "cmd": "/home/dweeb_xyz/.cache/root-sim/hsim-term-fixture/delta.sh typed",
+   "expect": "^([2-9]|[1-9][0-9])$"
   },
   {
-   "name": "the Antigravity conversation went on",
-   "cmd": "grep -c 'AGY-CONT-OK' /home/dweeb_xyz/.gemini/antigravity-cli/brain/1a289121-819e-47e3-b617-d9979520bf50/.system_generated/logs/transcript.jsonl",
-   "expect": "^[1-9]"
+   "name": "a closed Claude Code conversation went on (this run)",
+   "cmd": "/home/dweeb_xyz/.cache/root-sim/hsim-term-fixture/delta.sh cont",
+   "expect": "^([2-9]|[1-9][0-9])$"
   }
- ]
+ ],
+ "setup": "bash sim/scenarios/terminal-fixture.sh up",
+ "teardown": "bash sim/scenarios/terminal-fixture.sh down"
 }
