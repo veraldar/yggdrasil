@@ -258,7 +258,7 @@ test(`trunk-full-v1 (${SCENARIO})`, async ({ browser, request }) => {
       expect(createHash('sha256').update(readFileSync(blobPath)).digest('hex')).toBe(pdf.sha256);
       record('S17.4', 'PASS', `6.4 MB PDF arrived on lab over WireGuard (sha256 ${pdf.sha256.slice(0, 12)})`);
 
-      await expect(phone.getByText(pdf.marker)).toBeVisible({ timeout: 120_000 });
+      await expect(phone.locator('p', { hasText: pdf.marker }).first()).toBeVisible({ timeout: 120_000 });
       record('S17.6', 'PASS', `Claude Code on lab replied with marker word ${pdf.marker}`);
 
       // write marker.html and tap the link
