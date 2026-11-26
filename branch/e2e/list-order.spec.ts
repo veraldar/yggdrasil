@@ -131,9 +131,12 @@ test("a reply never moves a session up; the owner's own message does", async ({
   await page.screenshot({ path: 'test-results/order-1-reply-stays.png' });
   // the owner writes in A: A goes up
   await say(request, A, 'Reply with exactly: a-3');
-  await page.goto('/');
-  await expect(page.locator('.oz-row .t', { hasText: A.name })).toBeVisible();
-  order = await titles(page);
+  // a tab that has not shown the list yet, as at the first look above: the list paints its last copy
+  // first (sessionStorage 'oz-sessions', "instant paint") and corrects when its fetch answers
+  const again = await page.context().newPage();
+  await again.goto('/');
+  await expect(again.locator('.oz-row .t', { hasText: A.name })).toBeVisible();
+  order = await titles(again);
   expect(order.indexOf(A.name)).toBeLessThan(order.indexOf(B.name));
 });
 
