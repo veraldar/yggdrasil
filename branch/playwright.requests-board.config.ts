@@ -42,7 +42,12 @@ export default defineConfig({
     {
       command: `npx next start -p ${APP_PORT} -H 127.0.0.1`,
       url: `${baseURL}/api/ping`,
-      env: { OPENCODE_URL: BRAIN, ARTIFACTS_DIR: '', ARTIFACTS_MAIN_DIR: '', BIFROST_AUTH: 'tailnet' },
+      env: {
+        OPENCODE_URL: BRAIN,
+        ARTIFACTS_DIR: '',
+        ARTIFACTS_MAIN_DIR: '',
+        BIFROST_AUTH: 'tailnet',
+      },
       timeout: 90_000,
       reuseExistingServer: false,
     },

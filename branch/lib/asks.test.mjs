@@ -57,3 +57,7 @@ test('parseAsks drops what is not a card', () => {
   assert.deepEqual(parseAsks({ error: 'x' }), []);
   assert.equal(parseAsks([ask('1', 'done'), null, { id: 2 }]).length, 1);
 });
+
+test('MAIN loses its brackets', () => {
+  assert.equal(sessionLabel({ id: 'x', title: '[MAIN]' }), 'MAIN');
+});

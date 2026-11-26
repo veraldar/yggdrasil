@@ -24,7 +24,7 @@ const TONE: Record<string, string> = {
   running: 'var(--oz-success)',
   asked: 'var(--oz-dim)',
   done: 'var(--oz-text)',
-  answered: 'var(--oz-border)',
+  answered: 'var(--oz-dim)',
 };
 const WORD: Record<string, string> = {
   blocked: 'needs you',
@@ -184,9 +184,9 @@ export function RequestsScreen() {
                 data-testid={`group-head-${g.status}`}
               >
                 <span
-                  className="text-[12px] font-bold tracking-wider uppercase"
+                  className="text-[12px] font-bold tracking-wider whitespace-nowrap uppercase"
                   style={{
-                    color: TONE[g.status] === 'var(--oz-border)' ? 'var(--oz-dim)' : TONE[g.status],
+                    color: TONE[g.status],
                   }}
                 >
                   {g.title} · {g.asks.length}

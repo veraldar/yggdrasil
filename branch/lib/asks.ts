@@ -70,7 +70,8 @@ export function landed(a: Pick<Ask, 'branch' | 'commit'>): boolean {
 
 /** a title the owner would call it — the brain's default titles are session ids' tails */
 export function sessionLabel(s: { id: string; title: string }): string {
-  return s.title.trim() || `session ${s.id.slice(-6)}`;
+  // the brain's own session is titled "[MAIN]" — brackets are jargon on a card
+  return s.title.replace(/^\[(.*)\]$/, '$1').trim() || `session ${s.id.slice(-6)}`;
 }
 
 export function parseAsks(raw: unknown): Ask[] {
