@@ -13,6 +13,8 @@ const ICONS = {
   // artifact: a found runestone — rounded crown, flat foot set in the ground
   // line, one carved rune (algiz, the warden's mark)
   artifact: ['M4.25 13.25V6.5a3.75 3.75 0 0 1 7.5 0v6.75', 'M1.75 13.25h12.5', 'M8 5.5v5.25M6 6.75l2 2 2-2'],
+  // refresh: one arc turning back on itself, an arrowhead at its end
+  refresh: ['M13.25 8A5.25 5.25 0 1 1 11.7 4.3', 'M12.5 1.75v3h-3'],
   volume: ['M2 6h2.75L8.5 3v10L4.75 10H2zM11 5.5a3.5 3.5 0 0 1 0 5M12.75 3.5a6 6 0 0 1 0 9'],
   pause: ['M5.5 3v10M10.5 3v10'],
   play: ['M4.5 2.75v10.5L13 8z'],

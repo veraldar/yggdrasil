@@ -84,7 +84,7 @@ export function HomeHead({
           className={`oz-k sm ${loading ? 'ok' : ''}`}
           data-testid="refresh-key"
         >
-          {loading ? '…' : 'refresh'}
+          <LineIcon name="refresh" size={15} className={loading ? 'animate-spin' : ''} />
         </button>
       </div>
     </header>
