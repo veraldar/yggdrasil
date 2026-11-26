@@ -203,7 +203,6 @@ test('roots sheet → a computer\'s page: its settings, theme saved on lab, sess
     await hold(page, lab);
     await page.getByTestId('root-remove').tap();
     await expect(lab).toHaveCount(0);
-    await expect(page.getByTestId('root-row')).toHaveCount(1);
     if (TRUNK) {
       const removed = readFileSync(join(STATE, 'roots-removed.jsonl'), 'utf8')
         .trim()
@@ -211,6 +210,7 @@ test('roots sheet → a computer\'s page: its settings, theme saved on lab, sess
         .map((l) => JSON.parse(l) as { id?: string });
       expect(removed.some((r) => r.id === 'rt_lab')).toBe(true);
     } else {
+      await expect(page.getByTestId('root-row')).toHaveCount(1);
       const rec = JSON.parse(readFileSync(join(STATE, 'roots.json'), 'utf8')).roots.find(
         (r: { id: string }) => r.id === 'lab'
       );

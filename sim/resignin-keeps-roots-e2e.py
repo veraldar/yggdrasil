@@ -148,7 +148,8 @@ def main():
         spec.loader.exec_module(claim_mod)
         ctl_cmd = "%s trunk-ctl --sock %s/ctl.sock" % (a.bin_trunk, td)
         claimed, client_a = claim_mod.claim(trunk_url, ctl_cmd, origin=trunk_url)
-        dev_a = claimed["device"]["id"]
+        dev_raw = claimed.get("device")
+        dev_a = dev_raw.get("id", "") if isinstance(dev_raw, dict) else str(dev_raw or "")
         tok_a = claimed["cookies"].get("bifrost_device", "")
         ref_a = claimed["cookies"].get("bifrost_refresh", "")
         check("1 admin claims the v1 trunk (device A + refresh cookie)", dev_a.startswith("dev_") and bool(tok_a) and bool(ref_a), claimed.get("device"))
@@ -254,7 +255,8 @@ def main():
         client_b = Client(trunk_url, origin=trunk_url)
         r1 = client_b.post("/t/auth/login", {"email": claimed["email"], "password": claimed["password"]})
         r2 = client_b.post("/t/auth/mfa", {"mfa_ticket": r1.j("mfa_ticket"), "recovery": claimed["recovery_codes"][0]})
-        dev_b = (r2.j("device") or {}).get("id", "") if r2.status == 200 else ""
+        dev_b_raw = r2.j("device") if r2.status == 200 else None
+        dev_b = dev_b_raw.get("id", "") if isinstance(dev_b_raw, dict) else str(dev_b_raw or "")
         tok_b = (client_b.jar.get("bifrost_device") or ("", ""))[0]
         ref_b = (client_b.jar.get("bifrost_refresh") or ("", ""))[0]
         check("4a signing in again creates a new device B with fresh cookies",
