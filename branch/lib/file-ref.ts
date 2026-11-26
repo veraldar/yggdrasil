@@ -12,8 +12,8 @@ export type FileChip = { name: string; mime: string; size: number; url: string }
 export const PIECE_MAX = 1 << 20;
 export const FILES_PER_MESSAGE = 8;
 export const HASH_RE = /^[a-f0-9]{64}$/;
-/** a root's name (as lib/roots and the join routes take it) */
-export const ROOT_RE = /^[a-z0-9][a-z0-9-]{0,40}$/;
+/** a root's id/name (matches lib/roots.ts ROOT_NAME and root/src/peers.rs valid_id, incl. v1 rt_… ids) */
+export const ROOT_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 
 export const isImageMime = (mime: string | undefined) => /^image\//i.test(String(mime || ''));
 
