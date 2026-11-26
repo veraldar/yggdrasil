@@ -6,6 +6,12 @@
 #   G51_DRY_RUN=1  runs against mock_upstream.py with TWIN_HARNESS=0 (zero paid API quota)
 #   G51_DRY_RUN=0  (default, paid run when lead decides): real upstream + SIM_HARNESS=1
 #
+# G53=1 (G5.3, voice personas through this trunk): same stack, no Playwright drive. Instead
+#   G53_DRY_RUN=1 (default)  no model tokens: suite.py --dry-run (every scenario loads, v-all-agents excluded)
+#                            + sim/voice/v1probe.py (a Pixel 7 pairs by console QR and opens MAIN through the trunk)
+#   G53_DRY_RUN=0            the paid run: sim/voice/suite.py --target <trunk> --brain :4250 --pair-cmd <trunk-ctl pair-qr>
+#                            (needs the voice leg: LiveKit + a voice agent behind this trunk's /rtc — see docs/trunk-v1/LADDER.md)
+#
 # Spec §9 G5.1 8-step drive:
 #   1. sign in (Pixel 7 on /login)
 #   2. tree door / home screen
@@ -221,6 +227,30 @@ env -i PATH="$PATH" HOME="$STATE/mac" \
   YGG_PEERS_FROM="http://127.0.0.1:$MAC_WG_HTTP/_wg/_roots" YGG_PEERS_VIA="http://127.0.0.1:$MAC_WG_HTTP/_wg/{id}" \
   "$YGG_BIN" >"$STATE/brain-mac.log" 2>&1 &
 pids+=($!)
+
+# ---- G5.3 (voice personas through the v1 trunk) replaces the G5.1 drive ----
+if [ "${G53:-0}" = 1 ]; then
+  G53_DRY=${G53_DRY_RUN:-1}
+  PAIR_CMD="$BIN trunk-ctl --sock $STATE/trunk/ctl.sock pair-qr"
+  VOUT="$STATE/voice-suite"; mkdir -p "$VOUT"
+  : >"$STATE/steps.tsv"
+  g53_step() { # name, command...
+    local n=$1; shift
+    if "$@" >"$STATE/$n.log" 2>&1; then printf '%s\tPASS\t%s\n' "$n" "$(tail -1 "$STATE/$n.log" | cut -c1-110)" >>"$STATE/steps.tsv"
+    else printf '%s\tFAIL\t%s\n' "$n" "$(tail -3 "$STATE/$n.log" | tr '\n' ' ' | cut -c1-140)" >>"$STATE/steps.tsv"; fi
+  }
+  g53_step G53.1-suite-plan python3 "$ROOT/sim/voice/suite.py" --dry-run --out "$VOUT" -- --target "$TRUNK_URL" --brain http://127.0.0.1:4250 --pair-cmd "$PAIR_CMD"
+  g53_step G53.2-phone-probe python3 "$ROOT/sim/voice/v1probe.py" --target "$TRUNK_URL" --brain http://127.0.0.1:4250 --pair-cmd "$PAIR_CMD" --out "$VOUT/probe"
+  if [ "$G53_DRY" = 0 ]; then
+    g53_step G53.3-voice-suite python3 "$ROOT/sim/voice/suite.py" --out "$VOUT" -- --target "$TRUNK_URL" --brain http://127.0.0.1:4250 --pair-cmd "$PAIR_CMD"
+  fi
+  echo ""; printf '%-22s %-8s %s\n' "STEP" "RES" "WHAT"
+  fails=0
+  while IFS=$'\t' read -r n res what; do printf '%-22s %-8s %s\n' "$n" "$res" "$what"; [ "$res" = PASS ] || fails=$((fails + 1)); done <"$STATE/steps.tsv"
+  echo "TRUNK-V1-VOICE (G5.3 dry=$G53_DRY): fails=$fails (state: $STATE)"
+  [ "$fails" -eq 0 ]
+  exit $?
+fi
 
 # ---- 6. run the G5.1 Playwright drive ----
 cd "$B"

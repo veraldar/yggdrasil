@@ -6,6 +6,11 @@
 
 No scenario named = every scenarios/v-*.json except v-all-agents (70 min, harness logins).
 Sequential on purpose: each run owns the box's speech server and the stack's ports.
+
+    suite.py --dry-run [SCENARIO.json …] [-- vsim args…]   # no run, no tokens: validate every scenario the
+                                                             # way vsim loads it and print the exact vsim commands
+G5.3 (the v1 trunk): suite.py --out DIR -- --target http://127.0.0.1:18600 --brain http://127.0.0.1:4250 \
+                       --pair-cmd "bifrost-net trunk-ctl --sock S pair-qr"
 """
 import glob, json, os, subprocess, sys, time
 
@@ -21,7 +26,27 @@ def main():
         i = argv.index("--out")
         out = argv[i + 1]
         del argv[i:i + 2]
+    dry = "--dry-run" in argv
+    if dry:
+        argv.remove("--dry-run")
     scen = argv or sorted(x for x in glob.glob(os.path.join(HERE, "scenarios", "v-*.json")) if "all-agents" not in x)
+    if dry:
+        sys.path.insert(0, HERE)
+        sys.path.insert(0, os.path.dirname(HERE))
+        import vsim  # noqa: E402
+        bad = 0
+        for sc in scen:
+            try:
+                d = vsim.load_scenario(sc)
+                assert d["personas"] and d["roots"], "no personas/roots"
+                assert "all-agents" not in os.path.basename(sc) or argv, "v-all-agents is not part of the default set"
+                print(f"ok   {os.path.basename(sc)}: {len(d['personas'])} persona(s), roots {[r['name'] for r in d['roots']]}, max {d.get('max_minutes')} min")
+                print("     " + " ".join([sys.executable, os.path.join(HERE, "vsim.py"), sc, "--out", out, *extra]))
+            except Exception as e:  # noqa: BLE001
+                bad += 1
+                print(f"FAIL {os.path.basename(sc)}: {e}")
+        print(f"suite dry-run: {len(scen) - bad} ok, {bad} fail ({'v-all-agents excluded' if not any('all-agents' in x for x in scen) else 'v-all-agents INCLUDED'})")
+        sys.exit(1 if bad else 0)
     suite = time.strftime("%Y%m%dT%H%M%S") + "-suite"
     sdir = os.path.join(out, suite)
     os.makedirs(sdir, exist_ok=True)

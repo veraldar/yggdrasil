@@ -1,4 +1,6 @@
 import { execFileSync, spawn } from 'child_process';
+import http from 'http';
+import { performance } from 'perf_hooks';
 import { createHmac } from 'crypto';
 import { appendFileSync, chmodSync, existsSync, mkdirSync, openSync, readFileSync, writeFileSync } from 'fs';
 import { join } from 'path';
@@ -6,8 +8,10 @@ import { type Page, devices, expect, test } from '@playwright/test';
 
 /**
  * G3.6 · Storyboard end-to-end (spec §9 G3.6, 15 steps) inside sim/trunk-v1-e2e.sh's namespace.
- * Features not yet merged into trunk-v1 (IDP M3: QR/member/device-revoke/kill; WIRE M5: two voice
- * roots) record MISSING (never PASS, never SKIP) so the gate stays RED until they land.
+ * S06-S08 and S10 run against the merged IDP M3 API (QR pairing, member role, device revoke with
+ * the live relayed stream cut, kill + lockdown + unlock). S15 (two voice roots) stays MISSING
+ * (never PASS, never SKIP) until a helper is plugged in: set PW_S15_HELPER to an executable that
+ * takes `<trunk base url> <state dir>` and exits 0 when a spoken turn reached each voice root.
  */
 const STATE = process.env.PW_TRUNK_V1_STATE || '';
 const BASE = process.env.PW_BASE_URL || '';
@@ -15,6 +19,7 @@ const BIN = process.env.PW_TRUNK_BIN || '';
 const YGG_BIN = process.env.PW_YGG_BIN || '';
 const MOCK_PORT = process.env.PW_MOCK_PORT || '';
 const APP_DIR = process.env.PW_APP_DIR || '';
+const S15_HELPER = process.env.PW_S15_HELPER || '';
 
 test.skip(!STATE || !BASE || !BIN || !YGG_BIN || !MOCK_PORT || !APP_DIR, 'needs sim/trunk-v1-e2e.sh');
 test.use({ ...devices['Pixel 7'], serviceWorkers: 'block' });
@@ -78,6 +83,60 @@ async function waitFor(fn: () => Promise<boolean>, timeoutMs = 20_000, stepMs = 
     await new Promise((r) => setTimeout(r, stepMs));
   }
   return false;
+}
+
+/** A long-lived GET through the trunk (the phone's live channel). `first` = headers + first chunk seen. */
+function openStream(path: string, cookie: string) {
+  const u = new URL(BASE);
+  let firstRes!: (v: { status: number; body: string }) => void;
+  let endRes!: (v: { at: number; how: string }) => void;
+  const first = new Promise<{ status: number; body: string }>((r) => (firstRes = r));
+  const ended = new Promise<{ at: number; how: string }>((r) => (endRes = r));
+  let gotFirst = false;
+  const req = http.request(
+    { host: u.hostname, port: Number(u.port), path, method: 'GET', headers: { cookie: `bifrost_device=${cookie}`, accept: 'text/event-stream' } },
+    (res) => {
+      res.setEncoding('utf8');
+      let acc = '';
+      res.on('data', (c: string) => {
+        acc += c;
+        if (!gotFirst) {
+          gotFirst = true;
+          firstRes({ status: res.statusCode || 0, body: acc });
+        }
+      });
+      res.on('end', () => endRes({ at: performance.now(), how: 'end' }));
+      res.on('close', () => endRes({ at: performance.now(), how: 'close' }));
+      res.on('aborted', () => endRes({ at: performance.now(), how: 'aborted' }));
+      res.on('error', () => endRes({ at: performance.now(), how: 'error' }));
+    }
+  );
+  req.on('error', () => endRes({ at: performance.now(), how: 'req-error' }));
+  req.end();
+  return { first, ended, destroy: () => req.destroy() };
+}
+
+async function within<T>(p: Promise<T>, ms: number, what: string): Promise<T> {
+  let t: NodeJS.Timeout;
+  const timeout = new Promise<never>((_, rej) => (t = setTimeout(() => rej(new Error(`timeout ${ms} ms: ${what}`)), ms)));
+  try {
+    return await Promise.race([p, timeout]);
+  } finally {
+    clearTimeout(t!);
+  }
+}
+
+/** The device cookie a browser context holds. */
+async function deviceCookie(ctx: { cookies: () => Promise<Array<{ name: string; value: string }>> }): Promise<string> {
+  const c = (await ctx.cookies()).find((x) => x.name === 'bifrost_device');
+  if (!c) throw new Error('no bifrost_device cookie in the context');
+  return c.value;
+}
+
+function tokenOfQrUrl(url: string): string {
+  const m = url.match(/[#&]t=([^&]+)/);
+  if (!m) throw new Error(`no token in ${url}`);
+  return decodeURIComponent(m[1]);
 }
 
 const spawned: Array<{ name: string; pid: number }> = [];
@@ -170,7 +229,7 @@ test('G3.6 storyboard end to end (15 steps)', async ({ browser, request }) => {
     mac: { brain: 18792, bridge: 18793, media: 18794, wgHttp: 18795, wgUdp: 18796, relay: 18797, app: 18798 },
     lab: { brain: 18765, bridge: 18766, media: 18767, wgHttp: 18768, wgUdp: 18769, relay: 18777, app: 0 },
   };
-  const adminHdr = { cookie: `bifrost_device=${adminCookie}`, origin: BASE };
+  let adminHdr = { cookie: `bifrost_device=${adminCookie}`, origin: BASE };
 
   try {
     // 4a. desktop enroll for home (1 tap via /auth/root?e=<id>)
@@ -334,10 +393,189 @@ test('G3.6 storyboard end to end (15 steps)', async ({ browser, request }) => {
     throw e;
   }
 
-  // ---- S06, S07, S08: IDP M3 (not merged yet -> MISSING) ----
-  record('S06', 'MISSING', 'phone B by QR + second scan 410 + regenerate (IDP M3 not merged)');
-  record('S07', 'MISSING', 'member -> 403 on revoke, kill and mint (IDP M3 not merged)');
-  record('S08', 'MISSING', 'device revoke <=1s + channel/voice cut (IDP M3 not merged)');
+  // ---- S06, S07, S08: IDP M3 — QR pairing, member role, device revoke (live channel cut) ----
+  const asCookie = (c: string) => ({ cookie: `bifrost_device=${c}`, origin: BASE });
+  let recNext = 2; // recovery codes [0] (S05) and [1] (S13) are spoken for
+  const ensureFresh = async () => {
+    const d = await request.get(`${BASE}/t/devices`, { headers: adminHdr });
+    expect(d.status(), 'GET /t/devices as admin').toBe(200);
+    if ((await d.json()).fresh) return;
+    const su = await request.post(`${BASE}/t/auth/step-up`, { headers: adminHdr, data: { recovery: recoveryCodes[recNext++] } });
+    expect(su.status(), 'step-up with a recovery code').toBe(200);
+  };
+  const mintQr = async () => {
+    await ensureFresh();
+    const m = await request.post(`${BASE}/t/pair/qr`, { headers: adminHdr, data: {} });
+    expect(m.status(), 'POST /t/pair/qr').toBe(200);
+    return (await m.json()) as { id: string; url: string; token: string; role: string; expires_in: number };
+  };
+  const consoleQr = () => JSON.parse(execFileSync(BIN, ['trunk-ctl', '--sock', ctlSock, 'pair-qr'], { encoding: 'utf8' }).trim().split('\n').pop()!) as { url: string; role: string };
+  const redeemIn = async (ctx: { request: typeof request }, token: string, name: string) =>
+    ctx.request.post(`${BASE}/t/pair/redeem`, { headers: { origin: BASE }, data: { token, name } });
+  const adminMe = (await (await request.get(`${BASE}/t/me`, { headers: adminHdr })).json()) as { device: { id: string } };
+  const adminDid = adminMe.device.id;
+  let phoneBCookie = '';
+  let phoneBDid = '';
+  const SLUG = 'g36-turn';
+
+  // ---- S06: phone B by QR: consumed; a second scan 410; Regenerate kills the old QR ----
+  try {
+    const qr1 = await mintQr();
+    expect(qr1.role).toBe('member');
+    expect(qr1.url).toContain('/pair#v=2&t=bfnp-');
+    const st0 = await request.get(`${BASE}/t/pair/qr/${qr1.id}`, { headers: adminHdr });
+    expect((await st0.json()).status).toBe('waiting');
+
+    const bCtx = await browser.newContext({ ...devices['Pixel 7'], serviceWorkers: 'block', baseURL: BASE });
+    const r1 = await redeemIn(bCtx, qr1.token, 'phone-b');
+    expect(r1.status(), 'first scan').toBe(200);
+    const rj = await r1.json();
+    expect(rj.device.role).toBe('member');
+    phoneBCookie = await deviceCookie(bCtx);
+    expect(phoneBCookie).toMatch(/^v4\.public\./);
+    phoneBDid = rj.device.id;
+    // phone B really is signed in: its page opens the app, not /login
+    const pageB = await bCtx.newPage();
+    await pageB.goto('/');
+    await pageB.waitForLoadState('domcontentloaded');
+    expect(new URL(pageB.url()).pathname, 'phone B lands in the app').not.toMatch(/^\/login/);
+    await noOverflow360(pageB, 'phone B /');
+    const me = await request.get(`${BASE}/t/me`, { headers: asCookie(phoneBCookie) });
+    expect(me.status()).toBe(200);
+    expect((await me.json()).device.role).toBe('member');
+
+    // a second scan of the same QR -> 410 used (from a clean context: no cookie)
+    const c2 = await browser.newContext({ ...devices['Pixel 7'], serviceWorkers: 'block', baseURL: BASE });
+    const r2 = await redeemIn(c2, qr1.token, 'phone-x');
+    expect(r2.status(), 'second scan').toBe(410);
+    expect((await r2.json()).why).toBe('used');
+    expect((await c2.cookies()).some((c) => c.name === 'bifrost_device'), 'no device from a used QR').toBe(false);
+    const st1 = await (await request.get(`${BASE}/t/pair/qr/${qr1.id}`, { headers: adminHdr })).json();
+    expect(st1.status).toBe('joined');
+    expect(st1.device_name).toBe('phone-b');
+
+    // Regenerate: the old QR is burned (410 burned), the new one works once
+    const qr2 = await mintQr();
+    const rg = await request.post(`${BASE}/t/pair/qr/${qr2.id}/regenerate`, { headers: adminHdr, data: {} });
+    expect(rg.status(), 'regenerate').toBe(200);
+    const qr3 = await rg.json();
+    expect(qr3.id).not.toBe(qr2.id);
+    expect(qr3.token).not.toBe(qr2.token);
+    expect((await (await request.get(`${BASE}/t/pair/qr/${qr2.id}`, { headers: adminHdr })).json()).status).toBe('burned');
+    const old = await redeemIn(c2, qr2.token, 'phone-old');
+    expect(old.status(), 'old QR after regenerate').toBe(410);
+    expect((await old.json()).why).toBe('burned');
+    const c3 = await browser.newContext({ ...devices['Pixel 7'], serviceWorkers: 'block', baseURL: BASE });
+    const neu = await redeemIn(c3, qr3.token, 'phone-c');
+    expect(neu.status(), 'regenerated QR').toBe(200);
+    // ... once only; the used first QR and the burned one stay dead
+    expect((await redeemIn(c2, qr3.token, 'phone-y')).status()).toBe(410);
+    expect((await redeemIn(c2, qr1.token, 'phone-y')).status()).toBe(410);
+    expect((await redeemIn(c2, qr2.token, 'phone-y')).status()).toBe(410);
+    // the console mints one too (trunk-ctl pair-qr) and it redeems
+    const cq = consoleQr();
+    expect(cq.role).toBe('member');
+    expect((await redeemIn(c3, tokenOfQrUrl(cq.url), 'phone-console')).status(), 'console QR').toBe(200);
+    // the admin's /pair page renders at 360 px
+    await owner.goto('/pair');
+    await expect(owner.locator('#p-qr')).toBeVisible({ timeout: 15_000 });
+    await noOverflow360(owner, '/pair');
+    await c2.close();
+    await c3.close();
+    await bCtx.close();
+    record('S06', 'PASS', 'phone B by QR (member, lands in the app); 2nd scan 410 used; regenerate: old 410 burned, new works once; console pair-qr works');
+  } catch (e) {
+    record('S06', 'FAIL', String(e).slice(0, 160));
+  }
+
+  // ---- S07: a member device -> 403 on device revoke, kill and pair-code mint ----
+  try {
+    expect(phoneBCookie, 'S06 produced phone B').not.toBe('');
+    const mh = asCookie(phoneBCookie);
+    const before = await (await request.get(`${BASE}/t/devices`, { headers: adminHdr })).json();
+    const del = await request.delete(`${BASE}/t/devices/${adminDid}`, { headers: mh });
+    expect(del.status(), 'member revokes the admin device').toBe(403);
+    expect((await del.json()).why).toBe('role');
+    const kill = await request.post(`${BASE}/t/kill`, { headers: mh, data: { lockdown: true } });
+    expect(kill.status(), 'member pulls the kill switch').toBe(403);
+    const mint = await request.post(`${BASE}/t/pair/qr`, { headers: mh, data: {} });
+    expect(mint.status(), 'member mints a pair code').toBe(403);
+    expect((await request.patch(`${BASE}/t/devices/${phoneBDid}`, { headers: mh, data: { role: 'admin' } })).status(), 'member promotes itself').toBe(403);
+    expect((await request.get(`${BASE}/t/audit`, { headers: mh })).status(), 'member reads the audit').toBe(403);
+    const after = await (await request.get(`${BASE}/t/devices`, { headers: adminHdr })).json();
+    expect(after.kill_epoch).toBe(before.kill_epoch);
+    expect(after.lockdown).toBe(false);
+    const adminDev = after.devices.find((d: { id: string }) => d.id === adminDid);
+    expect(adminDev.revoked_at, 'admin device untouched').toBeNull();
+    const mine = await (await request.get(`${BASE}/t/devices`, { headers: mh })).json();
+    expect(mine.devices.length, 'a member sees only itself').toBe(1);
+    record('S07', 'PASS', 'member: 403 on device revoke, kill, pair-code mint (+ role change, audit); nothing changed');
+  } catch (e) {
+    record('S07', 'FAIL', String(e).slice(0, 160));
+  }
+
+  // ---- S08: device revoke <=1 s x5: next call 401 login + the live relayed stream cut ----
+  try {
+    const sever: number[] = [];
+    const refuse: number[] = [];
+    const modes: string[] = [];
+    for (let i = 0; i < 5; i++) {
+      const viaConsole = i >= 3;
+      modes.push(viaConsole ? 'console' : 'http');
+      const token = viaConsole ? tokenOfQrUrl(consoleQr().url) : (await mintQr()).token;
+      const ctx = await browser.newContext({ ...devices['Pixel 7'], serviceWorkers: 'block', baseURL: BASE });
+      const rr = await redeemIn(ctx, token, `phone-r${i}`);
+      expect(rr.status(), `round ${i}: redeem`).toBe(200);
+      const did = (await rr.json()).device.id as string;
+      const cookie = await deviceCookie(ctx);
+      const ok = await request.get(`${BASE}/api/build`, { headers: { cookie: `bifrost_device=${cookie}` } });
+      expect(ok.status(), `round ${i}: relayed call before the revoke`).toBe(200);
+      // its live channel: a relayed SSE stream to the door root's app
+      const stream = openStream(`/api/run-events?slug=${SLUG}`, cookie);
+      const f = await within(stream.first, 10_000, `round ${i}: stream's first chunk`);
+      expect(f.status, `round ${i}: stream status (${f.body.slice(0, 60)})`).toBe(200);
+      // the revoke; the clock starts when the call returns
+      let t0: number;
+      if (viaConsole) {
+        execFileSync(BIN, ['trunk-ctl', '--sock', ctlSock, 'devices', 'revoke', did, '--why', 'g36'], { encoding: 'utf8' });
+        t0 = performance.now();
+      } else {
+        const d = await request.delete(`${BASE}/t/devices/${did}`, { headers: adminHdr });
+        t0 = performance.now();
+        expect(d.status(), `round ${i}: DELETE /t/devices/:id`).toBe(200);
+      }
+      // next call refused: 401 with reauth=login (through the door)
+      let refuseMs = -1;
+      let last = '';
+      while (performance.now() - t0 < 3000) {
+        const r = await request.get(`${BASE}/api/build`, { headers: { cookie: `bifrost_device=${cookie}` } });
+        const txt = await r.text();
+        last = `${r.status()} ${txt.slice(0, 80)}`;
+        if (r.status() === 401) {
+          refuseMs = performance.now() - t0;
+          expect(txt, `round ${i}: refusal body`).toContain('"reauth":"login"');
+          break;
+        }
+        await new Promise((r2) => setTimeout(r2, 5));
+      }
+      expect(refuseMs, `round ${i}: next call refused (last: ${last})`).toBeGreaterThanOrEqual(0);
+      const me = await request.get(`${BASE}/t/me`, { headers: { cookie: `bifrost_device=${cookie}` } });
+      expect(me.status(), `round ${i}: /t/me after revoke`).toBe(401);
+      const end = await within(stream.ended, 5_000, `round ${i}: live stream never ended after the revoke`).catch((e) => {
+        stream.destroy();
+        throw e;
+      });
+      refuse.push(Math.round(refuseMs));
+      sever.push(Math.round(Math.max(0, end.at - t0)));
+      await ctx.close();
+    }
+    appendFileSync(join(STATE, 'timings.txt'), `S08 modes=${modes} refuse_ms=${JSON.stringify(refuse)} sever_ms=${JSON.stringify(sever)}\n`);
+    expect(Math.max(...sever), `live channel severed <=1000 ms: ${sever}`).toBeLessThanOrEqual(1000);
+    expect(Math.max(...refuse), `next call refused <=1000 ms: ${refuse}`).toBeLessThanOrEqual(1000);
+    record('S08', 'PASS', `device revoke x5 (${modes.join('/')}): next call 401 login ${JSON.stringify(refuse)} ms, live stream cut ${JSON.stringify(sever)} ms (<=1000)`);
+  } catch (e) {
+    record('S08', 'FAIL', String(e).slice(0, 160));
+  }
 
   // ---- S09: root revoke: WireGuard cut <=1.5 s (WIRE M2 — merged!) ----
   try {
@@ -367,8 +605,93 @@ test('G3.6 storyboard end to end (15 steps)', async ({ browser, request }) => {
     record('S09', 'FAIL', String(e).slice(0, 120));
   }
 
-  // ---- S10: kill + lockdown (IDP M3 — not merged yet -> MISSING) ----
-  record('S10', 'MISSING', 'kill + lockdown (IDP M3 not merged)');
+  // ---- S10: kill + lockdown: every device out, sign-ins refused while locked, unlock brings the admin back ----
+  try {
+    // a member phone with a live channel when the kill comes
+    const qrK = await mintQr();
+    const kCtx = await browser.newContext({ ...devices['Pixel 7'], serviceWorkers: 'block', baseURL: BASE });
+    expect((await redeemIn(kCtx, qrK.token, 'phone-k')).status()).toBe(200);
+    const kCookie = await deviceCookie(kCtx);
+    const phoneACookie = await deviceCookie(phoneCtx);
+    const kStream = openStream(`/api/run-events?slug=${SLUG}`, kCookie);
+    expect((await within(kStream.first, 10_000, 'S10 stream first chunk')).status).toBe(200);
+    const openQr = await mintQr(); // an open QR: the kill burns it
+    for (const c of [adminCookie, phoneACookie, kCookie]) {
+      expect((await request.get(`${BASE}/t/me`, { headers: asCookie(c) })).status(), 'every device is in before the kill').toBe(200);
+    }
+    expect((await (await request.get(`${BASE}/t/state`)).json()).lockdown).toBe(false);
+
+    const k = await request.post(`${BASE}/t/kill`, { headers: adminHdr, data: { lockdown: true } });
+    expect(k.status(), 'POST /t/kill {lockdown}').toBe(200);
+    const kj = await k.json();
+    expect(kj.lockdown).toBe(true);
+    expect(kj.devices_revoked).toBeGreaterThanOrEqual(3);
+    expect(kj.pairs_burned).toBeGreaterThanOrEqual(1);
+    const tK = performance.now();
+
+    // every device is out: the admin's own, phone A, the member phone, phone B — on the trunk and through the door
+    for (const [who, c] of [['admin', adminCookie], ['phone A', phoneACookie], ['member', kCookie], ['phone B', phoneBCookie]] as const) {
+      expect((await request.get(`${BASE}/t/me`, { headers: asCookie(c) })).status(), `${who} /t/me after kill`).toBe(401);
+      expect((await request.get(`${BASE}/api/build`, { headers: asCookie(c) })).status(), `${who} through the door after kill`).toBe(401);
+    }
+    // The live channel of a killed device. Spec §5.4 says "all devices are revoked"; a single
+    // revoke cuts the relayed stream (S08), the kill path is observed here and reported in the
+    // step line (not a gate item of step 10 as the spec words it).
+    const killedEnd = await within(kStream.ended, 3_000, 'live stream after the kill').catch(() => null);
+    const killSever = killedEnd ? `cut ${Math.round(Math.max(0, killedEnd.at - tK))} ms` : 'NOT cut after 3 s (kill only refuses new requests)';
+    kStream.destroy();
+    // the open QR is dead
+    const cB = await browser.newContext({ ...devices['Pixel 7'], serviceWorkers: 'block', baseURL: BASE });
+    const dead = await redeemIn(cB, openQr.token, 'phone-late');
+    expect([403, 410], 'a QR burned by the kill (or refused by the lockdown)').toContain(dead.status());
+    expect((await cB.cookies()).some((c) => c.name === 'bifrost_device')).toBe(false);
+
+    // lockdown: /t/state says so; password sign-in, mfa and QR redeem are refused
+    expect((await (await request.get(`${BASE}/t/state`)).json()).lockdown).toBe(true);
+    const lockedLogin = await request.post(`${BASE}/t/auth/login`, { headers: { origin: BASE }, data: { email, password } });
+    expect(lockedLogin.status(), 'login while locked').toBe(403);
+    expect((await lockedLogin.json()).why).toBe('lockdown');
+    const lockedMfa = await request.post(`${BASE}/t/auth/mfa`, { headers: { origin: BASE }, data: { mfa_ticket: 'x', recovery: recoveryCodes[recNext] } });
+    expect(lockedMfa.status(), 'mfa while locked').toBe(403);
+    const lockedQr = await redeemIn(cB, tokenOfQrUrl(consoleQr().url), 'phone-locked');
+    expect(lockedQr.status(), 'QR redeem while locked').toBe(403);
+    expect((await lockedQr.json()).why).toBe('lockdown');
+    expect((await request.get(`${BASE}/login`)).status(), 'the login page still loads').toBe(200);
+
+    // the documented unlock path: `trunk-ctl unlock` on the server, then a normal sign-in
+    const un = execFileSync(BIN, ['trunk-ctl', '--sock', ctlSock, 'unlock'], { encoding: 'utf8' });
+    expect(un.toLowerCase()).toContain('lockdown lifted');
+    expect((await (await request.get(`${BASE}/t/state`)).json()).lockdown).toBe(false);
+    for (const c of [adminCookie, phoneACookie, kCookie, phoneBCookie]) {
+      expect((await request.get(`${BASE}/t/me`, { headers: asCookie(c) })).status(), 'a killed device stays out after unlock').toBe(401);
+    }
+    const l1 = await request.post(`${BASE}/t/auth/login`, { headers: { origin: BASE }, data: { email, password } });
+    expect(l1.status(), 'login after unlock').toBe(200);
+    const l2 = await request.post(`${BASE}/t/auth/mfa`, { headers: { origin: BASE }, data: { mfa_ticket: (await l1.json()).mfa_ticket, recovery: recoveryCodes[recNext++] } });
+    expect(l2.status(), 'mfa after unlock').toBe(200);
+    const sc = l2.headersArray().filter((h) => h.name.toLowerCase() === 'set-cookie').map((h) => h.value).find((v) => v.startsWith('bifrost_device='));
+    adminCookie = decodeURIComponent(sc!.split(';')[0].split('=')[1]);
+    adminHdr = { cookie: `bifrost_device=${adminCookie}`, origin: BASE };
+    const me2 = await (await request.get(`${BASE}/t/me`, { headers: adminHdr })).json();
+    expect(me2.account.role).toBe('admin');
+    expect(me2.device.id).not.toBe(adminDid);
+    // the new admin reaches the app through the door (the roots took the new epoch) and the audit saw the kill
+    const viaDoor = await waitFor(async () => (await request.get(`${BASE}/api/build`, { headers: adminHdr })).status() === 200, 10_000, 200);
+    expect(viaDoor, 'the new admin reaches the app through the door after unlock').toBe(true);
+    const au = await (await request.get(`${BASE}/t/audit?action=kill.switch`, { headers: adminHdr })).json();
+    expect(au.entries.length).toBeGreaterThanOrEqual(1);
+    expect(au.chain_ok).toBe(true);
+    await kCtx.close();
+    await cB.close();
+    record('S10', 'PASS', `kill+lockdown: ${kj.devices_revoked} devices out, ${kj.pairs_burned} QR burned, live stream of a killed device: ${killSever}; login/mfa/QR 403 lockdown; trunk-ctl unlock -> admin signs in, reaches the app`);
+  } catch (e) {
+    try {
+      execFileSync(BIN, ['trunk-ctl', '--sock', ctlSock, 'unlock'], { encoding: 'utf8' }); // never leave later steps locked out
+    } catch {
+      /* best effort */
+    }
+    record('S10', 'FAIL', String(e).slice(0, 160));
+  }
 
   // ---- S11: trunk-ctl audit verify (IDP M1 — merged!) ----
   try {
@@ -485,7 +808,18 @@ test('G3.6 storyboard end to end (15 steps)', async ({ browser, request }) => {
   }
 
   // ---- S15: two voice roots dynamic ufrag routing (WIRE M5 — not merged yet -> MISSING) ----
-  record('S15', 'MISSING', 'two voice roots dynamic ufrag routing (WIRE M5 not merged)');
+  // HOOK: WIRE-2's two-voice-roots helper plugs in here (PW_S15_HELPER = executable taking
+  // `<trunk base url> <state dir>`; exit 0 = a spoken turn reached each voice root).
+  if (S15_HELPER) {
+    try {
+      const out = execFileSync(S15_HELPER, [BASE, STATE], { encoding: 'utf8', timeout: 240_000 });
+      record('S15', 'PASS', `two voice roots: ${out.trim().split('\n').pop()?.slice(0, 100)}`);
+    } catch (e) {
+      record('S15', 'FAIL', String(e).slice(0, 160));
+    }
+  } else {
+    record('S15', 'MISSING', 'two voice roots dynamic ufrag routing: no helper plugged in (set PW_S15_HELPER; WIRE-2 G3.2 helper pending)');
+  }
 
   await ownerCtx.close();
   await phoneCtx.close();
