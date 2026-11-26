@@ -472,10 +472,23 @@ test('G3.6 storyboard end to end (15 steps)', async ({ browser, request }) => {
     expect((await redeemIn(c2, qr3.token, 'phone-y')).status()).toBe(410);
     expect((await redeemIn(c2, qr1.token, 'phone-y')).status()).toBe(410);
     expect((await redeemIn(c2, qr2.token, 'phone-y')).status()).toBe(410);
-    // the console mints one too (trunk-ctl pair-qr) and it redeems
+    // the console mints one too (trunk-ctl pair-qr) and it redeems — on the phone's own /pair page,
+    // which shows "joined" and lands on the door by itself (spec F5 step 3: waited for, no tap)
     const cq = consoleQr();
     expect(cq.role).toBe('member');
-    expect((await redeemIn(c3, tokenOfQrUrl(cq.url), 'phone-console')).status(), 'console QR').toBe(200);
+    const cP = await browser.newContext({ ...devices['Pixel 7'], serviceWorkers: 'block', baseURL: BASE });
+    const pageC = await cP.newPage();
+    const redeemed = pageC.waitForResponse((r) => r.url().endsWith('/t/pair/redeem'));
+    await pageC.goto('/pair#' + cq.url.split('#')[1]);
+    const rc = await redeemed;
+    expect(rc.status(), 'console QR').toBe(200);
+    expect(((await rc.json()) as { next?: string }).next, 'F5.3: the landing the trunk names (a door is online)').toBe('/');
+    await expect(pageC.locator('#p-joined')).toBeVisible({ timeout: 10_000 });
+    await pageC.waitForURL(`${BASE}/`, { timeout: 30_000 });
+    await pageC.waitForLoadState('domcontentloaded');
+    expect(new URL(pageC.url()).pathname, 'the QR phone lands in the app by itself').toBe('/');
+    await noOverflow360(pageC, 'QR phone landing /');
+    await cP.close();
     // the admin's /pair page renders at 360 px
     await owner.goto('/pair');
     await expect(owner.locator('#p-qr')).toBeVisible({ timeout: 15_000 });
@@ -483,7 +496,7 @@ test('G3.6 storyboard end to end (15 steps)', async ({ browser, request }) => {
     await c2.close();
     await c3.close();
     await bCtx.close();
-    record('S06', 'PASS', 'phone B by QR (member, lands in the app); 2nd scan 410 used; regenerate: old 410 burned, new works once; console pair-qr works');
+    record('S06', 'PASS', 'phone B by QR (member, lands in the app); 2nd scan 410 used; regenerate: old 410 burned, new works once; console pair-qr on /pair lands on the door by itself');
   } catch (e) {
     record('S06', 'FAIL', String(e).slice(0, 160));
   }

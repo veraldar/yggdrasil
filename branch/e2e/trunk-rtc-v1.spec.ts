@@ -454,19 +454,20 @@ test('G3.2 v1 trunk rtc: QR pairing, voice over the trunk, ufrag routing, revoke
   }
   /** a pairing link straight from the trunk's console (`trunk-ctl pair-qr`) */
   const consoleQr = () => String((JSON.parse(ctl('pair-qr')) as { url: string }).url);
-  /** the phone redeems a QR link: the shell's /pair page → POST /t/pair/redeem → "joined" → the door.
-   *  (The trunk's page stops at "joined: <name> · member" — spec F5.3 says the phone lands on the
-   *  door; the phone's owner taps BIFROST, the shell's link to the door.) */
+  /** the phone redeems a QR link: the shell's /pair page → POST /t/pair/redeem → "joined" → the door
+   *  by itself (spec F5 step 3: the page goes where the trunk's `next` says, no tap). The landing is
+   *  waited for, never tapped: a tap raced the page's own navigation (G3.2 R7 on 3fe0812e). */
   async function redeem(page: Page, url: string) {
     const redeemed = page.waitForResponse((r) => r.url().endsWith('/t/pair/redeem'));
     await page.goto(url);
     const r = await redeemed;
     expect(r.status(), await r.text().catch(() => '')).toBe(200);
+    expect(((await r.json().catch(() => ({}))) as { next?: string }).next, 'F5.3: the landing the trunk names (door online)').toBe('/');
     const t = Date.now();
     await expect(page.locator('#p-joined')).toBeVisible({ timeout: 10_000 });
-    expect(page.url(), 'the token never stays in the address bar (B4)').toBe(`${AP}/pair`);
-    if (page.url() !== `${AP}/`) await page.locator('a.oz-brand').click();
+    expect(page.url(), 'the token never stays in the address bar (B4)').not.toContain('bfnp-');
     await page.waitForURL(`${AP}/`, { timeout: 30_000 });
+    expect(page.url(), 'the token never stays in the address bar (B4)').toBe(`${AP}/`);
     return t;
   }
   const deviceOf = async (page: Page) => String(((await pageFetch(page, '/t/me')).body.device as J | undefined)?.id || '');

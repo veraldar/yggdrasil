@@ -153,15 +153,19 @@ const handlers = {
   async pair({ tab: name = 'main', url, timeout = 30000 }) {
     const t = await openTab(name, url);
     const end = Date.now() + timeout;
+    let joined = false;
     while (Date.now() < end) {
       const path = new URL(t.page.url()).pathname;
       if (path !== '/pair') break;
-      // v1 trunk: its /pair page redeems the fragment in place and shows "joined" (no redirect)
-      if (await t.page.locator('#p-joined:visible').count().catch(() => 0)) break;
+      // v1 trunk: its /pair page redeems the fragment, shows "joined", then goes to the landing the
+      // trunk names (F5 step 3) by itself — wait for that navigation, never act during it
+      if (await t.page.locator('#p-joined:visible').count().catch(() => 0)) joined = true;
       const err = await t.page.locator('text=/already used|expired|not one the box issued|failed/i').count().catch(() => 0);
       if (err) throw new Error(`pairing refused: ${await t.page.locator('body').innerText()}`.slice(0, 300));
       await t.page.waitForTimeout(250);
     }
+    if (new URL(t.page.url()).pathname === '/pair') throw new Error(`paired${joined ? ' (joined)' : ''} but never landed: ${t.page.url()}`);
+    await t.page.waitForLoadState('load');
     const cookies = (await t.page.context().cookies()).map((c) => c.name);
     if (!cookies.includes('bifrost_device')) throw new Error(`paired page ${t.page.url()} but no device cookie`);
     return { landed: t.page.url(), cookies };
