@@ -104,4 +104,4 @@ A="http://127.0.0.1:$APP"
 cd "$B"
 PW_BASE_URL="$A" PW_HOME_BRAIN="http://127.0.0.1:$HOMEP" PW_LAB_BRAIN="http://127.0.0.1:$LABP" \
   PW_DEVICE_TOKEN="$TOKEN" PW_RIG_STATE="$STATE" PW_SHOTS="$SHOTS" E2E_OC_URL="http://127.0.0.1:$HOMEP" \
-  npx playwright test -c playwright.roots-page.config.ts "$@"
+  npx playwright test -c ${PW_CONFIG:-playwright.roots-page.config.ts} "$@"
