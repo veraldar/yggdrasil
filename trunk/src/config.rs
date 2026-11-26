@@ -5,6 +5,7 @@
 //! IPs were hand-pinned. Here, advertised candidates are config or nothing —
 //! `check` warns loudly when they are missing.
 
+#[cfg(feature = "bridge")]
 use std::net::{IpAddr, SocketAddr, TcpListener, UdpSocket};
 
 use serde::Deserialize;
@@ -276,6 +277,7 @@ pub fn load(path: &str) -> Result<LoadedConfig, String> {
     })
 }
 
+#[cfg(feature = "bridge")]
 impl Config {
     /// Validate + return human-readable check report (one line per finding).
     pub fn check(&self) -> Result<Vec<String>, String> {

@@ -5,14 +5,12 @@
 
 #![allow(dead_code)] // the skeleton exposes what WIRE and APP build on
 
-// WIRE, shared by every build: the proto-2 codec and signatures, trunk-state.json and the C3
-// check (the root build's `bifrost-net wg` verifies the signed directory with them)
+// WIRE, shared by every build: the proto-2 codec and signatures, trunk-state.json, websocket
+// frames for `/t/root`, and the root's `[trunk]` link (so light roots on the root build dial
+// out identically to full roots)
 pub mod proto;
 pub mod state;
-// WIRE: websocket frames for `/t/root` (both ends), the root's link (bridge `[trunk]`)
-#[cfg(any(feature = "bridge", feature = "trunk"))]
 pub mod wsio;
-#[cfg(feature = "bridge")]
 pub mod link;
 
 #[cfg(feature = "trunk")]

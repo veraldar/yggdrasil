@@ -27,7 +27,6 @@
 // the root build compiles the shared modules without the bridge that uses most of them
 #![cfg_attr(not(feature = "bridge"), allow(dead_code))]
 
-#[cfg(feature = "bridge")]
 mod ap;
 #[cfg(feature = "bridge")]
 mod bridge;
@@ -35,13 +34,11 @@ mod bridge;
 mod bridge_main;
 #[cfg(feature = "bridge")]
 mod cand;
-#[cfg(feature = "bridge")]
 mod config;
 #[cfg(feature = "bridge")]
 mod echo;
 #[cfg(feature = "bridge")]
 mod opencode;
-#[cfg(any(feature = "bridge", feature = "trunk"))]
 mod region;
 mod registry;
 #[cfg(feature = "bridge")]
@@ -105,7 +102,6 @@ fn main() {
         Some("selftest") => cmd_selftest(&args[1..]),
         #[cfg(feature = "bridge")]
         Some("serve") => cmd_serve(&args[1..]),
-        #[cfg(feature = "bridge")]
         Some("bridge") => cmd_bridge(&args[1..]),
         Some("rootlink") => cmd_rootlink(&args[1..]),
         Some("wg") => match config_arg(&args[1..]) {
@@ -181,9 +177,9 @@ fn main() {
             }
         },
         #[cfg(not(feature = "bridge"))]
-        Some(other @ ("check" | "selftest" | "serve" | "bridge" | "ap" | "ap-token" | "ap-pin" | "ap-cert")) => {
+        Some(other @ ("check" | "selftest" | "serve" | "ap" | "ap-token" | "ap-pin" | "ap-cert")) => {
             eprintln!(
-                "bifrost-net: '{other}' is not in this build — the root build (keygen, wg-key, wg, rootlink mint) has no bridge, access point or WebRTC; build the full one (cargo build --release in trunk/)"
+                "bifrost-net: '{other}' is not in this build — the root build (keygen, root-key, wg-key, wg, bridge [trunk], rootlink mint) has no access point or WebRTC; build the full one (cargo build --release in trunk/)"
             );
             2
         }
@@ -194,7 +190,7 @@ fn main() {
                 );
             } else {
                 eprintln!(
-                    "usage (the root build): bifrost-net keygen | wg -c NODE.toml | wg-key FILE | rootlink mint --root ID --dev DEV --ttl SECS --secret SECRET [--out FILE] [--roots a,b]"
+                    "usage (the root build): bifrost-net keygen | root-key FILE | wg -c NODE.toml | wg-key FILE | bridge -c CONFIG | rootlink mint --root ID --dev DEV --ttl SECS --secret SECRET [--out FILE] [--roots a,b]"
                 );
             }
             2
@@ -444,13 +440,16 @@ fn selftest_m1() -> i32 {
     }
 }
 
-#[cfg(feature = "bridge")]
 fn cmd_bridge(args: &[String]) -> i32 {
     let Some(path) = config_arg(args) else {
         eprintln!("bridge: missing -c CONFIG");
         return 2;
     };
-    match crate::bridge_main::run(path) {
+    #[cfg(feature = "bridge")]
+    let res = crate::bridge_main::run(path);
+    #[cfg(not(feature = "bridge"))]
+    let res = crate::v1::link::run_light_bridge(path);
+    match res {
         Ok(()) => 0,
         Err(e) => {
             eprintln!("bridge: {e}");

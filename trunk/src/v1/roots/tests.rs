@@ -176,6 +176,7 @@ fn link(t: &T, result: &Value, key: &Arc<SignKey>, app: SocketAddr) -> (Arc<Link
         branch: None,
         tokens,
         ice_demux: None,
+        trunk_link: None,
     });
     let l = Link::spawn(LinkConfig { url, pin: None, trunk_key: trunk_key.into(), root_id: id.into(), root_key: key.clone(), state, dial, wg: None, ufrags: Arc::default() })
         .unwrap();

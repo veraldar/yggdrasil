@@ -261,6 +261,7 @@ fn root(t: &Trunk, dir: &std::path::Path, id: &str, name: &'static str, addr: &s
         branch: None,
         tokens,
         ice_demux: None,
+        trunk_link: None,
     });
     let link = Link::spawn(LinkConfig {
         url,
