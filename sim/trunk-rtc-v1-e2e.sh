@@ -87,6 +87,9 @@ mkdir -p "$BASE_TMP"
 STATE=${TRUNK_RTC_STATE:-$(mktemp -d "$BASE_TMP/rtc-v1.XXXXXX")}
 mkdir -p "$STATE"/{home/work,vps/tls,vps/cred,phone} && chmod 700 "$STATE"
 rm -f "$STATE"/steps.tsv "$STATE"/tap.jsonl "$STATE"/eye.jsonl "$STATE"/mitm
+# unix sockets (the trunk's console, the harness's hop to lab) live in a short dir: SUN_LEN is 108
+SOCKS=$STATE
+[ ${#STATE} -le 80 ] || SOCKS=$(mktemp -d "$HOME/.cache/trunk-v1/tmp/rs.XXXXXX")
 { cat /etc/hosts; echo "$VPS $AP_HOST"; } >"$STATE/hosts"
 mount --bind "$STATE/hosts" /etc/hosts
 
@@ -94,6 +97,7 @@ pids=()
 cleanup() {
   for p in "${pids[@]}"; do kill "$p" 2>/dev/null || true; done
   wait 2>/dev/null || true
+  [ "$SOCKS" = "$STATE" ] || rm -rf "$SOCKS"
 }
 trap cleanup EXIT
 
@@ -153,7 +157,7 @@ trusted_proxies = ["127.0.0.1/32"]
 db = "$STATE/vps/trunk.db"
 state_dir = "$STATE/vps"
 cred_dir = "$STATE/vps/cred"
-ctl_socket = "$STATE/vps/ctl.sock"
+ctl_socket = "$SOCKS/ctl.sock"
 acme_webroot = "$STATE/vps/acme"
 rp_id = "$AP_HOST"
 origins = ["$AP_URL"]
@@ -181,7 +185,7 @@ pids+=($!)
 mkdir -p "$STATE/website" && echo "a website" >"$STATE/website/index.html"
 on vps python3 -m http.server --bind 127.0.0.1 $WEBP --directory "$STATE/website" >"$STATE/website.log" 2>&1 &
 pids+=($!)
-CTL="$BIN trunk-ctl --sock $STATE/vps/ctl.sock"
+CTL="$BIN trunk-ctl --sock $SOCKS/ctl.sock"
 for _ in $(seq 80); do
   on home curl -sf -o /dev/null --cacert "$STATE/vps/tls/cert.pem" "$AP_URL/t/state" && break
   sleep 0.25
@@ -391,10 +395,10 @@ COMMON=(PW_AP_URL="$AP_URL" PW_AP_IP="$VPS" PW_STATE="$STATE" PW_PHONE_CHROME="$
 # the harness runs at home; lab's brain lives on lab's loopback: two hops through a unix socket
 # (a filesystem socket crosses namespaces) — no firewall rule is opened for the harness
 labhop() {
-  on lab python3 -u "$ROOT/sim/trunk-rtc/hop.py" "unix:$STATE/lab-brain.sock" "127.0.0.1:$BRAIN" >"$L/hop.log" 2>&1 &
+  on lab python3 -u "$ROOT/sim/trunk-rtc/hop.py" "unix:$SOCKS/lab-brain.sock" "127.0.0.1:$BRAIN" >"$L/hop.log" 2>&1 &
   pids+=($!)
-  for _ in $(seq 40); do [ -S "$STATE/lab-brain.sock" ] && break; sleep 0.1; done
-  on home python3 -u "$ROOT/sim/trunk-rtc/hop.py" "127.0.0.1:18991" "unix:$STATE/lab-brain.sock" >"$H/hop.log" 2>&1 &
+  for _ in $(seq 40); do [ -S "$SOCKS/lab-brain.sock" ] && break; sleep 0.1; done
+  on home python3 -u "$ROOT/sim/trunk-rtc/hop.py" "127.0.0.1:18991" "unix:$SOCKS/lab-brain.sock" >"$H/hop.log" 2>&1 &
   pids+=($!)
   for _ in $(seq 40); do on home curl -sf -o /dev/null "http://127.0.0.1:18991/session" && break; sleep 0.1; done
 }

@@ -94,3 +94,34 @@ report as wanted contract changes.
 - The trunk meters itself as `ap` and keeps nothing on disk (the rig: `BIFROST_OBS_DIR=`): its minute lines go to the obs sink root (first online root with the app) as `{"t":"stats","lines":[…]}` CTRL; the root's bridge ingests them → `ap-min-*.jsonl` beside its own.
 - Per-root channel probes: `{"t":"probe","id":N}` CTRL every `BIFROST_PROBE_EVERY_S` (default 300), the root echoes it; counted `edge.probe.ok/fail`, histogram `edge.probe.link`.
 - `GET /_probe` on the trunk (public, no token): one CTRL probe to the door root → 204 + `X-Bifrost-Link-Us` µs / 503 no root online / 504 silent.
+
+## G3.2 — voice over the v1 trunk (`sim/trunk-rtc-v1-e2e.sh`) — done
+- The world (private namespaces, phone / VPS / home (+ lab), tcp 443 only, UDP dropped and counted):
+  `bifrost-net trunk` with its OWN TLS (`listen_tls`, PROXY v1) behind `sni-443.py` and the eye
+  (`sim/trunk-rtc/vps-eye.py`: the VPS's decrypted view; with `$STATE/mitm` an active man in the
+  middle), its `listen_ice` behind sni-443's `ice` route and the byte tap. Claim (`claim-admin.py`),
+  enrollment (`sim/trunk-v1/enroll-root.py`: the F4 path — enroll, by-code, approve with step-up,
+  poll), bridge `[trunk]` with the trunk's SPKI `pin`, the app in `BIFROST_AUTH=trunk`, real
+  LiveKit + agent + speech. Nothing stubbed. Ports 18900–18999 inside the namespaces only.
+- `--scenario rtc` (`branch/e2e/trunk-rtc-v1.spec.ts`): R1 QR pairing (`/pair` → `/t/pair/redeem`,
+  second scan 410), P1 pinned channel keyed by the directory pin, R2/R3 talk + spoken reply, R4
+  media path, R5 opaque bytes + no root/call secret on the VPS, E1 the eye saw no app data after
+  pairing (pairedAt before `goto`), U1 LiveKit ufrags registered on the pinned `tun` /rtc (acked,
+  `/t/ice/owner` 200), R6 `/devices` remove → out of the room + pinned channel severed ≤ 1 s, U2 the
+  plain /rtc path (a phone with no directory pin) registers too, R7 `trunk-ctl devices revoke` ≤ 1 s,
+  M1 answer fingerprint swapped → refused, no fallback, M2 directory pin swapped too → D3 alarm.
+- `--scenario s16` (`sim/reach/s16.mjs` with `PW_TRUNK_V1=1`): lab is a light v1 root (the root
+  build), reached from home's brain over WireGuard relayed by the trunk (the only path the
+  firewalls leave). `--scenario two-voice` (`sim/reach/two-voice-v1.mjs`) = G3.6 step 15; its hook
+  for `sim/trunk-v1-e2e.sh` is `TRUNK_V1_S15_HELPER=sim/trunk-v1/s15-two-voice.sh` (it builds its
+  own trunk world: the G3.6 one has no :443 ICE route and no LiveKit).
+- `bifrost-net dtls-id FILE`: makes / loads the bridge's DTLS identity (its `dtls_cert_file`) and
+  prints `fingerprint = "sha-256 …"` — what an installer must send as `dtls_fp` at enrollment. A root
+  enrolled with `dtls_fp: ""` gets no directory pin, so phones never pin a channel to it: every
+  /api and /rtc then goes through the trunk's TLS (U2 runs that way on purpose).
+- Bridge log lines (evidence and diagnosis): `offer: pinned-channel ufrag U registered with the trunk —
+  acked in N ms` and `rtc: LiveKit ufrag U registered with the trunk — acked in N ms (/rtc #k)`.
+- App fixes the rig forced (APP files, listed for APP): `lib/gate.ts` marks trunk pages with the
+  script-readable cookie `bifrost_mode=trunk`; `lib/pinned.ts` holds /api + /rtc at boot until the
+  directory pin is known (before: 6 API calls per page load crossed the trunk's TLS — E1);
+  `lib/voice-revoke.ts` sweeps the moment the deny-list or kill epoch moves (before: next 1 s tick).
