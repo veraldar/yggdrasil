@@ -15,8 +15,19 @@ export type Card = {
   model?: string;
   /** the computer (root) it runs on — set on a proxy of a session that lives on another root */
   root?: string;
+  /** the question the session itself asked the owner (`QUESTION:`), as the brain keeps it (root/src/owner.rs) */
+  ask?: Ask;
   /** 'root-main' = the proxy of another root's MAIN (it lives in the roots sheet, not the list) */
   kind?: string;
+};
+
+export type Ask = {
+  id: string;
+  q: string;
+  at: number;
+  shown?: number | null;
+  answered?: { by: string; via: string; at: number; expires?: number } | null;
+  used?: { at: number; what: string }[];
 };
 
 /** one row of the brain's GET /tree (via /api/tree) */

@@ -11,6 +11,7 @@ import { useTheme } from 'next-themes';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { EnginesBlock } from '@/components/engines-block';
+import { GrantsBlock } from '@/components/grants-block';
 import { LineIcon } from '@/components/line-icon';
 import { HOME_ROOT_KEY, type Tree } from '@/components/roots-sheet';
 import { WorldPicker } from '@/components/world-picker';
@@ -213,6 +214,7 @@ export default function SettingsPage() {
         {walkErr && <p className="note text-[var(--oz-danger)]">{walkErr}</p>}
         {vtErr && <p className="note text-[var(--oz-danger)]">{vtErr}</p>}
       </section>
+      <GrantsBlock />
     </main>
   );
 }

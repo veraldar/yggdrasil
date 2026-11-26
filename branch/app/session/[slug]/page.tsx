@@ -37,6 +37,7 @@ import {
 } from '@/lib/speech';
 import { shouldAutoSpeak } from '@/lib/auto-speak';
 import { engineWord } from '@/lib/agents';
+import { AskCards } from '@/components/ask-cards';
 import { CARD_ST, type TreeRow } from '@/lib/card';
 import { slugify } from '@/lib/slug';
 import { diagEvent } from '@/lib/diag';
@@ -390,22 +391,6 @@ export default function SessionView({
   const [voiceNa, setVoiceNa] = useState(() => !!voiceOff());
   const [voiceNaNote, setVoiceNaNote] = useState(false);
   const [error, setError] = useState('');
-  const [approving, setApproving] = useState(false);
-  /** the Approve button: only a paired device's tap; the brain verifies it (owner.rs) */
-  const approveAsk = async () => {
-    setApproving(true);
-    try {
-      const r = await fetch(`/api/session/${slug}/approve`, { method: 'POST', headers: pinHeaders() });
-      if (!r.ok) {
-        const d = await r.json().catch(() => null);
-        setError(String(d?.error || `approve failed (${r.status})`));
-      }
-    } catch (e) {
-      setError(String(e));
-    } finally {
-      setApproving(false);
-    }
-  };
   const [attachments, setAttachments] = useState<Attach[]>([]);
   // the same list, current between renders (picks and uploads finish out of step)
   const attachmentsRef = useRef<Attach[]>([]);
@@ -416,6 +401,12 @@ export default function SessionView({
   // line under the header) and, in MAIN, the sessions its `→ <title>` route
   // tags link to. Re-read as the transcript grows and runs start/end
   const [tree, setTree] = useState<TreeRow[]>([]);
+  // a question a session asks while this page sits idle must still appear on its card: re-read every 10 s
+  const [treeTick, setTreeTick] = useState(0);
+  useEffect(() => {
+    const t = setInterval(() => setTreeTick((x) => x + 1), 10_000);
+    return () => clearInterval(t);
+  }, []);
   const [cardOpen, setCardOpen] = useState(false);
   // the full log (header key): everything the brain recorded — internal
   // turns ([inbox] wakes, automation) and each tool call — muted; the clean
@@ -806,7 +797,7 @@ export default function SessionView({
     return () => {
       live = false;
     };
-  }, [slug, total, busy]);
+  }, [slug, total, busy, treeTick]);
   // the card of the session this view opened (pinned id, else its slug) —
   // MAIN has none to show: it is the door, not a managed session
   const me = isMainSlug(slug)
@@ -3193,11 +3184,7 @@ export default function SessionView({
           its question for you, then the summary (tap: the whole of it) */}
       {me && card && (() => {
         const engText = engineWord(card.engine || me.engine || '');
-        // a question only the owner may answer: one tap on a paired device (the brain checks the
-        // device and writes the approval itself — no session passes it on, none can press it)
-        const askOpen = card.status === 'blocked' && !!card.needs?.trim();
         return (
-          <>
           <button
             type="button"
             data-testid="session-card"
@@ -3225,18 +3212,6 @@ export default function SessionView({
               <span className="s">{card.summary || card.headline}</span>
             )}
           </button>
-          {askOpen && (
-            <button
-              type="button"
-              data-testid="approve-btn"
-              disabled={approving}
-              onClick={() => void approveAsk()}
-              className="oz-k mt-1 w-full"
-            >
-              {approving ? 'approving…' : 'Approve'}
-            </button>
-          )}
-          </>
         );
       })()}
 
@@ -3746,6 +3721,8 @@ export default function SessionView({
               {histChip}
             </div>
           )}
+          {/* the questions sessions asked you: Yes · No · Reply (MAIN: all of them; a session: its own) */}
+          <AskCards tree={tree} only={isMainSlug(slug) ? undefined : me?.id} />
           <div className="oz-dock -mx-3 px-3">
             {/* single paper-clip key — opens the phone's picker: any file, a photo,
                 the camera (package 2: files are files) */}
