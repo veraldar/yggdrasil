@@ -105,6 +105,7 @@ const auth = (over = {}) => ({
   keys: [{ kid: KID, alg: 'ed25519', public: raw.toString('base64url'), retired_at: null }],
   kill_epoch: 3,
   deny: [],
+  issuers: t.TEST_ISSUERS,
   ...over,
 });
 const mint = (claims = {}, opts = {}) =>
@@ -190,6 +191,36 @@ test('expired, region, revoked — and C3 order between them', () => {
   assert.equal(check(tok, { ...denied, kill_epoch: 9 }).why, 'revoked');
 });
 
+test('invalid: wrong iss, and a future iat (C3 M3)', () => {
+  const inv = { ok: false, why: 'invalid' };
+  // iss: only the trunk's own origins
+  assert.deepEqual(check(mint({ iss: 'https://evil.example' })), inv, 'a foreign iss');
+  assert.deepEqual(check(mint({ iss: 'https://trunk.invalid/x' })), inv, 'iss is an origin, not a url');
+  assert.equal(check(mint({ iss: 'HTTPS://TRUNK.INVALID' })).ok, true, 'case-insensitive, as state.rs');
+  assert.deepEqual(check(mint(), auth({ issuers: ['https://other.example'] })), inv, 'an iss the state does not list');
+  assert.deepEqual(check(mint(), auth({ issuers: [] })), inv, 'no issuers at all: nothing verifies');
+  // iat: more than 60 s in the future → invalid; within 60 s → ok (checked at now = NOW)
+  const at = (dtS) => t.rfc3339(NOW + dtS * 1000);
+  assert.deepEqual(check(mint({ iat: at(61) }), auth(), RGN, NOW), inv, '61 s in the future');
+  assert.equal(check(mint({ iat: at(60) }), auth(), RGN, NOW).ok, true, '60 s in the future (skew)');
+  assert.equal(check(mint({ iat: at(59) }), auth(), RGN, NOW).ok, true, '59 s in the future');
+  assert.equal(check(mint({ iat: at(-3600) }), auth(), RGN, NOW).ok, true, 'an old iat is fine');
+  // order: a future iat and a passed exp → invalid (the iat check comes first)
+  const late = NOW + 16 * 60_000; // past every 15 min token's exp
+  const future = t.mintToken(key, { did: 'dev_phone1', sub: 'acc_owner', rgn: RGN, kep: 3, iat: at(1200) }, { now: NOW, lifeMs: 30 * 60_000 });
+  assert.deepEqual(check(future, auth(), RGN, late), inv, 'iat before exp in the order');
+  assert.equal(check(future, auth(), RGN, NOW).ok, false, 'the control: a future iat refuses at now too');
+  assert.equal(check(mint(), auth(), RGN, late).ok, false, 'a plain token is expired by then');
+});
+
+test('originOf: C3 origins as state.rs origin_of writes them', () => {
+  assert.equal(t.originOf('https://ljoolq.veraldar.org'), 'https://ljoolq.veraldar.org');
+  assert.equal(t.originOf('https://Ljoolq.Veraldar.org/x/y?z'), 'https://ljoolq.veraldar.org');
+  assert.equal(t.originOf('http://127.0.0.1:19050'), 'http://127.0.0.1:19050');
+  assert.equal(t.originOf('127.0.0.1:19050'), 'https://127.0.0.1:19050', 'no scheme: https');
+  assert.equal(t.originOf('ftp://x/y'), 'https://x/y', 'a foreign scheme: https');
+});
+
 test('REAUTH: expired/region → refresh, the rest → login', () => {
   assert.deepEqual(t.REAUTH, { expired: 'refresh', region: 'refresh', missing: 'login', invalid: 'login', revoked: 'login' });
 });
@@ -220,6 +251,7 @@ test('parseState: C5 as written by the bridge; foreign or broken files are not a
   assert.equal(s.keys.length, 1);
   assert.equal(s.kill_epoch, 3);
   assert.deepEqual(s.deny, [{ did: 'dev_gone', until: 1764100900000 }]);
+  assert.deepEqual(s.issuers, ['https://ljoolq.veraldar.org'], 'issuers backfilled from trunk.url');
   assert.equal(s.root.name, 'omarchy', 'other readers’ fields ride along');
   assert.equal(t.parseState(JSON.stringify(C5({ version: 2 }))), null);
   assert.equal(t.parseState(JSON.stringify(C5({ kill_epoch: -1 }))), null);
@@ -229,6 +261,11 @@ test('parseState: C5 as written by the bridge; foreign or broken files are not a
   // a key whose kid is not its own is dropped (the footer could not name it honestly)
   const bad = t.parseState(JSON.stringify(C5({ keys: [{ kid: 'k_AAAAAAAAAAAAAAAA', alg: 'ed25519', public: raw.toString('base64url'), retired_at: null }] })));
   assert.equal(bad.keys.length, 0);
+  // issuers: the file's own list wins; an old file with no list falls back to origin(trunk.url)
+  const listed = t.parseState(JSON.stringify(C5({ trunk: { url: 'https://ljoolq.veraldar.org', trunk_id: 'trk_1', trunk_key: 'x', issuers: ['https://ljoolq.veraldar.org', 'https://ap.veraldar.org'] } })));
+  assert.deepEqual(listed.issuers, ['https://ljoolq.veraldar.org', 'https://ap.veraldar.org']);
+  const old = t.parseState(JSON.stringify(C5({ trunk: { trunk_id: 'trk_1', trunk_key: 'x' } })));
+  assert.deepEqual(old.issuers, [], 'no url, no list: none');
 });
 
 test('trunkState: re-read on a new stamp only; missing → fail closed; a torn file keeps the last good', () => {
@@ -253,11 +290,11 @@ test('trunkState: re-read on a new stamp only; missing → fail closed; a torn f
     assert.equal(at(1000).kill_epoch, 6);
     rmSync(file);
     assert.equal(at(1000), null, 'the file gone: no keys, nothing verifies');
-    // checkTrunkAccess reads BIFROST_TRUNK_STATE
+    // checkTrunkAccess reads BIFROST_TRUNK_STATE (iss must be the state's trunk.url origin)
     write(C5());
     process.env.BIFROST_TRUNK_STATE = file;
-    assert.equal(t.checkTrunkAccess(mint(), RGN, NOW + 1000).ok, true);
-    assert.equal(t.checkTrunkAccess(mint(), RGN, NOW + 1000).ok, true);
+    assert.equal(t.checkTrunkAccess(mint({ iss: 'https://ljoolq.veraldar.org' }), RGN, NOW + 1000).ok, true);
+    assert.equal(t.checkTrunkAccess(mint({ iss: 'https://trunk.invalid' }), RGN, NOW + 1000).ok, false, 'an iss the state does not list');
   } finally {
     delete process.env.BIFROST_TRUNK_STATE;
     rmSync(dir, { recursive: true, force: true });
@@ -286,10 +323,20 @@ test('shared vectors: the keypair, kid, footer and token are C3’s', { skip: !V
 test('shared vectors: every case, the same verdict and reauth as the Rust verifier', { skip: !V && 'not written yet (IDP stream)' }, () => {
   assert.ok(V.cases.length >= 10);
   for (const c of V.cases) {
-    // the authority as this app reads it from trunk-state.json (C5) — through the same parser
-    const auth = t.parseState(JSON.stringify({ version: 1, keys: V.keys, kill_epoch: c.ctx.kill_epoch, deny: c.ctx.deny }));
+    // the authority as this app reads it from trunk-state.json (C5) — through the same parser,
+    // issuers and all (what a token's iss is checked against)
+    const auth = t.parseState(
+      JSON.stringify({
+        version: 1,
+        trunk: { url: V.claims.iss, issuers: c.ctx.issuers },
+        keys: V.keys,
+        kill_epoch: c.ctx.kill_epoch,
+        deny: c.ctx.deny,
+      })
+    );
     assert.ok(auth, c.name);
     assert.equal(auth.keys.length, V.keys.length, `${c.name}: every key kept`);
+    assert.deepEqual(auth.issuers, c.ctx.issuers, `${c.name}: the ctx issuers`);
     const got = t.checkToken(c.token, auth, c.ctx.region, c.ctx.now * 1000);
     if (c.expect.ok) {
       assert.equal(got.ok, true, `${c.name}: ${got.why}`);

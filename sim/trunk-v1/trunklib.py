@@ -168,6 +168,13 @@ class Trunk:
         self.public_url = public_url or "http://localhost:%d" % self.port
         self.cfg = os.path.join(root, "trunk.toml")
         self.sock = os.path.join(root, "cred", "ctl.sock")
+        if len(self.sock.encode()) > 100:
+            # SUN_LEN is 108: a deep TMPDIR (the ladder's) would make bind() fail. Put the socket in a short private dir.
+            import atexit, shutil, tempfile
+            short = os.environ.get("XDG_RUNTIME_DIR") or "/tmp"
+            sd = tempfile.mkdtemp(prefix="tv1-", dir=short if os.path.isdir(short) else "/tmp")
+            atexit.register(shutil.rmtree, sd, True)
+            self.sock = os.path.join(sd, "ctl.sock")
         self.fast = fast
         with open(self.cfg, "w") as f:
             f.write(
