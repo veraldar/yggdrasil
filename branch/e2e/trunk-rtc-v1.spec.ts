@@ -420,6 +420,26 @@ test('G3.2 v1 trunk rtc: QR pairing, voice over the trunk, ufrag routing, revoke
     const page = await ctx.newPage();
     return { ctx, page, pcEvents, roomTts, tokens, tts, pageLog, sockets };
   }
+  /** what the trunk answers a device's credential: asked from a clean context of the phone browser
+   *  (its network and resolver) holding only that token. No app code runs there, so nothing navigates
+   *  or drops the cookie mid-question — a revoked app's own hand-off to /login does both (B10: its
+   *  /t/auth/refresh fails and clears the cookies; a later call then says "missing", not "revoked"). */
+  async function askAsDevice(token: string, path: string, init: { method?: string; body?: J } = {}) {
+    const c = await phoneBrowser.newContext({ ignoreHTTPSErrors: true, serviceWorkers: 'block' });
+    try {
+      await c.addCookies([{ name: 'bifrost_device', value: token, url: AP, httpOnly: true, secure: AP.startsWith('https'), sameSite: 'Strict' }]);
+      // a blank page of the trunk's origin, served by the rig itself (every trunk answer carries the
+      // API CSP, default-src 'none', which would block the fetch); the fetch below is real
+      await c.route(`${AP}/__rig_blank`, (r) => r.fulfill({ status: 200, contentType: 'text/html', body: '<!doctype html><title>rig</title>' }));
+      const p = await c.newPage();
+      await p.goto(`${AP}/__rig_blank`);
+      return await pageFetch(p, path, init);
+    } finally {
+      await c.close().catch(() => {});
+    }
+  }
+  const deviceToken = async (ctx: BrowserContext) => (await ctx.cookies(AP)).find((c) => c.name === 'bifrost_device')?.value || '';
+
   const A = await phoneContext();
   const phone = A.page;
   screens.push(['phone', phone]);
@@ -454,19 +474,20 @@ test('G3.2 v1 trunk rtc: QR pairing, voice over the trunk, ufrag routing, revoke
   }
   /** a pairing link straight from the trunk's console (`trunk-ctl pair-qr`) */
   const consoleQr = () => String((JSON.parse(ctl('pair-qr')) as { url: string }).url);
-  /** the phone redeems a QR link: the shell's /pair page → POST /t/pair/redeem → "joined" → the door.
-   *  (The trunk's page stops at "joined: <name> · member" — spec F5.3 says the phone lands on the
-   *  door; the phone's owner taps BIFROST, the shell's link to the door.) */
+  /** the phone redeems a QR link: the shell's /pair page → POST /t/pair/redeem → "joined" → the door
+   *  by itself (spec F5 step 3: the page goes where the trunk's `next` says, no tap). The landing is
+   *  waited for, never tapped: a tap raced the page's own navigation (G3.2 R7 on 3fe0812e). */
   async function redeem(page: Page, url: string) {
     const redeemed = page.waitForResponse((r) => r.url().endsWith('/t/pair/redeem'));
     await page.goto(url);
     const r = await redeemed;
     expect(r.status(), await r.text().catch(() => '')).toBe(200);
+    expect(((await r.json().catch(() => ({}))) as { next?: string }).next, 'F5.3: the landing the trunk names (door online)').toBe('/');
     const t = Date.now();
     await expect(page.locator('#p-joined')).toBeVisible({ timeout: 10_000 });
-    expect(page.url(), 'the token never stays in the address bar (B4)').toBe(`${AP}/pair`);
-    if (page.url() !== `${AP}/`) await page.locator('a.oz-brand').click();
+    expect(page.url(), 'the token never stays in the address bar (B4)').not.toContain('bfnp-');
     await page.waitForURL(`${AP}/`, { timeout: 30_000 });
+    expect(page.url(), 'the token never stays in the address bar (B4)').toBe(`${AP}/`);
     return t;
   }
   const deviceOf = async (page: Page) => String(((await pageFetch(page, '/t/me')).body.device as J | undefined)?.id || '');
@@ -749,6 +770,9 @@ test('G3.2 v1 trunk rtc: QR pairing, voice over the trunk, ufrag routing, revoke
       const row = box.locator('#d-list > *').filter({ has: box.locator(`input[aria-label="rename ${mark}"]`) });
       await expect(row).toHaveCount(1, { timeout: 15_000 });
       const severedBefore = (log(join(HOME_DIR, 'bridge.log')).match(/severed peer/g) || []).length;
+      // the phone's credential as it stands before the removal (the "next call" below carries it)
+      const tokA = await deviceToken(A.ctx);
+      expect(tokA, "phone A's access token").toMatch(/^v4\.public\./);
       await row.getByRole('button', { name: 'Remove' }).click();
       await expect(box.locator('#d-sheet')).toBeVisible();
       const del = box.waitForResponse((r) => r.request().method() === 'DELETE' && r.url().includes(`/t/devices/${deviceId}`));
@@ -775,19 +799,13 @@ test('G3.2 v1 trunk rtc: QR pairing, voice over the trunk, ufrag routing, revoke
             return f.cls === 'closed' && (f.t || 0) >= t0;
           })
       );
-      let t = { status: 0, via: null as string | null, body: {} as J };
-      const tried: string[] = [];
-      const until401 = Date.now() + 20_000;
-      while (Date.now() < until401) {
-        t = await pageFetch(phone, '/api/token', { method: 'POST', body: { room: ROOM } }).catch(() => ({ status: 0, via: null, body: {} }));
-        if (tried[tried.length - 1] !== `${t.status}`) tried.push(`${t.status}`);
-        if (t.status === 401) break;
-        await phone.waitForTimeout(250).catch(() => {});
-      }
-      expect(t.status, `the phone's /api/token answers: ${tried.join(' → ')}`).toBe(401);
+      // the phone's next call, with the credential it held (the first post-revoke answer — not one
+      // made after the app's own /login hand-off dropped the cookie, G3.2 R6 on 3b785371)
+      const t = await askAsDevice(tokA, '/api/token', { method: 'POST', body: { room: ROOM } });
+      expect(t.status, `the phone's /api/token answers ${t.status} ${JSON.stringify(t.body)}`).toBe(401);
       expect(t.body.why).toBe('revoked');
       expect(t.body.reauth).toBe('login');
-      return `DELETE /t/devices → out of the room ${goneMs} ms · pinned channel severed ${severMs} ms · phone pc ${down()?.state} ${pcMs} ms · ICE-TCP closed at the VPS ${tapMs} ms · /api/token ${tried.join(' → ')} (revoked, login)`;
+      return `DELETE /t/devices → out of the room ${goneMs} ms · pinned channel severed ${severMs} ms · phone pc ${down()?.state} ${pcMs} ms · ICE-TCP closed at the VPS ${tapMs} ms · /api/token ${t.status} (revoked, login)`;
     });
 
     // ---------------------------------------------------------------- U2 §5.7 on the plain path
@@ -839,6 +857,8 @@ test('G3.2 v1 trunk rtc: QR pairing, voice over the trunk, ufrag routing, revoke
       expect(rtcOpen().length, "phone B's plain /rtc socket is open before").toBeGreaterThan(0);
       const open = rtcOpen();
       const cutBefore = (log(join(HOME_DIR, 'bridge.log')).match(/\/rtc of device \S+ severed/g) || []).length;
+      const tokB = await deviceToken(B2.ctx);
+      expect(tokB, "phone B's access token").toMatch(/^v4\.public\./);
       ctl('devices', 'revoke', deviceB, 'rig');
       const t0 = Date.now();
       const [goneMs, cutMs] = await Promise.all([
@@ -850,8 +870,11 @@ test('G3.2 v1 trunk rtc: QR pairing, voice over the trunk, ufrag routing, revoke
       expect(cutMs, 'the plain /rtc severed').toBeGreaterThanOrEqual(0);
       expect(cutMs, `plain /rtc severed in ${cutMs} ms`).toBeLessThanOrEqual(1000);
       const byBridge = (log(join(HOME_DIR, 'bridge.log')).match(/\/rtc of device \S+ severed/g) || []).length > cutBefore;
-      const t = await pageFetch(B2.page, '/api/token', { method: 'POST', body: { room: ROOM } });
-      expect(t.status).toBe(401);
+      // the phone's next call, with the credential it held — asked outside its page: the revoked app
+      // answers its own 401 by going to /login (B10), which both destroys a page.evaluate (G3.2 R7 on
+      // 3fe0812e) and drops the cookie (→ "missing", R6 on 3b785371)
+      const t = await askAsDevice(tokB, '/api/token', { method: 'POST', body: { room: ROOM } });
+      expect(t.status, `phone B's /api/token answers ${t.status} ${JSON.stringify(t.body)}`).toBe(401);
       expect(t.body.why).toBe('revoked');
       expect(t.body.reauth).toBe('login');
       return `trunk-ctl devices revoke → out of the room ${goneMs} ms · the phone's plain /rtc closed ${cutMs} ms (${byBridge ? 'the bridge cut it' : 'the trunk cut the relayed stream'}) · /api/token 401 (revoked, login)`;

@@ -76,14 +76,16 @@ export async function stepUp(page, admin) {
 }
 
 /** the phone redeems a QR link: the shell's /pair page → POST /t/pair/redeem → "joined" → the door
- *  (the trunk's page stops at "joined"; the owner taps BIFROST, its link to the door) */
+ *  by itself (spec F5 step 3: the page goes where the trunk's `next` says — no tap); the landing is
+ *  waited for, never tapped, so nothing here races that navigation */
 export async function redeem(phone, url, ap) {
   const redeemed = phone.waitForResponse((r) => r.url().endsWith('/t/pair/redeem'));
   await phone.goto(url);
   const r = await redeemed;
   must(r.status() === 200, `redeem: ${r.status()} ${await r.text().catch(() => '')}`);
+  const next = (await r.json().catch(() => ({}))).next;
+  must(next === '/', `redeem: the landing is ${next} (a door root is online: /)`);
   await phone.locator('#p-joined').waitFor({ timeout: 10_000 });
-  await phone.locator('a.oz-brand').click();
   await phone.waitForURL(`${ap}/`, { timeout: 30_000 });
   await phone.getByTestId('roots').waitFor({ timeout: 30_000 });
 }
