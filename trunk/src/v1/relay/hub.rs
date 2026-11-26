@@ -241,34 +241,44 @@ impl Hub {
         self.links.lock().unwrap().values().any(|l| l.stream_did.lock().unwrap().values().any(|d| d == did))
     }
 
-    pub fn push_revoke(&self, did: &str, until: u64) {
-        // cut this device's live relayed streams first (B13: ≤ 1 s): dropping the tx ends the
-        // writer loop, which shuts the client's connection down; the root is told each stream is
-        // gone so its half ends too
-        let cut = |l: &RootLink| {
-            let ids: Vec<u32> = l
-                .stream_did
-                .lock()
-                .unwrap()
-                .iter()
-                .filter(|(_, d)| d.as_str() == did)
-                .map(|(i, _)| *i)
-                .collect();
+    /// Is any device-owned relayed stream live? (the kill test watches it go false)
+    pub fn device_streams_live(&self) -> usize {
+        self.links.lock().unwrap().values().map(|l| l.stream_did.lock().unwrap().len()).sum()
+    }
+
+    /// Cut the live relayed streams whose owning device `doomed` picks (B13: ≤ 1 s): dropping the
+    /// tx ends the writer loop, which shuts the client's connection down; the root is told each
+    /// stream is gone so its half ends too. Streams no device owns (not in `stream_did`: ICE-TCP,
+    /// raw forwards) are never touched. Returns how many were cut.
+    fn cut_device_streams(&self, doomed: impl Fn(&str) -> bool) -> usize {
+        let mut n = 0;
+        for l in self.links.lock().unwrap().values() {
+            let ids: Vec<u32> = l.stream_did.lock().unwrap().iter().filter(|(_, d)| doomed(d.as_str())).map(|(i, _)| *i).collect();
             for id in ids {
                 l.streams.lock().unwrap().remove(&id);
                 l.stream_did.lock().unwrap().remove(&id);
                 let _ = l.out.send((OP_BIN, proto::mux(proto::CLOSE, id, &[])));
+                n += 1;
             }
-        };
-        for l in self.links.lock().unwrap().values() {
-            cut(l);
         }
+        n
+    }
+
+    pub fn push_revoke(&self, did: &str, until: u64) {
+        // this device's live relayed streams first, then every root's deny-list
+        self.cut_device_streams(|d| d == did);
         let msg = proto::sign_json(&self.key, json!({ "t": "revoke", "did": did, "until": until }));
         self.send_all(&proto::ctrl(&msg));
     }
 
-    /// The kill switch moved the epoch (and maybe lockdown).
+    /// The kill switch moved the epoch (and maybe lockdown): every device is revoked (spec §5.4),
+    /// so every device-owned relayed stream is cut at once (B13, P14: ≤ 1 s), then every root
+    /// learns the epoch (its own sweeps end the pinned channels and voice).
     pub fn push_kill(&self, epoch: u64, lockdown: bool) {
+        let cut = self.cut_device_streams(|_| true);
+        if cut > 0 {
+            meter::event("kill.cut", json!({ "streams": cut }));
+        }
         let msg = proto::sign_json(&self.key, json!({ "t": "kill", "epoch": epoch, "lockdown": lockdown }));
         self.send_all(&proto::ctrl(&msg));
     }

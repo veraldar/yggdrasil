@@ -204,6 +204,11 @@ fn free_udp_port() -> SocketAddr {
 
 /// Enroll a root into the registry (what F3/F4 end in) and start its side.
 fn root(t: &Trunk, dir: &std::path::Path, id: &str, name: &'static str, addr: &str, has_app: bool) -> Root {
+    root_with_app(t, dir, id, name, addr, has_app, fake_app(name))
+}
+
+/// The same, with the root's app at `app`.
+fn root_with_app(t: &Trunk, dir: &std::path::Path, id: &str, name: &'static str, addr: &str, has_app: bool, app: SocketAddr) -> Root {
     let d = dir.join(id);
     std::fs::create_dir_all(&d).unwrap();
     let key = Arc::new(SignKey::generate());
@@ -259,7 +264,7 @@ fn root(t: &Trunk, dir: &std::path::Path, id: &str, name: &'static str, addr: &s
         url: url.clone(),
         pin: String::new(),
         token: String::new(),
-        upstream: fake_app(name).to_string(),
+        upstream: app.to_string(),
         livekit: None,
         tcp: HashMap::from([("livekit-ice".to_string(), echo_addr.to_string())]),
         rootlink: None,
@@ -564,5 +569,151 @@ fn revoke_reaches_the_root_and_cuts_the_live_channel_x5() {
     println!("revoke → root refuses next call (401 login): ×5 {:?}", refuse);
     println!("revoke → live channel severed:            ×5 {:?}", sever);
     assert!(sever.iter().all(|ms| *ms < 1_000), "the 1 s sever bound is broken: {sever:?}");
+    assert!(refuse.iter().all(|ms| *ms < 1_000), "the 1 s refuse bound is broken: {refuse:?}");
+}
+
+
+/// An app whose every answer is a held server-sent-event stream (like `/api/run-events`): a tick
+/// every 50 ms until its connection goes. `live` counts the streams it is still writing.
+fn sse_app(live: Arc<std::sync::atomic::AtomicUsize>) -> SocketAddr {
+    use std::sync::atomic::Ordering;
+    let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let a = l.local_addr().unwrap();
+    std::thread::spawn(move || {
+        for s in l.incoming().flatten() {
+            let live = live.clone();
+            std::thread::spawn(move || {
+                let mut s = s;
+                let mut buf = [0u8; 8192];
+                let mut got = vec![];
+                while !got.windows(4).any(|w| w == b"\r\n\r\n") {
+                    match s.read(&mut buf) {
+                        Ok(0) | Err(_) => return,
+                        Ok(n) => got.extend_from_slice(&buf[..n]),
+                    }
+                }
+                live.fetch_add(1, Ordering::SeqCst);
+                let head = b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n";
+                let mut ok = s.write_all(head).is_ok();
+                let mut i = 0u64;
+                while ok {
+                    i += 1;
+                    ok = s.write_all(format!("data: tick {i}\n\n").as_bytes()).is_ok();
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                live.fetch_sub(1, Ordering::SeqCst);
+            });
+        }
+    });
+    a
+}
+
+/// A device's held event stream through the trunk: returns once the first tick arrived, plus a
+/// thread that reports (on `done`) when the stream ended for the client.
+fn hold_events(t: &Trunk, tok: &str, done: std::sync::mpsc::Sender<Instant>) -> std::thread::JoinHandle<()> {
+    let mut s = StdTcp::connect(t.addr).unwrap();
+    s.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+    s.write_all(format!("GET /api/run-events HTTP/1.1\r\nHost: t\r\nCookie: bifrost_device={tok}\r\nAccept: text/event-stream\r\n\r\n").as_bytes()).unwrap();
+    let mut got = vec![];
+    let mut buf = [0u8; 4096];
+    while !String::from_utf8_lossy(&got).contains("data: tick") {
+        let n = s.read(&mut buf).unwrap();
+        assert!(n > 0, "the event stream ended before its first tick: {}", String::from_utf8_lossy(&got));
+        got.extend_from_slice(&buf[..n]);
+    }
+    assert!(got.starts_with(b"HTTP/1.1 200"), "{}", String::from_utf8_lossy(&got));
+    std::thread::spawn(move || {
+        loop {
+            match s.read(&mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(_) => {}
+            }
+        }
+        let _ = done.send(Instant::now());
+    })
+}
+
+/// One kill round: an admin and a member device each hold a live relayed event stream, and a raw
+/// ICE-TCP stream (owned by no device) is open. → (both device streams ended for the client, the
+/// root's halves ended at its app, the root refuses the next call), each in ms after the kill.
+fn kill_round(round: usize) -> (u128, u128, u128) {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let t = mini_trunk();
+    let dir = tmpdir(&format!("kill-x5-{round}"));
+    let live = Arc::new(AtomicUsize::new(0));
+    let a = root_with_app(&t, &dir, "rt_a", "a", "10.66.0.1", true, sse_app(live.clone()));
+    wait_for("root linked", Duration::from_secs(10), || t.hub.online("rt_a"));
+    // a raw stream no device owns (LiveKit's ICE-TCP by registered ufrag)
+    let uf = format!("ufragK{round}xx");
+    assert!(a.link.register_wait(std::slice::from_ref(&uf), crate::v1::link::ICE_ACK_WAIT));
+    let mut ice = StdTcp::connect(t.ice).unwrap();
+    ice.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    let pkt = stun_binding(&uf);
+    ice.write_all(&pkt).unwrap();
+    let mut got = vec![0u8; 8 + pkt.len()];
+    ice.read_exact(&mut got).unwrap();
+    assert_eq!(&got[..8], b"LIVEKIT:");
+    // an admin's and a member's device, each holding a live event stream
+    let (tx, rx) = std::sync::mpsc::channel();
+    let admin = t.token(&format!("dev_admin_{round}"), "loopback", 0, 120_000);
+    let member = t.token(&format!("dev_member_{round}"), "loopback", 0, 120_000);
+    let ha = hold_events(&t, &admin, tx.clone());
+    let hm = hold_events(&t, &member, tx);
+    assert_eq!(t.hub.device_streams_live(), 2);
+    assert_eq!(live.load(Ordering::SeqCst), 2);
+    // the kill, exactly as idp::devices::kill_all sends it (the epoch is in the db first)
+    let t0 = Instant::now();
+    *t.auth.kill.lock().unwrap() = (1, false);
+    t.hub.push_kill(1, false);
+    let push_ms = t0.elapsed().as_millis();
+    assert!(push_ms < 200, "push_kill took {push_ms} ms (bound: 200 ms)");
+    // both client streams end
+    let mut ended = vec![];
+    for _ in 0..2 {
+        let at = rx.recv_timeout(Duration::from_secs(3)).unwrap_or_else(|_| panic!("round {round}: a device stream was not cut in 3 s"));
+        ended.push(at.duration_since(t0).as_millis());
+    }
+    let _ = (ha.join(), hm.join());
+    assert_eq!(t.hub.device_streams_live(), 0, "the trunk still holds a device stream");
+    // the root ended its halves too (its app's connections closed)
+    // (an upper bound: measured when the wait returns, polled every 10 ms)
+    wait_for("the root's halves end", Duration::from_secs(3), || live.load(Ordering::SeqCst) == 0);
+    let root_ms = t0.elapsed().as_millis();
+    // the stream no device owns was not touched
+    ice.write_all(&pkt).unwrap();
+    let mut again = vec![0u8; 8 + pkt.len()];
+    ice.read_exact(&mut again).unwrap();
+    assert_eq!(&again[..8], b"LIVEKIT:", "the raw ICE stream survived the kill");
+    // the root refuses a pre-kill token (kep 0 < its kill epoch 1)
+    let mut refuse_ms = u128::MAX;
+    let hdr = format!("Host: t\r\nCookie: bifrost_device={admin}\r\nContent-Length: 2\r\n\r\n{{}}");
+    for _ in 0..300 {
+        let (st, body) = http(t.addr, &format!("POST /api/session HTTP/1.1\r\n{hdr}"));
+        if st == 401 && body.contains("reauth") {
+            refuse_ms = t0.elapsed().as_millis();
+            break;
+        }
+        assert!(t0.elapsed() < Duration::from_secs(3), "round {round}: never refused: {st} {body}");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    drop(ice);
+    let _ = std::fs::remove_dir_all(&dir);
+    (*ended.iter().max().unwrap(), root_ms, refuse_ms)
+}
+
+#[test]
+fn kill_cuts_every_live_device_stream_and_reaches_the_root_x5() {
+    let (mut cut, mut root, mut refuse) = (vec![], vec![], vec![]);
+    for round in 0..5 {
+        let (c, r, f) = kill_round(round);
+        cut.push(c);
+        root.push(r);
+        refuse.push(f);
+    }
+    println!("kill → both device streams cut (client side): ×5 {cut:?}");
+    println!("kill → the root's halves ended (app side):    ×5 {root:?}");
+    println!("kill → root refuses a pre-kill token (401):   ×5 {refuse:?}");
+    assert!(cut.iter().all(|ms| *ms < 1_000), "the 1 s cut bound is broken: {cut:?}");
+    assert!(root.iter().all(|ms| *ms < 1_000), "the root's halves outlived 1 s: {root:?}");
     assert!(refuse.iter().all(|ms| *ms < 1_000), "the 1 s refuse bound is broken: {refuse:?}");
 }

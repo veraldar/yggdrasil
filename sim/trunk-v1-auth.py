@@ -44,6 +44,9 @@ from its own client address (X-Forwarded-For). Nothing live is touched.
             an unbound identity, a cancel, an unpublished kid; a rotated key re-fetches the JWKS;
             ES256; lockdown; no secret in any file but its own
   load      (M4) 50 concurrent password sign-ins against a trunk pinned to one CPU
+  kill-live (fix) a real door root (bridge [trunk], enrolled through the API) serves held event
+            streams to an admin and a member device; POST /t/kill → both cut ≤ 1 s, the root's
+            halves end, the old token is refused; lockdown, unlock
 
     sim/trunk-v1-auth.py [--bin trunk/target/release/bifrost-net] [--keep]
 
@@ -1241,6 +1244,194 @@ def t_load(binp, root):
         t.stop()
 
 
+def sse_app():
+    """A root's app whose every answer is a held event stream (like /api/run-events): a tick every
+    50 ms until its connection goes. → (port, live-stream counter, server)."""
+    import socketserver, threading
+    live = {"n": 0}
+    lock = threading.Lock()
+
+    class H(socketserver.BaseRequestHandler):
+        def handle(self):
+            buf = b""
+            while b"\r\n\r\n" not in buf:
+                b = self.request.recv(4096)
+                if not b:
+                    return
+                buf += b
+            with lock:
+                live["n"] += 1
+            try:
+                self.request.sendall(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n")
+                i = 0
+                while True:
+                    i += 1
+                    self.request.sendall(b"data: tick %d\n\n" % i)
+                    time.sleep(0.05)
+            except OSError:
+                pass
+            finally:
+                with lock:
+                    live["n"] -= 1
+
+    class S(socketserver.ThreadingTCPServer):
+        daemon_threads = True
+        allow_reuse_address = True
+
+    from trunklib import free_port
+    port = free_port(18870, 18889)
+    srv = S(("127.0.0.1", port), H)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return port, live, srv
+
+
+def udp_free(lo, hi):
+    import socket
+    for p in range(lo, hi + 1):
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as u:
+            try:
+                u.bind(("127.0.0.1", p))
+                return p
+            except OSError:
+                continue
+    raise RuntimeError("no free udp port in %d-%d" % (lo, hi))
+
+
+def hold_stream(t, client, path="/api/run-events"):
+    """A device's held event stream through the trunk to its door root. → (socket, the first bytes)."""
+    import socket
+    s = socket.create_connection(("127.0.0.1", t.port), timeout=10)
+    cookie = "; ".join("%s=%s" % (k, v) for k, (v, pth) in client.jar.items() if path.startswith(pth))
+    s.sendall(("GET %s HTTP/1.1\r\nHost: %s\r\nCookie: %s\r\nX-Forwarded-For: %s\r\nAccept: text/event-stream\r\nUser-Agent: %s\r\n\r\n"
+               % (path, t.public_url.split("://", 1)[1], cookie, client.xff, client.ua)).encode())
+    got = b""
+    while b"data: tick" not in got:
+        b = s.recv(4096)
+        if not b:
+            break
+        got += b
+    return s, got
+
+
+def t_kill_live(binp, root):
+    """The kill switch cuts every live relayed device stream ≤ 1 s (spec §5.4, B13/P14): a real root
+    (bridge [trunk], enrolled through the API) is the door; an admin and a member device each hold
+    an event stream through the trunk; POST /t/kill {lockdown} → both streams end, the root's halves
+    end, the old tokens are refused; then lockdown and unlock as before."""
+    import threading
+    d = os.path.join(root, "killlive")
+    t = Trunk(binp, os.path.join(d, "trunk"))
+    t.start()
+    bridge, srv = None, None
+    try:
+        env = dict(os.environ, CLAIM_ADMIN_PASSWORD=PASSWORD)
+        p = subprocess.run([sys.executable, os.path.join(HERE, "trunk-v1", "claim-admin.py"), "--url", t.url, "--origin", t.public_url,
+                            "--ctl", " ".join(t.ctl_prefix), "--xff", "100.64.240.1"], capture_output=True, text=True, timeout=60, env=env)
+        out = json.loads(p.stdout) if p.returncode == 0 else {}
+        admin = t.client(xff="100.64.240.1")
+        for k, v in out.get("cookies", {}).items():
+            admin.jar[k] = (v, "/t/auth" if k == "bifrost_refresh" else "/")
+        secret, step = out.get("totp_secret", ""), out.get("last_step", 0)
+        if not check("kill-live: a claimed trunk with an admin device", p.returncode == 0 and admin.get("/t/me").status == 200, p.stderr[-300:]):
+            return
+
+        def bn(*args):
+            r = subprocess.run([binp, *args], capture_output=True, text=True)
+            if r.returncode != 0:
+                raise RuntimeError("bifrost-net %s: %s" % (args[0], r.stderr.strip()))
+            return {l.split(" = ")[0]: l.split('"')[1] for l in r.stdout.splitlines() if " = " in l and '"' in l}
+
+        # the door root: enrolled through the API, its bridge dialing OUT to /t/root
+        rd = os.path.join(d, "door")
+        os.makedirs(rd, exist_ok=True)
+        rk, wk = bn("root-key", os.path.join(rd, "root.key")), bn("wg-key", os.path.join(rd, "wg.key"))
+        inst = t.client(xff="100.64.242.1")
+        r = inst.post("/t/roots/enroll", {"hostname": "door-box", "os": "linux", "arch": "x86_64", "root_pub": rk["public_key"],
+                                          "wg_pub": wk["public_key"], "has_app": True, "has_voice": False})
+        code, step = totp_fresh(secret, step)
+        admin.post("/t/auth/step-up", {"totp": code})
+        a = admin.post("/t/roots/enroll/%s/approve" % r.j("id"), {"name": "door"})
+        res = inst.post("/t/roots/enroll/%s/poll" % r.j("id"), {"secret": r.j("poll_secret")})
+        if not check("kill-live: the door root enrolled (installer → admin approve → poll)", r.status == 200 and a.status == 200 and res.j("status") == "approved", (r, a, res)):
+            return
+        app_port, live, srv = sse_app()
+        from trunklib import free_port
+        http_port, media_port = free_port(18870, 18889), udp_free(18870, 18889)
+        with open(os.path.join(rd, "bridge.toml"), "w") as f:
+            f.write('[node]\nname = "door"\nprivate_key = "%s"\n\n' % bn("keygen")["private_key"]
+                    + '[bridge]\nhttp = "127.0.0.1:%d"\nmedia = "127.0.0.1:%d"\ntokens_file = "%s/devices.json"\nopencode_url = "http://127.0.0.1:9"\n\n'
+                    % (http_port, media_port, rd)
+                    + '[trunk]\nurl = "%s"\ntrunk_key = "%s"\nroot_key_file = "%s/root.key"\nroot_id = "%s"\nstate_file = "%s/trunk-state.json"\n'
+                      'upstream = "127.0.0.1:%d"\nice_tcp = []\n' % (t.url, res.j("trunk")["trunk_key"], rd, res.j("root_id"), rd, app_port))
+        blog = open(os.path.join(rd, "bridge.log"), "ab")
+        bridge = subprocess.Popen([binp, "bridge", "-c", os.path.join(rd, "bridge.toml")], stdout=blog, stderr=subprocess.STDOUT)
+        online = wait_until(lambda: any(x.get("online") for x in (admin.signed("GET", "/t/me/roots").data or [])), 20)
+        if not check("kill-live: the door root dialed out and linked", online, open(os.path.join(rd, "bridge.log")).read()[-400:]):
+            return
+
+        # a member phone (QR) and the admin, each holding a live event stream through the trunk
+        ok, q = t.ctl("pair-qr")
+        member = t.client(xff="100.64.243.1")
+        m = member.post("/t/pair/redeem", {"token": json.loads(q)["url"].split("t=", 1)[1]}) if ok else None
+        check("kill-live: a member device joined by QR", m is not None and m.status == 200 and m.j("device", {}).get("role") == "member", m)
+        held = {}
+        for name, c in (("admin", admin), ("member", member)):
+            sock, first = hold_stream(t, c)
+            held[name] = sock
+            check("kill-live: the %s's event stream is live through the trunk (ticks arriving)" % name, first.startswith(b"HTTP/1.1 200") and b"data: tick" in first, first[:200])
+        check("kill-live: the root's app holds both streams", wait_until(lambda: live["n"] == 2, 5), live)
+        ended = {}
+
+        def watch(name, sock):
+            sock.settimeout(5)
+            try:
+                while sock.recv(4096):
+                    pass
+            except OSError:
+                pass
+            ended[name] = time.monotonic()
+
+        ths = [threading.Thread(target=watch, args=(n, s_), daemon=True) for n, s_ in held.items()]
+        for th in ths:
+            th.start()
+        time.sleep(0.3)
+        check("kill-live: both streams still open before the kill", not ended, ended)
+        t0 = time.monotonic()
+        k = admin.post("/t/kill", {"lockdown": True})
+        for th in ths:
+            th.join(5)
+        cut = {n: round((v - t0) * 1000) for n, v in ended.items()}
+        print("  kill-live: POST /t/kill → stream ends (ms): %s" % cut, flush=True)
+        check("kill-live: POST /t/kill (lockdown) → ok", k.status == 200 and k.j("lockdown") is True, k)
+        check("kill-live: the admin's and the member's live streams are both cut ≤ 1 s", set(cut) == {"admin", "member"} and all(v <= 1000 for v in cut.values()), cut)
+        rt = wait_until(lambda: live["n"] == 0, 3)
+        check("kill-live: the root ended its halves too (its app's streams closed) ≤ 1 s", rt and time.monotonic() - t0 <= 1.5 and live["n"] == 0, (live, time.monotonic() - t0))
+        r = member.get("/api/run-events", headers={"accept": "text/event-stream"})
+        check("kill-live: the member's old token is refused (401 login)", r.status == 401 and r.j("reauth") == "login", r)
+        # lockdown and unlock, as before
+        r = t.client(xff="100.64.244.1").post("/t/auth/login", {"email": "owner@example.org", "password": PASSWORD})
+        check("kill-live: lockdown → sign-in refused", r.status == 403 and r.j("why") == "lockdown", r)
+        ok, o = t.ctl("unlock")
+        c2 = t.client(xff="100.64.244.1")
+        r = c2.post("/t/auth/login", {"email": "owner@example.org", "password": PASSWORD})
+        code, step = totp_fresh(secret, step)
+        m2 = c2.post("/t/auth/mfa", {"mfa_ticket": r.j("mfa_ticket"), "totp": code})
+        check("kill-live: trunk-ctl unlock → password + TOTP sign in again", ok and r.status == 200 and m2.status == 200, (o, r, m2))
+        ok, o = t.ctl("audit", "verify")
+        check("kill-live: the audit chain verifies", ok, o)
+    finally:
+        if bridge and bridge.poll() is None:
+            bridge.terminate()  # our own child, by PID
+            try:
+                bridge.wait(5)
+            except subprocess.TimeoutExpired:
+                bridge.kill()
+        if srv:
+            srv.shutdown()
+            srv.server_close()
+        t.stop()
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--bin", default=os.path.join(REPO, "trunk", "target", "release", "bifrost-net"))
@@ -1281,6 +1472,7 @@ def main():
         t_tls(a.bin, root)
         t_oauth(a.bin, root)
         t_load(a.bin, root)
+        t_kill_live(a.bin, root)
     except Exception as e:  # a rig error is a failure, never a pass
         import traceback
         traceback.print_exc()
