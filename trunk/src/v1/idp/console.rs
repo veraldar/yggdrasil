@@ -4,7 +4,7 @@
 use serde_json::json;
 
 use super::audit::Entry;
-use super::{account, audit, claim};
+use super::{account, audit, claim, devices, pair};
 use crate::v1::crypto::{b64u, random_bytes};
 use crate::v1::db::now_ms;
 use crate::v1::server::State;
@@ -19,12 +19,16 @@ pub const USAGE: &str = "usage: trunk-ctl [--sock PATH | -c trunk.toml] <command
   account reset-2fa [EMAIL]            drop the authenticator + recovery codes (next sign-in enrols anew)
   account reset-password [EMAIL]       set a random password, printed once here
   account unlock [EMAIL]               clear the password and 2FA lockouts
+  devices list                         every device (id, name, role, last seen, revoked?)
+  devices revoke ID [--why TEXT]       revoke one device (its tokens die everywhere)
+  pair-qr [--role member|admin]        a pairing QR link from the console (for rigs and rescue)
+  kill [--lockdown]                    the kill-switch: revoke everything, burn every QR
   unlock                               lift a kill-switch lockdown
-  audit tail [N]                       the last N audit entries (json lines)
-  roots list                           the roots of this trunk (id, name, keys, online, rebind)
-  roots revoke ID [WHY..]              cut a root: link closed, key refused, directory pushed
+  roots list                           the enrolled roots (online, name, os, door?, revoked?)
+  roots revoke ID [--why TEXT]         revoke a root (its devices' door moves off it)
   import-v0 --roots roots.json [--dtls bridge-dtls.json | --hub-dtls-fp PIN] --hub-name NAME
           --hub-wg-pub PUB --hub-root-pub PUB                bring the v0.9 trunk's roots in (§11)
+  audit tail [N]                       the last N audit entries (json lines)
   audit verify                         recompute the audit hash chain
   backup [DIR]                         an encrypted copy of trunk.db (default <state_dir>/backups)
   backup check FILE                    decrypt a backup in memory and check it";
@@ -43,6 +47,26 @@ pub async fn run(st: &Arc<State>, args: &[String]) -> (bool, String) {
         ["account", "reset-2fa", rest @ ..] => account::console_reset_2fa(st, rest.first().copied()),
         ["account", "reset-password", rest @ ..] => account::console_reset_password(st, rest.first().copied()).await,
         ["account", "unlock", rest @ ..] => account::console_unlock(st, rest.first().copied()),
+        ["devices", "list"] => Ok(devices::console_list(st).iter().map(|v| v.to_string()).collect::<Vec<_>>().join("\n")),
+        ["devices", "revoke", id, rest @ ..] => {
+            let why = rest.iter().position(|x| *x == "--why").and_then(|i| rest.get(i + 1)).copied();
+            devices::console_revoke(st, id, why)
+        }
+        ["pair-qr"] => pair::console_mint_qr(st, "member"),
+        ["pair-qr", "--role", role] => pair::console_mint_qr(st, role),
+        ["kill"] => match devices::kill_all(st, None, None, false, None, "console") {
+            Ok((epoch, devs, pairs, enrs)) => Ok(format!("kill epoch {epoch}: {devs} device(s) revoked, {pairs} QR(s) burned, {enrs} enrollment(s) burned (lockdown not set — use `kill --lockdown`)")),
+            Err(e) => Err(e),
+        },
+        ["kill", "--lockdown"] => match devices::kill_all(st, None, None, true, None, "console") {
+            Ok((epoch, devs, pairs, enrs)) => Ok(format!("kill epoch {epoch} + LOCKDOWN: {devs} device(s) revoked, {pairs} QR(s) burned, {enrs} enrollment(s) burned — `trunk-ctl unlock` to lift it")),
+            Err(e) => Err(e),
+        }
+        ["roots", "list"] => Ok(devices::console_roots_list(st).iter().map(|v| v.to_string()).collect::<Vec<_>>().join("\n")),
+        ["roots", "revoke", id, rest @ ..] => {
+            let why = rest.iter().position(|x| *x == "--why").and_then(|i| rest.get(i + 1)).copied();
+            devices::console_roots_revoke(st, id, why)
+        }
         ["unlock"] => {
             let was = st.lockdown();
             let _ = st.db.meta_set("lockdown", "0");
@@ -58,9 +82,6 @@ pub async fn run(st: &Arc<State>, args: &[String]) -> (bool, String) {
             Ok((n, head)) => Ok(format!("audit chain ok: {n} entries, head {head}")),
             Err((seq, why)) => Err(format!("AUDIT CHAIN BROKEN at entry {seq}: {why}")),
         },
-        ["roots", "list"] => crate::v1::import::roots_list(st),
-        ["roots", "revoke", id] => crate::v1::import::roots_revoke(st, id, "removed by the console"),
-        ["roots", "revoke", id, rest @ ..] => crate::v1::import::roots_revoke(st, id, &rest.join(" ")),
         ["import-v0", rest @ ..] => { let args: Vec<String> = rest.iter().map(|s| s.to_string()).collect(); crate::v1::import::import_v0(st, &args) },
         ["backup"] => backup(st, None),
         ["backup", "check", f] => backup_check(st, f),

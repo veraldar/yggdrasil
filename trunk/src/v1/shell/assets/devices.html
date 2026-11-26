@@ -1,0 +1,49 @@
+<header class="oz-head"><a class="oz-brand" href="/">BIFROST</a><span class="head-r"><a class="pill" href="/account" id="d-email">account</a><a class="pill" href="/pair">pair a phone</a></span></header>
+
+<section class="oz-blk" id="d-stepup" hidden>
+  <h2>confirm it's you<span class="r warn">step-up</span></h2>
+  <div>
+    <p class="lead">Removing devices needs a fresh code from your authenticator.</p>
+    <form class="row" id="d-stepup-form">
+      <input class="oz-field code grow" id="d-stepup-code" inputmode="numeric" autocomplete="one-time-code" maxlength="9" placeholder="000000" aria-label="6-digit code or a recovery code" required>
+      <button class="oz-k ok" type="submit">Confirm</button>
+    </form>
+    <p class="msg err" id="d-stepup-err" hidden></p>
+  </div>
+</section>
+
+<section class="oz-blk">
+  <h2>your devices</h2>
+  <div id="d-empty" hidden><p class="dim">No devices yet.</p></div>
+  <div id="d-list"></div>
+</section>
+
+<section class="oz-blk" id="d-roots-blk" hidden>
+  <h2>your computers<span class="r" id="d-roots-count"></span></h2>
+  <div id="d-roots-empty" hidden><p class="dim">No computer connected yet — <a href="/">install a root</a>.</p></div>
+  <div id="d-roots-list"></div>
+</section>
+
+<!-- the confirm sheet: one for a device revoke, one for the kill-switch -->
+<div class="sheet-back" id="d-sheet" hidden>
+  <div class="sheet" role="dialog" aria-modal="true">
+    <h3 id="d-sheet-title">remove this device?</h3>
+    <p class="dim small" id="d-sheet-body"></p>
+    <div class="row">
+      <button class="oz-k grow" id="d-sheet-no" type="button">Keep</button>
+      <button class="oz-k danger grow" id="d-sheet-yes" type="button">Remove</button>
+    </div>
+  </div>
+</div>
+
+<div class="sheet-back" id="d-kill-sheet" hidden>
+  <div class="sheet" role="dialog" aria-modal="true">
+    <h3>kill every device?</h3>
+    <p class="dim small">Every phone, browser and computer is signed out — this trunk's sessions, routes and voice with them. Pairing QRs die too. You sign in again on each device you keep.</p>
+    <label class="chk"><input type="checkbox" id="d-kill-lockdown"><span>also lock sign-in until <b>trunk-ctl unlock</b> on the server (lost phone, feared compromise)</span></label>
+    <div class="row">
+      <button class="oz-k grow" id="d-kill-no" type="button">Keep</button>
+      <button class="oz-k danger grow" id="d-kill-yes" type="button">Kill everything</button>
+    </div>
+  </div>
+</div>

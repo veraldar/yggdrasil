@@ -6,7 +6,9 @@ pub mod api;
 pub mod audit;
 pub mod claim;
 pub mod console;
+pub mod devices;
 pub mod limits;
+pub mod pair;
 pub mod password;
 pub mod qr;
 pub mod session;
@@ -36,6 +38,8 @@ pub struct Timers {
     pub mfa_lock_ms: i64,
     pub net_window_ms: i64,
     pub limits_idle_ms: i64,
+    pub pair_ttl_ms: i64,
+    pub pair_used_keep_ms: i64,
 }
 
 impl Timers {
@@ -54,6 +58,8 @@ impl Timers {
             mfa_lock_ms: 900_000,
             net_window_ms: 3_600_000,
             limits_idle_ms: 86_400_000,
+            pair_ttl_ms: 300_000,
+            pair_used_keep_ms: 3_600_000,
         };
         if !fast {
             return normal;
@@ -72,6 +78,8 @@ impl Timers {
             mfa_lock_ms: 15_000,
             net_window_ms: 60_000,
             limits_idle_ms: 120_000,
+            pair_ttl_ms: 15_000,
+            pair_used_keep_ms: 60_000,
             ..normal
         }
     }
@@ -136,6 +144,7 @@ pub fn spawn_background(st: Arc<State>) {
                 st.idp.mfa.lock().unwrap_or_else(|e| e.into_inner()).retain(|_, t| t.expires > now);
                 st.idp.totp_pending.lock().unwrap_or_else(|e| e.into_inner()).retain(|_, (_, at)| now - *at < 600_000);
                 session::prune_refresh(&st, now);
+                pair::prune(&st, now);
             }
             if now - last_daily > 86_400_000 {
                 last_daily = now;

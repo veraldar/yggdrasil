@@ -34,6 +34,15 @@ pub fn relay(st: &State) -> &Relay {
     &st.relay
 }
 
+impl Relay {
+    /// Push a device revocation if the hub is already running (used by `&State` callers like refresh theft).
+    pub fn push_revoke_if_live(&self, did: &str, until_ms: u64) {
+        if let Some(h) = self.hub.get() {
+            h.push_revoke(did, until_ms);
+        }
+    }
+}
+
 /// The hub (made on first use: its registry reads trunk.db through the `Arc<State>`).
 pub fn hub(st: &Arc<State>) -> &Arc<Hub> {
     st.relay.hub.get_or_init(|| {
@@ -179,7 +188,7 @@ pub async fn to_door(st: &Arc<State>, inc: Incoming, who: Claims) {
     };
     let hsts = inc.tls.then_some("max-age=31536000");
     let Incoming { io, head, rest, ip, .. } = inc;
-    let _ = hub(st).relay_http(&door, io, ip, &head, rest, hsts).await;
+    let _ = hub(st).relay_http(&door, io, ip, &head, rest, hsts, &who.did).await;
 }
 
 /// The trunk meters itself as "ap" (v0.9's VPS role, A13): nothing on disk here — its minute
