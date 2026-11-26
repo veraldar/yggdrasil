@@ -19,6 +19,7 @@ YGG_BIN=${YGG_BIN:-$ROOT/root/target/release/yggdrasil}
 OLD_DEFAULT=$HOME/.local/share/yggdrasil/hub/releases/20261123-2004-2044afb1/bin/yggdrasil
 OLD_BIN=${OLD_BIN-$([ -x "$OLD_DEFAULT" ] && echo "$OLD_DEFAULT" || true)}
 P=${P3_PORT_BASE:-18550}
+RIG_AUTH=${RIG_AUTH:-devices}
 MOCK=$P HOMEP=$((P + 1)) LABP=$((P + 2)) OLDP=$((P + 3)) APP=$((P + 10))
 for p in "$MOCK" "$HOMEP" "$LABP" "$OLDP" "$APP"; do
   if (exec 3<>"/dev/tcp/127.0.0.1/$p") 2>/dev/null; then
@@ -65,9 +66,23 @@ brain "$YGG_BIN" lab "$LABP" "home=http://127.0.0.1:$HOMEP" YGG_ROOT_MAIN=1 YGG_
 # one artifact on lab, so its artifacts page has a row to show
 mkdir -p "$STATE/lab/artifacts" && printf '# made on lab\n\nhello from lab\n' >"$STATE/lab/artifacts/lab-notes.md"
 
-# one paired phone, and the joined roots (as sim/roots-sheet-e2e.sh)
-TOKEN=$(head -c 48 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 40)
-python3 - "$STATE" "$TOKEN" "$ROOTS_JSON" <<'PY'
+if [ "$RIG_AUTH" = trunk ]; then
+  node "$ROOT/sim/acceptance/trunk-seed.mjs" init "$STATE" --root-name home --trunk-url "http://127.0.0.1:$APP" >/dev/null
+  TOKEN=$(node "$ROOT/sim/acceptance/trunk-seed.mjs" mint "$STATE" --did dev_e2e0root --rgn loopback --role admin)
+  (
+    cd "$B"
+    exec env -i PATH="$PATH" HOME="$STATE/app" NODE_ENV=production \
+      BIFROST_AUTH=trunk BIFROST_TRUNK_STATE="$STATE/trunk-state.json" \
+      BIFROST_TRUNK_URL="http://127.0.0.1:$APP" \
+      BIFROST_MAIN_TITLE='[MAIN]' OPENCODE_URL="http://127.0.0.1:$HOMEP" \
+      ARTIFACTS_DIR="$STATE/artifacts-app" ARTIFACTS_MAIN_DIR= YGG_PEER_TOKEN="$PEER" \
+      PORT="$APP" HOST=127.0.0.1 node server.mjs
+  ) >>"$STATE/app.log" 2>&1 &
+  pids+=($!)
+else
+  # one paired phone, and the joined roots (as sim/roots-sheet-e2e.sh)
+  TOKEN=$(head -c 48 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 40)
+  python3 - "$STATE" "$TOKEN" "$ROOTS_JSON" <<'PY'
 import hashlib, json, os, sys, time
 state, tok, names = sys.argv[1], sys.argv[2], json.loads(sys.argv[3])
 now = int(time.time() * 1000)
@@ -88,19 +103,20 @@ for name, body in (("devices.json", {"version": 2, "killEpoch": 0, "devices": [d
     os.chmod(p, 0o600)
 PY
 
-(
-  cd "$B"
-  exec env -i PATH="$PATH" HOME="$STATE/app" NODE_ENV=production \
-    BIFROST_AUTH=devices BIFROST_DEVICES_FILE="$STATE/devices.json" \
-    BIFROST_MAIN_TITLE='[MAIN]' OPENCODE_URL="http://127.0.0.1:$HOMEP" \
-    ARTIFACTS_DIR="$STATE/artifacts-app" ARTIFACTS_MAIN_DIR= YGG_PEER_TOKEN="$PEER" \
-    PORT="$APP" HOST=127.0.0.1 node server.mjs
-) >>"$STATE/app.log" 2>&1 &
-pids+=($!)
+  (
+    cd "$B"
+    exec env -i PATH="$PATH" HOME="$STATE/app" NODE_ENV=production \
+      BIFROST_AUTH=devices BIFROST_DEVICES_FILE="$STATE/devices.json" \
+      BIFROST_MAIN_TITLE='[MAIN]' OPENCODE_URL="http://127.0.0.1:$HOMEP" \
+      ARTIFACTS_DIR="$STATE/artifacts-app" ARTIFACTS_MAIN_DIR= YGG_PEER_TOKEN="$PEER" \
+      PORT="$APP" HOST=127.0.0.1 node server.mjs
+  ) >>"$STATE/app.log" 2>&1 &
+  pids+=($!)
+fi
 
 up=0
 for _ in $(seq 90); do
-  if curl -sf -o /dev/null "http://127.0.0.1:$APP/" && curl -sf -o /dev/null "http://127.0.0.1:$HOMEP/root" &&
+  if curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$APP/" | grep -qE '^(200|302|307)$' && curl -sf -o /dev/null "http://127.0.0.1:$HOMEP/root" &&
     curl -sf -o /dev/null "http://127.0.0.1:$LABP/root" &&
     { [ -z "$OLD_BIN" ] || curl -sf -o /dev/null "http://127.0.0.1:$OLDP/root"; }; then
     up=1

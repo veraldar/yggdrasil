@@ -17,6 +17,7 @@ B="$ROOT/branch"
 YGG_BIN=${YGG_BIN:-$ROOT/root/target/release/yggdrasil}
 OLD_BIN=${OLD_BIN:-$HOME/.local/share/yggdrasil/hub/releases/20261123-2004-2044afb1/bin/yggdrasil}
 P=${P3_PORT_BASE:-18530}
+RIG_AUTH=${RIG_AUTH:-devices}
 MOCK=$P HOMEP=$((P + 1)) LABP=$((P + 2)) OLDP=$((P + 3)) APP=$((P + 10))
 for p in "$MOCK" "$HOMEP" "$LABP" "$OLDP" "$APP"; do
   if (exec 3<>"/dev/tcp/127.0.0.1/$p") 2>/dev/null; then
@@ -60,10 +61,14 @@ brain "$YGG_BIN" lab "$LABP" "home=http://127.0.0.1:$HOMEP" YGG_ROOT_MAIN=1 YGG_
 brain "$STATE/bin/yggdrasil-old" old "$OLDP" "home=http://127.0.0.1:$HOMEP" YGG_ROOT_MAIN=1 YGG_HOME_ROOT=home
 OLD_PID=$LAST_PID
 
-# one paired phone (devices.json: an access token for its region — server.mjs stamps the peer: loopback),
-# and lab as a root this hub joined (roots.json — the remove marks it revoked)
-TOKEN=$(head -c 48 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 40)
-python3 - "$STATE" "$TOKEN" <<'PY'
+if [ "$RIG_AUTH" = trunk ]; then
+  node "$ROOT/sim/acceptance/trunk-seed.mjs" init "$STATE" --root-name home --trunk-url "http://127.0.0.1:$APP" >/dev/null
+  TOKEN=$(node "$ROOT/sim/acceptance/trunk-seed.mjs" mint "$STATE" --did dev_e2e0root --rgn loopback --role admin)
+else
+  # one paired phone (devices.json: an access token for its region — server.mjs stamps the peer: loopback),
+  # and lab as a root this hub joined (roots.json — the remove marks it revoked)
+  TOKEN=$(head -c 48 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 40)
+  python3 - "$STATE" "$TOKEN" <<'PY'
 import hashlib, json, os, sys, time
 state, tok = sys.argv[1], sys.argv[2]
 now = int(time.time() * 1000)
@@ -83,20 +88,33 @@ for name, body in (("devices.json", {"version": 2, "killEpoch": 0, "devices": [d
         json.dump(body, f, indent=2)
     os.chmod(p, 0o600)
 PY
+fi
 
 app_up() { # (re)start the app; its PID in $APP_PID
-  (
-    cd "$B"
-    exec env -i PATH="$PATH" HOME="$STATE/app" NODE_ENV=production \
-      BIFROST_AUTH=devices BIFROST_DEVICES_FILE="$STATE/devices.json" \
-      BIFROST_MAIN_TITLE='[MAIN]' OPENCODE_URL="http://127.0.0.1:$HOMEP" \
-      ARTIFACTS_DIR="$STATE/artifacts-app" ARTIFACTS_MAIN_DIR= YGG_PEER_TOKEN="$PEER" \
-      PORT="$APP" HOST=127.0.0.1 node server.mjs
-  ) >>"$STATE/app.log" 2>&1 &
+  if [ "$RIG_AUTH" = trunk ]; then
+    (
+      cd "$B"
+      exec env -i PATH="$PATH" HOME="$STATE/app" NODE_ENV=production \
+        BIFROST_AUTH=trunk BIFROST_TRUNK_STATE="$STATE/trunk-state.json" \
+        BIFROST_TRUNK_URL="http://127.0.0.1:$APP" \
+        BIFROST_MAIN_TITLE='[MAIN]' OPENCODE_URL="http://127.0.0.1:$HOMEP" \
+        ARTIFACTS_DIR="$STATE/artifacts-app" ARTIFACTS_MAIN_DIR= YGG_PEER_TOKEN="$PEER" \
+        PORT="$APP" HOST=127.0.0.1 node server.mjs
+    ) >>"$STATE/app.log" 2>&1 &
+  else
+    (
+      cd "$B"
+      exec env -i PATH="$PATH" HOME="$STATE/app" NODE_ENV=production \
+        BIFROST_AUTH=devices BIFROST_DEVICES_FILE="$STATE/devices.json" \
+        BIFROST_MAIN_TITLE='[MAIN]' OPENCODE_URL="http://127.0.0.1:$HOMEP" \
+        ARTIFACTS_DIR="$STATE/artifacts-app" ARTIFACTS_MAIN_DIR= YGG_PEER_TOKEN="$PEER" \
+        PORT="$APP" HOST=127.0.0.1 node server.mjs
+    ) >>"$STATE/app.log" 2>&1 &
+  fi
   APP_PID=$!
   pids+=("$APP_PID")
   for _ in $(seq 60); do
-    curl -sf -o /dev/null "http://127.0.0.1:$APP/" && return 0
+    curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$APP/" | grep -qE '^(200|302|307)$' && return 0
     sleep 0.5
   done
   echo "the app did not come up — $STATE/app.log" >&2
