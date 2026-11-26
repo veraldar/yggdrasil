@@ -46,12 +46,12 @@ function totp(secret) {
   page.on('console', (m) => { if (m.type() === 'error' && !m.text().startsWith('Failed to load resource')) problems.push('console: ' + m.text()); });
   page.on('pageerror', (e) => problems.push('pageerror: ' + e.message));
   let n = 0;
-  const shot = async (name) => {
-    await page.waitForTimeout(250);
+  const shot = async (name, p = page) => {
+    await p.waitForTimeout(250);
     const file = `${out}/${String(++n).padStart(2, '0')}-${name}.png`;
-    await page.screenshot({ path: file, fullPage: true });
+    await p.screenshot({ path: file, fullPage: true });
     // the page must fit 360 px: nothing scrolls sideways
-    const w = await page.evaluate(() => document.documentElement.scrollWidth);
+    const w = await p.evaluate(() => document.documentElement.scrollWidth);
     if (w > 360) problems.push(`${name}: ${w}px wide at a 360px viewport`);
     console.log('shot', file);
   };
@@ -169,9 +169,11 @@ function totp(secret) {
   const phoneCtx = await browser.newContext({ ...devices['Pixel 7'], viewport: { width: 360, height: 780 }, deviceScaleFactor: 2 });
   const phone = await phoneCtx.newPage();
   phone.on('console', (m) => { if (m.type() === 'error' && !m.text().startsWith('Failed to load resource')) problems.push('phone console: ' + m.text()); });
-  await phone.goto(link.url); // /pair#v=2&t=… → the page redeems and shows joined
-  await phone.waitForSelector('#p-joined', { timeout: 8000 }).catch(() => problems.push('phone did not join'));
-  await shot('pair-phone-joined');
+  await phone.goto(link.url); // /pair#v=2&t=… → the page redeems, then lands where a sign-in lands (F5 step 3)
+  // a root is enrolled here but none is online: the landing is /offline (no tap needed)
+  await phone.waitForURL(url + '/offline', { timeout: 8000 }).catch(() => problems.push('the phone did not land on /offline after joining'));
+  await phone.waitForSelector('body[data-page=offline]', { timeout: 8000 }).catch(() => problems.push('phone: no offline page'));
+  await shot('pair-phone-joined-lands-offline', phone);
   await phoneCtx.close();
 
   // minting a QR needs a fresh step-up: confirm with the authenticator first

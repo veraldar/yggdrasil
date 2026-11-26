@@ -650,6 +650,7 @@ def t_pair_m3(t):
     # second scan of the live one → 410 used
     r = phone.post("/t/pair/redeem", {"token": tok2})
     check("pair: redeem → member device + cookies", r.status == 200 and "bifrost_device" in phone.jar, r)
+    check("pair: with no root enrolled yet the phone lands on / (the empty-trunk page)", r.j("next") == "/", r)
     r = t.client(xff=ip(132)).post("/t/pair/redeem", {"token": tok2})
     check("pair: a second scan → 410 used", r.status == 410 and r.j("why") == "used", r)
     r = admin.get("/t/pair/qr/" + qr_id)
@@ -1159,6 +1160,7 @@ def page_shots(items):
         return
     for r in res:
         check("shot %s (360 px): drawn, no console error, nothing wider than the screen" % r["name"], r["ok"], r["problems"])
+    return res
 
 
 def node_checks(label, script, args, last_step):
@@ -1245,8 +1247,8 @@ def t_load(binp, root):
 
 
 def sse_app():
-    """A root's app whose every answer is a held event stream (like /api/run-events): a tick every
-    50 ms until its connection goes. → (port, live-stream counter, server)."""
+    """A root's app: /api/run-events is a held event stream (a tick every 50 ms until its connection
+    goes); anything else is a small page standing for the tree door. → (port, live-stream counter, server)."""
     import socketserver, threading
     live = {"n": 0}
     lock = threading.Lock()
@@ -1259,6 +1261,11 @@ def sse_app():
                 if not b:
                     return
                 buf += b
+            if b" /api/run-events" not in buf.split(b"\r\n", 1)[0]:
+                page = (b'<!doctype html><html><head><meta name="viewport" content="width=device-width"><title>door</title></head>'
+                        b'<body><main id="fake-door">the door root\'s app (rig): the tree door</main></body></html>')
+                self.request.sendall(b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s" % (len(page), page))
+                return
             with lock:
                 live["n"] += 1
             try:
@@ -1369,6 +1376,17 @@ def t_kill_live(binp, root):
         if not check("kill-live: the door root dialed out and linked", online, open(os.path.join(rd, "bridge.log")).read()[-400:]):
             return
 
+        # F5 step 3: a phone that redeems a QR lands where a sign-in lands — here the door (online)
+        ok, q = t.ctl("pair-qr")
+        ph = t.client(xff="100.64.245.1")
+        r = ph.post("/t/pair/redeem", {"token": json.loads(q)["url"].split("t=", 1)[1]}) if ok else None
+        door = ph.get("/", headers={"accept": "text/html"}) if r is not None else None
+        check("pair-landing: redeem with the door root online → next \"/\", and / is the door's app (its tree door)",
+              r is not None and r.status == 200 and r.j("next") == "/" and door.status == 200 and "fake-door" in str(door.data), (r, door))
+        ok, q = t.ctl("pair-qr")
+        res = page_shots([{"name": "m4-pair-lands-door", "url": json.loads(q)["url"], "wait": "#fake-door"}]) if ok else []
+        check("pair-landing: the phone's /pair page goes to the door by itself (no tap)", res and res[0]["final"].rstrip("/") == t.public_url, res)
+
         # a member phone (QR) and the admin, each holding a live event stream through the trunk
         ok, q = t.ctl("pair-qr")
         member = t.client(xff="100.64.243.1")
@@ -1419,6 +1437,20 @@ def t_kill_live(binp, root):
         check("kill-live: trunk-ctl unlock → password + TOTP sign in again", ok and r.status == 200 and m2.status == 200, (o, r, m2))
         ok, o = t.ctl("audit", "verify")
         check("kill-live: the audit chain verifies", ok, o)
+
+        # F5 step 3 with no door online: the door root's bridge stops → the landing is /offline
+        bridge.terminate()  # our own child, by PID
+        bridge.wait(5)
+        gone = wait_until(lambda: not any(x.get("online") for x in (c2.signed("GET", "/t/me/roots").data or [])), 10)
+        ok, q = t.ctl("pair-qr")
+        ph = t.client(xff="100.64.246.1")
+        r = ph.post("/t/pair/redeem", {"token": json.loads(q)["url"].split("t=", 1)[1]}) if ok else None
+        off = ph.get("/", headers={"accept": "text/html"}) if r is not None else None
+        check("pair-landing: redeem with no door root online → next \"/offline\" (and / sends there too)",
+              gone and r is not None and r.status == 200 and r.j("next") == "/offline" and off.status == 302 and off.headers.get("Location") == "/offline", (gone, r, off))
+        ok, q = t.ctl("pair-qr")
+        res = page_shots([{"name": "m4-pair-lands-offline", "url": json.loads(q)["url"], "wait": "body[data-page=offline]"}]) if ok else []
+        check("pair-landing: the phone's /pair page goes to /offline by itself", res and res[0]["final"] == t.public_url + "/offline", res)
     finally:
         if bridge and bridge.poll() is None:
             bridge.terminate()  # our own child, by PID

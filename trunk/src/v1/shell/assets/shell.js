@@ -1118,7 +1118,12 @@ async function pairRedeem(tok) {
   if (r.status === 200) {
     only('p-joined');
     $('p-joined-role').textContent = (r.data.device && r.data.device.role) || 'member';
-    $('p-joined-line').textContent = 'joined: ' + ((r.data.device && r.data.device.name) || 'phone') + ' · ' + ((r.data.device && r.data.device.role) || 'member');
+    $('p-joined-line').textContent = 'joined: ' + ((r.data.device && r.data.device.name) || 'phone') + ' · ' + ((r.data.device && r.data.device.role) || 'member') + ' — opening BIFROST…';
+    // F5 step 3: the phone goes where a fresh sign-in goes — the door (its first contact is the
+    // tree door, S8) or /offline; the trunk names it. The card stays as the next page loads.
+    const next = typeof r.data.next === 'string' && /^\/(?!\/)[^\\\s\u0000-\u001f\u007f]*$/.test(r.data.next) && !r.data.next.startsWith('/t/') ? r.data.next : '/';
+    $('p-open').href = next;
+    location.replace(next);
     return;
   }
   only('p-burned');

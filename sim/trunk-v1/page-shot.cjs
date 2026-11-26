@@ -27,7 +27,7 @@ const list = JSON.parse(listJson);
     } catch (e) {
       problems.push(String(e.message || e));
     }
-    res.push({ name: s.name, ok: problems.length === 0, problems });
+    res.push({ name: s.name, ok: problems.length === 0, problems, final: page.url() });
     await ctx.close();
   }
   await browser.close();
