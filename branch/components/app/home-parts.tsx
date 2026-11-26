@@ -15,6 +15,7 @@ export function HomeHead({
   title,
   settingsHref,
   artifactsHref,
+  requestsHref,
   unseen,
   joins,
   behind = 0,
@@ -27,6 +28,8 @@ export function HomeHead({
   title: string;
   settingsHref: string;
   artifactsHref: string;
+  /** the requests board (what you asked, and where it stands); only the tree's home shows its key */
+  requestsHref?: string;
   /** artifacts not opened yet (the badge) */
   unseen: number;
   /** computers waiting to join (the badge on the roots key) */
@@ -65,6 +68,16 @@ export function HomeHead({
             </span>
           )}
         </button>
+        {requestsHref && (
+          <Link
+            href={requestsHref}
+            aria-label="requests"
+            className="oz-k sm"
+            data-testid="requests-key"
+          >
+            <LineIcon name="log" size={15} />
+          </Link>
+        )}
         <Link
           href={artifactsHref}
           aria-label={`artifacts — ${unseen} unseen`}

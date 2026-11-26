@@ -792,6 +792,7 @@ export default function SessionsPage() {
           title="BIFROST"
           settingsHref="/settings"
           artifactsHref="/artifacts"
+          requestsHref="/requests"
           unseen={unseenArts}
           joins={pendingJoins}
           behind={rootsBehind}

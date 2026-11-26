@@ -49,7 +49,8 @@ pub struct Ask {
     pub session: String,
     pub text: String,
     pub created: u64,
-    /// the assistant turn that answered it (parentID = this ask), completed
+    /// the text of the assistant turn that answered it (parentID = this ask, completed); empty
+    /// for a folded turn, whose words were dropped — it still counts as answered
     pub reply: Option<String>,
     /// no later owner ask in the same session has been typed
     pub latest_in_session: bool,
@@ -92,7 +93,6 @@ pub fn collect(sessions: &HashMap<String, Session>) -> Vec<Ask> {
                 .filter(|r| r["info"]["role"] == "assistant" && r["info"]["parentID"] == m["info"]["id"])
                 .filter(|r| r["info"]["time"]["completed"].is_number())
                 .map(message_text)
-                .filter(|t| !t.trim().is_empty())
                 .last();
             out.push(Ask {
                 id,
@@ -378,6 +378,13 @@ mod tests {
         assert_eq!(asks[1].reply.as_deref(), Some("on it"));
         assert!(asks[0].latest_in_session && !asks[1].latest_in_session);
         assert!(asks[0].reply.is_none());
+    }
+
+    #[test]
+    fn folded_reply_still_answers() {
+        let mut m = HashMap::new();
+        m.insert("s".to_string(), sess(Value::Null, vec![umsg("m1", "Status?", 1, json!({})), amsg("r1", "m1", "", 2)]));
+        assert_eq!(collect(&m)[0].reply.as_deref(), Some(""));
     }
 
     fn f() -> Facts {
