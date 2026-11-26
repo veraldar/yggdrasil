@@ -212,6 +212,39 @@ function wav(pcm: Buffer, rate: number): Buffer {
   return Buffer.concat([h, pcm]);
 }
 
+/** the reply's STT pieces: about 2.5 s each, each cut moved to the quietest 20 ms within ±0.5 s —
+ *  where a speaker breathes, the way the agent's VAD cuts. A fixed 2.5 s grid cut words in half: the
+ *  reply opens with the brain's clock line, so where "what is 2 + 2" falls moves with the time of day
+ *  (v0.9 G3.2 11-26: R3 red twice; the same audio re-cut at its pauses reads "what is 2 + 2"). */
+function quietPieces(pcm: Buffer, rate: number): Buffer[] {
+  const n = Math.floor(pcm.length / 2);
+  const step = Math.round(rate * 2.5);
+  const frame = Math.max(1, Math.round(rate * 0.02));
+  const look = Math.round(rate * 0.5);
+  const energy = (s: number) => {
+    let e = 0;
+    for (let i = s; i < s + frame; i++) e += pcm.readInt16LE(i * 2) ** 2;
+    return e;
+  };
+  // no piece under 0.5 s (a few samples crash the rig's speech server; a short rest joins the last
+  // piece), and only whole 20 ms frames are weighed (a partial one at the end is not "quiet")
+  const least = Math.round(rate * 0.5);
+  const cuts = [0];
+  while (cuts[cuts.length - 1] + step + least < n) {
+    const last = cuts[cuts.length - 1];
+    const target = last + step;
+    let best = target;
+    let low = Infinity;
+    for (let s = Math.max(last + least, target - look); s + frame <= n - least && s < target + look; s += frame) {
+      const e = energy(s);
+      if (e < low) [low, best] = [e, s];
+    }
+    cuts.push(best);
+  }
+  cuts.push(n);
+  return cuts.slice(1).map((c, i) => pcm.subarray(cuts[i] * 2, c * 2));
+}
+
 /** words, the way a speech engine and a text compare: digits and "+" as words */
 const words = (s: string) =>
   s
@@ -447,6 +480,9 @@ test('G3.2 v1 trunk rtc: QR pairing, voice over the trunk, ufrag routing, revoke
 
   let mainId = '';
   let deviceId = '';
+  // E1's two clocks: `loadAt` = the phone starts loading the QR's page (first contact); `pairedAt` =
+  // the trunk answered the redeem — the device exists from here on, "after pairing" means after it
+  let loadAt = 0;
   let pairedAt = 0;
   let released = 0;
   let voiceTurn: Msg | null = null;
@@ -481,6 +517,7 @@ test('G3.2 v1 trunk rtc: QR pairing, voice over the trunk, ufrag routing, revoke
     const redeemed = page.waitForResponse((r) => r.url().endsWith('/t/pair/redeem'));
     await page.goto(url);
     const r = await redeemed;
+    // the redeem's whole answer is read (r.text) before the clock: its body is the pairing exchange
     expect(r.status(), await r.text().catch(() => '')).toBe(200);
     expect(((await r.json().catch(() => ({}))) as { next?: string }).next, 'F5.3: the landing the trunk names (door online)').toBe('/');
     const t = Date.now();
@@ -515,9 +552,10 @@ test('G3.2 v1 trunk rtc: QR pairing, voice over the trunk, ufrag routing, revoke
       writeFileSync(png, await qr.screenshot());
       const qrUrl = execFileSync('zbarimg', ['--raw', '-q', png]).toString().trim();
       expect(qrUrl.startsWith(`${AP}/pair#v=2&t=bfnp-`), qrUrl.replace(/t=.*/, 't=…')).toBe(true);
-      // E1's clock starts BEFORE the phone loads the page (NOTES-P1.md:153)
-      pairedAt = Date.now();
-      await redeem(phone, qrUrl);
+      // E1's clocks (NOTES-P1.md:153): POST /offer may leave before the door's load event — "it
+      // crossed the VPS" counts from loadAt; "no app data after pairing" counts from the redeem's answer
+      loadAt = Date.now();
+      pairedAt = await redeem(phone, qrUrl);
       await expect(phone.getByTestId('roots')).toBeVisible({ timeout: 30_000 });
       deviceId = await deviceOf(phone);
       expect(deviceId).toMatch(/^dev_/);
@@ -541,7 +579,7 @@ test('G3.2 v1 trunk rtc: QR pairing, voice over the trunk, ufrag routing, revoke
     // ---------------------------------------------------------------- P1 the pinned channel
     await step('P1', `the app rides the pinned channel: ICE-TCP ${AP_IP}:443, the key = the trunk directory's pin for this root`, async () => {
       await expect(phone.getByTestId('pin-state')).toHaveAttribute('data-state', 'pinned', { timeout: 20_000 });
-      const pinnedMs = Date.now() - pairedAt;
+      const pinnedMs = Date.now() - loadAt;
       const dir = (await pageFetch(phone, '/t/me/roots')).body as unknown as Array<{ id: string; dtls_fp: string; door: boolean }>;
       const me = dir.find((r) => r.id === HOME_ID);
       expect(me?.door, JSON.stringify(dir)).toBe(true);
@@ -612,11 +650,10 @@ test('G3.2 v1 trunk rtc: QR pairing, voice over the trunk, ufrag routing, revoke
       const at = ms.findIndex((m) => voiceTurn && textOf(m) === textOf(voiceTurn));
       const reply = ms.slice(at + 1).find((m) => m.info.role === 'assistant');
       expect(reply, 'MAIN answered the voice turn').toBeTruthy();
-      const win = Math.round(A.roomTts.rate * 2.5) * 2;
       const parts: string[] = [];
-      for (let o = 0; o < pcm.length; o += win) {
+      for (const piece of quietPieces(pcm, A.roomTts.rate)) {
         const f = new FormData();
-        f.append('file', new Blob([new Uint8Array(wav(pcm.subarray(o, o + win), A.roomTts.rate))], { type: 'audio/wav' }), 'reply.wav');
+        f.append('file', new Blob([new Uint8Array(wav(piece, A.roomTts.rate))], { type: 'audio/wav' }), 'reply.wav');
         const r = await fetch(`${VOICE}/audio/transcriptions`, { method: 'POST', body: f });
         parts.push(((await r.json()) as { text: string }).text);
       }
@@ -717,7 +754,7 @@ test('G3.2 v1 trunk rtc: QR pairing, voice over the trunk, ufrag routing, revoke
       expect(recs.length, 'the eye is on the path').toBeGreaterThan(0);
       const lines = eyeRequests(recs);
       expect(lines.filter(appCall), 'API calls through the VPS after pairing').toEqual([]);
-      expect(lines.some((l) => l.startsWith('POST /offer ')), 'the pinned signaling crossed it').toBe(true);
+      expect(eyeRequests(eyeSince(loadAt + 1)).some((l) => l.startsWith('POST /offer ')), 'the pinned signaling crossed it').toBe(true);
       // every decrypted byte, the root's own channel included (it carries the relayed streams)
       const plain = Buffer.concat(recs.map((r) => Buffer.from(r.b64, 'base64'))).toString('latin1');
       const turn = voiceTurn ? textOf(voiceTurn) : '';

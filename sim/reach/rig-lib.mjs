@@ -217,12 +217,43 @@ export async function renderSay(voiceV1, text, out, { lead = 1.0, tail = 4.0 } =
 }
 
 /** STT of PCM16 in 2.5 s windows (the way the agent's VAD hands speech to whisper-tiny) */
+/** the reply's STT pieces: about 2.5 s each, each cut moved to the quietest 20 ms within ±0.5 s —
+ *  where a speaker breathes, the way the agent's VAD cuts (a fixed 2.5 s grid cut words in half; the
+ *  reply opens with the brain's clock line, so what falls on a cut moves with the time of day) */
+export function quietPieces(pcm, rate) {
+  const n = Math.floor(pcm.length / 2);
+  const step = Math.round(rate * 2.5);
+  const frame = Math.max(1, Math.round(rate * 0.02));
+  const look = Math.round(rate * 0.5);
+  const energy = (s) => {
+    let e = 0;
+    for (let i = s; i < s + frame; i++) e += pcm.readInt16LE(i * 2) ** 2;
+    return e;
+  };
+  // no piece under 0.5 s (a few samples crash the rig's speech server; a short rest joins the last
+  // piece), and only whole 20 ms frames are weighed (a partial one at the end is not "quiet")
+  const least = Math.round(rate * 0.5);
+  const cuts = [0];
+  while (cuts[cuts.length - 1] + step + least < n) {
+    const last = cuts[cuts.length - 1];
+    const target = last + step;
+    let best = target;
+    let low = Infinity;
+    for (let s = Math.max(last + least, target - look); s + frame <= n - least && s < target + look; s += frame) {
+      const e = energy(s);
+      if (e < low) [low, best] = [e, s];
+    }
+    cuts.push(best);
+  }
+  cuts.push(n);
+  return cuts.slice(1).map((c, i) => pcm.subarray(cuts[i] * 2, c * 2));
+}
+
 export async function sttOf(voiceV1, pcm, rate) {
-  const win = Math.round(rate * 2.5) * 2;
   const parts = [];
-  for (let o = 0; o < pcm.length; o += win) {
+  for (const piece of quietPieces(pcm, rate)) {
     const f = new FormData();
-    f.append('file', new Blob([new Uint8Array(wavOf(pcm.subarray(o, o + win), rate))], { type: 'audio/wav' }), 'x.wav');
+    f.append('file', new Blob([new Uint8Array(wavOf(piece, rate))], { type: 'audio/wav' }), 'x.wav');
     const r = await fetch(`${voiceV1}/audio/transcriptions`, { method: 'POST', body: f });
     parts.push((await r.json()).text || '');
   }

@@ -229,6 +229,39 @@ function wav(pcm: Buffer, rate: number): Buffer {
   return Buffer.concat([h, pcm]);
 }
 
+/** the reply's STT pieces: about 2.5 s each, each cut moved to the quietest 20 ms within ±0.5 s —
+ *  where a speaker breathes, the way the agent's VAD cuts. A fixed 2.5 s grid cut words in half: the
+ *  reply opens with the brain's clock line, so where "what is 2 + 2" falls moves with the time of day
+ *  (v0.9 G3.2 11-26: R3 red twice; the same audio re-cut at its pauses reads "what is 2 + 2"). */
+function quietPieces(pcm: Buffer, rate: number): Buffer[] {
+  const n = Math.floor(pcm.length / 2);
+  const step = Math.round(rate * 2.5);
+  const frame = Math.max(1, Math.round(rate * 0.02));
+  const look = Math.round(rate * 0.5);
+  const energy = (s: number) => {
+    let e = 0;
+    for (let i = s; i < s + frame; i++) e += pcm.readInt16LE(i * 2) ** 2;
+    return e;
+  };
+  // no piece under 0.5 s (a few samples crash the rig's speech server; a short rest joins the last
+  // piece), and only whole 20 ms frames are weighed (a partial one at the end is not "quiet")
+  const least = Math.round(rate * 0.5);
+  const cuts = [0];
+  while (cuts[cuts.length - 1] + step + least < n) {
+    const last = cuts[cuts.length - 1];
+    const target = last + step;
+    let best = target;
+    let low = Infinity;
+    for (let s = Math.max(last + least, target - look); s + frame <= n - least && s < target + look; s += frame) {
+      const e = energy(s);
+      if (e < low) [low, best] = [e, s];
+    }
+    cuts.push(best);
+  }
+  cuts.push(n);
+  return cuts.slice(1).map((c, i) => pcm.subarray(cuts[i] * 2, c * 2));
+}
+
 /** words, the way a speech engine and a text compare: digits and "+" as words */
 const words = (s: string) =>
   s
@@ -428,6 +461,9 @@ test('trunk rtc: phone ⇄ vps:443 ⇄ box — pair, talk, hear the reply, media
 
   let mainId = '';
   let deviceId = '';
+  // E1's two clocks: `loadAt` = the phone starts loading the QR's page (first contact); `pairedAt` =
+  // the box answered the claim — the pin exists from here on, and "after pairing" means after it
+  let loadAt = 0;
   let pairedAt = 0;
   let released = 0;
   let voiceTurn: Msg | null = null;
@@ -445,10 +481,18 @@ test('trunk rtc: phone ⇄ vps:443 ⇄ box — pair, talk, hear the reply, media
         writeFileSync(png, await qr.screenshot());
         const qrUrl = execFileSync('zbarimg', ['--raw', '-q', png]).toString().trim();
         expect(qrUrl.startsWith(`${AP}/pair#`), qrUrl).toBe(true);
-        // E1's clock starts BEFORE the phone loads the page (NOTES-P1.md:153: the app's POST
-        // /offer leaves ~1.17 s after GET / and can fall before a pairedAt taken after the load)
-        pairedAt = Date.now();
+        // E1's clocks (NOTES-P1.md:153 and the 11-26 baseline): the pinned signaling (POST /offer)
+        // leaves ~1.17 s after GET / and can fall before the door's load event, so "it crossed the
+        // VPS" is counted from loadAt, before the page loads; "no app data after pairing" is counted
+        // from the claim's answer, the moment a pin exists — the pairing page's own first-contact
+        // calls, sent before the claim (POST /api/diag, GET /api/build), are not "after pairing"
+        const claimed = phone.waitForResponse((r) => r.url().endsWith('/api/pair/claim'));
+        loadAt = Date.now();
         await phone.goto(qrUrl);
+        // the claim's WHOLE answer (a response event fires on its headers; its chunked body — the
+        // device, its token, MAIN's id — is still the pairing exchange, not "after pairing")
+        await (await claimed).finished();
+        pairedAt = Date.now();
         await phone.waitForURL(`${AP}/`, { timeout: 30_000 });
         await expect(phone.getByTestId('roots')).toBeVisible({ timeout: 30_000 });
         const pin = await phone.evaluate(() =>
@@ -588,15 +632,14 @@ test('trunk rtc: phone ⇄ vps:443 ⇄ box — pair, talk, hear the reply, media
         const at = ms.findIndex((m) => voiceTurn && textOf(m) === textOf(voiceTurn));
         const reply = ms.slice(at + 1).find((m) => m.info.role === 'assistant');
         expect(reply, 'MAIN answered the voice turn').toBeTruthy();
-        // in 2.5 s windows, the way the agent's VAD hands speech to the STT (a whole 10 s clip
-        // sometimes sends whisper-tiny into a loop of quote marks — the engine, not the audio)
-        const win = Math.round(roomTts.rate * 2.5) * 2;
+        // in ~2.5 s pieces cut at pauses, the way the agent's VAD hands speech to the STT (a whole
+        // 10 s clip sometimes sends whisper-tiny into a loop of quote marks — the engine, not the audio)
         const parts: string[] = [];
-        for (let o = 0; o < pcm.length; o += win) {
+        for (const piece of quietPieces(pcm, roomTts.rate)) {
           const f = new FormData();
           f.append(
             'file',
-            new Blob([new Uint8Array(wav(pcm.subarray(o, o + win), roomTts.rate))], {
+            new Blob([new Uint8Array(wav(piece, roomTts.rate))], {
               type: 'audio/wav',
             }),
             'reply.wav'
@@ -747,7 +790,7 @@ test('trunk rtc: phone ⇄ vps:443 ⇄ box — pair, talk, hear the reply, media
         const lines = eyeRequests(recs);
         expect(lines.filter(appCall), 'API calls through the VPS after pairing').toEqual([]);
         expect(
-          lines.some((l) => l.startsWith('POST /offer ')),
+          eyeRequests(eyeSince(loadAt + 1)).some((l) => l.startsWith('POST /offer ')),
           'the pinned signaling crossed it'
         ).toBe(true);
         const plain = Buffer.concat(recs.map((r) => Buffer.from(r.b64, 'base64'))).toString(
