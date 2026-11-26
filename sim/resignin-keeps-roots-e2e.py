@@ -260,7 +260,7 @@ def main():
         tok_b = (client_b.jar.get("bifrost_device") or ("", ""))[0]
         ref_b = (client_b.jar.get("bifrost_refresh") or ("", ""))[0]
         check("4a signing in again creates a new device B with fresh cookies",
-              r2.status == 200 and dev_b.startswith("dev_") and dev_b != dev_a and bool(tok_b) and bool(ref_b), (r1.status, r2.status, r2.body))
+              r2.status == 200 and dev_b.startswith("dev_") and dev_b != dev_a and bool(tok_b) and bool(ref_b), (r1.status, r2.status, r2.data))
 
         # log out the original approver (device A)
         lo = client_a.post("/t/auth/logout", {})
@@ -290,7 +290,7 @@ def main():
         ref = client_b.post("/t/auth/refresh", {})
         tok_b2 = (client_b.jar.get("bifrost_device") or ("", ""))[0]
         check("4f device B refreshes cleanly (200) and mac-studio stays pinned",
-              ref.status == 200 and bool(tok_b2) and mac_id in (wg_roots() or []), (ref.status, ref.body))
+              ref.status == 200 and bool(tok_b2) and mac_id in (wg_roots() or []), (ref.status, ref.data))
 
         mode = os.stat(home_state).st_mode & 0o777
         no_v09 = not os.path.exists(os.path.join(roots["home"]["dir"], "devices.json")) and not os.path.exists(os.path.join(roots["home"]["dir"], "roots.json"))

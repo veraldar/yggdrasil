@@ -65,7 +65,7 @@ origins = ["$TRUNK_URL"]
 ice_owner_from = ["127.0.0.1/32"]
 TOML
 chmod 600 "$STATE/trunk/trunk.toml"
-TRUNK_TEST_FAST=1 "$BIN" trunk -c "$STATE/trunk/trunk.toml" >"$STATE/trunk.log" 2>&1 &
+"$BIN" trunk -c "$STATE/trunk/trunk.toml" >"$STATE/trunk.log" 2>&1 &
 pids+=($!)
 for _ in $(seq 60); do curl -sf "$TRUNK_URL/t/state" >/dev/null && break; sleep 0.25; done
 

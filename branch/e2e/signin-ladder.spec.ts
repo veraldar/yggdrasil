@@ -10,8 +10,9 @@ import { devices, expect, test } from '@playwright/test';
  */
 const STATE = process.env.PW_V1_STATE || '';
 const BASE = process.env.PW_BASE_URL || '';
+const LOCAL = process.env.PW_LOCAL_TRUNK || '';
 
-test.skip(!STATE || !BASE, 'needs scripts/v1-ladder.sh');
+test.skip(!STATE || !BASE || !LOCAL, 'needs scripts/v1-ladder.sh');
 test.use({ ...devices['Pixel 7'], serviceWorkers: 'block' });
 
 type Admin = {
@@ -26,10 +27,10 @@ test('signin-ladder: stranger → /login → sign in → home → typed turn →
   const a = admin();
 
   await test.step('1 unauthenticated phone lands on /login with zero app bytes', async () => {
-    const raw = await request.get('/', { maxRedirects: 0, headers: { accept: 'text/html' } });
+    const raw = await request.get(`${LOCAL}/`, { maxRedirects: 0, headers: { accept: 'text/html' } });
     expect(raw.status()).toBe(302);
     expect(raw.headers().location).toMatch(/^\/login/);
-    await page.goto('/');
+    await page.goto(`${LOCAL}/`);
     await expect(page).toHaveURL(/\/login/);
   });
 
@@ -70,7 +71,7 @@ test('signin-ladder: stranger → /login → sign in → home → typed turn →
       )
     );
     expect(lo).toBe(200);
-    await page.goto('/');
+    await page.goto(`${LOCAL}/`);
     await expect(page).toHaveURL(/\/login/);
   });
 });

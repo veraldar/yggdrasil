@@ -73,7 +73,7 @@ test('G3.3 trunk-e2e-v1: three roots, per-root peer tokens, chained delegation, 
       mkdirSync(join(d, 'data'), { recursive: true });
       mkdirSync(join(d, 'work'), { recursive: true });
       const netBin = name === 'home' ? BIN : ROOT_BIN;
-      const rk = kvPub(execFileSync(netBin, ['root-key', join(d, 'root.key')], { encoding: 'utf8' }));
+      const rk = kvPub(execFileSync(BIN, ['root-key', join(d, 'root.key')], { encoding: 'utf8' }));
       const wk = kvPub(execFileSync(netBin, ['wg-key', join(d, 'wg.key')], { encoding: 'utf8' }));
       const e = await request.post(`${BASE}/t/roots/enroll`, {
         data: { hostname: `${name}-box`, os: 'linux', arch: 'x86_64', root_pub: rk, wg_pub: wk, has_app: name === 'home', has_voice: false },
@@ -96,13 +96,13 @@ test('G3.3 trunk-e2e-v1: three roots, per-root peer tokens, chained delegation, 
         `[wg]\nkey_file = "${r.dir}/wg.key"\nudp = "127.0.0.1:${p.wgUdp}"\nrelay = "127.0.0.1:${p.relay}"\nhttp = "127.0.0.1:${p.wgHttp}"\nbrain = "http://127.0.0.1:${p.brain}"\ntrunk_state = "${r.dir}/trunk-state.json"\ntrunk_key = "${r.trunkKey}"\n`
       );
       bg(`wg-${name}`, netBin, ['wg', '-c', join(r.dir, 'wg.toml')], {});
-      const priv = kvPriv(execFileSync(netBin, ['keygen'], { encoding: 'utf8' }));
+      const priv = kvPriv(execFileSync(BIN, ['keygen'], { encoding: 'utf8' }));
       writeFileSync(
         join(r.dir, 'bridge.toml'),
         `[node]\nname = "${name}"\nprivate_key = "${priv}"\n\n[bridge]\nhttp = "127.0.0.1:${p.bridge}"\nmedia = "127.0.0.1:${p.media}"\ntokens_file = "${r.dir}/devices.json"\nopencode_url = "http://127.0.0.1:${p.brain}"\n\n[trunk]\nurl = "${BASE}"\ntrunk_key = "${r.trunkKey}"\nroot_key_file = "${r.dir}/root.key"\nroot_id = "${r.id}"\nstate_file = "${r.dir}/trunk-state.json"\nupstream = "127.0.0.1:${p.app || p.brain}"\nice_tcp = []\nwg_relay = "127.0.0.1:${p.relay}"\nwg_local = "127.0.0.1:${p.wgUdp}"\n`
       );
       chmodSync(join(r.dir, 'bridge.toml'), 0o600);
-      bg(`bridge-${name}`, netBin, ['bridge', '-c', join(r.dir, 'bridge.toml')], {});
+      bg(`bridge-${name}`, BIN, ['bridge', '-c', join(r.dir, 'bridge.toml')], {});
       bg(`brain-${name}`, YGG_BIN, [], {
         HOME: r.dir,
         YGG_UPSTREAM_BASE_URL: `http://127.0.0.1:${MOCK_PORT}`,

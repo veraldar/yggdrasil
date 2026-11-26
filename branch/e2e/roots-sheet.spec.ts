@@ -249,8 +249,11 @@ test('roots sheet → a computer\'s page: its settings, theme saved on lab, sess
       await expect(row).toBeVisible({ timeout: 15_000 });
       await expect(row.getByTestId('join-left')).toContainText(':');
       await expect(row.getByTestId('join-add')).toBeVisible();
+      const refRes = page.waitForResponse(
+        (r) => r.request().method() === 'POST' && r.url().includes('/t/roots/enroll/enr_debian01/refuse')
+      );
       await row.getByTestId('join-refuse').tap();
-      await expect(row).toHaveCount(0, { timeout: 10_000 });
+      expect((await refRes).status()).toBe(200);
       const removed = readFileSync(join(STATE, 'roots-removed.jsonl'), 'utf8')
         .trim()
         .split('\n')

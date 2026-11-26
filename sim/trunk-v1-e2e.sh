@@ -32,7 +32,7 @@ TRUNK_HOST=ljoolq.tree.test
 TRUNK_PORT=18780
 ICE_PORT=18781
 MOCK_PORT=18782
-TRUNK_URL="http://$TRUNK_HOST:$TRUNK_PORT"
+TRUNK_URL="http://127.0.0.1:$TRUNK_PORT"
 
 BASE_TMP=${TMPDIR:-$HOME/.cache/trunk-v1/tmp/ladder}
 mkdir -p "$BASE_TMP"
@@ -65,12 +65,12 @@ db = "$STATE/trunk/trunk.db"
 state_dir = "$STATE/trunk"
 cred_dir = "$STATE/trunk/cred"
 ctl_socket = "$STATE/trunk/ctl.sock"
-rp_id = "$TRUNK_HOST"
+rp_id = "127.0.0.1"
 origins = ["$TRUNK_URL"]
 ice_owner_from = ["127.0.0.1/32"]
 TOML
 chmod 600 "$STATE/trunk/trunk.toml"
-TRUNK_TEST_FAST=1 "$BIN" trunk -c "$STATE/trunk/trunk.toml" >"$STATE/trunk.log" 2>&1 &
+"$BIN" trunk -c "$STATE/trunk/trunk.toml" >"$STATE/trunk.log" 2>&1 &
 pids+=($!)
 
 for _ in $(seq 60); do
