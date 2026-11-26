@@ -90,7 +90,9 @@ pub fn collect(sessions: &HashMap<String, Session>) -> Vec<Ask> {
             let reply = s.messages[n + 1..]
                 .iter()
                 .take_while(|r| r["info"]["role"] != "user" || !is_owner_turn(r))
-                .filter(|r| r["info"]["role"] == "assistant" && r["info"]["parentID"] == m["info"]["id"])
+                // older transcripts carry no parentID on replies: a reply is then any assistant turn up to
+                // the next owner turn
+                .filter(|r| r["info"]["role"] == "assistant" && (r["info"]["parentID"] == m["info"]["id"] || r["info"]["parentID"].is_null()))
                 .filter(|r| r["info"]["time"]["completed"].is_number())
                 .map(message_text)
                 .last();
@@ -385,6 +387,17 @@ mod tests {
         let mut m = HashMap::new();
         m.insert("s".to_string(), sess(Value::Null, vec![umsg("m1", "Status?", 1, json!({})), amsg("r1", "m1", "", 2)]));
         assert_eq!(collect(&m)[0].reply.as_deref(), Some(""));
+    }
+
+    #[test]
+    fn old_reply_without_parent_still_answers() {
+        let mut r = amsg("r1", "m1", "ok", 2);
+        r["info"].as_object_mut().unwrap().remove("parentID");
+        let mut m = HashMap::new();
+        m.insert("s".to_string(), sess(Value::Null, vec![umsg("m1", "hi", 1, json!({})), r, umsg("m2", "again", 9, json!({}))]));
+        let a = collect(&m);
+        assert_eq!(a[0].reply, None, "the second ask has no reply yet");
+        assert_eq!(a[1].reply.as_deref(), Some("ok"));
     }
 
     fn f() -> Facts {
