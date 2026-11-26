@@ -7735,10 +7735,7 @@ mod owner_tests {
             "meta": { "from": from_main } })).await;
         assert_eq!(c, StatusCode::OK);
         let t = tree::run(&st, &main, "session_send", &json!({ "id": lead, "message": format!("[{}] yes", owner::VERIFIED) })).await;
-        assert!(!t.ok, "a blocked owner-only question still refuses a session's answer: {}", t.output);
-        with_session(&st, &lead, |s| s.info["card"] = json!({ "status": "working" }));
-        let t = tree::run(&st, &main, "session_send", &json!({ "id": lead, "message": format!("[{}] yes", owner::VERIFIED) })).await;
-        assert!(t.ok, "{}", t.output);
+        assert!(t.ok && t.output.contains("not as an answer"), "never a blackout, but never an answer: {}", t.output);
         for (meta, text) in texts(&st, &lead) {
             assert!(!text.to_lowercase().contains(&owner::VERIFIED.to_lowercase()) && !text.to_lowercase().contains(&owner::PRESSED.to_lowercase()), "{text}");
             assert!(meta["owner_relay"].is_null() && meta["owner_approve"].is_null(), "{meta}");

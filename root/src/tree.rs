@@ -596,18 +596,23 @@ pub(crate) fn pending_question(st: &AppState, target: &str) -> Option<String> {
     (!q.is_empty()).then_some(q)
 }
 
-/// Refused: answering a question only the owner may answer, or passing on their approval.
-fn owner_only(st: &AppState, target: &str, title: &str, message: &str) -> Option<Out> {
-    if relays_approval(message) {
-        return Some(err(RELAY_REFUSED.into()));
-    }
-    let q = pending_question(st, target)?;
-    (!q.is_empty() && owner_only_question(&q)).then(|| {
-        err(format!(
-            "\"{title}\" asks something only the user may answer: \"{}\". Tell the user that question word for word and that they answer it themselves in that session (→ {title}). Never answer or approve it yourself.",
+/// Refused: passing on the owner's approval in a session's own words. (11-26: a pending owner-only
+/// question no longer closes the session to MAIN — that was a total blackout until the owner typed in
+/// that thread. Ordinary traffic goes through; what keeps it from standing in for the owner is the
+/// header every message from a session wears, and the note `owner_note` adds to the tool's answer.)
+fn owner_only(message: &str) -> Option<Out> {
+    relays_approval(message).then(|| err(RELAY_REFUSED.into()))
+}
+
+/// The note MAIN reads when its message went to a session that has an open question only the owner may answer.
+fn owner_note(st: &AppState, target: &str, title: &str) -> String {
+    match pending_question(st, target).filter(|q| owner_only_question(q)) {
+        Some(q) => format!(
+            " NOTE: \"{title}\" has an open question only the user may answer: \"{}\". Your message reached it as yours, not as an answer. The user answers with the Approve button on its card, or by writing it to you once — pass it on with owner_turn (the id of their message).",
             one_line(&q, 300)
-        ))
-    })
+        ),
+        None => String::new(),
+    }
 }
 
 fn send(st: &AppState, caller: &str, input: &Value) -> Out {
@@ -627,10 +632,11 @@ fn send(st: &AppState, caller: &str, input: &Value) -> Out {
         None => None,
     };
     if trusted.is_none() {
-        if let Some(o) = owner_only(st, &target, &title, message) {
+        if let Some(o) = owner_only(message) {
             return o;
         }
     }
+    let note = if trusted.is_none() { owner_note(st, &target, &title) } else { String::new() };
     let parts = match with_files(st, caller, input, message) {
         Ok(p) => p,
         Err(o) => return o,
@@ -646,7 +652,7 @@ fn send(st: &AppState, caller: &str, input: &Value) -> Out {
     let turn = Turn { parts, modality: None, auto_turn: false, internal: false, origin: Some(caller.to_string()), completes: None, from: Some(crate::sender_here(st, caller)), digest_hint: None, trusted };
     match crate::submit(st, &target, turn) {
         Ok(_) => ok(format!(
-            "SENT, NOT DONE YET: \"{title}\" (id={target}){} has your instruction and reports back when finished. Tell the user it is on its way (→ {title}); never say it is done.",
+            "SENT, NOT DONE YET: \"{title}\" (id={target}){} has your instruction and reports back when finished. Tell the user it is on its way (→ {title}); never say it is done.{note}",
             if busy { ", queued behind its current work" } else { "" }
         )),
         Err(e) => err(format!("send failed ({:?})", e.status())),
