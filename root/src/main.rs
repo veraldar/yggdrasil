@@ -7932,6 +7932,9 @@ mod owner_tests {
         let after = ask(&st, &lead);
         assert_eq!((&before["id"], &before["at"], &before["shown"]), (&after["id"], &after["at"], &after["shown"]), "same question, same record");
         assert!(after["shown"].is_i64() || after["shown"].is_u64());
+        // the session answered a session's message and still asks the same thing: stubborn — the one case that earns MAIN's top area
+        assert_eq!(after["bounced"]["n"], 1, "bounced once: {after}");
+        assert!(before["bounced"].is_null(), "an ask nobody bounced has no mark: {before}");
         asks(&st, &lead, "A different question? I need your approval.");
         assert_ne!(ask(&st, &lead)["id"], json!(id));
         // a turn with no QUESTION removes it

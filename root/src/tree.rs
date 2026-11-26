@@ -1104,6 +1104,9 @@ pub(crate) fn defang_event(ev: &mut Value) {
 
 fn write_card(st: &AppState, sid: &str, ev: &Value) {
     let info = with_session(st, sid, |s| {
+        // did the turn that just ended answer a session's message (the brain's open-question line) or a relayed answer?
+        let bounced = s.messages.iter().rev().find(|m| m["info"]["role"] == "user" && m["info"]["meta"]["auto"] != true)
+            .is_some_and(|m| m["info"]["meta"]["ask_open"].is_object() || m["info"]["meta"]["owner_relay"].is_object());
         let card = &mut s.info["card"];
         if !card.is_object() {
             *card = json!({});
@@ -1119,6 +1122,13 @@ fn write_card(st: &AppState, sid: &str, ev: &Value) {
         match ev["ask"]["q"].as_str() {
             Some(q) => {
                 let same = card["ask"]["q"].as_str().is_some_and(|old| crate::owner::norm(old) == crate::owner::norm(q));
+                // a STUBBORN session: the turn that just ended answered a message from a session (or a relayed
+                // answer) and still asks the same question — it bounced it. Only these earn the persistent
+                // approvals area at the top of MAIN (owner 11-26: very limited, never a prompt for every ask).
+                if same && bounced {
+                    let n = card["ask"]["bounced"]["n"].as_u64().unwrap_or(0) + 1;
+                    card["ask"]["bounced"] = json!({ "at": crate::clock_now_ms(), "n": n });
+                }
                 if !same {
                     retire_ask(card);
                     card["ask"] = json!({ "id": format!("ask_{}", &uuid::Uuid::new_v4().simple().to_string()[..12]), "q": q,

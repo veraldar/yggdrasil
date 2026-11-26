@@ -103,6 +103,13 @@ def main():
             raise SystemExit(1)
         ids = {r["title"]: r["id"] for r in req(brain, "GET", "/tree") if r["title"].startswith("asker")}
         shots = lambda token, mode: json.loads(subprocess.run(["node", os.path.join(HERE, "owner-answer-shots.mjs"), os.path.join(ROOT, "branch"), f"http://127.0.0.1:{app}", a.out, token, json.dumps({"mode": mode})], capture_output=True, text=True, timeout=180, check=True).stdout.strip().splitlines()[-1])
+        # default: typed-once in MAIN's chat — a question nobody bounced earns NO approvals area in MAIN
+        r = shots(TOKEN, "none")
+        check("MAIN shows no approvals area for questions nobody bounced", r["cards"] == 0, r)
+        # a stubborn session: a message from MAIN arrives under the open-question line and it asks the same thing again
+        for i, q in enumerate(qs):
+            req(brain, "POST", f"/session/{ids[f'asker {i}']}/message?async=1&origin=none", {"parts": [{"type": "text", "text": f"Reply with exactly: {q}"}], "meta": {"from": {"session": main_id, "title": "[MAIN]"}}})
+        check("both sessions bounced (the brain marks the ask)", wait(lambda: len([x for x in req(brain, "GET", "/tree") if x["title"].startswith("asker") and ((x.get("card") or {}).get("ask") or {}).get("bounced")]) == 2, 90))
         # the box console (no credential): no button, the route refuses, nothing reaches the session
         r = shots("-", "one")
         check("console: cards show, whole questions, no button, one line", r["cards"] == 2 and r["yes"] == 0 and r["unpaired"] == 2 and r["fits"], r)
@@ -124,6 +131,10 @@ def main():
         say(tool([["session_start", {"title": "asker 2", "agent": "build", "brief": "Reply with exactly: QUESTION:May-I-delete-the-old-data?-I-need-your-permission."}]]))
         say(tool([["session_start", {"title": "asker 3", "agent": "build", "brief": "Reply with exactly: QUESTION:May-I-rotate-the-signing-key?-I-need-your-approval."}]]))
         wait(lambda: len([x for x in req(brain, "GET", "/tree") if (x.get("card") or {}).get("ask") and not x["card"]["ask"].get("answered")]) >= 3, 60)
+        for t, q in (("asker 2", "QUESTION:May-I-delete-the-old-data?-I-need-your-permission."), ("asker 3", "QUESTION:May-I-rotate-the-signing-key?-I-need-your-approval.")):
+            sid = next(x["id"] for x in req(brain, "GET", "/tree") if x["title"] == t)
+            req(brain, "POST", f"/session/{sid}/message?async=1&origin=none", {"parts": [{"type": "text", "text": f"Reply with exactly: {q}"}], "meta": {"from": {"session": main_id, "title": "[MAIN]"}}})
+        wait(lambda: len([x for x in req(brain, "GET", "/tree") if ((x.get("card") or {}).get("ask") or {}).get("bounced") and not x["card"]["ask"].get("answered")]) >= 3, 90)
         r = shots(TOKEN, "all")
         check("paired: Yes to all answered every open question", r.get("doneAll", 0) == r["cards"] == 3, r)
         open_left = [x for x in req(brain, "GET", "/tree") if (x.get("card") or {}).get("ask") and not x["card"]["ask"].get("answered")]

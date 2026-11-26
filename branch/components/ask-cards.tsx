@@ -2,7 +2,10 @@
 /**
  * The owner's answer cards: one per open question a session asked (`card.ask`, from the tree rows), the
  * question in full — Yes · No · Reply. Two or more: Yes to all (N), one call per ask with its own id.
- * Shown in MAIN, and the same card on the asking session's own page (`only`).
+ * Shown on the asking session's own page (`only`). In MAIN only the STUBBORN ones — a session that bounced a
+ * message or a relayed answer and still asks (`ask.bounced`, set by the brain): the owner's ruling 11-26 is
+ * that a persistent approvals area stays very limited, never a prompt for every question. The default is to
+ * answer once, in MAIN's chat; the brain's relay (`owner_turn`) carries it.
  *
  * The buttons exist only on a paired device (GET /api/owner/state); anywhere else — the :8447 door, the
  * box console — one line says where to answer, never a button that fails. The brain checks the device and
@@ -35,7 +38,7 @@ export function AskCards({ tree, only }: { tree: TreeRow[]; only?: string }) {
   }, []);
 
   const rows = tree.filter(
-    (r) => r.card?.ask && (only ? r.id === only : true) && (!r.card.ask.answered || done[r.card.ask.id])
+    (r) => r.card?.ask && (only ? r.id === only : !!r.card.ask.bounced) && (!r.card.ask.answered || done[r.card.ask.id])
   );
   const open = rows.filter((r) => !r.card!.ask!.answered);
 

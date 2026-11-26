@@ -3180,6 +3180,10 @@ export default function SessionView({
       {/* the rail — the tree's signal, flattened to one trace */}
       <div className="oz-rail -mx-3" data-s={tone} aria-hidden="true" />
 
+      {/* the approvals area (owner 11-26): in MAIN only sessions that bounced a message or a relayed answer and
+          still ask — at the top, never a prompt for every question; a session's own page shows its own */}
+      <AskCards tree={tree} only={isMainSlug(slug) ? undefined : me?.id} />
+
       {/* a managed session's card: who works it, on what, how it stands —
           its question for you, then the summary (tap: the whole of it) */}
       {me && card && (() => {
@@ -3721,8 +3725,6 @@ export default function SessionView({
               {histChip}
             </div>
           )}
-          {/* the questions sessions asked you: Yes · No · Reply (MAIN: all of them; a session: its own) */}
-          <AskCards tree={tree} only={isMainSlug(slug) ? undefined : me?.id} />
           <div className="oz-dock -mx-3 px-3">
             {/* single paper-clip key — opens the phone's picker: any file, a photo,
                 the camera (package 2: files are files) */}

@@ -17,6 +17,14 @@ await ctx.addInitScript(() => {
 const page = await ctx.newPage();
 const shot = (n) => page.screenshot({ path: path.join(out, `${n}.png`) });
 await page.goto(`${app}/session/main`, { waitUntil: 'domcontentloaded' });
+if (ids.mode === 'none') {
+  await page.waitForTimeout(6000);
+  res.cards = await page.locator('[data-testid="ask-card"]').count();
+  await shot('main-no-approvals');
+  await browser.close();
+  console.log(JSON.stringify(res));
+  process.exit(0);
+}
 await page.waitForSelector('[data-testid="ask-card"]', { timeout: 45000 });
 res.cards = await page.locator('[data-testid="ask-card"]').count();
 res.questions = await page.locator('[data-testid="ask-q"]').allTextContents();

@@ -27,6 +27,8 @@ export type Ask = {
   at: number;
   shown?: number | null;
   answered?: { by: string; via: string; at: number; expires?: number } | null;
+  /** set by the brain when the session answered a session's message or a relayed answer and still asks: the stubborn ones */
+  bounced?: { at: number; n: number } | null;
   used?: { at: number; what: string }[];
 };
 
