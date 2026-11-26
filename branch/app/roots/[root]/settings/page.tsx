@@ -30,7 +30,7 @@ import {
   roleTag,
 } from '@/lib/agents';
 import { useTrunkMode } from '@/lib/auth-mode';
-import { onPinState, pinState } from '@/lib/pinned';
+import { usePinState } from '@/lib/pinned';
 import { rootOfParam } from '@/lib/root-param';
 import {
   type WorldId,
@@ -146,7 +146,7 @@ function RootSettings({ rootId }: { rootId: string }) {
   const [saveErr, setSaveErr] = useState('');
   // v1 trunk-only model form (§4.1 item 13, §5.6 F7): disabled unless pin state is "end to end"
   const trunk = useTrunkMode();
-  const [pin, setPin] = useState(() => pinState().state);
+  const pin = usePinState().state;
   const [otherRoots, setOtherRoots] = useState<string[]>([]);
   const [provider, setProvider] = useState<ProviderId>('zai');
   const [mUrl, setMUrl] = useState<string>(MODEL_PRESETS[0].url);
@@ -156,7 +156,6 @@ function RootSettings({ rootId }: { rootId: string }) {
   const [modelBusy, setModelBusy] = useState(false);
   const [modelSaved, setModelSaved] = useState('');
 
-  useEffect(() => onPinState((s) => setPin(s)), []);
   useEffect(() => {
     if (!trunk) return;
     void fetch('/api/roots', { cache: 'no-store' })

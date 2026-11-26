@@ -732,6 +732,7 @@ test('G3.6 storyboard end to end (15 steps)', async ({ browser, request }) => {
   }
 
   // ---- S13: pin-change alarm (APP M5 — merged!) ----
+  let s13Page: import('@playwright/test').Page | null = null;
   try {
     const FP_A = 'sha-256 ' + 'AA:'.repeat(31) + 'AA';
     const FP_B = 'sha-256 ' + 'BB:'.repeat(31) + 'BB';
@@ -759,6 +760,7 @@ test('G3.6 storyboard end to end (15 steps)', async ({ browser, request }) => {
       { name: 'bifrost_device', value: locTok, domain: '127.0.0.1', path: '/', httpOnly: true },
     ]);
     const pPage = await pinCtx.newPage();
+    s13Page = pPage;
     await pPage.addInitScript(
       ([rid, fp]) => {
         localStorage.setItem('bifrost-door', 'v2');
@@ -783,7 +785,16 @@ test('G3.6 storyboard end to end (15 steps)', async ({ browser, request }) => {
     await pinCtx.close();
     record('S13', 'PASS', 'pin-change alarm: swapped dtls_fp -> refused + alarm');
   } catch (e) {
-    record('S13', 'FAIL', String(e).slice(0, 120));
+    // a flake must say what it saw: the badge's state and words, the error without colour codes
+    const badgeNow = s13Page
+      ? await s13Page
+          .getByTestId('pin-state')
+          .evaluate((el) => `data-state=${el.getAttribute('data-state')} text="${el.textContent}"`, undefined, { timeout: 2_000 })
+          .catch(() => 'badge unreadable')
+      : 'no page';
+    const msg = String(e).replace(/\x1b\[[0-9;]*m/g, '').replace(/\s+/g, ' ');
+    record('S13', 'FAIL', `${msg.slice(0, 300)} — badge ${badgeNow}`);
+    await s13Page?.context().close().catch(() => {});
   }
 
   // ---- S14: model form refused when not pinned (APP M5 — merged!) ----

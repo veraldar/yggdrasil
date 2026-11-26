@@ -7,13 +7,7 @@
  * Hidden when there is no pin (the box's own network, the tailnet).
  */
 import { useEffect, useState } from 'react';
-import {
-  PIN_CHANGED_ALARM,
-  type PinState,
-  bootPinned,
-  onPinState,
-  pinState,
-} from '@/lib/pinned';
+import { PIN_CHANGED_ALARM, type PinState, bootPinned, usePinState } from '@/lib/pinned';
 
 // as early as the page's code runs: requests wait for the channel instead of leaking ahead of it
 if (typeof window !== 'undefined') bootPinned();
@@ -28,10 +22,9 @@ const SAY: Record<PinState, string> = {
 };
 
 export function PinStateLine() {
-  const [s, setS] = useState(pinState());
+  const s = usePinState();
   // /pair found this visitor is not paired (a phone that was, once, still holds its old pin): no road to name
   const [unpaired, setUnpaired] = useState(false);
-  useEffect(() => onPinState((state, why) => setS({ state, why })), []);
   useEffect(() => {
     const on = () => setUnpaired(true);
     if (document.documentElement.dataset.unpaired) on();
