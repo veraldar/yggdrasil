@@ -1036,6 +1036,8 @@ async fn digest(st: &AppState, sid: &str, f: &Facts) -> Value {
         "status": status, "headline": headline, "summary": summary, "needs": needs, "relevance": relevance,
         "body": clip(&f.reply, 2500), "delivered": false,
     });
+    // what a session wrote reaches MAIN's inbox, the digest and the card with the brain's marks broken (owner.rs)
+    defang_event(&mut ev);
     // the question as the session itself wrote it (owner.rs): the record an answer is tied to
     if let Some(q) = ask_q {
         ev["ask"] = json!({ "q": q, "msg": f.reply_id });
@@ -1087,6 +1089,15 @@ fn retire_ask(card: &mut Value) {
         let n = a.len();
         if n > 20 {
             a.drain(..n - 20);
+        }
+    }
+}
+
+/// The text fields of a digest event, with the brain's marks broken (owner.rs).
+pub(crate) fn defang_event(ev: &mut Value) {
+    for k in ["headline", "summary", "needs", "body"] {
+        if let Some(s) = ev[k].as_str().map(crate::owner::defang) {
+            ev[k] = json!(s);
         }
     }
 }
