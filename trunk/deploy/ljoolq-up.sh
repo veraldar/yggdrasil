@@ -94,7 +94,7 @@ on_target() {
 
   # 3. Optional Caddy merge + validate + reload (restores previous Caddyfile on failure)
   if [ -n "$caddy_mode" ]; then
-    local c_bak="$CADDYFILE.bak.$(date -u +%Y%m%d-%H%M%S)"
+    local c_bak; c_bak="$CADDYFILE.bak.$(date -u +%Y%m%d-%H%M%S)"
     cp -p "$CADDYFILE" "$c_bak"
     say "caddy-merge.py ($caddy_mode) → $CADDYFILE"
     if ! python3 "$pay/caddy/caddy-merge.py" "$caddy_mode" "$CADDYFILE" --container-ip "$CT_IP" --in-place \
@@ -114,7 +114,7 @@ on_target() {
     mv -f "$SNI_BIN.new" "$SNI_BIN"
   fi
   if [ "$has_sni_conf" = 1 ]; then
-    local s_bak="$SNI_CONF.bak.$(date -u +%Y%m%d-%H%M%S)"
+    local s_bak; s_bak="$SNI_CONF.bak.$(date -u +%Y%m%d-%H%M%S)"
     [ -f "$SNI_CONF" ] && cp -p "$SNI_CONF" "$s_bak"
     python3 "$SNI_BIN" -c "$pay/sni-443.conf" --check || die "sni-443 --check failed — nothing reloaded"
     install -m 0644 "$pay/sni-443.conf" "$SNI_CONF"
