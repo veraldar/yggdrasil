@@ -50,13 +50,13 @@ test('#5 · voice-test on → turns land in voice-test, MAIN untouched; off → 
     localStorage.removeItem('bifrost-voice-test');
   });
 
-  // settings: the switch
+  // settings: the switch (one bare button now, its state inside the text)
   await page.goto('/settings');
   const sw = page.getByTestId('voice-test-toggle');
   await expect(sw).toHaveAttribute('aria-checked', 'false');
   await sw.click();
   await expect(sw).toHaveAttribute('aria-checked', 'true');
-  await expect(page.getByTestId('voice-test-state')).toContainText('voice-test');
+  await expect(sw).toHaveText('voice tests · on');
   await page.screenshot({
     path: `${process.env.TF_SHOTS || '../artifacts'}/ux-batch-voice-test-settings.png`,
   });

@@ -650,6 +650,10 @@
   .oz-alist .m { flex: none; margin-left: auto; font-size: 11px; color: var(--oz-dim); }
   .oz-alist .r2 { display: block; margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 10.5px; color: var(--oz-dim); }
   /* the settings page's engines: a row that opens its model choices in place */
+  /* owner 11-26, approved (wireframe v2.1): a settings row is ONE bare full-width
+     key — its own text the placeholder, no left label, no icon */
+  .plist { display: grid; gap: 8px; }
+  .plist .oz-k.bar { display: flex; width: 100%; justify-content: flex-start; padding: 0 12px; }
   .oz-alist li.eng { border-bottom: 1px var(--oz-rule) var(--oz-border); }
   .oz-alist li.eng:last-child { border-bottom: 0; }
   .oz-alist li.eng > button { display: block; width: 100%; min-width: 0; padding: 8px 2px; text-align: left; font-size: 12px; }

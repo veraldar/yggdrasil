@@ -38,10 +38,12 @@ export function EnginesBlock({
     setOpen('');
   }
 
+  // the row (owner 11-26, approved): ONE bare button, its own text the
+  // placeholder — "engine · its current default model", no icon-only chevron
   const rowOf = (e: EngineRow) => {
     const label = e.label || engineLabel(e.name);
     const isOpen = open === e.name;
-    const cur = e.model || 'default';
+    const cur = e.model || 'its default';
     const kind = engineControlKind(e);
     return (
       <li key={e.name} className="eng" data-testid="engine-row" data-engine={e.name}>
@@ -55,9 +57,8 @@ export function EnginesBlock({
           }}
         >
           <span className="r1">
-            <span className="truncate">{label}</span>
-            <span className="m">
-              {e.model || 'its default'} {isOpen ? '▲' : '›'}
+            <span className="truncate">
+              {label} · {cur} {isOpen ? '▲' : '›'}
             </span>
           </span>
           {ENGINE_NOTE[e.name] && <span className="r2">{ENGINE_NOTE[e.name]}</span>}

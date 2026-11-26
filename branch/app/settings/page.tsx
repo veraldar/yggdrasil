@@ -30,6 +30,8 @@ export default function SettingsPage() {
   const [vtBusy, setVtBusy] = useState(false);
   const [vtErr, setVtErr] = useState('');
   // the walk-through again (UX-CALM): MAIN's first-turn card, in the test room
+  // — its row is one bare button (owner 11-26), so the room link lives on the
+  // /session page instead (voice tests · voice-test), not here
   const [walkBusy, setWalkBusy] = useState(false);
   const [walkErr, setWalkErr] = useState('');
 
@@ -166,36 +168,31 @@ export default function SettingsPage() {
 
       {engines && engines.length > 0 && <EnginesBlock engines={engines} onSaved={setEngines} />}
 
-      {/* the simple menu (owner feedback): three rows, nothing else —
+      {/* the simple menu (owner 11-26, approved): a row is ONE bare button —
+          its own text the placeholder, no left label, no icon-only key.
           roles opens the roles page; walk-through re-walks in the test room;
-          voice tests toggle their own room */}
+          voice tests toggle their own room, their state inside the button
+          ("voice tests · on/off") — on answers "voice tests · voice-test" on
+          the /session page, per the approved wireframe v2.1. */}
       <section className="oz-blk">
-        <ul className="oz-kv">
-          <li>
-            <span>roles</span>
-            <span />
-            <Link href="/agents" data-testid="agents-link" className="oz-k sm">
-              ›
+        <ul className="plist">
+          <li className="prow">
+            <Link href="/agents" data-testid="agents-link" className="oz-k bar">
+              roles ›
             </Link>
           </li>
-          <li>
-            <span>walk-through</span>
-            <span />
+          <li className="prow">
             <button
               type="button"
               data-testid="walk-again"
               disabled={walkBusy}
               onClick={() => void walkAgain()}
-              className="oz-k sm"
+              className="oz-k bar"
             >
-              walk it
+              {walkBusy ? 'walk-through · walking …' : 'walk-through · walk it'}
             </button>
           </li>
-          <li>
-            <span>voice tests</span>
-            <span data-testid="voice-test-state">
-              {vt && <Link href={`/session/${VOICE_TEST_SLUG}`}>{VOICE_TEST_SLUG} ›</Link>}
-            </span>
+          <li className="prow">
             <button
               type="button"
               role="switch"
@@ -204,9 +201,9 @@ export default function SettingsPage() {
               data-testid="voice-test-toggle"
               disabled={vtBusy}
               onClick={() => void toggleVoiceTest()}
-              className={`oz-k sm ${vt ? 'on' : ''}`}
+              className={`oz-k bar ${vt ? 'on' : ''}`}
             >
-              {vt ? 'on' : 'off'}
+              voice tests · {vt ? 'on' : 'off'}
             </button>
           </li>
         </ul>
