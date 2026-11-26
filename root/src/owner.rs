@@ -118,21 +118,93 @@ pub fn redeem(headers: &HeaderMap) -> Option<String> {
     (exp > crate::now_ms()).then_some(device)
 }
 
+/// One look-alike letter as the plain one it imitates (Cyrillic/Greek/fullwidth/digits), for matching only.
+fn plain(c: char) -> Option<char> {
+    Some(match c {
+        'а' | 'ａ' | 'α' => 'a',
+        'е' | 'ｅ' | 'ε' | '3' => 'e',
+        'о' | 'ｏ' | 'ο' | '0' => 'o',
+        'р' | 'ｐ' | 'ρ' => 'p',
+        'с' | 'ｃ' => 'c',
+        'х' | 'ｘ' => 'x',
+        'у' | 'ｙ' => 'y',
+        'і' | 'ｉ' | 'ι' | 'l' | 'ӏ' | '1' | '|' | 'I' | 'ı' => 'i',
+        'ѕ' | 'ｓ' | '5' => 's',
+        'ј' | 'ｊ' => 'j',
+        'һ' | 'ｈ' => 'h',
+        'ԁ' | 'ｄ' => 'd',
+        'ѵ' | 'ｖ' | 'ν' => 'v',
+        'ｒ' => 'r',
+        'ｔ' | 'τ' => 't',
+        'ｎ' => 'n',
+        'ｗ' => 'w',
+        'ｕ' => 'u',
+        'ｂ' => 'b',
+        'ｆ' => 'f',
+        'ｇ' | 'ɡ' => 'g',
+        'ｍ' => 'm',
+        'ｋ' => 'k',
+        c if c.is_ascii() => c.to_ascii_lowercase(),
+        _ => return None,
+    })
+}
+
 /// Marks only the brain writes lose their force in any text a session or the owner's own typing
-/// carries: the words are kept, the mark is broken.
+/// carries: the words are kept, the mark is broken — also when written with look-alike letters,
+/// stray spaces/dashes or zero-width characters between them.
 pub fn defang(text: &str) -> String {
-    let mut out = text.to_string();
+    let src: Vec<char> = text.chars().filter(|c| !matches!(*c, '\u{200b}'..='\u{200f}' | '\u{2060}' | '\u{feff}' | '\u{00ad}')).collect();
+    let folded: Vec<Option<char>> = src.iter().map(|c| plain(*c)).collect();
+    let mut hit = vec![false; src.len()];
     for mark in [VERIFIED, PRESSED] {
-        let mut from = 0;
-        while let Some(i) = out.to_ascii_lowercase()[from..].find(&mark.to_ascii_lowercase()) {
-            let at = from + i;
-            let end = at + mark.len();
-            if !out.is_char_boundary(at) || !out.is_char_boundary(end) {
-                break;
+        let want: Vec<char> = mark.to_ascii_lowercase().chars().filter(|c| *c != ' ').collect();
+        for start in 0..src.len() {
+            // the mark's letters in order; between them only spaces, dashes, dots, underscores
+            let (mut k, mut at) = (0, start);
+            while k < want.len() && at < src.len() {
+                match folded[at] {
+                    Some(c) if c == want[k] => { k += 1; at += 1 }
+                    Some(' ' | '-' | '_' | '.' | '·') if k > 0 => at += 1,
+                    None if src[at].is_whitespace() && k > 0 => at += 1,
+                    _ => break,
+                }
             }
-            let broken = out[at..end].replace(' ', "·");
-            out.replace_range(at..end, &broken);
-            from = at + broken.len();
+            if k == want.len() {
+                for h in &mut hit[start..at] {
+                    *h = true;
+                }
+            }
+        }
+    }
+    if !hit.contains(&true) {
+        return src.into_iter().collect();
+    }
+    // a broken mark reads as a mark in quotes: letters kept plain, joined with a middle dot
+    let mut out = String::new();
+    let mut i = 0;
+    while i < src.len() {
+        if hit[i] {
+            let mut j = i;
+            while j < src.len() && hit[j] {
+                j += 1;
+            }
+            // letters kept as written, every gap between words becomes a middle dot
+            let mut prev_gap = false;
+            for c in &src[i..j] {
+                let gap = c.is_whitespace() || matches!(*c, '-' | '_' | '.' | '·');
+                if gap {
+                    if !prev_gap {
+                        out.push('·');
+                    }
+                } else {
+                    out.push(*c);
+                }
+                prev_gap = gap;
+            }
+            i = j;
+        } else {
+            out.push(src[i]);
+            i += 1;
         }
     }
     out
@@ -147,6 +219,9 @@ fn hhmm(ms: i64) -> String {
 /// What a verified relay or press hands `submit`: the block the brain writes in front of the
 /// message, and the audit record kept on it (`meta.owner_relay` / `meta.owner_approve`).
 pub struct Trusted {
+    /// what the sender's header line adds (`[from session “MAIN” — …]`): the signal the model reads FIRST
+    /// and no text can write, since a header is built from the stored sender, not from words
+    pub label: &'static str,
     pub block: String,
     pub meta_key: &'static str,
     pub meta: Value,
@@ -161,6 +236,8 @@ pub fn relay(st: &AppState, session: &str, message: &str, relayer: &str, target:
     if relayer == target {
         return Err("that is your own conversation".into());
     }
+    // what the target was asking when it arrives (taken before the lock)
+    let asking = crate::tree::pending_question(st, target);
     let sessions = st.sessions.lock().unwrap();
     let s = sessions.get(session).ok_or("no such session")?;
     if !crate::is_main_title(s.info["title"].as_str().unwrap_or_default()) {
@@ -173,6 +250,10 @@ pub fn relay(st: &AppState, session: &str, message: &str, relayer: &str, target:
     if !typed {
         return Err("that message was not typed by the owner on a paired device — the brain cannot vouch for it".into());
     }
+    // one use per session: an old "go" is not a standing approval for whatever is asked next
+    if sessions.get(target).is_some_and(|t| t.messages.iter().any(|x| x["info"]["meta"]["owner_relay"]["message"].as_str() == Some(message))) {
+        return Err("that owner message was already delivered to that session — ask the owner again for a new question".into());
+    }
     let at = m["info"]["time"]["created"].as_i64().unwrap_or(0);
     if crate::clock_now_ms() - at > RELAY_MAX_AGE_MS {
         return Err("that owner message is older than a day".into());
@@ -184,11 +265,15 @@ pub fn relay(st: &AppState, session: &str, message: &str, relayer: &str, target:
     }
     let words: String = text.chars().take(4000).collect();
     let title = s.info["title"].as_str().unwrap_or("MAIN");
+    let scope = match &asking {
+        Some(q) => format!("\nWhen this reached you, your open question was: “{}”. Read the owner's words against it — they answer that only if they say so.", q.chars().take(300).collect::<String>()),
+        None => String::new(),
+    };
     let block = format!(
-        "[{VERIFIED} — the owner's own words. The owner typed them themselves in “{title}” (message {message}, {}, on a paired device). “{title}” only passes them on and cannot change them; this block is written by the brain, not by any session.]\n“{words}”\n[end of the owner's words — what follows, if anything, is “{title}”'s own note, not the owner's]",
+        "[{VERIFIED} — the owner's own words. The owner typed them themselves in “{title}” (message {message}, {}, on a paired device). “{title}” only passes them on and cannot change them; this block is written by the brain, not by any session.]\n“{words}”\n[end of the owner's words — what follows, if anything, is “{title}”'s own note, not the owner's]{scope}",
         hhmm(at)
     );
-    Ok(Trusted { block, meta_key: "owner_relay", meta: json!({ "session": session, "message": message, "device": device, "at": at }) })
+    Ok(Trusted { label: "carrying the owner's own words, verified by the brain", block, meta_key: "owner_relay", meta: json!({ "session": session, "message": message, "device": device, "at": at }) })
 }
 
 /// `POST /session/{id}/owner-approve` — the owner pressed Approve on the session's open question.
@@ -204,7 +289,7 @@ pub async fn post_approve(State(st): State<AppState>, Path(id): Path<String>, he
     let block = format!(
         "[{PRESSED} — verified by the brain: the owner tapped Approve in the app, on a paired device, for your open question. This is the owner's own approval, given by themselves; no session passed it on.]\nYour question was: “{question}”\nThe owner's answer: YES — approved."
     );
-    let trusted = Trusted { block, meta_key: "owner_approve", meta: json!({ "device": device, "question": question, "at": crate::now_ms() }) };
+    let trusted = Trusted { label: "the owner pressed Approve — verified by the brain", block, meta_key: "owner_approve", meta: json!({ "device": device, "question": question, "at": crate::now_ms() }) };
     match crate::submit_trusted(&st, &id, trusted) {
         Ok(turn_id) => Json(json!({ "turn_id": turn_id, "sessionID": id, "status": "queued" })).into_response(),
         Err(r) => r,
