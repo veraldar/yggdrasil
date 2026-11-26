@@ -84,12 +84,15 @@ function init() {
   const key = keyOf(F.seed);
   const now = Date.now();
   const prev = readJson(F.state, null);
+  const url = opt('trunk-url', 'http://127.0.0.1');
   const s = {
     version: 1,
     trunk: {
-      url: opt('trunk-url', 'http://127.0.0.1'),
+      url,
       trunk_id: `trk_${createHash('sha256').update(ta.rawPublic(key)).digest('base64url').slice(0, 12)}`,
       trunk_key: ta.rawPublic(key).toString('base64url'),
+      // C3 M3: every origin a token's iss may be (the real bridge writes this; mint uses the same)
+      issuers: [ta.originOf(url)],
     },
     root: { id: 'rt_twin', name: opt('root-name', 'twin') },
     link: { state: 'up', since: now, written: now },
@@ -114,7 +117,7 @@ function mint({ did = 'dev_twin', ip, rgn, lifeS = 900, role = 'admin', kep } = 
   const s = state();
   return ta.mintToken(
     keyOf(F.seed),
-    { did, rgn: rgn ?? regionOf(ip ?? '203.0.113.7'), role, kep: kep ?? s.kill_epoch, iss: s.trunk.url, sub: 'acc_twin' },
+    { did, rgn: rgn ?? regionOf(ip ?? '203.0.113.7'), role, kep: kep ?? s.kill_epoch, iss: s.trunk.issuers?.[0] ?? ta.originOf(s.trunk.url), sub: 'acc_twin' },
     { lifeMs: lifeS * 1000 }
   );
 }

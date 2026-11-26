@@ -59,8 +59,21 @@ export type Claims = {
 export type TrunkKey = { kid: string; alg: 'ed25519'; public: string; retired_at: number | null };
 export type DenyEntry = { did: string; until: number | null };
 
-/** What a verifier needs from trunk-state.json: the keys, the kill epoch, the deny-list. */
-export type Authority = { keys: TrunkKey[]; kill_epoch: number; deny: DenyEntry[] };
+/** What a verifier needs from trunk-state.json: the keys, the kill epoch, the deny-list, the issuers. */
+export type Authority = {
+  keys: TrunkKey[];
+  kill_epoch: number;
+  deny: DenyEntry[];
+  /**
+   * Every origin a valid token's `iss` may be (the trunk mints with public_url and https://<extra
+   * name>, C3). An old state file has none → `origin(trunk.url)` (state.rs backfills the same way);
+   * no issuers at all (no state file) → nothing verifies.
+   */
+  issuers: string[];
+};
+
+/** C3: `iat` more than this many seconds in the future → invalid (clock skew allowance). */
+export const IAT_SKEW_S = 60;
 
 export type Verdict = { ok: true; claims: Claims } | { ok: false; why: Why; did?: string };
 
@@ -182,6 +195,25 @@ export function timeOf(s: string): number {
   return Number.isFinite(t) && new Date(t).toISOString().replace('.000Z', 'Z') === s ? t : Number.NaN;
 }
 
+/**
+ * C3's origin, lowercased, as state.rs `origin_of` writes it: "https://host[:port]" (a scheme-less
+ * url is taken as https; http survives, for a loopback twin trunk).
+ */
+export function originOf(url: string): string {
+  const at = url.indexOf('://');
+  let scheme = 'https';
+  let rest = url;
+  if (at > 0) {
+    scheme = url.slice(0, at).toLowerCase();
+    rest = url.slice(at + 3);
+    if (scheme !== 'https' && scheme !== 'http') {
+      return `https://${rest}`;
+    }
+  }
+  const host = rest.split(/[/?#]/, 1)[0].toLowerCase();
+  return `${scheme}://${host}`;
+}
+
 /** The payload as C3 claims, or null: exactly C3's keys, each of its type. */
 export function claimsOf(message: Buffer): Claims | null {
   let c: Record<string, unknown>;
@@ -243,6 +275,12 @@ export function checkToken(raw: string, auth: Authority, region: string, now = D
   const claims = claimsOf(v.message);
   if (!claims) return { ok: false, why: 'invalid' };
   const did = claims.did;
+  // the trunk's own issuers only, and no token from the future (more than 60 s of clock skew) —
+  // both invalid, before any time or region judgment (C3 M3: iss, iat)
+  if (!auth.issuers.some((o) => o.toLowerCase() === claims.iss.toLowerCase())) {
+    return { ok: false, why: 'invalid' };
+  }
+  if (timeOf(claims.iat) > now + IAT_SKEW_S * 1000) return { ok: false, why: 'invalid' };
   if (now >= timeOf(claims.exp)) return { ok: false, why: 'expired', did };
   if (claims.rgn !== region) return { ok: false, why: 'region', did };
   if (claims.kep < auth.kill_epoch) return { ok: false, why: 'revoked', did };
@@ -278,7 +316,7 @@ function keyObject(k: TrunkKey): KeyObject | null {
 /** The whole C5 file as parsed (other readers' fields kept: directory, link, …). */
 export type TrunkState = Authority & {
   version: 1;
-  trunk?: { url?: string; trunk_id?: string; trunk_key?: string };
+  trunk?: { url?: string; trunk_id?: string; trunk_key?: string; issuers?: string[] };
   root?: { id?: string; name?: string };
   link?: { state?: string; since?: number; written?: number };
   lockdown?: boolean;
@@ -286,13 +324,15 @@ export type TrunkState = Authority & {
   vapid_public?: string | null;
 };
 
-const EMPTY: Authority = { keys: [], kill_epoch: 0, deny: [] };
+const EMPTY: Authority = { keys: [], kill_epoch: 0, deny: [], issuers: [] };
 
 const isMs = (v: unknown) => typeof v === 'number' && Number.isFinite(v) && v >= 0;
 
 /**
  * C5 → the verifier's view, or null when the file is not a C5 state. Keys whose kid does not match
- * their public key are dropped (the footer's kid must name the key it was signed with).
+ * their public key are dropped (the footer's kid must name the key it was signed with). Issuers:
+ * `trunk.issuers[]` when the file has them, else `origin(trunk.url)` (state.rs backfills the same
+ * way for an old file); neither in the file → none (nothing verifies).
  */
 export function parseState(text: string): TrunkState | null {
   let s: Record<string, unknown>;
@@ -317,9 +357,16 @@ export function parseState(text: string): TrunkState | null {
   for (const d of s.deny as Array<Record<string, unknown>>) {
     if (!d || typeof d.did !== 'string') return null; // a deny-list we cannot read is not skipped
     const until = d.until ?? null;
-    deny.push({ did: d.did, until: until === null ? null : isMs(until) ? (until as number) : null });
+    deny.push({ did: d.did, until: until === null || isMs(until) ? (until as number | null) : null });
   }
-  return { ...(s as object), version: 1, keys, kill_epoch: s.kill_epoch as number, deny } as TrunkState;
+  const trunk = (s.trunk ?? {}) as { url?: unknown; issuers?: unknown };
+  let issuers: string[] = [];
+  if (Array.isArray(trunk.issuers)) {
+    issuers = trunk.issuers.filter((o): o is string => typeof o === 'string' && o.length > 0);
+  } else if (typeof trunk.url === 'string' && trunk.url) {
+    issuers = [originOf(trunk.url)];
+  }
+  return { ...(s as object), version: 1, keys, kill_epoch: s.kill_epoch as number, deny, issuers } as TrunkState;
 }
 
 type Cache = { path: string; checked: number; stamp: string; state: TrunkState | null };
@@ -393,3 +440,6 @@ export function mintToken(
   const kid = opts.kid ?? kidOf(rawPublic(key));
   return v4PublicSign(JSON.stringify(full), key, JSON.stringify({ kid }));
 }
+
+/** Default issuers for a minted test authority: the iss mintToken itself defaults to. */
+export const TEST_ISSUERS = ['https://trunk.invalid'];
