@@ -8079,6 +8079,12 @@ mod owner_tests {
         assert_eq!(r.status(), StatusCode::OK);
         assert_eq!(ask(&st, &lead)["used"][0]["what"], "deployed release 7");
         assert_eq!(owner::get_ask(State(st.clone()), Path("ask_nope".into())).await.status(), StatusCode::NOT_FOUND);
+        // the session moves on to another question: the answered record is still there, and still takes its audit line
+        asks(&st, &lead, "A different question? I need your approval.");
+        let b = body_of(owner::get_ask(State(st.clone()), Path(id.clone())).await).await;
+        assert_eq!((b["q"].as_str(), b["answered"]["via"].as_str()), (Some(Q), Some("thread")), "kept after the session moved on: {b}");
+        assert_eq!(owner::post_used(State(st.clone()), Path(id.clone()), Json(json!({ "what": "again" }))).await.status(), StatusCode::OK);
+        assert_eq!(ask(&st, &lead)["answered"], Value::Null, "the new question is its own, open");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

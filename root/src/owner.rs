@@ -447,13 +447,18 @@ pub async fn post_seen(State(st): State<AppState>, Path(id): Path<String>, heade
 /// `GET /ask/{id}` — what a session that must act on an answer reads from the brain (open on loopback).
 pub async fn get_ask(State(st): State<AppState>, Path(id): Path<String>) -> Response {
     let sessions = st.sessions.lock().unwrap();
-    match sessions.iter().find(|(_, s)| s.info["card"]["ask"]["id"].as_str() == Some(id.as_str())) {
-        Some((sid, s)) => {
-            let a = &s.info["card"]["ask"];
-            Json(json!({ "session": sid, "title": s.info["title"], "q": a["q"], "at": a["at"], "answered": a["answered"], "used": a["used"] })).into_response()
-        }
+    match find_ask(&sessions, &id) {
+        Some((sid, s, a)) => Json(json!({ "session": sid, "title": s.info["title"], "q": a["q"], "at": a["at"], "answered": a["answered"], "used": a["used"] })).into_response(),
         None => refuse(StatusCode::NOT_FOUND, "no such question"),
     }
+}
+
+/// An ask by id: the open one on a card, or one answered earlier (`card.asks_done`).
+fn find_ask<'a>(sessions: &'a HashMap<String, crate::Session>, id: &str) -> Option<(&'a String, &'a crate::Session, &'a Value)> {
+    sessions.iter().find_map(|(sid, s)| {
+        let c = &s.info["card"];
+        std::iter::once(&c["ask"]).chain(c["asks_done"].as_array().into_iter().flatten()).find(|a| a["id"].as_str() == Some(id)).map(|a| (sid, s, a))
+    })
 }
 
 /// `POST /ask/{id}/used {what}` — the performer's audit line: it acted once on this answer.
@@ -462,15 +467,23 @@ pub async fn post_used(State(st): State<AppState>, Path(id): Path<String>, Json(
     if what.trim().is_empty() {
         return refuse(StatusCode::BAD_REQUEST, "what: the act performed");
     }
-    let sid = st.sessions.lock().unwrap().iter().find(|(_, s)| s.info["card"]["ask"]["id"].as_str() == Some(id.as_str())).map(|(k, _)| k.clone());
+    let sid = find_ask(&st.sessions.lock().unwrap(), &id).map(|(k, _, _)| k.clone());
     let Some(sid) = sid else { return refuse(StatusCode::NOT_FOUND, "no such question") };
     let now = crate::clock_now_ms();
     crate::with_session(&st, &sid, |s| {
-        let used = &mut s.info["card"]["ask"]["used"];
-        if !used.is_array() {
-            *used = json!([]);
+        let card = &mut s.info["card"];
+        let a = if card["ask"]["id"].as_str() == Some(id.as_str()) {
+            &mut card["ask"]
+        } else {
+            match card["asks_done"].as_array_mut().and_then(|v| v.iter_mut().find(|a| a["id"].as_str() == Some(id.as_str()))) {
+                Some(a) => a,
+                None => return,
+            }
+        };
+        if !a["used"].is_array() {
+            a["used"] = json!([]);
         }
-        used.as_array_mut().unwrap().push(json!({ "at": now, "what": defang(&what) }));
+        a["used"].as_array_mut().unwrap().push(json!({ "at": now, "what": defang(&what) }));
     });
     audit(&st, json!({ "at": now, "via": "used", "ask": id, "session": sid, "what": what }));
     Json(json!({ "ok": true })).into_response()

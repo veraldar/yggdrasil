@@ -1072,6 +1072,25 @@ pub(crate) fn write_card_for_tests(st: &AppState, sid: &str, ev: &Value) {
     write_card(st, sid, ev)
 }
 
+/// An ask that was answered keeps its record after the session moves on (another question, or none): the
+/// performer of an answered act reads it from the brain by id (`GET /ask/{id}`), and the session has
+/// usually asked something else, or acted, by then. The last 20 are kept in `card.asks_done`.
+fn retire_ask(card: &mut Value) {
+    if card["ask"]["answered"].is_object() {
+        let old = card["ask"].clone();
+        let done = &mut card["asks_done"];
+        if !done.is_array() {
+            *done = json!([]);
+        }
+        let a = done.as_array_mut().unwrap();
+        a.push(old);
+        let n = a.len();
+        if n > 20 {
+            a.drain(..n - 20);
+        }
+    }
+}
+
 fn write_card(st: &AppState, sid: &str, ev: &Value) {
     let info = with_session(st, sid, |s| {
         let card = &mut s.info["card"];
@@ -1090,11 +1109,13 @@ fn write_card(st: &AppState, sid: &str, ev: &Value) {
             Some(q) => {
                 let same = card["ask"]["q"].as_str().is_some_and(|old| crate::owner::norm(old) == crate::owner::norm(q));
                 if !same {
+                    retire_ask(card);
                     card["ask"] = json!({ "id": format!("ask_{}", &uuid::Uuid::new_v4().simple().to_string()[..12]), "q": q,
                         "at": crate::clock_now_ms(), "msg": ev["ask"]["msg"], "shown": null, "answered": null, "used": [] });
                 }
             }
             None => {
+                retire_ask(card);
                 if let Some(c) = card.as_object_mut() {
                     c.remove("ask");
                 }
