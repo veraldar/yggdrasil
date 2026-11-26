@@ -73,6 +73,7 @@ use tokio::sync::{Notify, broadcast, mpsc, oneshot};
 use tokio_stream::wrappers::{BroadcastStream, ReceiverStream, UnboundedReceiverStream};
 
 mod anthropic;
+mod asks;
 // the root-part id is computed by build.rs (it includes the same file); here only its tests run
 #[cfg(test)]
 mod build_id;
@@ -5816,6 +5817,8 @@ async fn main() {
         .route("/event", get(events))
         .route("/tree", get(get_tree))
         .route("/tree/report", post(tree_report))
+        .route("/asks", get(asks::get_asks))
+        .route("/asks/{id}", post(asks::set_ask))
         .route("/root", get(get_root))
         .route("/session/{id}/inbox", get(get_inbox))
         .route("/session/{id}/context", get(get_context))
