@@ -229,6 +229,36 @@ function wav(pcm: Buffer, rate: number): Buffer {
   return Buffer.concat([h, pcm]);
 }
 
+/** the reply's STT pieces: about 2.5 s each, each cut moved to the quietest 20 ms within ±0.5 s —
+ *  where a speaker breathes, the way the agent's VAD cuts. A fixed 2.5 s grid cut words in half: the
+ *  reply opens with the brain's clock line, so where "what is 2 + 2" falls moves with the time of day
+ *  (v0.9 G3.2 11-26: R3 red twice; the same audio re-cut at its pauses reads "what is 2 + 2"). */
+function quietPieces(pcm: Buffer, rate: number): Buffer[] {
+  const n = Math.floor(pcm.length / 2);
+  const step = Math.round(rate * 2.5);
+  const frame = Math.max(1, Math.round(rate * 0.02));
+  const look = Math.round(rate * 0.5);
+  const energy = (s: number) => {
+    let e = 0;
+    for (let i = s; i < Math.min(n, s + frame); i++) e += pcm.readInt16LE(i * 2) ** 2;
+    return e;
+  };
+  const cuts = [0];
+  while (cuts[cuts.length - 1] + step < n) {
+    const last = cuts[cuts.length - 1];
+    const target = last + step;
+    let best = target;
+    let low = Infinity;
+    for (let s = Math.max(last + frame, target - look); s < Math.min(n, target + look); s += frame) {
+      const e = energy(s);
+      if (e < low) [low, best] = [e, s];
+    }
+    cuts.push(best);
+  }
+  cuts.push(n);
+  return cuts.slice(1).map((c, i) => pcm.subarray(cuts[i] * 2, c * 2));
+}
+
 /** words, the way a speech engine and a text compare: digits and "+" as words */
 const words = (s: string) =>
   s
@@ -597,15 +627,14 @@ test('trunk rtc: phone ⇄ vps:443 ⇄ box — pair, talk, hear the reply, media
         const at = ms.findIndex((m) => voiceTurn && textOf(m) === textOf(voiceTurn));
         const reply = ms.slice(at + 1).find((m) => m.info.role === 'assistant');
         expect(reply, 'MAIN answered the voice turn').toBeTruthy();
-        // in 2.5 s windows, the way the agent's VAD hands speech to the STT (a whole 10 s clip
-        // sometimes sends whisper-tiny into a loop of quote marks — the engine, not the audio)
-        const win = Math.round(roomTts.rate * 2.5) * 2;
+        // in ~2.5 s pieces cut at pauses, the way the agent's VAD hands speech to the STT (a whole
+        // 10 s clip sometimes sends whisper-tiny into a loop of quote marks — the engine, not the audio)
         const parts: string[] = [];
-        for (let o = 0; o < pcm.length; o += win) {
+        for (const piece of quietPieces(pcm, roomTts.rate)) {
           const f = new FormData();
           f.append(
             'file',
-            new Blob([new Uint8Array(wav(pcm.subarray(o, o + win), roomTts.rate))], {
+            new Blob([new Uint8Array(wav(piece, roomTts.rate))], {
               type: 'audio/wav',
             }),
             'reply.wav'

@@ -212,6 +212,36 @@ function wav(pcm: Buffer, rate: number): Buffer {
   return Buffer.concat([h, pcm]);
 }
 
+/** the reply's STT pieces: about 2.5 s each, each cut moved to the quietest 20 ms within ±0.5 s —
+ *  where a speaker breathes, the way the agent's VAD cuts. A fixed 2.5 s grid cut words in half: the
+ *  reply opens with the brain's clock line, so where "what is 2 + 2" falls moves with the time of day
+ *  (v0.9 G3.2 11-26: R3 red twice; the same audio re-cut at its pauses reads "what is 2 + 2"). */
+function quietPieces(pcm: Buffer, rate: number): Buffer[] {
+  const n = Math.floor(pcm.length / 2);
+  const step = Math.round(rate * 2.5);
+  const frame = Math.max(1, Math.round(rate * 0.02));
+  const look = Math.round(rate * 0.5);
+  const energy = (s: number) => {
+    let e = 0;
+    for (let i = s; i < Math.min(n, s + frame); i++) e += pcm.readInt16LE(i * 2) ** 2;
+    return e;
+  };
+  const cuts = [0];
+  while (cuts[cuts.length - 1] + step < n) {
+    const last = cuts[cuts.length - 1];
+    const target = last + step;
+    let best = target;
+    let low = Infinity;
+    for (let s = Math.max(last + frame, target - look); s < Math.min(n, target + look); s += frame) {
+      const e = energy(s);
+      if (e < low) [low, best] = [e, s];
+    }
+    cuts.push(best);
+  }
+  cuts.push(n);
+  return cuts.slice(1).map((c, i) => pcm.subarray(cuts[i] * 2, c * 2));
+}
+
 /** words, the way a speech engine and a text compare: digits and "+" as words */
 const words = (s: string) =>
   s
@@ -595,11 +625,10 @@ test('G3.2 v1 trunk rtc: QR pairing, voice over the trunk, ufrag routing, revoke
       const at = ms.findIndex((m) => voiceTurn && textOf(m) === textOf(voiceTurn));
       const reply = ms.slice(at + 1).find((m) => m.info.role === 'assistant');
       expect(reply, 'MAIN answered the voice turn').toBeTruthy();
-      const win = Math.round(A.roomTts.rate * 2.5) * 2;
       const parts: string[] = [];
-      for (let o = 0; o < pcm.length; o += win) {
+      for (const piece of quietPieces(pcm, A.roomTts.rate)) {
         const f = new FormData();
-        f.append('file', new Blob([new Uint8Array(wav(pcm.subarray(o, o + win), A.roomTts.rate))], { type: 'audio/wav' }), 'reply.wav');
+        f.append('file', new Blob([new Uint8Array(wav(piece, A.roomTts.rate))], { type: 'audio/wav' }), 'reply.wav');
         const r = await fetch(`${VOICE}/audio/transcriptions`, { method: 'POST', body: f });
         parts.push(((await r.json()) as { text: string }).text);
       }
