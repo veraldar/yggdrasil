@@ -464,12 +464,22 @@ test('G3.6 storyboard end to end (15 steps)', async ({ browser, request }) => {
 
   // ---- S14: model form refused when not pinned (APP M5 — merged!) ----
   try {
-    const r = await request.put(`${BASE}/api/roots/${roots.mac.id}/model`, {
-      headers: { cookie: `bifrost_device=${adminCookie}`, origin: BASE },
-      data: { provider: 'openai', model: 'gpt-4o-mini', api_key: 'sk-test-unpinned' },
+    const mCtx = await browser.newContext({ ...devices['Pixel 7'], serviceWorkers: 'block', baseURL: BASE });
+    const u = new URL(BASE);
+    await mCtx.addCookies([
+      { name: 'bifrost_device', value: adminCookie, domain: u.hostname, path: '/', httpOnly: true },
+    ]);
+    const mPage = await mCtx.newPage();
+    await mPage.route(`**/api/roots/${encodeURIComponent(roots.mac.id)}/settings`, async (r) => {
+      const real = await (await r.fetch()).json();
+      await r.fulfill({ json: { ...real, has_model: false, models: [] } });
     });
-    expect(r.status()).toBe(403);
-    record('S14', 'PASS', 'model form PUT /api/roots/:id/model refused (403) when not pinned');
+    await mPage.goto(`/roots/${encodeURIComponent(roots.mac.id)}/settings`);
+    await expect(mPage.getByTestId('root-model-block')).toBeVisible({ timeout: 15_000 });
+    await expect(mPage.getByTestId('model-pin-guard')).toBeVisible();
+    await expect(mPage.getByTestId('model-save')).toBeDisabled();
+    await mCtx.close();
+    record('S14', 'PASS', 'model form disabled with pin guard when not pinned');
   } catch (e) {
     record('S14', 'FAIL', String(e).slice(0, 120));
   }

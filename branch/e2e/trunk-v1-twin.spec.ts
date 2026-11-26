@@ -106,7 +106,7 @@ test('G5.1 twin as a v1 root (8-step drive)', async ({ page, request }) => {
   try {
     const ck = (await page.context().cookies()).find((c) => c.name === 'bifrost_device')?.value || '';
     const art = await request.get(`${BASE}/api/artifact/g51-check.html`, {
-      headers: { cookie: `bifrost_device=${ck}` },
+      headers: { cookie: `bifrost_device=${ck}`, 'sec-fetch-dest': 'document', accept: 'text/html' },
     });
     expect(art.status()).toBe(200);
     const csp = art.headers()['content-security-policy'] || '';
