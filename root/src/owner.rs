@@ -576,3 +576,66 @@ mod tests {
         assert_eq!(norm("**May I**  use the “release key”?\n> yes"), norm("may i use the release key? yes"));
     }
 }
+
+// ── standing permissions (§6) ────────────────────────────────────────────────────────────────
+
+/// The text of a kind is fixed here; a request can only switch it on or off.
+const GRANTS: &[(&str, &str)] = &[
+    ("ship", "Deploy to this computer without asking when all hold: (1) a release made by `hub-units.sh release` from a commit; (2) root `cargo test` and `sim/tree-e2e.py` green on that commit, and the change's own test; (3) a session other than its author wrote \"ship\" for that commit; (4) deployed by the integrator with `hub-units.sh deploy`. Never covered, always asked: the trunk server, other computers, keys / passwords / access, deleting or moving data, publishing outside (git push, releases, posts), spending."),
+    ("ship-trunk", "The trunk server, when the full ladder gate file for that commit is green and its way back is rehearsed (the v1 spec's own bar, R2)."),
+];
+
+fn grants_file(st: &AppState) -> std::path::PathBuf {
+    st.data_dir.join("owner-grants.json")
+}
+
+fn grants_state(st: &AppState) -> Value {
+    let stored: Value = std::fs::read(grants_file(st)).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or(json!({}));
+    let kinds: Vec<Value> = GRANTS
+        .iter()
+        .map(|(k, text)| {
+            let s = &stored[*k];
+            json!({ "kind": k, "text": text, "on": s["on"] == true, "at": s["at"], "device": s["device"] })
+        })
+        .collect();
+    json!({ "grants": kinds })
+}
+
+/// `GET /owner/grants` — open on loopback: sessions read what the owner has switched on.
+pub async fn get_grants(State(st): State<AppState>) -> Response {
+    Json(grants_state(&st)).into_response()
+}
+
+/// `PUT /owner/grants/{kind} {on}` — a paired device only. Off by default; the text is not in the request.
+pub async fn put_grant(State(st): State<AppState>, Path(kind): Path<String>, headers: HeaderMap, Json(body): Json<Value>) -> Response {
+    let device = match require_device(&headers) {
+        Ok(d) => d,
+        Err(r) => return r,
+    };
+    if !GRANTS.iter().any(|(k, _)| *k == kind) {
+        return refuse(StatusCode::NOT_FOUND, "no such standing permission");
+    }
+    let Some(on) = body["on"].as_bool() else { return refuse(StatusCode::BAD_REQUEST, "on: true or false") };
+    let mut stored: Value = std::fs::read(grants_file(&st)).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or(json!({}));
+    stored[&kind] = json!({ "on": on, "at": crate::clock_now_ms(), "device": device });
+    let _ = std::fs::write(grants_file(&st), stored.to_string());
+    audit(&st, json!({ "at": crate::clock_now_ms(), "via": "grant", "kind": kind, "on": on, "device": device }));
+    Json(grants_state(&st)).into_response()
+}
+
+/// `POST /owner/grants/{kind}/used {release, commit, tests, review}` — the performer's audit line, and a
+/// fact in MAIN's inbox. Refused while the switch is off.
+pub async fn post_grant_used(State(st): State<AppState>, Path(kind): Path<String>, Json(body): Json<Value>) -> Response {
+    let on = grants_state(&st)["grants"].as_array().and_then(|a| a.iter().find(|g| g["kind"] == kind.as_str()).map(|g| g["on"] == true)).unwrap_or(false);
+    if !on {
+        return refuse(StatusCode::CONFLICT, "that standing permission is off");
+    }
+    let field = |k: &str| defang(&body[k].as_str().unwrap_or_default().chars().take(200).collect::<String>());
+    let line = json!({ "at": crate::clock_now_ms(), "via": "grant-used", "kind": kind, "release": field("release"), "commit": field("commit"), "tests": field("tests"), "review": field("review") });
+    audit(&st, line.clone());
+    let main = st.sessions.lock().unwrap().iter().filter(|(_, s)| crate::is_main_title(s.info["title"].as_str().unwrap_or_default())).max_by_key(|(_, s)| s.info["time"]["updated"].as_u64().unwrap_or(0)).map(|(id, _)| id.clone());
+    if let Some(m) = main {
+        crate::tree::external_report(&st, &m, &format!("standing permission `{kind}` used: release {} · commit {} · tests {} · review {}", field("release"), field("commit"), field("tests"), field("review")));
+    }
+    Json(json!({ "ok": true })).into_response()
+}

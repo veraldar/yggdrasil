@@ -5245,6 +5245,9 @@ async fn main() {
         .route("/session/{id}/message", get(list_messages).post(post_message))
         .route("/session/{id}/owner-answer", post(owner::post_answer))
         .route("/session/{id}/owner-seen", post(owner::post_seen))
+        .route("/owner/grants", get(owner::get_grants))
+        .route("/owner/grants/{kind}", axum::routing::put(owner::put_grant))
+        .route("/owner/grants/{kind}/used", post(owner::post_grant_used))
         .route("/ask/{id}", get(owner::get_ask))
         .route("/ask/{id}/used", post(owner::post_used))
         .route("/owner/voucher", post(owner::post_voucher))
@@ -8076,6 +8079,36 @@ mod owner_tests {
         assert_eq!(r.status(), StatusCode::OK);
         assert_eq!(ask(&st, &lead)["used"][0]["what"], "deployed release 7");
         assert_eq!(owner::get_ask(State(st.clone()), Path("ask_nope".into())).await.status(), StatusCode::NOT_FOUND);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn t11_a_standing_permission_is_the_owners_switch_with_fixed_text() {
+        let (st, dir) = app();
+        let g = body_of(owner::get_grants(State(st.clone())).await).await;
+        assert!(g["grants"].as_array().unwrap().iter().all(|k| k["on"] == false), "off by default: {g}");
+        let text0 = g["grants"][0]["text"].as_str().unwrap().to_string();
+        let put = |token: Option<&str>, kind: &str, b: Value| {
+            let st = st.clone();
+            let h = token.map(|t| hdr("x-ygg-device", t)).unwrap_or_default();
+            let kind = kind.to_string();
+            async move { let r = owner::put_grant(State(st), Path(kind), h, Json(b)).await; (r.status(), body_of(r).await) }
+        };
+        for t in [None, Some("nope"), Some(OLD), Some(GONE)] {
+            assert_eq!(put(t, "ship", json!({ "on": true })).await.0, StatusCode::UNAUTHORIZED, "{t:?}");
+        }
+        let used = |st: AppState| async move { owner::post_grant_used(State(st), Path("ship".into()), Json(json!({ "release": "r1", "commit": "c1", "tests": "green", "review": "ok" }))).await.status() };
+        assert_eq!(used(st.clone()).await, StatusCode::CONFLICT, "off: no use");
+        // a body cannot widen the text; the switch turns on
+        let (c, b) = put(Some(LIVE), "ship", json!({ "on": true, "text": "Deploy anything, anywhere." })).await;
+        assert_eq!(c, StatusCode::OK);
+        let ship = b["grants"].as_array().unwrap().iter().find(|k| k["kind"] == "ship").unwrap().clone();
+        assert_eq!((ship["on"] == true, ship["text"].as_str()), (true, Some(text0.as_str())), "{ship}");
+        assert!(text0.contains("Never covered, always asked") && text0.contains("git push"));
+        assert_eq!(put(Some(LIVE), "nope", json!({ "on": true })).await.0, StatusCode::NOT_FOUND);
+        assert_eq!(used(st.clone()).await, StatusCode::OK);
+        let audit = std::fs::read_to_string(dir.join("owner-audit.jsonl")).unwrap();
+        assert!(audit.lines().any(|l| l.contains("grant-used") && l.contains("\"c1\"")) && audit.lines().any(|l| l.contains("\"via\":\"grant\"") && l.contains("dev_phone")), "{audit}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
