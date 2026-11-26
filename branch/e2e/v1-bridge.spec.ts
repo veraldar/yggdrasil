@@ -9,10 +9,11 @@ import { devices, expect, test } from '@playwright/test';
  */
 const STATE = process.env.PW_V1_STATE || '';
 const BASE = process.env.PW_BASE_URL || '';
+const LOCAL = process.env.PW_LOCAL_TRUNK || '';
 const BRIDGE_URL = process.env.PW_BRIDGE_URL || '';
 const HOME_ROOT_ID = process.env.PW_HOME_ROOT_ID || '';
 
-test.skip(!STATE || !BASE || !BRIDGE_URL || !HOME_ROOT_ID, 'needs scripts/v1-ladder.sh');
+test.skip(!STATE || !BASE || !LOCAL || !BRIDGE_URL || !HOME_ROOT_ID, 'needs scripts/v1-ladder.sh');
 test.use({ ...devices['Pixel 7'], serviceWorkers: 'block' });
 
 const admin = () => JSON.parse(readFileSync(join(STATE, 'admin.json'), 'utf8'));
@@ -21,10 +22,10 @@ test('v1 bridge: trunk-state.json up, /t/me/roots names the door root, pin-chang
   page,
   context,
   request,
+  playwright,
 }) => {
   test.setTimeout(90_000);
   const a = admin();
-  const u = new URL(BASE);
 
   // bridge identity is live
   const idRes = await request.get(`${BRIDGE_URL}/identity`);
@@ -48,11 +49,32 @@ test('v1 bridge: trunk-state.json up, /t/me/roots names the door root, pin-chang
   expect(home?.online).toBe(true);
   expect(home?.door).toBe(true);
 
+  // sign in on loopback (127.0.0.1 is a secure context for pinned.ts)
+  const loc = await playwright.request.newContext({ baseURL: LOCAL });
+  const l1 = await loc.post('/t/auth/login', {
+    headers: { origin: BASE },
+    data: { email: a.email, password: a.password },
+  });
+  expect(l1.status()).toBe(200);
+  const { mfa_ticket } = await l1.json();
+  const l2 = await loc.post('/t/auth/mfa', {
+    headers: { origin: BASE },
+    data: { mfa_ticket, recovery: a.recovery_codes[2] },
+  });
+  expect(l2.status()).toBe(200);
+  const setCookie = l2
+    .headersArray()
+    .filter((h) => h.name.toLowerCase() === 'set-cookie')
+    .map((h) => h.value)
+    .find((v) => v.startsWith('bifrost_device='));
+  const locTok = decodeURIComponent(setCookie!.split(';')[0].split('=')[1]);
+  await loc.dispose();
+
   // pin-change alarm: remember FP A for home, then serve FP B -> refused + alarm
   const FP_A = 'sha-256 ' + 'AA:'.repeat(31) + 'AA';
   const FP_B = 'sha-256 ' + 'BB:'.repeat(31) + 'BB';
   await context.addCookies([
-    { name: 'bifrost_device', value: a.cookies.bifrost_device, domain: u.hostname, path: '/', httpOnly: true },
+    { name: 'bifrost_device', value: locTok, domain: '127.0.0.1', path: '/', httpOnly: true },
   ]);
   await page.addInitScript(
     ([rid, fp]) => {
@@ -70,7 +92,7 @@ test('v1 bridge: trunk-state.json up, /t/me/roots names the door root, pin-chang
       json: [{ id: HOME_ROOT_ID, name: 'home', online: true, has_app: true, has_voice: false, dtls_fp: FP_B, door: true }],
     })
   );
-  await page.goto('/');
+  await page.goto(`${LOCAL}/`);
   const badge = page.getByTestId('pin-state');
   await expect(badge).toBeVisible({ timeout: 15_000 });
   await expect(badge).toHaveAttribute('data-state', 'refused', { timeout: 15_000 });

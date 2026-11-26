@@ -201,15 +201,19 @@ test('roots sheet → a computer\'s page: its settings, theme saved on lab, sess
     await expect(ask).toHaveCount(0);
     await expect(lab).toBeVisible();
     await hold(page, lab);
-    await page.getByTestId('root-remove').tap();
-    await expect(lab).toHaveCount(0);
     if (TRUNK) {
+      const del = page.waitForResponse((r) => r.request().method() === 'DELETE' && r.url().includes('/t/roots/rt_lab'));
+      await page.getByTestId('root-remove').tap();
+      expect((await del).status()).toBe(200);
+      await expect(page.getByTestId('root-confirm')).toHaveCount(0);
       const removed = readFileSync(join(STATE, 'roots-removed.jsonl'), 'utf8')
         .trim()
         .split('\n')
         .map((l) => JSON.parse(l) as { id?: string });
       expect(removed.some((r) => r.id === 'rt_lab')).toBe(true);
     } else {
+      await page.getByTestId('root-remove').tap();
+      await expect(lab).toHaveCount(0);
       await expect(page.getByTestId('root-row')).toHaveCount(1);
       const rec = JSON.parse(readFileSync(join(STATE, 'roots.json'), 'utf8')).roots.find(
         (r: { id: string }) => r.id === 'lab'

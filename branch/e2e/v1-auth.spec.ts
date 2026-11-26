@@ -39,7 +39,7 @@ function parseCookies(headers: Record<string, string> | Array<{ name: string; va
 
 test('unauthenticated callers get 302 /login on pages and C3 401 login on /api', async ({ request }) => {
   for (const p of ['/', '/settings', '/agents']) {
-    const r = await request.get(p, { maxRedirects: 0 });
+    const r = await request.get(p, { maxRedirects: 0, headers: { accept: 'text/html' } });
     expect(r.status(), p).toBe(302);
     expect(r.headers().location, p).toMatch(/^\/login/);
   }

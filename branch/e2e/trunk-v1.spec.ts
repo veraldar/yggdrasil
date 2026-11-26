@@ -407,10 +407,28 @@ test('G3.6 storyboard end to end (15 steps)', async ({ browser, request }) => {
   try {
     const FP_A = 'sha-256 ' + 'AA:'.repeat(31) + 'AA';
     const FP_B = 'sha-256 ' + 'BB:'.repeat(31) + 'BB';
-    const pinCtx = await browser.newContext({ ...devices['Pixel 7'], serviceWorkers: 'block', baseURL: BASE });
-    const u = new URL(BASE);
+    const localBase = `http://127.0.0.1:${new URL(BASE).port}`;
+    const l1 = await request.post(`${localBase}/t/auth/login`, {
+      headers: { origin: BASE },
+      data: { email, password },
+    });
+    expect(l1.status()).toBe(200);
+    const { mfa_ticket } = await l1.json();
+    const l2 = await request.post(`${localBase}/t/auth/mfa`, {
+      headers: { origin: BASE },
+      data: { mfa_ticket, recovery: recoveryCodes[1] },
+    });
+    expect(l2.status()).toBe(200);
+    const sc = l2
+      .headersArray()
+      .filter((h) => h.name.toLowerCase() === 'set-cookie')
+      .map((h) => h.value)
+      .find((v) => v.startsWith('bifrost_device='));
+    const locTok = decodeURIComponent(sc!.split(';')[0].split('=')[1]);
+
+    const pinCtx = await browser.newContext({ ...devices['Pixel 7'], serviceWorkers: 'block', baseURL: localBase });
     await pinCtx.addCookies([
-      { name: 'bifrost_device', value: adminCookie, domain: u.hostname, path: '/', httpOnly: true },
+      { name: 'bifrost_device', value: locTok, domain: '127.0.0.1', path: '/', httpOnly: true },
     ]);
     const pPage = await pinCtx.newPage();
     await pPage.addInitScript(
@@ -429,7 +447,7 @@ test('G3.6 storyboard end to end (15 steps)', async ({ browser, request }) => {
         json: [{ id: roots.mac.id, name: 'mac', online: true, has_app: true, has_voice: false, dtls_fp: FP_B, door: true }],
       })
     );
-    await pPage.goto('/');
+    await pPage.goto(`${localBase}/`);
     const badge = pPage.getByTestId('pin-state');
     await expect(badge).toBeVisible({ timeout: 15_000 });
     await expect(badge).toHaveAttribute('data-state', 'refused', { timeout: 15_000 });

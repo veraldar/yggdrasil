@@ -26,7 +26,7 @@ test('signin-ladder: stranger → /login → sign in → home → typed turn →
   const a = admin();
 
   await test.step('1 unauthenticated phone lands on /login with zero app bytes', async () => {
-    const raw = await request.get('/', { maxRedirects: 0 });
+    const raw = await request.get('/', { maxRedirects: 0, headers: { accept: 'text/html' } });
     expect(raw.status()).toBe(302);
     expect(raw.headers().location).toMatch(/^\/login/);
     await page.goto('/');
