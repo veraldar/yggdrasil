@@ -559,16 +559,7 @@ fn engine_of_input(input: &Value, agent: &str) -> Result<Option<&'static str>, O
 // The coordinator relayed "the owner said" until an agent outside every sandbox minted a key and
 // posted its code in a chat; these two checks make that move impossible rather than discouraged.
 
-pub(crate) const RELAY_REFUSED: &str = "a brief is your own words: never pass on the user's approval or \"the user said\" in your own words — permissions, keys, access and approvals are the user's to give. To pass one on, use owner_turn (session_send) with the id of the message the user typed to you: the brain then delivers their exact words as theirs, verified";
-
-/// Words that mark a question only the owner may answer.
-fn owner_only_question(q: &str) -> bool {
-    let q = q.to_lowercase();
-    ["permission", "approv", "access", "credential", "password", "passphrase", "secret", "token", "sudo", "grant",
-        "enrol", "ssh", "release key", "signing key", "private key", "api key", "allow you", "may i", "can i use"]
-        .iter()
-        .any(|w| q.contains(w))
-}
+pub(crate) const RELAY_REFUSED: &str = "your own words only — you cannot carry the user's answer. If a session waits on them: they press its card, or they reply to you and you pass that message on with owner_turn (session_send)";
 
 /// A message that carries the owner's approval second-hand.
 pub(crate) fn relays_approval(m: &str) -> bool {
@@ -580,36 +571,20 @@ pub(crate) fn relays_approval(m: &str) -> bool {
         .any(|w| m.contains(w))
 }
 
-/// The open question of a session that is blocked on one: the card's, else the `QUESTION:` in its
-/// last reply (the digest may leave `needs` empty).
-pub(crate) fn pending_question(st: &AppState, target: &str) -> Option<String> {
-    let sessions = st.sessions.lock().unwrap();
-    let s = sessions.get(target)?;
-    let card = &s.info["card"];
-    if card["status"] != "blocked" {
-        return None;
-    }
-    let q = card["needs"].as_str().filter(|n| !n.trim().is_empty()).map(String::from).or_else(|| {
-        let last = s.messages.iter().rev().find(|m| m["info"]["role"] == "assistant").map(message_text)?;
-        last.find("QUESTION:").map(|i| one_line(&last[i + 9..], 300))
-    })?;
-    (!q.is_empty()).then_some(q)
-}
-
-/// Refused: passing on the owner's approval in a session's own words. (11-26: a pending owner-only
-/// question no longer closes the session to MAIN — that was a total blackout until the owner typed in
-/// that thread. Ordinary traffic goes through; what keeps it from standing in for the owner is the
-/// header every message from a session wears, and the note `owner_note` adds to the tool's answer.)
+/// Refused: passing on the owner's approval in a session's own words. A tripwire, not the wall: the
+/// wall is the tie to the question (owner.rs). (11-26: a pending question no longer closes the session
+/// to MAIN — that was a total blackout. Ordinary traffic goes through; what keeps it from standing in
+/// for the owner is the brain's own line on every message from a session while a question is open.)
 fn owner_only(message: &str) -> Option<Out> {
     relays_approval(message).then(|| err(RELAY_REFUSED.into()))
 }
 
-/// The note MAIN reads when its message went to a session that has an open question only the owner may answer.
-fn owner_note(st: &AppState, target: &str, title: &str) -> String {
-    match pending_question(st, target).filter(|q| owner_only_question(q)) {
-        Some(q) => format!(
-            " NOTE: \"{title}\" has an open question only the user may answer: \"{}\". Your message reached it as yours, not as an answer. The user answers with the Approve button on its card, or by writing it to you once — pass it on with owner_turn (the id of their message).",
-            one_line(&q, 300)
+/// G3: what MAIN reads when its message went to a session whose question to the owner is still open.
+fn open_note(st: &AppState, target: &str) -> String {
+    match crate::owner::ask_of(st, target).filter(|a| a["answered"].is_null()) {
+        Some(a) => format!(
+            " Its question for the user stays open: “{}”. Only the user answers it — they press its card, or reply to you and you pass that on with owner_turn.",
+            one_line(a["q"].as_str().unwrap_or_default(), 300)
         ),
         None => String::new(),
     }
@@ -624,6 +599,10 @@ fn send(st: &AppState, caller: &str, input: &Value) -> Out {
     let title = st.sessions.lock().unwrap().get(&target).map(title_of).unwrap_or_default();
     // the owner's own message, passed on by reference: the brain checks the owner typed it and
     // writes their words itself (owner.rs) — the one way an approval travels through MAIN
+    // the tripwire runs on MAIN's own note even when an answer rides with it
+    if let Some(o) = owner_only(message) {
+        return o;
+    }
     let trusted = match input["owner_turn"].as_str().map(str::trim).filter(|m| !m.is_empty()) {
         Some(mid) => match crate::owner::relay(st, caller, mid, caller, &target) {
             Ok(t) => Some(t),
@@ -631,12 +610,7 @@ fn send(st: &AppState, caller: &str, input: &Value) -> Out {
         },
         None => None,
     };
-    if trusted.is_none() {
-        if let Some(o) = owner_only(message) {
-            return o;
-        }
-    }
-    let note = if trusted.is_none() { owner_note(st, &target, &title) } else { String::new() };
+    let note = if trusted.is_none() { open_note(st, &target) } else { String::new() };
     let parts = match with_files(st, caller, input, message) {
         Ok(p) => p,
         Err(o) => return o,
@@ -697,6 +671,11 @@ pub(crate) fn read(st: &AppState, caller: &str, input: &Value) -> Out {
     if let Some(n) = card["needs"].as_str().filter(|n| !n.is_empty()) {
         out.push_str(&format!("needs: {n}\n"));
     }
+    // an answered message reads in plain words here, never as the brain's block (owner.rs)
+    let last_user = match s.messages.iter().rev().find(|m| m["info"]["role"] == "user").and_then(|m| crate::owner::plain_answer(&m["info"]["meta"])) {
+        Some(a) => format!("{a} {last_user}"),
+        None => last_user,
+    };
     out.push_str(&format!("last request: {}\nlast reply:\n{}\n", clip(&last_user, 500), clip(&last_reply, 3000)));
     // C6: `turns: N` — the last N exchanges, each clipped, tool calls as `[tool name] key`.
     // The librarian search (query / around) lands with the librarian v1 (phase 2).
@@ -895,6 +874,7 @@ struct Facts {
     prev: String,
     asked: String,
     reply: String,
+    reply_id: String,
     tools: Vec<String>,
     running_kids: usize,
     outcome: &'static str,
@@ -937,6 +917,7 @@ fn gather(st: &AppState, sid: &str, result: &Result<Value, String>) -> Option<Fa
         prev: s.info["card"]["summary"].as_str().unwrap_or_default().to_string(),
         asked,
         reply,
+        reply_id: result.as_ref().ok().and_then(|m| m["info"]["id"].as_str()).unwrap_or_default().to_string(),
         tools,
         running_kids,
         outcome,
@@ -963,11 +944,13 @@ fn fact_status(f: &Facts) -> &'static str {
 /// a failed run is failed, `QUESTION:` is blocked, running sub-sessions mean working.
 async fn digest(st: &AppState, sid: &str, f: &Facts) -> Value {
     let question = f.reply.find("QUESTION:").map(|i| one_line(&f.reply[i + 9..], 300));
+    let ask_q = literal_question(&f.reply);
     let mut status = fact_status(f).to_string();
     let first = f.reply.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("(no reply)");
     let mut headline = one_line(first, 140);
     let mut summary = one_line(&f.reply, 450);
-    let mut needs = question.clone().unwrap_or_default();
+    // the literal question, whole (≤ 600): what MAIN shows the owner word for word
+    let mut needs = ask_q.clone().or_else(|| question.clone()).unwrap_or_default();
     let mut relevance = match status.as_str() {
         "blocked" => "needs_you",
         "working" => "routine",
@@ -1053,6 +1036,10 @@ async fn digest(st: &AppState, sid: &str, f: &Facts) -> Value {
         "status": status, "headline": headline, "summary": summary, "needs": needs, "relevance": relevance,
         "body": clip(&f.reply, 2500), "delivered": false,
     });
+    // the question as the session itself wrote it (owner.rs): the record an answer is tied to
+    if let Some(q) = ask_q {
+        ev["ask"] = json!({ "q": q, "msg": f.reply_id });
+    }
     if let Some(e) = served_engine {
         ev["engine"] = json!(e);
     }
@@ -1062,14 +1049,56 @@ async fn digest(st: &AppState, sid: &str, f: &Facts) -> Value {
     ev
 }
 
+/// The text after a line that begins `QUESTION:`, to the first blank line — the session's own
+/// words, whitespace collapsed, ≤ 600 chars. The LAST such line of the reply. (Never the digest's `needs`.)
+pub(crate) fn literal_question(reply: &str) -> Option<String> {
+    let lines: Vec<&str> = reply.lines().collect();
+    let at = lines.iter().rposition(|l| l.trim_start().trim_start_matches(['*', '_', '>', ' ']).starts_with("QUESTION:"))?;
+    let first = lines[at].trim_start().trim_start_matches(['*', '_', '>', ' ']).trim_start_matches("QUESTION:");
+    let mut text = first.to_string();
+    for l in &lines[at + 1..] {
+        if l.trim().is_empty() {
+            break;
+        }
+        text.push(' ');
+        text.push_str(l);
+    }
+    let q: String = text.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(600).collect();
+    (!q.trim().is_empty()).then_some(crate::owner::defang(q.trim()))
+}
+
+#[cfg(test)]
+pub(crate) fn write_card_for_tests(st: &AppState, sid: &str, ev: &Value) {
+    write_card(st, sid, ev)
+}
+
 fn write_card(st: &AppState, sid: &str, ev: &Value) {
     let info = with_session(st, sid, |s| {
         let card = &mut s.info["card"];
         if !card.is_object() {
             *card = json!({});
         }
+        // text a session or the digest wrote reaches the card with the brain's marks broken (owner.rs)
         for k in ["status", "headline", "summary", "needs"] {
-            card[k] = ev[k].clone();
+            card[k] = match ev[k].as_str() {
+                Some(t) => json!(crate::owner::defang(t)),
+                None => ev[k].clone(),
+            };
+        }
+        // the ask record: the same question again keeps its id, time and answer; another is new; none removes it
+        match ev["ask"]["q"].as_str() {
+            Some(q) => {
+                let same = card["ask"]["q"].as_str().is_some_and(|old| crate::owner::norm(old) == crate::owner::norm(q));
+                if !same {
+                    card["ask"] = json!({ "id": format!("ask_{}", &uuid::Uuid::new_v4().simple().to_string()[..12]), "q": q,
+                        "at": crate::clock_now_ms(), "msg": ev["ask"]["msg"], "shown": null, "answered": null, "used": [] });
+                }
+            }
+            None => {
+                if let Some(c) = card.as_object_mut() {
+                    c.remove("ask");
+                }
+            }
         }
         for k in ["engine", "model"] {
             if !ev[k].is_null() {
@@ -1553,6 +1582,7 @@ pub fn external_report(st: &AppState, door: &str, text: &str) {
             prev: String::new(),
             asked: "(automated report)".into(),
             reply: text.clone(),
+            reply_id: String::new(),
             tools: Vec::new(),
             running_kids: 0,
             outcome: "ok",
