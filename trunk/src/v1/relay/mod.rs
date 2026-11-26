@@ -33,6 +33,15 @@ pub fn relay(st: &State) -> &Relay {
     &st.relay
 }
 
+impl Relay {
+    /// Push a device revocation if the hub is already running (used by `&State` callers like refresh theft).
+    pub fn push_revoke_if_live(&self, did: &str, until_ms: u64) {
+        if let Some(h) = self.hub.get() {
+            h.push_revoke(did, until_ms);
+        }
+    }
+}
+
 /// The hub (made on first use: its registry reads trunk.db through the `Arc<State>`).
 pub fn hub(st: &Arc<State>) -> &Arc<Hub> {
     st.relay.hub.get_or_init(|| {

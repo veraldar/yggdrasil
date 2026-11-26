@@ -121,6 +121,11 @@ impl Authority for DbAuthority {
         serde_json::from_value(st.keys_json()).unwrap_or_default()
     }
 
+    fn issuers(&self) -> Vec<String> {
+        let Some(st) = self.st.upgrade() else { return vec![] };
+        st.cfg.write_origins()
+    }
+
     fn kill(&self) -> (u64, bool) {
         match self.st.upgrade() {
             Some(st) => (st.kill_epoch(), st.lockdown()),

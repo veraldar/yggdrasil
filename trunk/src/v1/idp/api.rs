@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use serde_json::{json, Value};
 
-use super::{account, claim, session};
+use super::{account, audit, claim, devices, pair, session};
 use crate::v1::http::{Resp, MAX_BODY};
 use crate::v1::relay;
 use crate::v1::server::{Incoming, State};
@@ -83,7 +83,7 @@ pub async fn handle(st: Arc<State>, mut inc: Incoming) {
         ("POST", "/t/auth/refresh") => {
             let raw = inc.req.cookie(session::REFRESH_COOKIE);
             match session::refresh(&st, raw.as_deref(), ip) {
-                Ok(i) => session::set_cookies(&st, Resp::json(200, &json!({ "ok": true, "exp": i.access_exp })), &i),
+                Ok(i) => session::set_cookies(&st, Resp::json(200, &json!({ "ok": true, "exp": i.access_exp, "access_token": i.access })), &i),
                 Err(e) => e.resp(),
             }
         }
@@ -146,6 +146,78 @@ pub async fn handle(st: Arc<State>, mut inc: Incoming) {
             Ok(w) => account::recovery_regenerate(&st, &w, ip),
             Err(r) => r,
         },
+
+        // M3 · devices, kill-switch, QR pairing, audit
+        ("GET" | "HEAD", "/t/devices") => match session::who(&st, &inc) {
+            Ok(w) => devices::list(&st, &w),
+            Err(r) => r,
+        },
+        ("PATCH", p) if p.starts_with("/t/devices/") && !p["/t/devices/".len()..].contains('/') => {
+            let id = &p["/t/devices/".len()..];
+            match session::who(&st, &inc) {
+                Ok(w) => devices::patch(&st, &w, id, opt(&body, "name"), opt(&body, "role"), ip),
+                Err(r) => r,
+            }
+        }
+        ("DELETE", p) if p.starts_with("/t/devices/") && !p["/t/devices/".len()..].contains('/') => {
+            let id = &p["/t/devices/".len()..];
+            match session::who(&st, &inc) {
+                Ok(w) => devices::revoke(&st, &w, id, ip),
+                Err(r) => r,
+            }
+        }
+        ("POST", "/t/kill") => match session::who(&st, &inc) {
+            Ok(w) => {
+                let lockdown = body.get("lockdown").and_then(Value::as_bool).unwrap_or(false);
+                devices::kill_http(&st, &w, lockdown, ip)
+            }
+            Err(r) => r,
+        },
+        ("POST", "/t/pair/qr") => match session::who(&st, &inc) {
+            Ok(w) => pair::mint_http(&st, &w, ip),
+            Err(r) => r,
+        },
+        ("POST", p) if p.starts_with("/t/pair/qr/") && p.ends_with("/regenerate") => {
+            let id = &p["/t/pair/qr/".len()..p.len() - "/regenerate".len()];
+            if id.is_empty() || id.contains('/') {
+                Resp::json(404, &json!({ "error": "not found" }))
+            } else {
+                match session::who(&st, &inc) {
+                    Ok(w) => pair::regenerate(&st, &w, id, ip),
+                    Err(r) => r,
+                }
+            }
+        }
+        ("DELETE", p) if p.starts_with("/t/pair/qr/") && !p["/t/pair/qr/".len()..].contains('/') => {
+            let id = &p["/t/pair/qr/".len()..];
+            match session::who(&st, &inc) {
+                Ok(w) => pair::close(&st, &w, id, ip),
+                Err(r) => r,
+            }
+        }
+        ("GET" | "HEAD", p) if p.starts_with("/t/pair/qr/") && !p["/t/pair/qr/".len()..].contains('/') => {
+            let id = &p["/t/pair/qr/".len()..];
+            match session::who(&st, &inc) {
+                Ok(w) => pair::status(&st, &w, id),
+                Err(r) => r,
+            }
+        }
+        ("POST", "/t/pair/redeem") => {
+            let tok = opt(&body, "token").or_else(|| opt(&body, "t")).unwrap_or("");
+            pair::redeem(&st, tok, opt(&body, "name"), ip, &ua)
+        }
+        ("GET" | "HEAD", "/t/audit") => match session::who(&st, &inc) {
+            Ok(w) if w.role == "admin" => {
+                let limit = inc.req.query("limit").and_then(|v| v.parse::<i64>().ok()).unwrap_or(100);
+                let before = inc.req.query("before").and_then(|v| v.parse::<i64>().ok());
+                let action = inc.req.query("action");
+                let (entries, total) = audit::list_page(&st.db, limit, before, action.as_deref());
+                let chain_ok = audit::verify(&st.db).is_ok();
+                Resp::json(200, &json!({ "entries": entries, "total": total, "chain_ok": chain_ok }))
+            }
+            Ok(_) => Resp::json(403, &json!({ "error": "admin only", "why": "role" })),
+            Err(r) => r,
+        },
         (_, p) if KNOWN.contains(&p) => Resp::json(405, &json!({ "error": "method not allowed" })),
         _ => Resp::json(404, &json!({ "error": "not found" })),
     };
@@ -156,7 +228,7 @@ const KNOWN: &[&str] = &[
     "/t/state", "/t/claim/begin", "/t/claim/ticket", "/t/claim/approve", "/t/claim/refuse", "/t/auth/signup",
     "/t/auth/totp/confirm", "/t/auth/login", "/t/auth/mfa", "/t/auth/refresh", "/t/auth/step-up", "/t/auth/logout",
     "/t/me", "/t/account", "/t/account/password", "/t/account/totp/reset", "/t/account/totp/confirm",
-    "/t/account/recovery/regenerate",
+    "/t/account/recovery/regenerate", "/t/devices", "/t/kill", "/t/pair/qr", "/t/pair/redeem", "/t/audit",
 ];
 
 /// GET /t/state — `{claimed, has_roots, lockdown, providers[]}` (anyone).

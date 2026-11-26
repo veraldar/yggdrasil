@@ -195,6 +195,39 @@ pub fn tail(db: &Db, n: i64) -> Vec<Value> {
     v
 }
 
+/// Page of audit entries for `GET /t/audit` (newest first), with optional `before` seq and `action` prefix.
+pub fn list_page(db: &Db, limit: i64, before: Option<i64>, action: Option<&str>) -> (Vec<Value>, i64) {
+    let limit = limit.clamp(1, 500);
+    let total: i64 = db.with(|c| c.query_row("SELECT count(*) FROM audit", [], |r| r.get(0))).unwrap_or(0);
+    let prefix = action.map(|a| format!("{a}%"));
+    let rows = db
+        .with(|c| {
+            let mut s = c.prepare(
+                "SELECT seq, ts, actor_account, actor_device, actor_root, action, target_kind, target_id, region, ip_trunc, detail_json, hash
+                 FROM audit
+                 WHERE (?1 IS NULL OR seq < ?1) AND (?2 IS NULL OR action LIKE ?2)
+                 ORDER BY seq DESC LIMIT ?3",
+            )?;
+            let v = s
+                .query_map(params![before, prefix, limit], |r| {
+                    let ts: i64 = r.get(1)?;
+                    let d: String = r.get(10)?;
+                    Ok(json!({
+                        "seq": r.get::<_, i64>(0)?, "ts": ts, "at": fmt_time(ts / 1000),
+                        "actor_account": r.get::<_, Option<String>>(2)?, "actor_device": r.get::<_, Option<String>>(3)?,
+                        "actor_root": r.get::<_, Option<String>>(4)?, "action": r.get::<_, String>(5)?,
+                        "target_kind": r.get::<_, Option<String>>(6)?, "target_id": r.get::<_, Option<String>>(7)?,
+                        "region": r.get::<_, Option<String>>(8)?, "ip": r.get::<_, Option<String>>(9)?,
+                        "detail": serde_json::from_str::<Value>(&d).unwrap_or(Value::Null), "hash": r.get::<_, String>(11)?,
+                    }))
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(v)
+        })
+        .unwrap_or_default();
+    (rows, total)
+}
+
 /// Drop entries older than 400 days; the chain then starts at the first kept entry's prev_hash.
 pub fn retain(db: &Db, mirror_dir: Option<&str>, now: i64) -> usize {
     let cut = now - KEEP_DAYS * 86_400_000;

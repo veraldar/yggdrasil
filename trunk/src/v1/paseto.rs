@@ -34,13 +34,22 @@ pub fn sign(key: &SigningKey, message: &[u8], footer: &[u8], implicit: &[u8]) ->
     t
 }
 
+/// Canonical unpadded base64url (no `=`, `+`, `/`, no non-zero trailing bits, non-empty).
+fn canon_b64u(s: &str) -> Option<Vec<u8>> {
+    if s.is_empty() || !s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_') {
+        return None;
+    }
+    let out = unb64u(s)?;
+    (b64u(&out) == s).then_some(out)
+}
+
 /// The footer of a token, unverified (to pick the key by `kid`).
 pub fn footer_of(token: &str) -> Option<Vec<u8>> {
     let rest = token.strip_prefix(HEADER)?;
     let mut parts = rest.split('.');
     let _body = parts.next()?;
     let f = match parts.next() {
-        Some(f) => unb64u(f)?,
+        Some(f) => canon_b64u(f)?,
         None => vec![],
     };
     if parts.next().is_some() {
@@ -55,17 +64,13 @@ pub fn verify(public: &[u8], token: &str, implicit: &[u8]) -> Option<Vec<u8>> {
     let mut parts = rest.split('.');
     let body_b64 = parts.next()?;
     let footer = match parts.next() {
-        Some(f) => unb64u(f)?,
+        Some(f) => canon_b64u(f)?,
         None => vec![],
     };
     if parts.next().is_some() {
         return None;
     }
-    // canonical b64url only: no padding, no foreign alphabet
-    if body_b64.contains('=') || body_b64.contains('+') || body_b64.contains('/') {
-        return None;
-    }
-    let body = unb64u(body_b64)?;
+    let body = canon_b64u(body_b64)?;
     if body.len() < 64 {
         return None;
     }
@@ -143,6 +148,8 @@ pub struct Ctx<'a> {
     pub kill_epoch: u64,
     /// `did` currently denied (deny-list entry whose `until` has not passed)
     pub denied: &'a dyn Fn(&str) -> bool,
+    /// accepted `iss` origins (`public_url` + `https://<extra_name>`)
+    pub issuers: &'a [String],
 }
 
 pub fn mint(key: &SigningKey, claims: &Claims) -> String {
@@ -151,9 +158,9 @@ pub fn mint(key: &SigningKey, claims: &Claims) -> String {
     sign(key, &msg, &footer, b"")
 }
 
-/// The C3 checks, in the C3 order: signature with a non-retired kid → `invalid`; `exp` passed →
-/// `expired`; `rgn` ≠ request region → `region`; `kep` < kill epoch → `revoked`; `did` denied →
-/// `revoked`; no token → `missing`.
+/// The C3 checks, in the C3 order: signature with a non-retired kid (plus `iss` and `iat` ≤ now +
+/// 60 s) → `invalid`; `exp` passed → `expired`; `rgn` ≠ request region → `region`; `kep` < kill
+/// epoch → `revoked`; `did` denied → `revoked`; no token → `missing`.
 pub fn verify_access(token: Option<&str>, keys: &[VerifyKey], ctx: &Ctx) -> Result<Claims, Why> {
     let token = match token.map(str::trim) {
         None | Some("") => return Err(Why::Missing),
@@ -164,8 +171,14 @@ pub fn verify_access(token: Option<&str>, keys: &[VerifyKey], ctx: &Ctx) -> Resu
     let key = keys.iter().find(|k| k.kid == f.kid && !k.retired).ok_or(Why::Invalid)?;
     let msg = verify(&key.public, token, b"").ok_or(Why::Invalid)?;
     let c: Claims = serde_json::from_slice(&msg).map_err(|_| Why::Invalid)?;
+    if !ctx.issuers.iter().any(|o| o.eq_ignore_ascii_case(&c.iss)) {
+        return Err(Why::Invalid);
+    }
     let exp = parse_time(&c.exp).ok_or(Why::Invalid)?;
-    parse_time(&c.iat).ok_or(Why::Invalid)?;
+    let iat = parse_time(&c.iat).ok_or(Why::Invalid)?;
+    if iat > ctx.now + 60 {
+        return Err(Why::Invalid);
+    }
     if exp <= ctx.now {
         return Err(Why::Expired);
     }
@@ -331,7 +344,10 @@ pub(crate) mod tests {
             { "kid": key.kid(), "alg": "ed25519", "public": b64u(&key.public()), "retired_at": null },
             { "kid": old.kid(), "alg": "ed25519", "public": b64u(&old.public()), "retired_at": 1764000000000u64 },
         ]);
-        let ok_ctx = json!({ "now": iat + 60, "region": base.rgn, "kill_epoch": 3, "deny": [] });
+        let ok_ctx = json!({
+            "now": iat + 60, "region": base.rgn, "kill_epoch": 3, "deny": [],
+            "issuers": ["https://ljoolq.veraldar.org", "https://ap.veraldar.org"],
+        });
         let with = |f: &dyn Fn(&mut Claims)| {
             let mut c = base.clone();
             f(&mut c);
@@ -354,6 +370,7 @@ pub(crate) mod tests {
             let foot = serde_json::to_vec(&json!({ "kid": key.kid() })).unwrap();
             sign(&key, &serde_json::to_vec(&v).unwrap(), &foot, b"")
         };
+        let padded_footer = format!("{token}=");
         let cases = json!([
             { "name": "ok", "token": token, "ctx": ok_ctx, "expect": { "ok": true, "did": base.did, "sub": base.sub, "role": "admin" } },
             { "name": "missing", "token": "", "ctx": ok_ctx, "expect": { "why": "missing", "reauth": "login" } },
@@ -362,6 +379,11 @@ pub(crate) mod tests {
             { "name": "invalid: retired kid", "token": mint(&old, &base), "ctx": ok_ctx, "expect": { "why": "invalid", "reauth": "login" } },
             { "name": "invalid: not v4.public", "token": token.replacen("v4.public.", "v4.local.", 1), "ctx": ok_ctx, "expect": { "why": "invalid", "reauth": "login" } },
             { "name": "invalid: extra claim", "token": unsigned_extra, "ctx": ok_ctx, "expect": { "why": "invalid", "reauth": "login" } },
+            { "name": "invalid: non-canonical footer (padding)", "token": padded_footer, "ctx": ok_ctx, "expect": { "why": "invalid", "reauth": "login" } },
+            { "name": "invalid: wrong iss", "token": with(&|c| c.iss = "https://evil.example".into()), "ctx": ok_ctx, "expect": { "why": "invalid", "reauth": "login" } },
+            { "name": "ok: iss in extra_names", "token": with(&|c| c.iss = "https://ap.veraldar.org".into()), "ctx": ok_ctx, "expect": { "ok": true, "did": base.did, "sub": base.sub, "role": "admin" } },
+            { "name": "invalid: iat more than 60 s in the future", "token": with(&|c| c.iat = fmt_time(iat + 121)), "ctx": ok_ctx, "expect": { "why": "invalid", "reauth": "login" } },
+            { "name": "ok: iat 60 s in the future (within skew)", "token": with(&|c| c.iat = fmt_time(iat + 120)), "ctx": ok_ctx, "expect": { "ok": true, "did": base.did, "sub": base.sub, "role": "admin" } },
             { "name": "expired", "token": token, "ctx": ctx(&|c| c["now"] = json!(iat + 900)), "expect": { "why": "expired", "reauth": "refresh" } },
             { "name": "region", "token": token, "ctx": ctx(&|c| c["region"] = json!("lan:192.168.1.0/24")), "expect": { "why": "region", "reauth": "refresh" } },
             { "name": "revoked: kill epoch moved", "token": token, "ctx": ctx(&|c| c["kill_epoch"] = json!(4)), "expect": { "why": "revoked", "reauth": "login" } },
@@ -409,8 +431,14 @@ pub(crate) mod tests {
             .iter()
             .map(|d| (d["did"].as_str().unwrap().to_string(), d["until"].as_i64().unwrap()))
             .collect();
+        let issuers: Vec<String> = c["issuers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|x| x.as_str().unwrap().to_string())
+            .collect();
         let denied = |did: &str| deny.iter().any(|(d, until)| d == did && *until > now * 1000);
-        let ctx = Ctx { now, region: c["region"].as_str().unwrap(), kill_epoch: c["kill_epoch"].as_u64().unwrap(), denied: &denied };
+        let ctx = Ctx { now, region: c["region"].as_str().unwrap(), kill_epoch: c["kill_epoch"].as_u64().unwrap(), denied: &denied, issuers: &issuers };
         let t = case["token"].as_str().unwrap();
         verify_access(Some(t), &keys, &ctx)
     }

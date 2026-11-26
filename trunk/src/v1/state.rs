@@ -24,6 +24,17 @@ use super::proto;
 /// How often the file is rewritten when nothing changed (C5: at least every 10 s).
 pub const REWRITE_EVERY: Duration = Duration::from_secs(10);
 
+/// The origin of an url, lowercased ("https://host[:port]").
+pub fn origin_of(url: &str) -> String {
+    let (scheme, rest) = url.split_once("://").unwrap_or(("https", url));
+    let scheme = scheme.to_ascii_lowercase();
+    if scheme != "https" && scheme != "http" {
+        return format!("https://{rest}");
+    }
+    let host = rest.split(['/', '?', '#']).next().unwrap_or(rest).to_ascii_lowercase();
+    format!("{scheme}://{host}")
+}
+
 pub fn now_ms() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64
 }
@@ -33,6 +44,10 @@ pub struct TrunkInfo {
     pub url: String,
     pub trunk_id: String,
     pub trunk_key: String,
+    /// every origin a valid token's `iss` may be (public_url + https://extra_name, as the trunk
+    /// mints); empty in an old file → backfilled from `url`
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub issuers: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -82,7 +97,7 @@ impl StateFile {
     pub fn new(url: &str, trunk_key: &str, root_id: &str) -> StateFile {
         StateFile {
             version: 1,
-            trunk: TrunkInfo { url: url.into(), trunk_id: String::new(), trunk_key: trunk_key.into() },
+            trunk: TrunkInfo { url: url.into(), trunk_id: String::new(), trunk_key: trunk_key.into(), issuers: vec![origin_of(url)] },
             root: RootInfo { id: root_id.into(), name: String::new() },
             link: LinkInfo { state: "down".into(), since: now_ms(), written: 0 },
             keys: vec![],
@@ -191,6 +206,18 @@ pub fn check_token(st: &StateFile, raw: &str, region: &str, now: u64) -> Result<
     let (Some(sub), Some(did), Some(role), Some(rgn), Some(kep)) = (s("sub"), s("did"), s("role"), s("rgn"), c["kep"].as_u64()) else {
         return Err(Why::Invalid);
     };
+    // the trunk's own origins only, and no token from the future (more than 60 s of clock skew)
+    let iss = s("iss").unwrap_or_default();
+    if st.trunk.issuers.is_empty() || !st.trunk.issuers.iter().any(|o| o.eq_ignore_ascii_case(&iss)) {
+        return Err(Why::Invalid);
+    }
+    if let Some(iat) = c["iat"].as_str().filter(|t| t.len() == 20).and_then(proto::parse_rfc3339) {
+        if iat > now + 60_000 {
+            return Err(Why::Invalid);
+        }
+    } else {
+        return Err(Why::Invalid);
+    }
     if exp_ms <= now {
         return Err(Why::Expired);
     }
@@ -226,7 +253,11 @@ impl TrunkState {
         let mut st = StateFile::new(url, trunk_key, root_id);
         if let Some(old) = path.as_deref().and_then(StateFile::read) {
             if old.trunk.trunk_key == trunk_key && old.root.id == root_id {
-                st = StateFile { link: LinkInfo { state: "down".into(), since: now_ms(), written: 0 }, trunk: TrunkInfo { url: url.into(), ..old.trunk.clone() }, ..old };
+                let mut trunk = TrunkInfo { url: url.into(), ..old.trunk.clone() };
+                if trunk.issuers.is_empty() {
+                    trunk.issuers = vec![origin_of(url)];
+                }
+                st = StateFile { link: LinkInfo { state: "down".into(), since: now_ms(), written: 0 }, trunk, ..old };
             }
         }
         Arc::new(TrunkState {
@@ -374,6 +405,7 @@ mod tests {
         assert!(cases.len() >= 15);
         for c in cases {
             let mut st = base.clone();
+            st.trunk.issuers = c["ctx"]["issuers"].as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect()).unwrap_or_default();
             st.kill_epoch = c["ctx"]["kill_epoch"].as_u64().unwrap();
             st.deny = serde_json::from_value(c["ctx"]["deny"].clone()).unwrap();
             let now = c["ctx"]["now"].as_u64().unwrap() * 1000;

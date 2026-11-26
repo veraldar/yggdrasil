@@ -106,6 +106,7 @@ fn mini_trunk() -> Trunk {
     let tok = Arc::new(SignKey::generate());
     let reg = Arc::new(MemRegistry::default());
     let auth = Arc::new(MemAuthority::default());
+    *auth.issuers.lock().unwrap() = vec!["http://t".to_string()];
     auth.keys.lock().unwrap().push(Key { kid: kid_of(&tok.public()), alg: "ed25519".into(), public: tok.public_b64u(), retired_at: None });
     let hub = Hub::new("trk_test", key, reg.clone(), auth.clone());
     let doors: Arc<Mutex<HashMap<String, String>>> = Arc::default();
@@ -149,6 +150,7 @@ fn mini_trunk() -> Trunk {
                     }
                     let mut st = StateFile::new("http://t", "", "");
                     st.keys = auth.token_keys();
+                    st.trunk.issuers = auth.issuers();
                     let raw = h.cookie("bifrost_device").or_else(|| h.header("authorization").and_then(crate::tokens::bearer).map(str::to_string)).unwrap_or_default();
                     match crate::v1::state::check_token(&st, &raw, &crate::region::region_of(peer.ip()), now_ms()) {
                         Err(w) => {

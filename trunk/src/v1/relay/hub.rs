@@ -70,6 +70,8 @@ pub trait Registry: Send + Sync {
 /// switch, the deny-list.
 pub trait Authority: Send + Sync {
     fn token_keys(&self) -> Vec<Key>;
+    /// every origin a valid token's `iss` may be (the trunk's public_url + extra_names)
+    fn issuers(&self) -> Vec<String>;
     fn kill(&self) -> (u64, bool);
     fn deny(&self) -> Vec<DenyEntry>;
 }
@@ -218,7 +220,7 @@ impl Hub {
     }
 
     fn keys_msg(&self) -> Value {
-        proto::sign_json(&self.key, json!({ "t": "keys", "seq": self.keys_seq.load(Ordering::Relaxed), "keys": self.auth.token_keys() }))
+        proto::sign_json(&self.key, json!({ "t": "keys", "seq": self.keys_seq.load(Ordering::Relaxed), "keys": self.auth.token_keys(), "issuers": self.auth.issuers() }))
     }
 
     /// The token keys changed (a rotation, a retirement): every root hears it.
@@ -758,6 +760,7 @@ impl Registry for MemRegistry {
 #[derive(Default)]
 pub struct MemAuthority {
     pub keys: Mutex<Vec<Key>>,
+    pub issuers: Mutex<Vec<String>>,
     pub kill: Mutex<(u64, bool)>,
     pub deny: Mutex<Vec<DenyEntry>>,
 }
@@ -765,6 +768,9 @@ pub struct MemAuthority {
 impl Authority for MemAuthority {
     fn token_keys(&self) -> Vec<Key> {
         self.keys.lock().unwrap().clone()
+    }
+    fn issuers(&self) -> Vec<String> {
+        self.issuers.lock().unwrap().clone()
     }
     fn kill(&self) -> (u64, bool) {
         *self.kill.lock().unwrap()

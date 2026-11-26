@@ -154,6 +154,7 @@ pub fn revoke_device(st: &State, did: &str, by: Option<&str>, why: &str, ip: Opt
         })
         .unwrap_or(0);
     if n > 0 {
+        st.relay.push_revoke_if_live(did, (now + 900_000) as u64);
         let account: Option<String> =
             st.db.with(|c| c.query_row("SELECT account_id FROM devices WHERE id = ?1", [did], |r| r.get(0)).optional()).ok().flatten();
         let mut e = Entry::new("device.revoke").target("device", did).detail(json!({ "why": why }));
@@ -284,9 +285,8 @@ pub fn deny(why: Why) -> Resp {
     Resp::json(401, &json!({ "why": why.as_str(), "reauth": why.reauth() }))
 }
 
-/// C3 on the request, then the device and account rows.
-pub fn who(st: &State, inc: &Incoming) -> Result<Who, Resp> {
-    let claims = st.check_access(&inc.req, inc.ip).map_err(deny)?;
+/// Resolve verified `Claims` to the live device and active account row (also used by WIRE's `roots`).
+pub fn who_claims(st: &State, claims: &Claims) -> Result<Who, Resp> {
     let row: Option<(String, String, String, i64, Option<i64>, Option<String>)> = st
         .db
         .with(|c| {
@@ -301,7 +301,13 @@ pub fn who(st: &State, inc: &Incoming) -> Result<Who, Resp> {
         .ok()
         .flatten();
     let Some((role, name, created_via, created_at, last_2fa_at, email)) = row else { return Err(deny(Why::Revoked)) };
-    Ok(Who { account: claims.sub.clone(), did: claims.did.clone(), claims, email, role, name, created_via, created_at, last_2fa_at })
+    Ok(Who { account: claims.sub.clone(), did: claims.did.clone(), claims: claims.clone(), email, role, name, created_via, created_at, last_2fa_at })
+}
+
+/// C3 on the request, then the device and account rows.
+pub fn who(st: &State, inc: &Incoming) -> Result<Who, Resp> {
+    let claims = st.check_access(&inc.req, inc.ip).map_err(deny)?;
+    who_claims(st, &claims)
 }
 
 pub fn step_up_needed() -> Resp {
