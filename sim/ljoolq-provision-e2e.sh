@@ -149,7 +149,13 @@ inct 'systemctl disable -q --now yggdrasil-trunk; rm -f /etc/yggdrasil-trunk/tru
 ok "$(inct 'systemctl is-active -q yggdrasil-trunk || [ -f /etc/yggdrasil-trunk/trunk.toml ]' && echo 1 || echo 0)" "broken on purpose: the trunk stopped, its trunk.toml gone"
 prov restore "$SHA" pre-test; ok $? "restore pre-test"
 for _ in $(seq 1 30); do inct 'systemctl is-active -q yggdrasil-trunk' 2>/dev/null && break; sleep 1; done
-code=$(bx 'curl -s -o /dev/null -m 5 -w "%{http_code}" http://10.99.0.2:8080/t/state' 2>/dev/null)
+# a restored container needs a moment for its address and the trunk's listener: ask for up to 30 s (the check is unchanged)
+code=000
+for _ in $(seq 1 30); do
+  code=$(bx 'curl -s -o /dev/null -m 5 -w "%{http_code}" http://10.99.0.2:8080/t/state' 2>/dev/null)
+  [ "$code" = 200 ] && break
+  sleep 1
+done
 ok "$(inct '[ -f /etc/yggdrasil-trunk/trunk.toml ] && systemctl is-active -q yggdrasil-trunk' && [ "$code" = 200 ]; echo $?)" "after the restore: trunk.toml back, the v1 trunk runs and answers from the host ($code)"
 
 # ── 6. the nightly snapshot really fires (the schedule set to every minute for this check, then put back) ──
