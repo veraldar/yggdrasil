@@ -421,6 +421,12 @@ ROOT_PUB=$("$BIN/bifrost-net" root-key "$ROOT_KEY" | sed -n 's/^public_key = "\(
 WG_KEY=$DIR/wg.key
 WG_PUB=$("$BIN/bifrost-net" wg-key "$WG_KEY" | sed -n 's/^public_key = "\(.*\)"$/\1/p')
 [ -n "$WG_PUB" ] || die "bifrost-net wg-key made no key ($WG_KEY)"
+# The DTLS identity: the very file bridge.toml names as dtls_cert_file. Made here only if missing
+# (never regenerated: a changed pin raises the D3 alarm on every phone); its fingerprint is what
+# the trunk's directory pins, so the app can open the pinned channel to this root.
+DTLS_FILE=$DIR/bridge-dtls.json
+DTLS_FP=$("$BIN/bifrost-net" dtls-id "$DTLS_FILE" | sed -n 's/^fingerprint = "\(.*\)"$/\1/p')
+[ -n "$DTLS_FP" ] || die "bifrost-net dtls-id made no identity ($DTLS_FILE)"
 
 # --------------------------------------------------------- 2. enroll: POST /t/roots/enroll
 # The enrollment helper (python, no deps): makes the DTLS identity, calls the trunk, shows the code
@@ -433,7 +439,7 @@ if [ $JOINED = 1 ]; then
 else
   say "asking $TRUNK to let this computer join as \"$NAME\" ($OS, host $HOSTN)"
   "$PY" "$HELPER" enroll --state "$DIR" --trunk "$TRUNK" --name "$NAME" --os "$OS" --host "$HOSTN" \
-    --arch "$ARCH" --root-pub "$ROOT_PUB" --wg-pub "$WG_PUB" --brain-port "$BRAIN_PORT" \
+    --arch "$ARCH" --root-pub "$ROOT_PUB" --wg-pub "$WG_PUB" --dtls-fp "$DTLS_FP" --brain-port "$BRAIN_PORT" \
     --app-port "$APP_PORT" --bridge-port "$BRIDGE_PORT" ${QR_PNG:+--qr-png "$QR_PNG"} \
     || exit $?
 fi
@@ -463,7 +469,7 @@ http = "127.0.0.1:$BRIDGE_PORT"
 media = "127.0.0.1:$((BRIDGE_PORT + 4))"
 tokens_file = "$DIR/devices.json"
 opencode_url = "http://127.0.0.1:$BRAIN_PORT"
-dtls_cert_file = "$DIR/bridge-dtls.json"
+dtls_cert_file = "$DTLS_FILE"
 public_url = "http://127.0.0.1:$BRIDGE_PORT"
 
 [trunk]

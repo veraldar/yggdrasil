@@ -343,6 +343,19 @@ if stage a; then
   check h2 "root.sh re-run: idempotent (already joined, same root_id, exit 0)" \
     bash -c "[ $rc = 0 ] && grep -q 'already joined: root $ROOT_ID' '$STATE/log/h2-rerun.log'"
 
+  # dtls_fp: the directory pin of the really-installed root is the bridge's actual certificate
+  # fingerprint (what /identity and /offer carry), and a plain --update (nothing newer) keeps it.
+  BR_PORT=$(homesh 'sed -n "s/^BRIDGE_PORT=//p" ~/.local/share/yggdrasil-root/root.conf')
+  bridge_fp() { homesh "curl -s http://127.0.0.1:$BR_PORT/identity" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("fingerprint",""))'; }
+  dir_fp() { outside "python3 /sim/v1-agent.py roots --url https://$A --cookies /sim/cookies-a.json --cacert /sim/trunk-a.pem" | python3 -c '
+import json,sys
+d=json.load(sys.stdin); d=d.get("roots",d) if isinstance(d,dict) else d
+print(" ".join(r.get("dtls_fp","") for r in d if r.get("id")=="'$ROOT_ID'" or r.get("root_id")=="'$ROOT_ID'"))'; }
+  FP0=$(bridge_fp); homesh "cd ~ && $HREL bash root.sh --update --upstream-env ~/model.env" >"$STATE/log/h3-update.log" 2>&1 </dev/null; rc=$?
+  FP1=$(bridge_fp)
+  check h1d "enrolled dtls_fp is non-empty, equals the bridge's real certificate fingerprint, and --update keeps it (rc $rc)" \
+    bash -c "[ $rc = 0 ] && [ -n '$FP0' ] && [ '$FP0' = '$FP1' ] && [ \"\$(echo $(dir_fp))\" = '$FP0' ]"
+
   if [ -n "$KEY" ]; then
     latest 2.0.0-test
     homesh "cd ~ && $HREL bash root.sh --update --upstream-env ~/model.env" >"$STATE/log/h3-major.log" 2>&1 </dev/null; rc=$?
