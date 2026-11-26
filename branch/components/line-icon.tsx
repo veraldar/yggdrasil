@@ -16,6 +16,9 @@ const ICONS = {
   volume: ['M2 6h2.75L8.5 3v10L4.75 10H2zM11 5.5a3.5 3.5 0 0 1 0 5M12.75 3.5a6 6 0 0 1 0 9'],
   pause: ['M5.5 3v10M10.5 3v10'],
   play: ['M4.5 2.75v10.5L13 8z'],
+  // copy: two overlapping squares — copy the link; check: it worked
+  copy: ['M5.5 5.5h8v8h-8z', 'M10.5 5.5v-3h-8v8h3'],
+  check: ['M3 8.5l3.5 3.5L13 4.5'],
   external: ['M9.5 2.5h4v4M13.5 2.5 7.5 8.5', 'M11.5 9.5v4h-9v-9h4'],
   // fork: a line that goes on, and a branch leaving it — "continue in a new session"
   fork: ['M4.5 2v12', 'M4.5 5.5c0 3.5 2.5 5 8.25 5', 'M10.25 8l2.5 2.5-2.5 2.5'],

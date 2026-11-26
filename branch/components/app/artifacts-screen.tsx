@@ -30,12 +30,28 @@ import {
   seenInit,
 } from '@/lib/artifact-read';
 import { type ThumbTicket, thumbQueue } from '@/lib/thumb-queue';
+import { useCopyLink } from '@/lib/copy-link';
 import { useRootWorld } from '@/lib/worlds';
 
 /** a row of the gallery: the home list's ArtifactEntry, or what another computer lists */
 type Entry = { name: string; mtime: number; size: number; type?: string; source?: string };
 
 // instant paint on back-navigation, same trick as the sessions list
+/** the grid card's copy key: tap = the full artifact URL on the clipboard, check for 2 s */
+function CopyKey({ name, src }: { name: string; src: string }) {
+  const { copied, copy } = useCopyLink(src);
+  return (
+    <button
+      onClick={copy}
+      aria-label={copied ? `${name} link copied` : `copy link to ${name}`}
+      data-testid="artifact-copy-key"
+      className={`oz-k sm ${copied ? 'ok' : 'text-[var(--oz-text)]'}`}
+    >
+      <LineIcon name={copied ? 'check' : 'copy'} size={12} />
+    </button>
+  );
+}
+
 const CACHE_KEY = 'oz-artifacts';
 
 /** provenance tag — this checkout's own files go untagged */
@@ -421,19 +437,22 @@ function Gallery({ root }: { root: string }) {
                   <SourceTag f={f} />
                 </div>
               </button>
-              {/* both entries possible: tap = here, corner = new tab. Sibling
-                  overlay — nested buttons are invalid and break the tap */}
-              <button
-                onClick={() => {
-                  markSeen(seenName(f.name), f.mtime);
-                  touch();
-                  window.open(srcOf(f.name), '_blank', 'noopener');
-                }}
-                aria-label={`open ${f.name} in new tab`}
-                className="oz-k sm absolute top-1.5 right-1.5 z-10 text-[var(--oz-text)]"
-              >
-                <LineIcon name="external" size={12} />
-              </button>
+              {/* tap = here; corner keys = new tab, copy link. Sibling overlays —
+                  nested buttons are invalid and break the tap */}
+              <div className="absolute top-1.5 right-1.5 z-10 flex gap-1">
+                <button
+                  onClick={() => {
+                    markSeen(seenName(f.name), f.mtime);
+                    touch();
+                    window.open(srcOf(f.name), '_blank', 'noopener');
+                  }}
+                  aria-label={`open ${f.name} in new tab`}
+                  className="oz-k sm text-[var(--oz-text)]"
+                >
+                  <LineIcon name="external" size={12} />
+                </button>
+                <CopyKey name={f.name} src={srcOf(f.name)} />
+              </div>
             </div>
           ))}
         </div>
