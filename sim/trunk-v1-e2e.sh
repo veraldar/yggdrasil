@@ -6,8 +6,10 @@
 #   bifrost-net wg with trunk_state, real yggdrasil brains on mock_upstream.py,
 #   real app (node server.mjs, BIFROST_AUTH=trunk).
 #
-# Steps whose feature is not merged yet report MISSING (never PASS, never SKIP) and exit 1
-# so G3.6 stays RED until IDP M3 and WIRE M5 land.
+# S06-S08 and S10 run against the merged IDP M3 API. S15 (two voice roots) reports MISSING
+# (never PASS, never SKIP, exit 1) until a helper is plugged in:
+#   TRUNK_V1_S15_HELPER=/path/to/exe sim/trunk-v1-e2e.sh   # exe <trunk base url> <state dir>; exit 0 = voice reached both roots
+# Timing values of S08 (x5) go to $STATE/timings.txt and into the step line.
 #
 #   sim/trunk-v1-e2e.sh        exit 0 = all 15 steps PASS; exit 1 = any FAIL or MISSING
 set -euo pipefail
@@ -82,7 +84,7 @@ curl -sf "$TRUNK_URL/t/state" >/dev/null || { echo "v1 trunk did not start"; tai
 # ---- run the storyboard spec ----
 cd "$B"
 set +e
-PW_BASE_URL="$TRUNK_URL" PW_TRUNK_V1_STATE="$STATE" PW_TRUNK_BIN="$BIN" \
+PW_S15_HELPER="${TRUNK_V1_S15_HELPER:-}" PW_BASE_URL="$TRUNK_URL" PW_TRUNK_V1_STATE="$STATE" PW_TRUNK_BIN="$BIN" \
   PW_YGG_BIN="$YGG_BIN" PW_MOCK_PORT="$MOCK_PORT" PW_APP_DIR="$B" \
   npx playwright test e2e/trunk-v1.spec.ts --workers=1 --reporter=list >"$STATE/pw.log" 2>&1
 pw_rc=$?
