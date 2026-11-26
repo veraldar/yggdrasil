@@ -4278,7 +4278,7 @@ async fn run_turn(st: &AppState, id: &str, tx: &mpsc::Sender<Event>, queue_ms: u
     // terminal's conversation) never moves.
     let pinned = is_pinned_for_fallback(&info, &prof);
     let first = current_target(st, id, &info);
-    let mut served_engine: Option<harness::Kind> = first.engine;
+    let served_engine: Mutex<Option<harness::Kind>> = Mutex::new(first.engine);
     let mut fallback_used: Option<FallbackPlan> = None;
     let mut fb_steps: Vec<Value> = Vec::new();
     let outcome = {
@@ -4299,7 +4299,8 @@ async fn run_turn(st: &AppState, id: &str, tx: &mpsc::Sender<Event>, queue_ms: u
                 apply_fallback(st, id, &prof, to);
                 run.text.clear();
                 if run.tool_count() == 0 {
-                    run.msg["parts"] = json!([]);
+                    // (the lines about earlier moves of this turn stay)
+                    run.msg["parts"].as_array_mut().unwrap().retain(|p| p["notice"] == true);
                 }
                 run.first_delta_ms = None;
                 run.first_token_seen = false;
@@ -4312,7 +4313,7 @@ async fn run_turn(st: &AppState, id: &str, tx: &mpsc::Sender<Event>, queue_ms: u
                 replace_message(st, id, &run.msg);
                 steps.extend(skipped);
                 steps.push(json!({ "from": cur.show(), "to": to.show(), "reason": reason, "tools_done": run.tool_count() }));
-                served_engine = to.engine;
+                *served_engine.lock().unwrap() = to.engine;
                 let plan = fallback_used.get_or_insert_with(|| FallbackPlan {
                     from_engine: cur.engine,
                     from_model: cur.model.clone(),
@@ -4325,6 +4326,8 @@ async fn run_turn(st: &AppState, id: &str, tx: &mpsc::Sender<Event>, queue_ms: u
             };
             let mut waits = 0u32;
             'top: loop {
+                // (a second round after a wait starts on the home engine again)
+                *served_engine.lock().unwrap() = first.engine;
                 run.text.clear();
                 run.first_delta_ms = None;
                 run.first_token_seen = false;
@@ -4446,6 +4449,7 @@ async fn run_turn(st: &AppState, id: &str, tx: &mpsc::Sender<Event>, queue_ms: u
             running.remove(id);
         }
     }
+    let served_engine = *served_engine.lock().unwrap();
     let served_name = engine_word(served_engine);
     let served_model = match served_engine {
         None => run.served.clone().unwrap_or_else(|| session_upstream(st, id).0),
