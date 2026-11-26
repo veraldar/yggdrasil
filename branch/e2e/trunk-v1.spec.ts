@@ -622,24 +622,25 @@ test('G3.6 storyboard end to end (15 steps)', async ({ browser, request }) => {
     expect((await (await request.get(`${BASE}/t/state`)).json()).lockdown).toBe(false);
 
     const k = await request.post(`${BASE}/t/kill`, { headers: adminHdr, data: { lockdown: true } });
+    const tK = performance.now(); // the clock starts when the kill call returns
     expect(k.status(), 'POST /t/kill {lockdown}').toBe(200);
     const kj = await k.json();
     expect(kj.lockdown).toBe(true);
     expect(kj.devices_revoked).toBeGreaterThanOrEqual(3);
     expect(kj.pairs_burned).toBeGreaterThanOrEqual(1);
-    const tK = performance.now();
 
     // every device is out: the admin's own, phone A, the member phone, phone B — on the trunk and through the door
     for (const [who, c] of [['admin', adminCookie], ['phone A', phoneACookie], ['member', kCookie], ['phone B', phoneBCookie]] as const) {
       expect((await request.get(`${BASE}/t/me`, { headers: asCookie(c) })).status(), `${who} /t/me after kill`).toBe(401);
       expect((await request.get(`${BASE}/api/build`, { headers: asCookie(c) })).status(), `${who} through the door after kill`).toBe(401);
     }
-    // The live channel of a killed device. Spec §5.4 says "all devices are revoked"; a single
-    // revoke cuts the relayed stream (S08), the kill path is observed here and reported in the
-    // step line (not a gate item of step 10 as the spec words it).
-    const killedEnd = await within(kStream.ended, 3_000, 'live stream after the kill').catch(() => null);
-    const killSever = killedEnd ? `cut ${Math.round(Math.max(0, killedEnd.at - tK))} ms` : 'NOT cut after 3 s (kill only refuses new requests)';
-    kStream.destroy();
+    // the live channel of a killed device is cut <= 1 s after the kill call returns
+    const killedEnd = await within(kStream.ended, 5_000, 'live stream of a killed device never ended').catch((e) => {
+      kStream.destroy();
+      throw e;
+    });
+    const killSeverMs = Math.round(Math.max(0, killedEnd.at - tK));
+    expect(killSeverMs, `killed device's live stream cut <=1000 ms (${killSeverMs})`).toBeLessThanOrEqual(1000);
     // the open QR is dead
     const cB = await browser.newContext({ ...devices['Pixel 7'], serviceWorkers: 'block', baseURL: BASE });
     const dead = await redeemIn(cB, openQr.token, 'phone-late');
@@ -683,7 +684,7 @@ test('G3.6 storyboard end to end (15 steps)', async ({ browser, request }) => {
     expect(au.chain_ok).toBe(true);
     await kCtx.close();
     await cB.close();
-    record('S10', 'PASS', `kill+lockdown: ${kj.devices_revoked} devices out, ${kj.pairs_burned} QR burned, live stream of a killed device: ${killSever}; login/mfa/QR 403 lockdown; trunk-ctl unlock -> admin signs in, reaches the app`);
+    record('S10', 'PASS', `kill+lockdown: ${kj.devices_revoked} devices out, ${kj.pairs_burned} QR burned, live stream of a killed device cut ${killSeverMs} ms (<=1000); login/mfa/QR 403 lockdown; trunk-ctl unlock -> admin signs in, reaches the app`);
   } catch (e) {
     try {
       execFileSync(BIN, ['trunk-ctl', '--sock', ctlSock, 'unlock'], { encoding: 'utf8' }); // never leave later steps locked out
