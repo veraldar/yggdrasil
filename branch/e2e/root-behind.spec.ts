@@ -105,7 +105,7 @@ test('a root on an older brain is marked "not up to date"; one on this build is 
   });
 
   await test.step('the home screen: the roots key carries the mark, in --oz-active', async () => {
-    await page.goto('/');
+    await page.goto('/home');
     const key = page.getByTestId('roots-key');
     await expect(key).toBeVisible({ timeout: 15_000 });
     await expect(key).toHaveClass(/\bmark\b/, { timeout: 15_000 });
@@ -133,7 +133,7 @@ test('a root on an older brain is marked "not up to date"; one on this build is 
       );
       await shot(page, `1b-root-${id}-key-mark`);
     }
-    await page.goto('/');
+    await page.goto('/home');
     await expect(page.getByTestId('roots-key')).toBeVisible({ timeout: 15_000 });
   });
 
@@ -166,7 +166,7 @@ test('a root on an older brain is marked "not up to date"; one on this build is 
       headers: { cookie: `bifrost_device=${TOKEN}` },
     });
     expect(r.ok()).toBe(true);
-    await page.goto('/');
+    await page.goto('/home');
     const key = page.getByTestId('roots-key');
     await expect(key).toBeVisible({ timeout: 15_000 });
     await expect(page.getByRole('button', { name: 'roots', exact: true })).toBeVisible();
