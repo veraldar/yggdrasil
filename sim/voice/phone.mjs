@@ -156,6 +156,8 @@ const handlers = {
     while (Date.now() < end) {
       const path = new URL(t.page.url()).pathname;
       if (path !== '/pair') break;
+      // v1 trunk: its /pair page redeems the fragment in place and shows "joined" (no redirect)
+      if (await t.page.locator('#p-joined:visible').count().catch(() => 0)) break;
       const err = await t.page.locator('text=/already used|expired|not one the box issued|failed/i').count().catch(() => 0);
       if (err) throw new Error(`pairing refused: ${await t.page.locator('body').innerText()}`.slice(0, 300));
       await t.page.waitForTimeout(250);
