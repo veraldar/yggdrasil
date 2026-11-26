@@ -4,6 +4,7 @@
  *  tree (docs/spec-join.md). The machine shows this URL as a QR plus a code;
  *  the phone shows the same code — compare them, then add or refuse. Needs a
  *  paired device: without one the phone is sent to pair first. */
+import { useHomeHref } from '@/lib/home-path';
 import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { LineIcon } from '@/components/line-icon';
@@ -32,6 +33,7 @@ const SAID: Record<View['status'], string> = {
 };
 
 export default function JoinPage() {
+  const homeHref = useHomeHref();
   const [req, setReq] = useState('');
   const [view, setView] = useState<View | null>(null);
   const [status, setStatus] = useState('');
@@ -102,7 +104,7 @@ export default function JoinPage() {
   return (
     <main className="mx-auto flex min-h-dvh max-w-md flex-col px-3 pb-6">
       <header className="oz-head justify-start gap-2.5">
-        <Link href="/" className="oz-k sm">
+        <Link href={homeHref} className="oz-k sm">
           <LineIcon name="back" size={13} /> back
         </Link>
         <span className="text-[13px]">join a machine</span>

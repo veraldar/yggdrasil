@@ -12,6 +12,7 @@
  *  explicit level set. DELETE at the bottom removes the session (opencode
  *  cascades sub-sessions) and returns to the list. Reaching this page: tap
  *  the session name in the chat header; leaving: system back gesture. */
+import { cachedHomePath } from '@/lib/home-path';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Link from 'next/link';
 import { useParams, useRouter } from 'next/navigation';
@@ -518,7 +519,7 @@ export default function SessionSettingsView() {
       } catch {
         /* no seed — the list fetches fresh anyway */
       }
-      router.push('/');
+      router.push(cachedHomePath());
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
       setDeleting(false);

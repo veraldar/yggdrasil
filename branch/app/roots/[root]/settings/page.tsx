@@ -259,7 +259,7 @@ function RootSettings({ rootId }: { rootId: string }) {
     try {
       const r = await fetch(`/api/roots/${enc}/remove`, { method: 'POST' });
       if (!r.ok) return setSaveErr(`${rootId} was not removed (${r.status})`);
-      router.push('/?roots=1');
+      router.push('/roots/');
     } catch {
       setSaveErr(`${rootId} was not removed`);
     } finally {

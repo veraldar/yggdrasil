@@ -5,6 +5,7 @@
  *  peer dropped, every pairing code burned. Reachable from the box console
  *  and from any paired device — a safety control must be in the hand that
  *  needs it. */
+import { useHomeHref } from '@/lib/home-path';
 import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { LineIcon } from '@/components/line-icon';
@@ -13,6 +14,7 @@ import type { DeviceView } from '@/lib/devices';
 type Registry = { devices: DeviceView[]; killEpoch: number; killedAt?: string };
 
 export default function DevicesPage() {
+  const homeHref = useHomeHref();
   const [reg, setReg] = useState<Registry | null>(null);
   const [note, setNote] = useState('');
 
@@ -54,7 +56,7 @@ export default function DevicesPage() {
   return (
     <main className="mx-auto flex min-h-dvh max-w-md flex-col px-3 pb-6">
       <header className="oz-head justify-start gap-2.5">
-        <Link href="/" className="oz-k sm">
+        <Link href={homeHref} className="oz-k sm">
           <LineIcon name="back" size={13} /> back
         </Link>
         <span className="text-[13px]">devices</span>

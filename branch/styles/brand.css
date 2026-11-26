@@ -757,3 +757,11 @@
   .cc-keys { display: flex; gap: 5px; overflow-x: auto; padding: 6px 0 2px; }
   .cc-keys .oz-k { flex: none; }
 }
+
+/* the roots page (/roots/): plain white, no root's theme — each row brings its own world */
+.oz-white {
+  --oz-bg: #ffffff; --oz-surface: #ffffff; --oz-surface-hover: #f2f3f4;
+  --oz-border: rgba(22,24,26,.16); --oz-text: #16181a; --oz-dim: #5d646b;
+  --oz-success: #1d7a45; --oz-active: #8a5a12; --oz-danger: #b3333f; --oz-info: #2f5f9e;
+  background: #ffffff; color: #16181a;
+}

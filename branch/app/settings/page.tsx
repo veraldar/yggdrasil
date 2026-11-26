@@ -6,6 +6,7 @@
  *  attribute on <html>, transitions suppressed for the swap frame. Below it:
  *  the engines block (components/engines-block.tsx) — each engine's default
  *  model, saved to the brain on tap. */
+import { useHomeHref } from '@/lib/home-path';
 import { useEffect, useState } from 'react';
 import { useTheme } from 'next-themes';
 import Link from 'next/link';
@@ -20,6 +21,7 @@ import { VOICE_TEST_SLUG, ensureVoiceTestRoom, setVoiceTest, voiceTestOn } from 
 import { chosenWorld } from '@/lib/worlds';
 
 export default function SettingsPage() {
+  const homeHref = useHomeHref();
   const router = useRouter();
   const { theme, setTheme } = useTheme();
   // next-themes only knows the stored theme after mount — render no
@@ -125,7 +127,7 @@ export default function SettingsPage() {
   return (
     <main className="mx-auto flex min-h-dvh max-w-md flex-col px-3 pb-6">
       <header className="oz-head justify-start gap-2.5">
-        <Link href="/" className="oz-k sm">
+        <Link href={homeHref} className="oz-k sm">
           <LineIcon name="back" size={13} /> back
         </Link>
         <span className="text-[13px]">settings</span>
