@@ -15,7 +15,6 @@
  *  — the same page, its list from GET /api/roots/<name>/artifacts, its files fetched from that
  *  computer (`?root=`), back to that computer's own page. A computer that is off keeps its
  *  last known list, greyed: nothing opens. */
-
 import { useCallback, useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
 import { Streamdown } from 'streamdown';
@@ -30,12 +29,28 @@ import {
   markSeen,
   seenInit,
 } from '@/lib/artifact-read';
+import { useCopyLink } from '@/lib/copy-link';
 import { useRootWorld } from '@/lib/worlds';
 
 /** a row of the gallery: the home list's ArtifactEntry, or what another computer lists */
 type Entry = { name: string; mtime: number; size: number; type?: string; source?: string };
 
 // instant paint on back-navigation, same trick as the sessions list
+/** the grid card's copy key: tap = the full artifact URL on the clipboard, check for 2 s */
+function CopyKey({ name, src }: { name: string; src: string }) {
+  const { copied, copy } = useCopyLink(src);
+  return (
+    <button
+      onClick={copy}
+      aria-label={copied ? `${name} link copied` : `copy link to ${name}`}
+      data-testid="artifact-copy-key"
+      className={`oz-k sm ${copied ? 'ok' : 'text-[var(--oz-text)]'}`}
+    >
+      <LineIcon name={copied ? 'check' : 'copy'} size={12} />
+    </button>
+  );
+}
+
 const CACHE_KEY = 'oz-artifacts';
 
 /** provenance tag — this checkout's own files go untagged */
@@ -108,12 +123,7 @@ function Viewer({ file, src }: { file: Entry; src: string }) {
   }
   if (kind === 'pdf') {
     return (
-      <a
-        href={src}
-        target="_blank"
-        rel="noreferrer"
-        className="oz-chip text-[var(--oz-info)]"
-      >
+      <a href={src} target="_blank" rel="noreferrer" className="oz-chip text-[var(--oz-info)]">
         <LineIcon name="artifact" size={13} />
         {file.name} — tap to view
       </a>
@@ -128,7 +138,9 @@ function Viewer({ file, src }: { file: Entry; src: string }) {
           <Streamdown>{body}</Streamdown>
         </div>
       ) : (
-        <pre className="whitespace-pre-wrap break-words text-xs text-[var(--oz-text)]/85">{body}</pre>
+        <pre className="text-xs break-words whitespace-pre-wrap text-[var(--oz-text)]/85">
+          {body}
+        </pre>
       )}
     </div>
   );
@@ -150,7 +162,7 @@ function HtmlThumb({ name, src }: { name: string; src: string }) {
         tabIndex={-1}
         src={src}
         title={`${name} preview`}
-        className="pointer-events-none absolute left-0 top-0 h-[400%] w-[400%] origin-top-left scale-[.25] border-0 bg-white"
+        className="pointer-events-none absolute top-0 left-0 h-[400%] w-[400%] origin-top-left scale-[.25] border-0 bg-white"
       />
     </div>
   );
@@ -209,8 +221,7 @@ function Gallery({ root }: { root: string }) {
         }
       );
       const d = (await r.json()) as
-        | Entry[]
-        | { home?: boolean; reachable?: boolean; artifacts?: Entry[] };
+        Entry[] | { home?: boolean; reachable?: boolean; artifacts?: Entry[] };
       if (!r.ok) return;
       const list = Array.isArray(d) ? d : (d.artifacts ?? []);
       const isRemote = !!root && !Array.isArray(d) && d.home !== true;
@@ -360,19 +371,22 @@ function Gallery({ root }: { root: string }) {
                   <SourceTag f={f} />
                 </div>
               </button>
-              {/* both entries possible: tap = here, corner = new tab. Sibling
-                  overlay — nested buttons are invalid and break the tap */}
-              <button
-                onClick={() => {
-                  markSeen(seenName(f.name), f.mtime);
-                  touch();
-                  window.open(srcOf(f.name), '_blank', 'noopener');
-                }}
-                aria-label={`open ${f.name} in new tab`}
-                className="oz-k sm absolute top-1.5 right-1.5 z-10 text-[var(--oz-text)]"
-              >
-                <LineIcon name="external" size={12} />
-              </button>
+              {/* tap = here; corner keys = new tab, copy link. Sibling overlays —
+                  nested buttons are invalid and break the tap */}
+              <div className="absolute top-1.5 right-1.5 z-10 flex gap-1">
+                <button
+                  onClick={() => {
+                    markSeen(seenName(f.name), f.mtime);
+                    touch();
+                    window.open(srcOf(f.name), '_blank', 'noopener');
+                  }}
+                  aria-label={`open ${f.name} in new tab`}
+                  className="oz-k sm text-[var(--oz-text)]"
+                >
+                  <LineIcon name="external" size={12} />
+                </button>
+                <CopyKey name={f.name} src={srcOf(f.name)} />
+              </div>
             </div>
           ))}
         </div>
@@ -401,7 +415,10 @@ function Gallery({ root }: { root: string }) {
                     className={`oz-row ${isUnread ? 'unread' : ''} ${off ? 'oz-gone' : ''}`}
                   >
                     <div className="oz-r1">
-                      <span className="w-4 shrink-0 text-center text-[var(--oz-dim)]" aria-hidden="true">
+                      <span
+                        className="w-4 shrink-0 text-center text-[var(--oz-dim)]"
+                        aria-hidden="true"
+                      >
                         {glyphOf(f.name)}
                       </span>
                       {isUnread && <span aria-label="unseen">●</span>}
