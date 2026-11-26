@@ -106,7 +106,7 @@ async function noOverflow(page: Page, label: string) {
 /** where the home screen's parts sit (CSS px, one decimal) and how its name is set */
 async function measure(page: Page) {
   // the refresh key reads "…" while a load runs: measure the settled screen
-  await expect(page.getByTestId('refresh-key')).toHaveText('refresh', { timeout: 20_000 });
+  await expect(page.getByTestId('refresh-key')).not.toHaveClass(/ok/, { timeout: 20_000 });
   await expect(page.locator('main ul .oz-row').first()).toBeVisible({ timeout: 20_000 });
   await page.waitForTimeout(300); // the keys' 240 ms colour transition out of "loading"
   return page.evaluate(() => {
@@ -183,6 +183,12 @@ test('a) the home screen and every computer: the same header, band and rows in t
   expect(ref.roots!.x).toBeLessThan(ref.artifacts!.x);
   expect(ref.artifacts!.x).toBeLessThan(ref.refresh!.x);
   expect(ref.refresh!.x + ref.refresh!.w).toBeCloseTo(360 - 12, 0);
+  // refresh is an icon key: the same box as roots and artifacts, an icon inside, no text
+  expect({ w: ref.refresh!.w, h: ref.refresh!.h }, 'refresh key box').toEqual({ w: ref.roots!.w, h: ref.roots!.h });
+  expect(ref.artifacts!.w).toBe(ref.roots!.w);
+  expect(await page.getByTestId('refresh-key').locator('svg.oz-ic').count()).toBe(1);
+  expect((await page.getByTestId('refresh-key').innerText()).trim()).toBe('');
+  console.log('KEYS', JSON.stringify([ref.roots, ref.artifacts, ref.refresh]));
 
   const shots: Record<string, Buffer> = {};
   for (const r of roots) {
