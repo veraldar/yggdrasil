@@ -12,6 +12,7 @@ files the sessions built, plus voice checks on the turn log) and an LLM judge wi
     vsim.py SCENARIO.json [--port 4170] [--keep] [--out DIR]          # own stack, own ports
     vsim.py SCENARIO.json --target https://host:8447 --brain http://127.0.0.1:4101
     vsim.py SCENARIO.json --target home=http://…,lab=http://… --brain home=http://…,lab=http://…
+    vsim.py SCENARIO.json --target http://127.0.0.1:18600 --brain http://127.0.0.1:4250 --pair-cmd "bifrost-net trunk-ctl --sock S pair-qr"   # a v1 trunk (G5.3)
 
 Transport-agnostic: the phone only knows the target app URL (whatever carries it — tailnet
 today, the trunk tomorrow); the brain URL is a side channel for checks and transcripts.
@@ -108,6 +109,20 @@ class Line:
         self.opened = False
         self.incidents = []  # voice-path trouble before any turn (no agent, …)
 
+    def pair_v1(self, cmd):
+        """v1 trunk: `cmd` (e.g. "bifrost-net trunk-ctl --sock S pair-qr") mints a member QR on the trunk's console
+        and prints its JSON ({url: "<trunk>/pair#v=2&t=bfnp-…"}) on the last line; the phone opens it, the
+        trunk's /pair page redeems it and the device cookie lands in this phone's context."""
+        import shlex
+        out = subprocess.run(shlex.split(cmd), capture_output=True, text=True, timeout=30)
+        if out.returncode != 0:
+            raise RuntimeError(f"pair command failed: {out.stderr.strip()[:200]}")
+        qr = json.loads(out.stdout.strip().splitlines()[-1])["url"]
+        res = self.phone.call("pair", tab=self.tab, url=qr, timeout=60)
+        self.root = dict(self.root, app=qr.split("/pair#")[0])
+        log(f"[{self.persona['id']}→{self.tab}] paired through the v1 trunk {self.root['app']} → landed {res['landed']}")
+        return res
+
     def pair(self, admin_token=None):
         """devices mode: the box console mints a one-time code (POST /api/pair/code — loopback or the
         admin token), the phone 'scans' the QR (opens its URL: the app behind the access point that
@@ -124,8 +139,11 @@ class Line:
         return res
 
     def open(self):
-        if self.root.get("pair") and not getattr(self, "paired", False):
-            self.pair(self.root.get("admin_token"))
+        if (self.root.get("pair") or self.root.get("pair_cmd")) and not getattr(self, "paired", False):
+            if self.root.get("pair_cmd"):
+                self.pair_v1(self.root["pair_cmd"])
+            else:
+                self.pair(self.root.get("admin_token"))
             self.paired = True
         url = self.root["app"].rstrip("/") + (f"/session/main?id={self.main_id}" if self.main_id else "/session/main")
         self.phone.call("open", tab=self.tab, url=url, timeout=60)
@@ -1025,6 +1043,7 @@ def main():
     ap.add_argument("--auth", choices=["tailnet", "devices"], default="tailnet", help="own stack: the app's auth mode")
     ap.add_argument("--pair", action="store_true", help="pair each phone first (devices mode: QR code → /pair)")
     ap.add_argument("--admin-token", default=os.environ.get("VSIM_ADMIN_TOKEN"), help="mints pairing codes when not on the box's loopback")
+    ap.add_argument("--pair-cmd", default=os.environ.get("VSIM_PAIR_CMD"), help="v1 trunk: a console command that prints a member QR as JSON ({url}), run once per phone")
     a = ap.parse_args()
     sc = load_scenario(a.scenario)
     name = a.name or sc["id"]
@@ -1068,7 +1087,9 @@ def main():
                         break
                     time.sleep(1)
         for r in roots:
-            if a.pair or a.auth == "devices":
+            if a.pair_cmd:
+                r["pair_cmd"] = a.pair_cmd
+            elif a.pair or a.auth == "devices":
                 r["pair"], r["admin_token"] = True, a.admin_token
         engines = dict(speech.engines())
         if stack:

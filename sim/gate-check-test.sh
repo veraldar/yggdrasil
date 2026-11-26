@@ -157,26 +157,26 @@ reset_files; mkfile "$SHA.json" "$SHA" 'd["gates"].append({"id": "G6.1", "result
 out=$(bash "$R/trunk/deploy/gate-check.sh" "$SHA" "$R" 2>&1); rc=$?
 [ $rc = 0 ] && pass "an extra (newer) GREEN gate does not refuse" || fail "an extra GREEN gate does not refuse" "rc=$rc $out"
 
-# the M0 VPS-step shell still unbuilt (ljoolq-up): gate first; refusal stops before anything else; pass says not built yet, exit 3
+# the built OPS deploy script (ljoolq-up.sh): gate_check runs before anything reaches ssh/docker
 reset_files; mkfile "$SHA.json" "$SHA"
-for s in ljoolq-up; do
-  out=$(bash "$R/trunk/deploy/$s.sh" "$SHA" 2>&1); rc=$?
-  [ $rc = 3 ] && [[ "$out" == *"$s: not built yet (OPS stream, M6)"* ]] && [[ "$out" == "gate-check: OK"* ]] &&
-    pass "$s.sh with a complete green file: gate OK, then 'not built yet', exit 3" || fail "$s.sh good file" "rc=$rc $out"
-  touch "$R/stray.log"
-  out=$(bash "$R/trunk/deploy/$s.sh" "$SHA" 2>&1); rc=$?
-  [ $rc = 1 ] && [[ "$out" == "gate-check: REFUSED worktree is not clean"* ]] && [[ "$out" != *"not built yet"* ]] &&
-    pass "$s.sh on a dirty tree: refused, stops before anything else" || fail "$s.sh dirty" "rc=$rc $out"
-  rm -f "$R/stray.log"
-  out=$(bash "$R/trunk/deploy/$s.sh" "$OLD" 2>&1); rc=$?
-  [ $rc = 1 ] && [[ "$out" == *"REFUSED worktree HEAD is"* ]] && pass "$s.sh for a commit that is not checked out: refused" || fail "$s.sh other sha" "rc=$rc $out"
-  out=$(bash "$R/trunk/deploy/$s.sh" 2>&1); rc=$?
-  [ $rc = 2 ] && pass "$s.sh without a sha: usage, exit 2" || fail "$s.sh usage" "rc=$rc $out"
-  mv "$V1_GATES_DIR/$SHA.json" "$T/held.json"
-  out=$(bash "$R/trunk/deploy/$s.sh" "$SHA" 2>&1); rc=$?
-  [ $rc = 1 ] && [[ "$out" == *"no gate file"* ]] && pass "$s.sh with no gate file: refused" || fail "$s.sh no file" "rc=$rc $out"
-  mv "$T/held.json" "$V1_GATES_DIR/$SHA.json"
-done
+out=$(TMPDIR="$T" LJOOLQ_SHOW=1 bash "$R/trunk/deploy/ljoolq-up.sh" "$SHA" 2>&1); rc=$?
+[ $rc = 0 ] && [[ "$out" == *"gate-check: OK"* ]] && [[ "$out" == *"would run on ssh:veraldar as root:"* ]] &&
+  pass "ljoolq-up.sh with a complete green file: gate OK (dry-run LJOOLQ_SHOW=1)" || fail "ljoolq-up.sh good file" "rc=$rc $out"
+touch "$R/stray.log"
+out=$(TMPDIR="$T" bash "$R/trunk/deploy/ljoolq-up.sh" "$SHA" 2>&1); rc=$?
+[ $rc = 1 ] && [[ "$out" == *"gate-check: REFUSED worktree is not clean"* ]] && [[ "$out" != *"would run"* ]] &&
+  pass "ljoolq-up.sh on a dirty tree: refused before any remote call" || fail "ljoolq-up.sh dirty" "rc=$rc $out"
+rm -f "$R/stray.log"
+out=$(TMPDIR="$T" bash "$R/trunk/deploy/ljoolq-up.sh" "$OLD" 2>&1); rc=$?
+[ $rc = 1 ] && [[ "$out" == *"REFUSED worktree HEAD is"* ]] && pass "ljoolq-up.sh for a commit that is not checked out: refused" || fail "ljoolq-up.sh other sha" "rc=$rc $out"
+out=$(TMPDIR="$T" bash "$R/trunk/deploy/ljoolq-up.sh" 2>&1); rc=$?
+[ $rc = 2 ] && pass "ljoolq-up.sh without a sha: usage, exit 2" || fail "ljoolq-up.sh usage" "rc=$rc $out"
+mv "$V1_GATES_DIR/$SHA.json" "$T/held.json"
+out=$(TMPDIR="$T" bash "$R/trunk/deploy/ljoolq-up.sh" "$SHA" 2>&1); rc=$?
+[ $rc = 1 ] && [[ "$out" == *"no gate file"* ]] && pass "ljoolq-up.sh with no gate file: refused" || fail "ljoolq-up.sh no file" "rc=$rc $out"
+out=$(TMPDIR="$T" LJOOLQ_TEST_SKIP_GATE=1 bash "$R/trunk/deploy/ljoolq-up.sh" "$SHA" 2>&1); rc=$?
+[ $rc = 1 ] && [[ "$out" == *"for a docker: rehearsal box only"* ]] && pass "ljoolq-up.sh refuses LJOOLQ_TEST_SKIP_GATE=1 on ssh:veraldar" || fail "ljoolq-up.sh skip-gate ssh" "rc=$rc $out"
+mv "$T/held.json" "$V1_GATES_DIR/$SHA.json"
 # the built OPS provisioning script (ljoolq-provision.sh): gate_check runs before anything reaches ssh/docker
 out=$(TMPDIR="$T" LJOOLQ_SHOW=1 bash "$R/trunk/deploy/ljoolq-provision.sh" up "$SHA" 2>&1); rc=$?
 [ $rc = 0 ] && [[ "$out" == *"gate-check: OK"* ]] && [[ "$out" == *"would run on ssh:veraldar as root:"* ]] &&
@@ -200,11 +200,11 @@ mv "$T/held.json" "$V1_GATES_DIR/$SHA.json"
 for s in gate-check ljoolq-up ljoolq-provision; do
   cmp -s "$SRC/trunk/deploy/$s.sh" "$R/trunk/deploy/$s.sh" || fail "copy of $s.sh differs"
 done
-# no network, no VPS: no shimmed tool was called; no ssh/veraldar in gate-check or the unbuilt M0 shell's code lines
+# no network, no VPS: no shimmed tool was called; no ssh/veraldar in gate-check's code lines
 [ ! -s "$T/shim/calls" ] && pass "nothing tried ssh/scp/rsync/curl/wget/incus/nc" || fail "a network tool was called" "$(cat "$T/shim/calls")"
-if grep -vE '^\s*#' "$SRC/trunk/deploy/ljoolq-up.sh" "$SRC/trunk/deploy/gate-check.sh" |
-  grep -qE '\b(ssh|scp|rsync|curl|wget|incus|veraldar)\b'; then fail "gate-check / unbuilt M0 shell name a remote tool or the VPS in code"
-else pass "gate-check and unbuilt M0 shell name no remote tool and no VPS host in code"; fi
+if grep -vE '^\s*#' "$SRC/trunk/deploy/gate-check.sh" |
+  grep -qE '\b(ssh|scp|rsync|curl|wget|incus|veraldar)\b'; then fail "gate-check names a remote tool or the VPS in code"
+else pass "gate-check names no remote tool and no VPS host in code"; fi
 real_after=$(ls -la --time-style=+%s.%N "$REAL_GATES" 2>/dev/null | md5sum)
 [ "$real_before" = "$real_after" ] && pass "the real gates folder was not touched" || fail "the real gates folder changed during the test"
 
