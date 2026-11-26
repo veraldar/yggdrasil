@@ -65,11 +65,30 @@ export async function deviceGate(req: NextRequest): Promise<NextResponse> {
   const region = regionOfReq(req);
   const gate = await checkAccess(raw, region);
   if (!gate.ok) {
-    // the meter: a refusal and the hint it sends back (a bare missing token is a stranger:
-    // not an event)
-    if (gate.why !== 'missing') {
-      obsEvent('deny', { src: 'app', why: gate.why, hint: REAUTH[gate.why], device: gate.device, region, path: routeClass(path) });
+    // the meter: a refusal and the hint it sends back. A bare missing token is a stranger (not an
+    // event) — unless it is a page load: that is a link tapped open whose cookie did not ride, the
+    // owner's 11-26 case, which the proxy's log shows only as "missing" with no address or cause.
+    const nav = isNavigation(req);
+    if (gate.why !== 'missing' || nav) {
+      obsEvent('deny', {
+        src: 'app',
+        why: gate.why,
+        hint: REAUTH[gate.why],
+        device: gate.device,
+        region,
+        path: routeClass(path),
+        nav,
+        // what the browser says it is doing (names only, never values of credentials)
+        site: req.headers.get('sec-fetch-site') || '',
+        dest: req.headers.get('sec-fetch-dest') || '',
+        sw: req.headers.has('x-bifrost-dest'),
+      });
     }
+    // a link tapped open (an artifact in a new tab) is a page load: it carries no Authorization, only
+    // the cookie — which SameSite=Strict withholds on a link followed from another site, and which
+    // outlives its token. A JSON 401 there is a dead end (owner 11-26); /pair asks the box again from
+    // inside the site (the refresh cookie rides) and loads this address again — as for a page.
+    if (nav) return toPair(req);
     return NextResponse.json(
       { error: 'device token required', why: gate.why, reauth: REAUTH[gate.why] },
       { status: 401 }
@@ -85,6 +104,26 @@ export function routeClass(p: string): string {
   if (seg[0] !== 'api') return 'page';
   if (seg[1] === 'session') return seg.length === 2 ? 'api.session' : seg[3] === 'messages' ? 'api.session.messages' : 'api.session.one';
   return seg[1] ? `api.${seg[1].replace(/[^a-z0-9-]/gi, '').slice(0, 24)}` : 'api';
+}
+
+/** a browser loading this address as a page (address bar, a tapped link, a new tab) — never a script's fetch
+ *  (a default Accept of any type, and it reads the 401 line) nor a frame (an inline preview: the page around it asks).
+ *  Sec-Fetch-* is sent only to https or localhost (a plain-http LAN box gets none) and Chromium blanks the
+ *  destination on a load a service worker took over: then the page's own Accept (`text/html,…`) tells — the
+ *  rule the artifact route uses for its doc/frame split. */
+function isNavigation(req: NextRequest): boolean {
+  if (req.method !== 'GET') return false;
+  const dest = req.headers.get('sec-fetch-dest');
+  if (dest === 'document' || req.headers.get('sec-fetch-mode') === 'navigate') return true;
+  return (!dest || dest === 'empty') && (req.headers.get('accept') || '').startsWith('text/html');
+}
+
+/** the /pair page, in place of the address asked for (nothing of it is sent) */
+function toPair(req: NextRequest): NextResponse {
+  const pair = req.nextUrl.clone();
+  pair.pathname = '/pair';
+  pair.search = '?unpaired=1';
+  return NextResponse.rewrite(pair, { headers: { 'Cache-Control': 'no-store', Vary: 'Cookie' } });
 }
 
 /**
@@ -111,10 +150,7 @@ export async function pageGate(req: NextRequest): Promise<NextResponse> {
   const raw = req.headers.get('authorization')?.replace(/^Bearer\s+/i, '') || cookie;
   const gate = await checkAccess(raw, regionOfReq(req));
   if (gate.ok || REAUTH[gate.why] === 'refresh') return NextResponse.next();
-  const pair = req.nextUrl.clone();
-  pair.pathname = '/pair';
-  pair.search = '?unpaired=1';
-  return NextResponse.rewrite(pair, { headers: { 'Cache-Control': 'no-store', Vary: 'Cookie' } });
+  return toPair(req);
 }
 
 /** true when the gate lets the request through */
