@@ -26,10 +26,14 @@ rm -f "$STATE/steps.tsv"
 # Bring up loopback + non-loopback dummy IPs (pion/ice requires non-loopback node_ip for ICE-TCP)
 # and bind-mount /etc/hosts + /etc/nsswitch.conf so ap.veraldar.org & ljoolq.veraldar.org resolve to 127.0.0.1
 ip link set lo up
+# one dummy interface per LiveKit (each pinned to its own via rtc.interfaces): with both addresses on one
+# interface pion's NAT1To1 mapping makes the second server's ICE-TCP mux ignore its own address.
 ip link add d0 type dummy
 ip addr add 198.51.100.20/24 dev d0
-ip addr add 198.51.100.21/24 dev d0
 ip link set d0 up
+ip link add d1 type dummy
+ip addr add 198.51.100.21/24 dev d1
+ip link set d1 up
 { cat /etc/hosts; echo "127.0.0.1 ap.veraldar.org ljoolq.veraldar.org"; } >"$STATE/hosts"
 printf 'hosts: files\n' >"$STATE/nsswitch.conf"
 mount --bind "$STATE/hosts" /etc/hosts
@@ -103,10 +107,12 @@ rtc:
   udp_port: $V0_LK_UDP
   use_external_ip: false
   node_ip: 198.51.100.20
+  interfaces:
+    includes: [d0]
 keys:
   $LK0_KEY: $LK0_SECRET
 logging:
-  level: warn
+  level: ${LK_LOG:-warn}
 YAML
 cat >"$STATE/v1/livekit.yaml" <<YAML
 port: $V1_LK_HTTP
@@ -116,10 +122,12 @@ rtc:
   udp_port: $V1_LK_UDP
   use_external_ip: false
   node_ip: 198.51.100.21
+  interfaces:
+    includes: [d1]
 keys:
   $LK1_KEY: $LK1_SECRET
 logging:
-  level: warn
+  level: ${LK_LOG:-warn}
 YAML
 chmod 600 "$STATE/v0/livekit.yaml" "$STATE/v1/livekit.yaml"
 "$LK_BIN" --config "$STATE/v0/livekit.yaml" >"$STATE/v0/livekit.log" 2>&1 &
@@ -334,6 +342,7 @@ cat >"$STATE/cfg.json" <<JSON
 }
 JSON
 
+[ -z "${COEXIST_HOLD:-}" ] || { echo "HOLD $STATE"; sleep "$COEXIST_HOLD"; }
 echo ""
 printf '%-6s %-8s %s\n' "STEP" "RES" "WHAT"
 set +e
