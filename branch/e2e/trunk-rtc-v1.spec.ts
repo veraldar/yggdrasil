@@ -427,6 +427,9 @@ test('G3.2 v1 trunk rtc: QR pairing, voice over the trunk, ufrag routing, revoke
 
   let mainId = '';
   let deviceId = '';
+  // E1's two clocks: `loadAt` = the phone starts loading the QR's page (first contact); `pairedAt` =
+  // the trunk answered the redeem — the device exists from here on, "after pairing" means after it
+  let loadAt = 0;
   let pairedAt = 0;
   let released = 0;
   let voiceTurn: Msg | null = null;
@@ -494,9 +497,10 @@ test('G3.2 v1 trunk rtc: QR pairing, voice over the trunk, ufrag routing, revoke
       writeFileSync(png, await qr.screenshot());
       const qrUrl = execFileSync('zbarimg', ['--raw', '-q', png]).toString().trim();
       expect(qrUrl.startsWith(`${AP}/pair#v=2&t=bfnp-`), qrUrl.replace(/t=.*/, 't=…')).toBe(true);
-      // E1's clock starts BEFORE the phone loads the page (NOTES-P1.md:153)
-      pairedAt = Date.now();
-      await redeem(phone, qrUrl);
+      // E1's clocks (NOTES-P1.md:153): POST /offer may leave before the door's load event — "it
+      // crossed the VPS" counts from loadAt; "no app data after pairing" counts from the redeem's answer
+      loadAt = Date.now();
+      pairedAt = await redeem(phone, qrUrl);
       await expect(phone.getByTestId('roots')).toBeVisible({ timeout: 30_000 });
       deviceId = await deviceOf(phone);
       expect(deviceId).toMatch(/^dev_/);
@@ -520,7 +524,7 @@ test('G3.2 v1 trunk rtc: QR pairing, voice over the trunk, ufrag routing, revoke
     // ---------------------------------------------------------------- P1 the pinned channel
     await step('P1', `the app rides the pinned channel: ICE-TCP ${AP_IP}:443, the key = the trunk directory's pin for this root`, async () => {
       await expect(phone.getByTestId('pin-state')).toHaveAttribute('data-state', 'pinned', { timeout: 20_000 });
-      const pinnedMs = Date.now() - pairedAt;
+      const pinnedMs = Date.now() - loadAt;
       const dir = (await pageFetch(phone, '/t/me/roots')).body as unknown as Array<{ id: string; dtls_fp: string; door: boolean }>;
       const me = dir.find((r) => r.id === HOME_ID);
       expect(me?.door, JSON.stringify(dir)).toBe(true);
@@ -696,7 +700,7 @@ test('G3.2 v1 trunk rtc: QR pairing, voice over the trunk, ufrag routing, revoke
       expect(recs.length, 'the eye is on the path').toBeGreaterThan(0);
       const lines = eyeRequests(recs);
       expect(lines.filter(appCall), 'API calls through the VPS after pairing').toEqual([]);
-      expect(lines.some((l) => l.startsWith('POST /offer ')), 'the pinned signaling crossed it').toBe(true);
+      expect(eyeRequests(eyeSince(loadAt + 1)).some((l) => l.startsWith('POST /offer ')), 'the pinned signaling crossed it').toBe(true);
       // every decrypted byte, the root's own channel included (it carries the relayed streams)
       const plain = Buffer.concat(recs.map((r) => Buffer.from(r.b64, 'base64'))).toString('latin1');
       const turn = voiceTurn ? textOf(voiceTurn) : '';

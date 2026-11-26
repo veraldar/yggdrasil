@@ -428,6 +428,9 @@ test('trunk rtc: phone ⇄ vps:443 ⇄ box — pair, talk, hear the reply, media
 
   let mainId = '';
   let deviceId = '';
+  // E1's two clocks: `loadAt` = the phone starts loading the QR's page (first contact); `pairedAt` =
+  // the box answered the claim — the pin exists from here on, and "after pairing" means after it
+  let loadAt = 0;
   let pairedAt = 0;
   let released = 0;
   let voiceTurn: Msg | null = null;
@@ -445,10 +448,16 @@ test('trunk rtc: phone ⇄ vps:443 ⇄ box — pair, talk, hear the reply, media
         writeFileSync(png, await qr.screenshot());
         const qrUrl = execFileSync('zbarimg', ['--raw', '-q', png]).toString().trim();
         expect(qrUrl.startsWith(`${AP}/pair#`), qrUrl).toBe(true);
-        // E1's clock starts BEFORE the phone loads the page (NOTES-P1.md:153: the app's POST
-        // /offer leaves ~1.17 s after GET / and can fall before a pairedAt taken after the load)
-        pairedAt = Date.now();
+        // E1's clocks (NOTES-P1.md:153 and the 11-26 baseline): the pinned signaling (POST /offer)
+        // leaves ~1.17 s after GET / and can fall before the door's load event, so "it crossed the
+        // VPS" is counted from loadAt, before the page loads; "no app data after pairing" is counted
+        // from the claim's answer, the moment a pin exists — the pairing page's own first-contact
+        // calls, sent before the claim (POST /api/diag, GET /api/build), are not "after pairing"
+        const claimed = phone.waitForResponse((r) => r.url().endsWith('/api/pair/claim'));
+        loadAt = Date.now();
         await phone.goto(qrUrl);
+        await claimed;
+        pairedAt = Date.now();
         await phone.waitForURL(`${AP}/`, { timeout: 30_000 });
         await expect(phone.getByTestId('roots')).toBeVisible({ timeout: 30_000 });
         const pin = await phone.evaluate(() =>
@@ -747,7 +756,7 @@ test('trunk rtc: phone ⇄ vps:443 ⇄ box — pair, talk, hear the reply, media
         const lines = eyeRequests(recs);
         expect(lines.filter(appCall), 'API calls through the VPS after pairing').toEqual([]);
         expect(
-          lines.some((l) => l.startsWith('POST /offer ')),
+          eyeRequests(eyeSince(loadAt + 1)).some((l) => l.startsWith('POST /offer ')),
           'the pinned signaling crossed it'
         ).toBe(true);
         const plain = Buffer.concat(recs.map((r) => Buffer.from(r.b64, 'base64'))).toString(

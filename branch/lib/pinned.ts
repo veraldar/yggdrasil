@@ -28,7 +28,6 @@
  * did not match: a man in the middle — nothing is sent, nothing falls back).
  */
 import { useSyncExternalStore } from 'react';
-import { buildReady, isTrunk } from '@/lib/auth-mode';
 import { type Pin, PinMismatch, assertPinned, loadPin, normFp } from '@/lib/p2p';
 
 export type PinState = 'off' | 'connecting' | 'pinned' | 'fallback' | 'reconnecting' | 'refused';
@@ -910,18 +909,12 @@ function pinnable(): boolean {
   return secureOrLoopback && 'RTCPeerConnection' in window;
 }
 
-/** `held`: bootPinned already wired the hooks and holds the page's requests (state connecting) —
- *  every way out of here that opens no channel must let them go (state off) */
-async function bootTrunkPinned(held = false): Promise<void> {
+/** Only on a page the door marked as trunk (bootPinned): the hooks are wired and the page's requests
+ *  are held (state connecting) — every way out of here that opens no channel lets them go (off). */
+async function bootTrunkPinned(): Promise<void> {
   const release = () => {
-    if (held && state === 'connecting') setState('off');
+    if (state === 'connecting') setState('off');
   };
-  // held: the door said trunk; never wait for /api/build here (it is one of the held requests)
-  if (!held) {
-    const b = await buildReady();
-    if (!isTrunk(b)) return;
-    if (!pinnable()) return;
-  }
   const remembered = loadTrunkPins();
   let list: MeRoot[] | null = null;
   try {
@@ -1019,13 +1012,13 @@ export function bootPinned(): void {
     if (trunkPage() && pinnable()) {
       wireChannelHooks();
       setState('connecting', "asking the trunk for this computer's key");
-      void bootTrunkPinned(true).catch(() => {
+      void bootTrunkPinned().catch(() => {
         if (state === 'connecting') setState('off');
       });
       return;
     }
+    // tailnet / devices (no pin) — and a trunk page that cannot pin: off, exactly as before v1
     setState('off');
-    void bootTrunkPinned(false);
     return;
   }
   if (location.protocol !== 'https:' || !('RTCPeerConnection' in window)) {
