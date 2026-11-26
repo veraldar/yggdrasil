@@ -10,9 +10,9 @@ import { expect, test } from '@playwright/test';
  */
 const STATE = process.env.PW_V1_STATE || '';
 const BASE = process.env.PW_BASE_URL || '';
-const LOCAL = process.env.PW_LOCAL_TRUNK || '';
+const LAN = process.env.PW_LAN_URL || '';
 
-test.skip(!STATE || !BASE || !LOCAL, 'needs scripts/v1-ladder.sh');
+test.skip(!STATE || !BASE || !LAN, 'needs scripts/v1-ladder.sh');
 
 type Admin = {
   email: string;
@@ -58,8 +58,8 @@ test('sign-in with recovery code → valid PASETO → region roam → refresh re
   playwright,
 }) => {
   const a = admin();
-  const lan = await playwright.request.newContext({ baseURL: BASE });
-  const loc = await playwright.request.newContext({ baseURL: LOCAL });
+  const lan = await playwright.request.newContext({ baseURL: LAN });
+  const loc = await playwright.request.newContext({ baseURL: BASE });
 
   // sign in from LAN (192.168.77.2 -> lan:192.168.77.0/24)
   const r1 = await lan.post('/t/auth/login', {

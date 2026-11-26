@@ -28,6 +28,10 @@ if [ -z "${TRUNK_FULL_V1_NS:-}" ]; then
     env TRUNK_FULL_V1_NS=1 TRUNK_FULL_SCENARIO="$SCENARIO" "$0"
 fi
 
+for d in "$HOME/.local/bin" "$HOME/.local/share/mise/installs/node/latest/bin" "$HOME/.local/share/mise/installs/claude/latest"; do
+  [ -d "$d" ] && PATH="$d:$PATH"
+done
+export PATH
 BIN=${BIFROST_NET_BIN:-$ROOT/trunk/target/release/bifrost-net}
 YGG_BIN=${YGG_BIN:-$ROOT/root/target/release/yggdrasil}
 B=${APP_DIR:-$ROOT/branch}

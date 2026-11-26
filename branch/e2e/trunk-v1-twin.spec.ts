@@ -80,7 +80,7 @@ test('G5.1 twin as a v1 root (8-step drive)', async ({ page, request }) => {
       const main = ((await (await request.get('http://127.0.0.1:4250/session')).json()) as Array<{ id: string; title: string }>).find(
         (s) => s.title === '[MAIN]'
       )!;
-      const toolText = `tool:${JSON.stringify([[['session_start', { title: 'g51-build', agent: 'build', brief: 'Reply with exactly: BUILD-OK' }]]][0])}`;
+      const toolText = `tool:${JSON.stringify([[['session_start', { title: 'g51-build', agent: 'build', brief: 'Reply with exactly: BUILD-OK' }]]])}`;
       const r = await request.post(`http://127.0.0.1:4250/session/${main.id}/message`, {
         data: { parts: [{ type: 'text', text: toolText }] },
         timeout: 60_000,

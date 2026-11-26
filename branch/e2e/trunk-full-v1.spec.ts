@@ -224,7 +224,7 @@ test(`trunk-full-v1 (${SCENARIO})`, async ({ browser, request }) => {
       const pdfBytes = readFileSync(pdf.path);
 
       // MAIN starts "pdf reader" (agent claude) on root lab
-      const toolMsg = `tool:${JSON.stringify([[['session_start', { title: 'pdf reader', agent: 'claude', brief: 'Wait for the user.', root: roots.lab.id }]]][0])}`;
+      const toolMsg = `tool:${JSON.stringify([[['session_start', { title: 'pdf reader', agent: 'claude', brief: 'Wait for the user.', root: roots.lab.id }]]])}`;
       const rStart = await request.post(`http://127.0.0.1:${portMap.home.brain}/session/${mainId}/message`, {
         data: { parts: [{ type: 'text', text: toolMsg }] },
         timeout: 60_000,

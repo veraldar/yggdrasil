@@ -34,8 +34,8 @@ mkdir -p "$BASE_TMP"
 STATE=${V1_STATE:-$(mktemp -d "$BASE_TMP/v1-ladder.XXXXXX")}
 mkdir -p "$STATE"/{trunk/cred,home/ygg,home/proj} && chmod 700 "$STATE"
 
-TRUNK_URL="http://$LAN:$TRUNK_PORT"
-TRUNK_LOCAL="http://127.0.0.1:$TRUNK_PORT"
+TRUNK_URL="http://127.0.0.1:$TRUNK_PORT"
+TRUNK_LAN="http://$LAN:$TRUNK_PORT"
 
 pids=()
 cleanup() { for p in "${pids[@]}"; do kill "$p" 2>/dev/null || true; done; wait 2>/dev/null || true; }
@@ -55,8 +55,8 @@ db = "$STATE/trunk/trunk.db"
 state_dir = "$STATE/trunk"
 cred_dir = "$STATE/trunk/cred"
 ctl_socket = "$STATE/trunk/ctl.sock"
-rp_id = "$LAN"
-origins = ["$TRUNK_URL", "$TRUNK_LOCAL"]
+rp_id = "127.0.0.1"
+origins = ["$TRUNK_URL", "$TRUNK_LAN"]
 ice_owner_from = ["127.0.0.1/32"]
 TOML
 chmod 600 "$STATE/trunk/trunk.toml"
@@ -64,10 +64,10 @@ chmod 600 "$STATE/trunk/trunk.toml"
 pids+=($!)
 
 for _ in $(seq 60); do
-  curl -sf "$TRUNK_LOCAL/t/state" >/dev/null && break
+  curl -sf "$TRUNK_URL/t/state" >/dev/null && break
   sleep 0.25
 done
-curl -sf "$TRUNK_LOCAL/t/state" >/dev/null || { echo "v1 trunk did not start"; tail -20 "$STATE/trunk.log"; exit 1; }
+curl -sf "$TRUNK_URL/t/state" >/dev/null || { echo "v1 trunk did not start"; tail -20 "$STATE/trunk.log"; exit 1; }
 
 # ---- 2. claim admin + enroll the box's home root ----
 python3 "$ROOT/sim/trunk-v1/claim-admin.py" \
@@ -121,7 +121,7 @@ candidates = ["$LAN"]
 dtls_cert_file = "$STATE/home/bridge-dtls.json"
 
 [trunk]
-url = "$TRUNK_LOCAL"
+url = "$TRUNK_URL"
 trunk_key = "$TRUNK_KEY"
 root_key_file = "$STATE/home/root.key"
 root_id = "$HOME_ROOT_ID"
@@ -162,7 +162,7 @@ cd "$B"
 SPECS=("$@")
 [ ${#SPECS[@]} -gt 0 ] || SPECS=(e2e/v1-auth.spec.ts e2e/signin-ladder.spec.ts e2e/v1-bridge.spec.ts e2e/enroll.spec.ts)
 set +e
-PW_BASE_URL="$TRUNK_URL" PW_LOCAL_TRUNK="$TRUNK_LOCAL" PW_LAN_URL="$TRUNK_URL" \
+PW_BASE_URL="$TRUNK_URL" PW_LOCAL_TRUNK="$TRUNK_URL" PW_LAN_URL="$TRUNK_LAN" \
   PW_V1_STATE="$STATE" PW_TRUNK_BIN="$BIN" PW_MAIN_SLUG=e2e-ladder-main \
   PW_BRIDGE_URL="http://$LAN:$BR" PW_HOME_ROOT_ID="$HOME_ROOT_ID" \
   npx playwright test "${SPECS[@]}" --workers=1 2>&1 | tee "$STATE/e2e.log"

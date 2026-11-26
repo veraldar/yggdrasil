@@ -182,7 +182,8 @@ test('G3.6 storyboard end to end (15 steps)', async ({ browser, request }) => {
     });
     expect(eHome.status()).toBe(200);
     const sHome = await eHome.json();
-    await owner.goto(`${BASE}${sHome.approve_url}`);
+    const approveUrl = sHome.approve_url.startsWith('http') ? sHome.approve_url : `${BASE}${sHome.approve_url}`;
+    await owner.goto(approveUrl);
     await noOverflow360(owner, '/auth/root');
     const approveBtn = owner.locator('button[type="submit"], button.ok, #approve-btn').first();
     await expect(approveBtn).toBeVisible({ timeout: 15_000 });
