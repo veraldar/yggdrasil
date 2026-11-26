@@ -29,7 +29,7 @@ test('session states: empty → working… → replied, screenshots each', async
   await expect(page.getByText(/working… \d+s/)).toBeVisible();
   await page.screenshot({ path: '../artifacts/e2e-working.png' });
 
-  await expect(page.getByText('pong')).toBeVisible({ timeout: 90_000 });
+  await expect(page.getByText('pong', { exact: true })).toBeVisible({ timeout: 90_000 });
   await expect(page.getByText(/working… \d+s/)).toHaveCount(0);
   await page.screenshot({ path: '../artifacts/e2e-replied.png' });
 });
@@ -74,7 +74,10 @@ test('hands-free: keyword protocol status, no cancel button, screenshot', async 
   await expect(page.getByTestId('free-strip')).not.toContainText('connecting', { timeout: 30_000 });
   // the cancel button is gone; turns are committed by saying "over"
   await expect(page.getByTestId('free-cancel')).toHaveCount(0);
-  await expect(phase).toHaveText(/hands-free$/); // "over" is taught by the walk-through (ux-calm)
+  // hands-free listening carries no visible word (owner 11-04 hf-strip law, 11-11 round3): the cycle is
+  // exposed as data-cycle, the word survives for screen readers only; "over" is taught by the walk-through
+  await expect(phase).toHaveAttribute('data-cycle', 'listening');
+  await expect(phase).toHaveText('');
   await page.screenshot({ path: '../artifacts/e2e-free-listening.png' });
   // leave hands-free quickly — the fake mic never says "over", so nothing
   // can commit, but short tests keep the shared server state clean

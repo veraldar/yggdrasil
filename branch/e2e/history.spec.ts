@@ -128,6 +128,8 @@ test('input recall: ArrowUp/Down on the textarea, slide on touch', async ({ brow
   await page.goto(`/session/${NAME}?id=${sessionId}`);
   const ta = page.getByPlaceholder('message…');
   await expect(ta).toBeVisible();
+  // the recall walks the loaded transcript: the composer is there before the messages are
+  await expect(page.locator('[data-mi]').first()).toBeVisible();
 
   // ArrowUp recalls the (single) sent message; a second Up stays at oldest
   await ta.click();

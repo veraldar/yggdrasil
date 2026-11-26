@@ -11,7 +11,12 @@ export default defineConfig({
   testIgnore: undefined,
   testMatch: /(tree-first|first-turn-voice|voice-wait)\.spec\.ts/,
   // a FRESH device (no storageState): the door is the subject here
-  use: { ...base.use, storageState: undefined, baseURL: process.env.PW_BASE_URL || 'http://127.0.0.1:8090' },
+  use: { ...base.use, storageState: undefined,
+    // the app's service worker answers every /api/* fetch itself (the pinned channel's door, sw.js), and
+    // page.route() never sees a request a worker handled — the carried-answers test counts on its own
+    // route answering the POST /api/onboard. The door has no use for the worker.
+    serviceWorkers: 'block',
+    baseURL: process.env.PW_BASE_URL || 'http://127.0.0.1:8090' },
   projects: [
     {
       name: 'chromium',
