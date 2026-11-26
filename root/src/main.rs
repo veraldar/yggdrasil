@@ -7904,6 +7904,40 @@ mod owner_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// T20 as a regression test (the real-session rig mostly sees fix sessions hand over without asking):
+    /// a pressed yes is a record the integrator reads from the brain, not from the session that hands over;
+    /// it outlives the asking session's next question, is logged when used, and widens no one's rights.
+    #[tokio::test]
+    async fn t20_a_pressed_yes_is_read_from_the_brain_by_the_integrator_and_logged_when_used() {
+        let (st, dir) = app();
+        let (_main, lead) = trio(&st).await;
+        let id = asks(&st, &lead, "May I deploy release r1 with hub-units.sh deploy? I need your approval.");
+        let r = owner::post_answer(State(st.clone()), Path(lead.clone()), hdr("x-ygg-device", LIVE), Json(json!({ "ask": id, "answer": "yes" }))).await;
+        assert_eq!(r.status(), StatusCode::OK);
+        // the asking session moves on and asks something else: the answered ask must still be readable
+        let id2 = asks(&st, &lead, "Which branch do I merge next? I need your choice.");
+        assert_ne!(id, id2);
+        let got = body_of(owner::get_ask(State(st.clone()), Path(id.clone())).await).await;
+        assert_eq!((got["session"].as_str(), got["q"].as_str().map(|q| q.contains("hub-units.sh deploy"))), (Some(lead.as_str()), Some(true)), "{got}");
+        assert_eq!((got["answered"]["via"].as_str(), got["answered"]["device"].as_str()), (Some("press"), Some("dev_phone")), "{got}");
+        assert!(got["answered"]["expires"].as_i64().unwrap() > got["answered"]["at"].as_i64().unwrap(), "every answer expires: {got}");
+        assert_eq!(got["used"].as_array().map(|a| a.len()).unwrap_or(0), 0, "not used yet: {got}");
+        // the integrator acts once and says so; a blank audit line and an unknown id are refused
+        assert_eq!(owner::post_used(State(st.clone()), Path(id.clone()), Json(json!({ "what": "  " }))).await.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(owner::post_used(State(st.clone()), Path("ask_nope".into()), Json(json!({ "what": "deploy r1" }))).await.status(), StatusCode::NOT_FOUND);
+        assert_eq!(owner::post_used(State(st.clone()), Path(id.clone()), Json(json!({ "what": "hub-units.sh deploy r1" }))).await.status(), StatusCode::OK);
+        let got = body_of(owner::get_ask(State(st.clone()), Path(id.clone())).await).await;
+        assert_eq!(got["used"].as_array().map(|a| a.len()), Some(1), "{got}");
+        // the still-open second question is not answered by the first answer
+        let got2 = body_of(owner::get_ask(State(st.clone()), Path(id2)).await).await;
+        assert!(got2["answered"].is_null() || got2["answered"] == false, "{got2}");
+        let audit = std::fs::read_to_string(dir.join("owner-audit.jsonl")).unwrap();
+        assert!(audit.lines().any(|l| l.contains("\"via\":\"used\"") && l.contains(&id)), "{audit}");
+        // the answer text never names who may run the deploy: whether, never who
+        assert!(!prompt_of(&st, &lead, 0).to_lowercase().contains("integrator"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[tokio::test]
     async fn t9_t10_t15_the_gate_no_longer_blacks_out_main_and_the_brain_says_the_question_is_open() {
         let (st, dir) = app();
