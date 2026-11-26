@@ -27,6 +27,7 @@
  * trunk's TLS — fallback is a first-contact answer only) · refused (the box key
  * did not match: a man in the middle — nothing is sent, nothing falls back).
  */
+import { useSyncExternalStore } from 'react';
 import { buildReady, isTrunk } from '@/lib/auth-mode';
 import { type Pin, PinMismatch, assertPinned, loadPin, normFp } from '@/lib/p2p';
 
@@ -205,18 +206,43 @@ const listeners = new Set<(s: PinState, why: string) => void>();
 const waiters: Array<() => void> = [];
 let origFetch: typeof fetch | null = null;
 
+type PinSnap = { state: PinState; why: string };
+const OFF: PinSnap = { state: 'off', why: '' };
+/** the current state as one object, replaced on every change (a stable snapshot for React) */
+let snap: PinSnap = OFF;
+
 function setState(s: PinState, w = '') {
+  // P11: `refused` is terminal for this page — nothing moves it (a retry timer of an earlier loss,
+  // a held boot letting its requests go): the page sends the box's data nowhere from then on
+  if (state === 'refused' && s !== 'refused') return;
   state = s;
   why = w;
+  snap = { state, why };
   for (const l of listeners) l(s, w);
   if (s !== 'connecting' && s !== 'reconnecting') waiters.splice(0).forEach((f) => f());
   tellWorker();
 }
 
-export const pinState = () => ({ state, why });
+/** the same object until the state changes */
+export const pinState = (): PinSnap => snap;
 export function onPinState(f: (s: PinState, why: string) => void): () => void {
   listeners.add(f);
   return () => listeners.delete(f);
+}
+
+const subscribePin = (cb: () => void) => {
+  const off = onPinState(() => cb());
+  return () => {
+    off();
+  };
+};
+const serverPin = (): PinSnap => OFF;
+/** the pinned channel's state in a component. useState(pinState()) + a subscribing effect loses a
+ *  change that lands between the render and the effect (the D3 alarm stayed "pinning…" while the
+ *  page was already refused: G3.6 S13); useSyncExternalStore re-reads the store once subscribed,
+ *  and hydrates with the server's `off` (no hydration mismatch) */
+export function usePinState(): PinSnap {
+  return useSyncExternalStore(subscribePin, pinState, serverPin);
 }
 
 function tellWorker() {
