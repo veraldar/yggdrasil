@@ -35,6 +35,8 @@ STATE=${V1_STATE:-$(mktemp -d "$BASE_TMP/v1-ladder.XXXXXX")}
 mkdir -p "$STATE"/{trunk/cred,home/ygg,home/proj} && chmod 700 "$STATE"
 
 TRUNK_URL="http://127.0.0.1:$TRUNK_PORT"
+# the dummy LAN address is only a SOURCE/destination for the region tests (the specs reach the trunk there with Origin = the
+# trunk's own public_url); it is not a name of the trunk, so it is not in `origins` (A8: every origin must sit under rp_id)
 TRUNK_LAN="http://$LAN:$TRUNK_PORT"
 
 pids=()
@@ -56,7 +58,7 @@ state_dir = "$STATE/trunk"
 cred_dir = "$STATE/trunk/cred"
 ctl_socket = "$STATE/trunk/ctl.sock"
 rp_id = "127.0.0.1"
-origins = ["$TRUNK_URL", "$TRUNK_LAN"]
+origins = ["$TRUNK_URL"]
 ice_owner_from = ["127.0.0.1/32"]
 TOML
 chmod 600 "$STATE/trunk/trunk.toml"

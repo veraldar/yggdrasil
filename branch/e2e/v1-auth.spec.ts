@@ -114,9 +114,14 @@ test('sign-in with recovery code → valid PASETO → region roam → refresh re
 test('moved v0.9 routes answer 404 in trunk mode', async ({ request }) => {
   const a = admin();
   const h = { cookie: `bifrost_device=${a.cookies.bifrost_device}`, origin: BASE };
-  for (const p of ['/pair', '/devices', '/join']) {
+  // /join is gone. Since IDP M3 `/pair` and `/devices` are the TRUNK's own shell pages (spec §7), answered before
+  // the app: 200 with the trunk's page marker — never the v0.9 app's page.
+  const j = await request.get('/join', { headers: h, maxRedirects: 0 });
+  expect(j.status(), '/join').toBe(404);
+  for (const [p, page] of [['/pair', 'pair'], ['/devices', 'devices']]) {
     const r = await request.get(p, { headers: h, maxRedirects: 0 });
-    expect(r.status(), p).toBe(404);
+    expect(r.status(), p).toBe(200);
+    expect(await r.text(), `${p} is the trunk's page`).toContain(`data-page="${page}"`);
   }
   for (const p of ['/api/pair/claim', '/api/pair/code', '/api/roots/join']) {
     const r = await request.post(p, { headers: h, data: {} });
