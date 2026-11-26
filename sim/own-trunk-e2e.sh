@@ -197,7 +197,7 @@ check n0 "newer() & major_of(): pre-release < release, 1.x vs 2.x — in trunk.s
 # =========================================================================================== stage a
 if stage a; then
   say "stage a: fresh VPS, trunk.sh v1 --self-signed (signed, static user, claim, /install/root.sh, update + --major)"
-  new_vps ot-vps-a "$IP_A" "$A" "extra.tree.test"; to_box ot-vps-a
+  new_vps ot-vps-a "$IP_A" "$A" "extra.trunk.tree.test"; to_box ot-vps-a
   docker cp "$DIST/trunk.sh" ot-vps-a:/root/trunk.sh >/dev/null
   vps ot-vps-a "sed \"s/^YGG_RELEASE_TEST='1'/YGG_RELEASE_TEST=''/\" /root/trunk.sh >/root/trunk-real.sh &&
     cp /root/trunk.sh /root/trunk-changed.sh && echo '# one line more' >>/root/trunk-changed.sh"
@@ -252,10 +252,10 @@ if stage a; then
 
   KEYSUM=$(vps ot-vps-a 'sha256sum </etc/yggdrasil-trunk/key.pem')
   KEKSUM=$(vps ot-vps-a 'sha256sum </etc/yggdrasil-trunk/trunk-kek')
-  vps ot-vps-a "cd /root && $REL bash trunk.sh --add-name extra.tree.test -y" >"$STATE/log/a4-addname.log" 2>&1; rc=$?
+  vps ot-vps-a "cd /root && $REL bash trunk.sh --add-name extra.trunk.tree.test -y" >"$STATE/log/a4-addname.log" 2>&1; rc=$?
   check a4 "SPKI pin matches, --add-name writes extra_names, re-run keeps key + kek + pin" \
     bash -c "[ $rc = 0 ] && [ \"\$(docker exec ot-vps-a /usr/local/lib/yggdrasil-trunk/bifrost-net ap-pin /etc/yggdrasil-trunk/cert.pem)\" = 'pin = \"sha-256 $PIN_A\"' ] && \
-      docker exec ot-vps-a grep -q 'extra_names *=.*\"extra.tree.test\"' /etc/yggdrasil-trunk/trunk.toml && \
+      docker exec ot-vps-a grep -q 'extra_names *=.*\"extra.trunk.tree.test\"' /etc/yggdrasil-trunk/trunk.toml && \
       [ \"\$(docker exec ot-vps-a bash -c 'sha256sum </etc/yggdrasil-trunk/key.pem')\" = '$KEYSUM' ] && \
       [ \"\$(docker exec ot-vps-a bash -c 'sha256sum </etc/yggdrasil-trunk/trunk-kek')\" = '$KEKSUM' ]"
 
@@ -342,6 +342,19 @@ if stage a; then
   homesh "cd ~ && $HREL bash root.sh --upstream-env ~/model.env" >"$STATE/log/h2-rerun.log" 2>&1 </dev/null; rc=$?
   check h2 "root.sh re-run: idempotent (already joined, same root_id, exit 0)" \
     bash -c "[ $rc = 0 ] && grep -q 'already joined: root $ROOT_ID' '$STATE/log/h2-rerun.log'"
+
+  # dtls_fp: the directory pin of the really-installed root is the bridge's actual certificate
+  # fingerprint (what /identity and /offer carry), and a plain --update (nothing newer) keeps it.
+  BR_PORT=$(homesh 'sed -n "s/^BRIDGE_PORT=//p" ~/.local/share/yggdrasil-root/root.conf')
+  bridge_fp() { homesh "curl -s http://127.0.0.1:$BR_PORT/identity" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("fingerprint",""))'; }
+  dir_fp() { outside "python3 /sim/v1-agent.py roots --url https://$A --cookies /sim/cookies-a.json --cacert /sim/trunk-a.pem" | python3 -c '
+import json,sys
+d=json.load(sys.stdin); d=d.get("roots",d) if isinstance(d,dict) else d
+print(" ".join(r.get("dtls_fp","") for r in d if r.get("id")=="'$ROOT_ID'" or r.get("root_id")=="'$ROOT_ID'"))'; }
+  FP0=$(bridge_fp); homesh "cd ~ && $HREL bash root.sh --update --upstream-env ~/model.env" >"$STATE/log/h3-update.log" 2>&1 </dev/null; rc=$?
+  FP1=$(bridge_fp)
+  check h1d "enrolled dtls_fp is non-empty, equals the bridge's real certificate fingerprint, and --update keeps it (rc $rc)" \
+    bash -c "[ $rc = 0 ] && [ -n '$FP0' ] && [ '$FP0' = '$FP1' ] && [ \"\$(echo $(dir_fp))\" = '$FP0' ]"
 
   if [ -n "$KEY" ]; then
     latest 2.0.0-test
