@@ -3073,6 +3073,7 @@ mod dtls_load {
             branch: None,
             tokens,
             ice_demux: None,
+            trunk_link: None,
         });
         // the ICE-TCP candidate the bridge advertises (the ap's :443 in real life): the phone
         // talks to the bridge's listener and calls it by this address

@@ -155,6 +155,10 @@ pub struct DialConfig {
     /// first STUN binding request's USERNAME names the receiver's ufrag, and
     /// the bridge's peers register theirs at /offer
     pub ice_demux: Option<IceDemux>,
+    /// trunk v1 (spec §5.7): when set, `/rtc` LiveKit signaling frames are scanned for
+    /// `a=ice-ufrag:` and registered with the trunk (ack ≤ 500 ms before forwarding the SDP),
+    /// both on the plain trunk path and over the pinned channel's `tun` mux.
+    pub trunk_link: Option<Arc<std::sync::OnceLock<Arc<crate::v1::link::Link>>>>,
 }
 
 pub struct IceDemux {
@@ -337,6 +341,7 @@ pub fn new_token() -> (String, String) {
 }
 
 /// Self-signed cert+key for local runs (the VPS uses the site's LE files).
+#[cfg(feature = "bridge")]
 pub fn self_signed(dir: &str, names: Vec<String>) -> Result<(String, String, String), String> {
     let ck = rcgen::generate_simple_self_signed(names).map_err(|e| e.to_string())?;
     std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
@@ -934,12 +939,18 @@ fn tls_fail_kind(e: &io::Error) -> &'static str {
 }
 
 /// The DNS names of the ap's certificate (the test request names the first).
+#[cfg(feature = "bridge")]
 fn certs_names(cert_path: &str) -> Vec<String> {
     let Ok(Some(Ok(cert))) = CertificateDer::pem_file_iter(cert_path).map(|mut it| it.next()) else { return vec![] };
     match webpki::EndEntityCert::try_from(&cert) {
         Ok(ee) => ee.valid_dns_names().map(str::to_string).collect(),
         Err(_) => vec![],
     }
+}
+
+#[cfg(not(feature = "bridge"))]
+fn certs_names(_cert_path: &str) -> Vec<String> {
+    vec![]
 }
 
 /// Where the ap's test request goes: its own front door (the :443 dispatcher when the ap sits
@@ -1470,7 +1481,7 @@ fn join_exempt(method: &str, raw: &str) -> bool {
     }
 }
 
-fn rewrite_head(req: &Req, ip: IpAddr, upgrade: bool, edge: bool) -> Vec<u8> {
+fn rewrite_head(req: &Req, ip: IpAddr, upgrade: bool, edge: bool, strip_ws_ext: bool) -> Vec<u8> {
     const DROP: &[&str] = &[
         "connection", "keep-alive", "proxy-connection", "forwarded", "x-forwarded-for",
         "x-forwarded-proto", "x-forwarded-host", "x-real-ip", "x-bifrost-peer",
@@ -1478,7 +1489,8 @@ fn rewrite_head(req: &Req, ip: IpAddr, upgrade: bool, edge: bool) -> Vec<u8> {
     ];
     let mut s = format!("{} {} {}\r\n", req.method, req.path, req.version);
     for (k, v) in &req.headers {
-        if !DROP.contains(&k.to_ascii_lowercase().as_str()) {
+        let kl = k.to_ascii_lowercase();
+        if !DROP.contains(&kl.as_str()) && !(strip_ws_ext && kl == "sec-websocket-extensions") {
             s.push_str(&format!("{k}: {v}\r\n"));
         }
     }
@@ -1727,33 +1739,42 @@ async fn serve_stream_via(
     MH.up_connect.since(t_up);
     let _ = up.set_nodelay(true);
     let (mut ur, mut uw) = up.into_split();
-    if uw.write_all(&rewrite_head(&req, ip, upgrade, branch.is_some())).await.is_err() {
+    // spec §5.7: strip Sec-WebSocket-Extensions on /rtc so LiveKit never negotiates compression
+    // and every SDP `a=ice-ufrag:` is plain ASCII in the WebSocket frame payload
+    if uw.write_all(&rewrite_head(&req, ip, upgrade, branch.is_some(), livekit.is_some())).await.is_err() {
         return reply(&rec, vec![]);
     }
     let (switched_tx, mut switched) = watch::channel(false);
     let out2 = out.clone();
     let (shared, t0) = (rec.shared.clone(), rec.t0);
-    let pump = tokio::spawn(async move {
-        let mut buf = vec![0u8; 16384];
-        let mut first = true;
-        loop {
-            match ur.read(&mut buf).await {
-                Ok(0) | Err(_) => break,
-                Ok(n) => {
-                    shared.first(t0, &buf[..n]);
-                    shared.bytes_out.fetch_add(n as u64, Ordering::Relaxed);
-                    if first && buf[..n].starts_with(b"HTTP/1.1 101") {
-                        let _ = switched_tx.send(true);
-                    }
-                    first = false;
-                    if out2.send(mux(DATA, id, &buf[..n])).is_err() {
-                        break;
+    let rtc_link = livekit
+        .and_then(|_| cfg.trunk_link.as_ref())
+        .and_then(|c| c.get().cloned());
+    let pump = if let Some(link) = rtc_link {
+        tokio::spawn(pump_livekit_rtc(ur, out2, id, switched_tx, shared, t0, link))
+    } else {
+        tokio::spawn(async move {
+            let mut buf = vec![0u8; 16384];
+            let mut first = true;
+            loop {
+                match ur.read(&mut buf).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        shared.first(t0, &buf[..n]);
+                        shared.bytes_out.fetch_add(n as u64, Ordering::Relaxed);
+                        if first && buf[..n].starts_with(b"HTTP/1.1 101") {
+                            let _ = switched_tx.send(true);
+                        }
+                        first = false;
+                        if out2.send(mux(DATA, id, &buf[..n])).is_err() {
+                            break;
+                        }
                     }
                 }
             }
-        }
-        let _ = out2.send(mux(CLOSE, id, &[]));
-    });
+            let _ = out2.send(mux(CLOSE, id, &[]));
+        })
+    };
     let mut recheck = tokio::time::interval(Duration::from_millis(500));
     loop {
         let chunk = tokio::select! {
@@ -1790,6 +1811,197 @@ async fn serve_stream_via(
     }
     let _ = uw.shutdown().await;
     pump.abort();
+}
+
+/// Spec §5.7: LiveKit→phone `/rtc` pump for v1 trunks (used on BOTH the plain trunk path and
+/// the pinned channel's `tun` mux). Reads complete RFC 6455 messages from LiveKit, extracts any
+/// new `a=ice-ufrag:` values, waits up to 500 ms for the trunk's `ice.ack` BEFORE forwarding the
+/// frame carrying the SDP, and releases all ufrags owned by this socket on close/abort.
+async fn pump_livekit_rtc(
+    mut ur: tokio::net::tcp::OwnedReadHalf,
+    out: Frames,
+    id: u32,
+    switched_tx: watch::Sender<bool>,
+    shared: Arc<StreamShared>,
+    t0: Instant,
+    link: Arc<crate::v1::link::Link>,
+) {
+    struct RtcRelease(Arc<crate::v1::link::Link>, u64);
+    impl Drop for RtcRelease {
+        fn drop(&mut self) {
+            self.0.release_rtc(self.1);
+        }
+    }
+    let stream_id = link.next_rtc_stream_id();
+    let _guard = RtcRelease(link.clone(), stream_id);
+
+    let send_chunked = |data: &[u8]| -> bool {
+        for c in data.chunks(16384) {
+            if out.send(mux(DATA, id, c)).is_err() {
+                return false;
+            }
+        }
+        true
+    };
+
+    // 1. Read HTTP response head up to \r\n\r\n
+    let mut pending = Vec::with_capacity(4096);
+    let mut tmp = [0u8; 4096];
+    let head_end = loop {
+        if let Some(p) = pending.windows(4).position(|w| w == b"\r\n\r\n") {
+            break p + 4;
+        }
+        if pending.len() > MAX_HEAD {
+            let _ = send_chunked(&pending);
+            let _ = out.send(mux(CLOSE, id, &[]));
+            return;
+        }
+        match ur.read(&mut tmp).await {
+            Ok(0) | Err(_) => {
+                if !pending.is_empty() {
+                    let _ = send_chunked(&pending);
+                }
+                let _ = out.send(mux(CLOSE, id, &[]));
+                return;
+            }
+            Ok(n) => {
+                shared.first(t0, &tmp[..n]);
+                shared.bytes_out.fetch_add(n as u64, Ordering::Relaxed);
+                pending.extend_from_slice(&tmp[..n]);
+            }
+        }
+    };
+    let head: Vec<u8> = pending.drain(..head_end).collect();
+    let is_101 = head.starts_with(b"HTTP/1.1 101");
+    if is_101 {
+        let _ = switched_tx.send(true);
+    }
+    if !send_chunked(&head) {
+        let _ = out.send(mux(CLOSE, id, &[]));
+        return;
+    }
+    if !is_101 {
+        if !pending.is_empty() && !send_chunked(&pending) {
+            let _ = out.send(mux(CLOSE, id, &[]));
+            return;
+        }
+        let mut buf = vec![0u8; 16384];
+        while let Ok(n) = ur.read(&mut buf).await {
+            if n == 0 {
+                break;
+            }
+            shared.bytes_out.fetch_add(n as u64, Ordering::Relaxed);
+            if !send_chunked(&buf[..n]) {
+                break;
+            }
+        }
+        let _ = out.send(mux(CLOSE, id, &[]));
+        return;
+    }
+
+    // 2. WebSocket frame mode: inspect server→phone data messages for `a=ice-ufrag:`
+    const MAX_RTC_FRAME: usize = 4 << 20;
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut msg_frames: Vec<Vec<u8>> = Vec::new();
+    let mut msg_payload: Vec<u8> = Vec::new();
+
+    'ws: loop {
+        // Need at least 2 bytes for the RFC 6455 header
+        while pending.len() < 2 {
+            match ur.read(&mut tmp).await {
+                Ok(0) | Err(_) => break 'ws,
+                Ok(n) => {
+                    shared.bytes_out.fetch_add(n as u64, Ordering::Relaxed);
+                    pending.extend_from_slice(&tmp[..n]);
+                }
+            }
+        }
+        let b0 = pending[0];
+        let b1 = pending[1];
+        let fin = (b0 & 0x80) != 0;
+        let op = b0 & 0x0F;
+        let masked = (b1 & 0x80) != 0;
+        let len7 = (b1 & 0x7F) as usize;
+        let ext_len = match len7 {
+            126 => 2,
+            127 => 8,
+            _ => 0,
+        };
+        let hdr_len = 2 + ext_len + if masked { 4 } else { 0 };
+        while pending.len() < hdr_len {
+            match ur.read(&mut tmp).await {
+                Ok(0) | Err(_) => break 'ws,
+                Ok(n) => {
+                    shared.bytes_out.fetch_add(n as u64, Ordering::Relaxed);
+                    pending.extend_from_slice(&tmp[..n]);
+                }
+            }
+        }
+        let payload_len: usize = match len7 {
+            126 => u16::from_be_bytes([pending[2], pending[3]]) as usize,
+            127 => {
+                let n = u64::from_be_bytes(pending[2..10].try_into().unwrap());
+                if n > MAX_RTC_FRAME as u64 {
+                    break 'ws;
+                }
+                n as usize
+            }
+            n => n,
+        };
+        if payload_len > MAX_RTC_FRAME {
+            break 'ws;
+        }
+        let total = hdr_len + payload_len;
+        while pending.len() < total {
+            let mut buf = vec![0u8; (total - pending.len()).min(16384)];
+            match ur.read(&mut buf).await {
+                Ok(0) | Err(_) => break 'ws,
+                Ok(n) => {
+                    shared.bytes_out.fetch_add(n as u64, Ordering::Relaxed);
+                    pending.extend_from_slice(&buf[..n]);
+                }
+            }
+        }
+        let raw_frame: Vec<u8> = pending.drain(..total).collect();
+        // Control frames (ping/pong/close) may interleave fragmented data frames: forward at once
+        if op >= 0x8 {
+            if !send_chunked(&raw_frame) {
+                break 'ws;
+            }
+            continue;
+        }
+        let mut payload = raw_frame[hdr_len..].to_vec();
+        if masked {
+            let mask = &raw_frame[hdr_len - 4..hdr_len];
+            for (i, b) in payload.iter_mut().enumerate() {
+                *b ^= mask[i & 3];
+            }
+        }
+        msg_frames.push(raw_frame);
+        msg_payload.extend_from_slice(&payload);
+        if fin {
+            let ufrags: Vec<String> = crate::v1::link::extract_sdp_ufrags(&msg_payload)
+                .into_iter()
+                .filter(|u| seen.insert(u.clone()))
+                .collect();
+            if !ufrags.is_empty() {
+                link.register_rtc_wait(stream_id, &ufrags, crate::v1::link::ICE_ACK_WAIT).await;
+            }
+            for f in msg_frames.drain(..) {
+                if !send_chunked(&f) {
+                    break 'ws;
+                }
+            }
+            msg_payload.clear();
+        }
+    }
+    for f in msg_frames {
+        let _ = send_chunked(&f);
+    }
+    if !pending.is_empty() {
+        let _ = send_chunked(&pending);
+    }
+    let _ = out.send(mux(CLOSE, id, &[]));
 }
 
 /// One HTTP stream over the PINNED channel (the phone's tunnel, bridge.rs):
@@ -1895,6 +2107,7 @@ pub(crate) async fn serve_raw(
 
 // ---- selftest: the whole chain in one process --------------------------------------------
 
+#[cfg(feature = "bridge")]
 pub fn selftest() -> Result<String, String> {
     let dir = std::env::temp_dir().join(format!("bifrost-ap-{}", std::process::id()));
     let dir_s = dir.to_string_lossy().to_string();
@@ -1988,6 +2201,7 @@ pub fn selftest() -> Result<String, String> {
             branch: Some(up_addr.to_string()),
             tokens: Arc::new(TokenStore::open(&reg_path)),
             ice_demux: Some(IceDemux { name: "livekit-ice".into(), bridge: bice_addr, ufrags: ufrags.clone() }),
+            trunk_link: None,
         })
     };
     let bad_tok = rt.block_on(async { timeout(Duration::from_secs(5), dial_once(&mk(&pin, "not-the-pairing-token-000"))).await });

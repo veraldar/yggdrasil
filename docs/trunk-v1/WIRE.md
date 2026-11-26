@@ -84,3 +84,13 @@ report as wanted contract changes.
   `idp::session::Who` is merged; `roots::audit` prints until `idp::audit` is merged.
 - Rigs: `bifrost-net trunk-rig seed-admin|mint -c trunk.toml --device …` (refused unless
   `TRUNK_TEST_FAST=1`) — a claimed trunk with an admin device and its token, before sign-in exists.
+
+## import-v0 + rebind (§11 steps 2 and 7, A6) — the switchover seam, done
+- `trunk-ctl import-v0 --roots roots.json --dtls bridge-dtls.json (or --hub-dtls-fp PIN) --hub-name NAME --hub-wg-pub PUB --hub-root-pub PUB`: keeps every v0.9 root id and WireGuard address (a trunk that already has a different net is refused — never renumbers); the hub root is enrolled with its NEW key directly; every joined root keeps `rebind_secret_hash` = its v0.9 `secretHash` (`share_model` → `share_model_from` = the hub id). One audit entry per root. It runs once.
+- `POST /t/roots/rebind {"root_id","old_secret","root_pub","sig"}` (no cookie): `sig` = Ed25519(root_pub) over `"ygg-trunk-v1/rebind\0" root_id "\0" old_secret`. On match the new key becomes the root's link key and the secret is burned (NULL; a second use → 410). After it, the root dials `/t/root` the normal way (its result carries the trunk url/key for the config).
+- `trunk-ctl roots list | roots revoke ID [WHY..]`: the console sees every root (incl. `needs_rebind`), revoke cuts the link and pushes the directory.
+
+## the trunk's own meter (A13/A14) — done
+- The trunk meters itself as `ap` and keeps nothing on disk (the rig: `BIFROST_OBS_DIR=`): its minute lines go to the obs sink root (first online root with the app) as `{"t":"stats","lines":[…]}` CTRL; the root's bridge ingests them → `ap-min-*.jsonl` beside its own.
+- Per-root channel probes: `{"t":"probe","id":N}` CTRL every `BIFROST_PROBE_EVERY_S` (default 300), the root echoes it; counted `edge.probe.ok/fail`, histogram `edge.probe.link`.
+- `GET /_probe` on the trunk (public, no token): one CTRL probe to the door root → 204 + `X-Bifrost-Link-Us` µs / 503 no root online / 504 silent.

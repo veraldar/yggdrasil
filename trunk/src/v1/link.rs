@@ -20,14 +20,14 @@
 
 use std::collections::{HashMap, HashSet};
 use std::net::{SocketAddr, UdpSocket};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Notify};
 use tokio::time::timeout;
 
 use super::proto::{self, SignKey};
@@ -69,13 +69,17 @@ pub struct Link {
     /// ufrags the trunk acknowledged on the current link
     acked: Mutex<HashSet<String>>,
     acked_cv: Condvar,
+    acked_notify: Notify,
     /// ufrags registered on the current link (renewed every ICE_RENEW_S, released when gone)
     held: Mutex<HashMap<String, Instant>>,
+    /// LiveKit ufrags per open `/rtc` stream (plain trunk path AND pinned channel `tun` mux)
+    rtc_ufrags: Mutex<HashMap<u64, HashSet<String>>>,
+    rtc_seq: AtomicU64,
     keys_seq: Mutex<u64>,
     revoked: AtomicBool,
     wg_sock: Option<UdpSocket>,
-    pub wg_relayed: std::sync::atomic::AtomicU64,
-    pub wg_dropped: std::sync::atomic::AtomicU64,
+    pub wg_relayed: AtomicU64,
+    pub wg_dropped: AtomicU64,
 }
 
 fn badsig(what: &str) {
@@ -109,7 +113,10 @@ impl Link {
             out: Mutex::new(None),
             acked: Mutex::default(),
             acked_cv: Condvar::new(),
+            acked_notify: Notify::new(),
             held: Mutex::default(),
+            rtc_ufrags: Mutex::default(),
+            rtc_seq: AtomicU64::new(0),
             keys_seq: Mutex::new(0),
             revoked: AtomicBool::new(false),
             wg_sock,
@@ -196,8 +203,79 @@ impl Link {
         true
     }
 
-    /// Keep the trunk's routes in line with the bridge's live ufrags: new ones registered, gone
-    /// ones released, all renewed every ICE_RENEW_S.
+    fn all_live_ufrags(&self) -> HashSet<String> {
+        let mut live: HashSet<String> = self.cfg.ufrags.lock().unwrap().clone();
+        for set in self.rtc_ufrags.lock().unwrap().values() {
+            live.extend(set.iter().cloned());
+        }
+        live
+    }
+
+    pub fn next_rtc_stream_id(&self) -> u64 {
+        self.rtc_seq.fetch_add(1, Ordering::Relaxed) + 1
+    }
+
+    /// Async registration for LiveKit `/rtc` ufrags (spec §5.7): records them under `stream_id`
+    /// (so `ice_sync` renews them every 60 s and reconnects re-register them), sends `ice.register`
+    /// and awaits `ice.ack` for at most `wait` (500 ms) BEFORE the bridge forwards the SDP frame.
+    pub async fn register_rtc_wait(&self, stream_id: u64, ufrags: &[String], wait: Duration) -> bool {
+        if ufrags.is_empty() {
+            return true;
+        }
+        {
+            let mut r = self.rtc_ufrags.lock().unwrap();
+            let entry = r.entry(stream_id).or_default();
+            for u in ufrags {
+                entry.insert(u.clone());
+            }
+        }
+        {
+            let mut h = self.held.lock().unwrap();
+            for u in ufrags {
+                h.insert(u.clone(), Instant::now());
+            }
+        }
+        if !self.send_ctrl(json!({ "t": "ice.register", "ufrags": ufrags, "ttl_s": proto::ICE_TTL_S })) {
+            meter::inc_named("ice.reg_timeout");
+            return false;
+        }
+        let deadline = tokio::time::Instant::now() + wait;
+        loop {
+            let notified = self.acked_notify.notified();
+            if ufrags.iter().all(|u| self.acked.lock().unwrap().contains(u)) {
+                return true;
+            }
+            if tokio::time::timeout_at(deadline, notified).await.is_err() {
+                if ufrags.iter().all(|u| self.acked.lock().unwrap().contains(u)) {
+                    return true;
+                }
+                meter::inc_named("ice.reg_timeout");
+                return false;
+            }
+        }
+    }
+
+    /// Release all ufrags owned solely by `/rtc` stream `stream_id` when that socket closes.
+    pub fn release_rtc(&self, stream_id: u64) {
+        let removed = self.rtc_ufrags.lock().unwrap().remove(&stream_id);
+        let Some(removed) = removed else { return };
+        let still_live = self.all_live_ufrags();
+        let gone: Vec<String> = removed.into_iter().filter(|u| !still_live.contains(u)).collect();
+        if gone.is_empty() {
+            return;
+        }
+        {
+            let mut h = self.held.lock().unwrap();
+            for u in &gone {
+                h.remove(u);
+            }
+        }
+        self.acked.lock().unwrap().retain(|u| !gone.contains(u));
+        self.send_ctrl(json!({ "t": "ice.release", "ufrags": gone }));
+    }
+
+    /// Keep the trunk's routes in line with the bridge's live ufrags (both str0m and `/rtc`):
+    /// new ones registered, gone ones released, all renewed every ICE_RENEW_S.
     async fn ice_sync(self: Arc<Self>) {
         let mut last_renew = Instant::now();
         loop {
@@ -205,7 +283,7 @@ impl Link {
             if !self.is_up() {
                 continue;
             }
-            let live: HashSet<String> = self.cfg.ufrags.lock().unwrap().clone();
+            let live = self.all_live_ufrags();
             let (new, gone): (Vec<String>, Vec<String>) = {
                 let mut h = self.held.lock().unwrap();
                 let new: Vec<String> = live.iter().filter(|u| !h.contains_key(*u)).cloned().collect();
@@ -376,7 +454,9 @@ impl Link {
                 for u in m["ufrags"].as_array().into_iter().flatten().filter_map(Value::as_str) {
                     a.insert(u.to_string());
                 }
+                drop(a);
                 self.acked_cv.notify_all();
+                self.acked_notify.notify_waiters();
             }
             "probe" => {
                 meter::inc(&MC.probe_answered);
@@ -512,8 +592,8 @@ impl Link {
         });
         *self.out.lock().unwrap() = Some(out.clone());
         self.cfg.state.set_link("up");
-        // the routes of every live pinned peer (a reconnect: the trunk kept none)
-        let live: Vec<String> = self.cfg.ufrags.lock().unwrap().iter().cloned().collect();
+        // the routes of every live pinned peer and `/rtc` socket (a reconnect: the trunk kept none)
+        let live: Vec<String> = self.all_live_ufrags().into_iter().collect();
         if !live.is_empty() {
             let me = self.clone();
             tokio::task::spawn_blocking(move || me.register_wait(&live, ICE_ACK_WAIT));
@@ -635,6 +715,104 @@ async fn recv_ctrl<R: tokio::io::AsyncRead + Unpin>(rd: &mut R) -> Result<Value,
     }
 }
 
+/// Light-root runner for the root build (`--no-default-features`, no WebRTC / libopus / cmake):
+/// dials the v1 trunk from `[trunk]` in `bridge.toml`, maintains `trunk-state.json`, relays
+/// WireGuard frames to/from the local `bifrost-net wg` node, and serves HTTP / raw streams when
+/// configured. `[ap]` (v0.9) and bridge-only configs are refused.
+pub fn run_light_bridge(path: &str) -> Result<(), String> {
+    let loaded = crate::config::load(path)?;
+    println!("bifrost-net bridge '{}' (root build — light [trunk] link, config: {})", loaded.config.node.name, loaded.path);
+    if loaded.config.ap.is_some() {
+        return Err("config has [ap] (v0.9): the root build only dials a v1 [trunk]".into());
+    }
+    let t = loaded
+        .config
+        .trunk
+        .as_ref()
+        .ok_or("config has no [trunk] section (the root build has no WebRTC bridge; configure [trunk])")?;
+    meter::init("bridge", meter::dir_from_env(meter::dir_beside(std::path::Path::new(&t.state_file))));
+    let st = TrunkState::open(Some(t.state_file.clone().into()), &t.url, &t.trunk_key, &t.root_id);
+    let tokens = Arc::new(crate::tokens::TokenStore::open_trunk(st.clone()));
+    let root_key = SignKey::load(&t.root_key_file)?;
+    let wg = match (t.wg_relay.as_deref(), t.wg_local.as_deref()) {
+        (Some(r), Some(l)) => Some((
+            r.parse().map_err(|e| format!("[trunk] wg_relay {r}: {e}"))?,
+            l.parse().map_err(|e| format!("[trunk] wg_local {l}: {e}"))?,
+        )),
+        (None, None) => None,
+        _ => return Err("[trunk] wg_relay and wg_local go together".into()),
+    };
+    let link_cell: Arc<std::sync::OnceLock<Arc<Link>>> = Default::default();
+    let link = Link::spawn(LinkConfig {
+        url: t.url.clone(),
+        pin: t.pin.clone(),
+        trunk_key: t.trunk_key.clone(),
+        root_id: t.root_id.clone(),
+        root_key: Arc::new(root_key),
+        state: st,
+        dial: Arc::new(crate::ap::DialConfig {
+            url: t.url.clone(),
+            pin: t.pin.clone().unwrap_or_default(),
+            token: String::new(),
+            upstream: t.upstream.clone(),
+            livekit: t.livekit.clone(),
+            tcp: t.tcp.clone(),
+            rootlink: None,
+            branch: None,
+            tokens,
+            ice_demux: None,
+            trunk_link: Some(link_cell.clone()),
+        }),
+        wg,
+        ufrags: Arc::default(),
+    })?;
+    let _ = link_cell.set(link);
+    println!("  bridge: trunk {} as {} (proto 2, root build) → {}", t.url, t.root_id, t.upstream);
+    println!("  bridge: device gate = PASETO offline against {} (C3)", t.state_file);
+    match wg {
+        Some((r, l)) => println!("  bridge: root <-> root over WireGuard — udp {r} <-> this root's node {l}"),
+        None => println!("  bridge: no WireGuard node (wg_relay / wg_local unset)"),
+    }
+    println!("bifrost-net bridge (root build) serving — Ctrl-C to stop");
+    loop {
+        std::thread::sleep(Duration::from_secs(3600));
+    }
+}
+
+/// Extract every `a=ice-ufrag:<token>` from a LiveKit `/rtc` WebSocket payload (SDP is plain
+/// UTF-8 text inside LiveKit's protobuf `SessionDescription`). Deduplicated, order-preserving.
+pub fn extract_sdp_ufrags(payload: &[u8]) -> Vec<String> {
+    const NEEDLE: &[u8] = b"a=ice-ufrag:";
+    let mut out: Vec<String> = vec![];
+    let mut i = 0;
+    while i + NEEDLE.len() <= payload.len() {
+        if &payload[i..i + NEEDLE.len()] == NEEDLE {
+            let start = i + NEEDLE.len();
+            let mut end = start;
+            while end < payload.len() {
+                let b = payload[end];
+                if b.is_ascii_alphanumeric() || b == b'+' || b == b'/' {
+                    end += 1;
+                } else {
+                    break;
+                }
+            }
+            let len = end - start;
+            if (4..=256).contains(&len) {
+                if let Ok(u) = std::str::from_utf8(&payload[start..end]) {
+                    if !out.iter().any(|x| x == u) {
+                        out.push(u.to_string());
+                    }
+                }
+            }
+            i = end;
+        } else {
+            i += 1;
+        }
+    }
+    out
+}
+
 /// `https://host[:port][/…]` or `http://host:port` → (tls, host, port).
 pub fn parse_origin(url: &str) -> Result<(bool, String, u16), String> {
     let (tls, rest) = if let Some(r) = url.strip_prefix("https://") {
@@ -686,6 +864,7 @@ mod tests {
             branch: None,
             tokens,
             ice_demux: None,
+            trunk_link: None,
         });
         Link::spawn(LinkConfig {
             url: "http://127.0.0.1:9".into(),
@@ -758,5 +937,15 @@ mod tests {
         assert_eq!(parse_origin("http://127.0.0.1:18901"), Ok((false, "127.0.0.1".into(), 18901)));
         assert!(parse_origin("wss://x/ap").is_err());
         assert!(parse_origin("https://").is_err());
+    }
+
+    #[test]
+    fn sdp_ufrag_extraction() {
+        let mut proto_blob = vec![0x0a, 0x80, 0x01, 0x12, 0x70];
+        proto_blob.extend_from_slice(
+            b"v=0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\na=ice-ufrag:AbC1+2/\r\na=ice-pwd:secret\r\nm=video 9 UDP/TLS/RTP/SAVPF 96\r\na=ice-ufrag:AbC1+2/\r\na=ice-ufrag:XyZ9876\r\na=ice-ufrag:bad\r\n",
+        );
+        assert_eq!(extract_sdp_ufrags(&proto_blob), vec!["AbC1+2/".to_string(), "XyZ9876".to_string()]);
+        assert!(extract_sdp_ufrags(b"no ufrag here").is_empty());
     }
 }

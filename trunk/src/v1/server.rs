@@ -359,6 +359,7 @@ pub async fn start(st: Arc<State>) -> Result<Bound, String> {
         bound.ice = l.local_addr().ok();
         tokio::spawn(relay::serve_ice(st.clone(), l));
     }
+    relay::spawn_ap_meter(&st);
     Ok(bound)
 }
 

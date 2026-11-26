@@ -133,6 +133,7 @@ pub fn run(path: &str) -> Result<(), String> {
                 branch: Some(own.clone()),
                 tokens: tokens.clone(),
                 ice_demux: None,
+                trunk_link: Some(link_cell.clone()),
             };
             (ice, Some(std::sync::Arc::new(d)))
         }
@@ -157,6 +158,7 @@ pub fn run(path: &str) -> Result<(), String> {
                 branch: Some(own.clone()),
                 tokens: tokens.clone(),
                 ice_demux: None,
+                trunk_link: None,
             };
             (ice, Some(std::sync::Arc::new(t)))
         }
@@ -276,6 +278,7 @@ pub fn run(path: &str) -> Result<(), String> {
             branch: Some(branch),
             tokens: tokens.clone(),
             ice_demux,
+            trunk_link: None,
         });
     }
     if let (Some(t), Some(st)) = (trunk.as_ref(), trunk_state.as_ref()) {
@@ -307,6 +310,7 @@ pub fn run(path: &str) -> Result<(), String> {
                 branch: Some(own.clone()),
                 tokens: tokens.clone(),
                 ice_demux,
+                trunk_link: Some(link_cell.clone()),
             }),
             wg,
             ufrags: handle.ufrags.clone(),

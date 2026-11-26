@@ -99,6 +99,8 @@ pub struct Hub {
     ice_changed: Notify,
     /// (seq, the signed directory, its content)
     dir: Mutex<(u64, Value, Vec<DirRoot>)>,
+    /// the trunk's channel probes: id → the waiting probe's sender (answered by the root's CTRL echo)
+    pending_probes: Mutex<HashMap<u64, tokio::sync::oneshot::Sender<()>>>,
     /// the seq last pushed to every root
     pushed: AtomicU64,
     keys_seq: AtomicU64,
@@ -125,6 +127,7 @@ impl Hub {
             ice: Mutex::default(),
             ice_changed: Notify::new(),
             dir: Mutex::new((0, Value::Null, vec![])),
+            pending_probes: Mutex::default(),
             pushed: AtomicU64::new(0),
             keys_seq: AtomicU64::new(now_ms()),
             wg_tap: Mutex::new(None),
@@ -487,6 +490,41 @@ impl Hub {
         }
     }
 
+    /* ---------------------------------------------------------------- the trunk's probes (A13) */
+
+    /// One channel probe to a root: a CTRL `probe` it must echo; the round trip over the whole
+    /// link (this is the v1 `own_probe` — the round trip includes the trunk's websocket writer).
+    pub async fn probe_root(&self, id: &str) -> Option<Duration> {
+        let link = self.link_of(id)?;
+        let pid = self.ids.fetch_add(1, Ordering::Relaxed) as u64 + 1;
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.pending_probes.lock().unwrap().insert(pid, tx);
+        let t0 = Instant::now();
+        if link.out.send((OP_BIN, proto::ctrl(&json!({ "t": "probe", "id": pid })))).is_err() {
+            self.pending_probes.lock().unwrap().remove(&pid);
+            return None;
+        }
+        let ok = tokio::time::timeout(Duration::from_secs(2), rx).await.is_ok_and(|r| r.is_ok());
+        self.pending_probes.lock().unwrap().remove(&pid);
+        ok.then(|| t0.elapsed())
+    }
+
+    /// The root echoed a probe: wake its waiter.
+    fn probe_answered(&self, id: u64) {
+        if let Some(tx) = self.pending_probes.lock().unwrap().remove(&id) {
+            let _ = tx.send(());
+        }
+    }
+
+    /// The trunk's minute lines, to the obs sink root (the first online root with the app) as a
+    /// `stats` CTRL (the root's bridge ingests them into its own obs folder — the v0.9 STATS home).
+    pub fn push_stats_line(&self, line: &Value) {
+        let Some(root) = self.door_for(None) else { return };
+        if let Some(l) = self.link_of(&root) {
+            let _ = l.out.send((OP_BIN, proto::ctrl(&json!({ "t": "stats", "lines": [line] }))));
+        }
+    }
+
     /* ---------------------------------------------------------------- WS /t/root */
 
     /// `GET /t/root` after the server read its head: the upgrade, the proto-2 handshake, then the
@@ -636,6 +674,12 @@ impl Hub {
                                 "ice.release" => {
                                     let ufrags: Vec<String> = m["ufrags"].as_array().into_iter().flatten().filter_map(|u| u.as_str().map(str::to_string)).collect();
                                     self.ice_release(&root_id, &ufrags);
+                                }
+                                "probe" => {
+                                    // the trunk's channel probe, echoed by the root (link.rs)
+                                    if let Some(pid) = m["id"].as_u64() {
+                                        self.probe_answered(pid);
+                                    }
                                 }
                                 _ => {}
                             }

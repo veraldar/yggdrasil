@@ -217,7 +217,7 @@ pub fn clean_name(s: &str) -> Option<String> {
     (!n.is_empty() && n.len() <= 40).then_some(n)
 }
 
-fn dtls_fp_ok(s: &str) -> bool {
+pub fn dtls_fp_ok(s: &str) -> bool {
     s.is_empty() || (s.len() <= 120 && s.starts_with("sha-256 ") && s[8..].bytes().all(|b| b.is_ascii_hexdigit() || b == b':'))
 }
 

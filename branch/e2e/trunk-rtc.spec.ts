@@ -445,9 +445,11 @@ test('trunk rtc: phone ⇄ vps:443 ⇄ box — pair, talk, hear the reply, media
         writeFileSync(png, await qr.screenshot());
         const qrUrl = execFileSync('zbarimg', ['--raw', '-q', png]).toString().trim();
         expect(qrUrl.startsWith(`${AP}/pair#`), qrUrl).toBe(true);
+        // E1's clock starts BEFORE the phone loads the page (NOTES-P1.md:153: the app's POST
+        // /offer leaves ~1.17 s after GET / and can fall before a pairedAt taken after the load)
+        pairedAt = Date.now();
         await phone.goto(qrUrl);
         await phone.waitForURL(`${AP}/`, { timeout: 30_000 });
-        pairedAt = Date.now();
         await expect(phone.getByTestId('roots')).toBeVisible({ timeout: 30_000 });
         const pin = await phone.evaluate(() =>
           JSON.parse(localStorage.getItem('bifrost.pin') || 'null')

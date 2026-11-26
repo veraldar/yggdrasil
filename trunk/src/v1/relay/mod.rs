@@ -9,6 +9,7 @@
 pub mod hub;
 
 use std::sync::{Arc, OnceLock};
+use std::time::{Duration, Instant};
 
 use super::db::Migration;
 use super::http::Resp;
@@ -75,6 +76,11 @@ pub async fn route(st: &Arc<State>, mut inc: Incoming) -> Option<Incoming> {
         }
         _ => {}
     }
+    if inc.req.method == "GET" && route == "/_probe" {
+        let r = public_probe(&st).await;
+        inc.answer(r).await;
+        return None;
+    }
     let s = segs(&route);
     let mine = matches!(s.as_slice(), ["t", "root"] | ["t", "roots", ..] | ["t", "me", "roots"] | ["t", "me", "door"] | ["t", "ice", "owner"]);
     if !mine {
@@ -114,6 +120,8 @@ pub async fn route(st: &Arc<State>, mut inc: Incoming) -> Option<Incoming> {
             let id = id.to_string();
             roots::enroll_poll(&st, &mut inc, &id).await
         }
+        // a v0.9-joined root binds its new key with its old root secret (no cookie)
+        ("POST", ["t", "roots", "rebind"]) => super::import::rebind(&st, &mut inc).await,
         _ => {
             // everything else: a signed-in device; writes from the trunk's own pages only
             match roots::device(&st, &inc) {
@@ -172,6 +180,74 @@ pub async fn to_door(st: &Arc<State>, inc: Incoming, who: Claims) {
     let hsts = inc.tls.then_some("max-age=31536000");
     let Incoming { io, head, rest, ip, .. } = inc;
     let _ = hub(st).relay_http(&door, io, ip, &head, rest, hsts).await;
+}
+
+/// The trunk meters itself as "ap" (v0.9's VPS role, A13): nothing on disk here — its minute
+/// lines go home over the link (STATS), and it probes each online root over the CTRL channel
+/// (`edge.probe.*`, the `edge.probe.link` histogram). `BIFROST_PROBE`/`BIFROST_PROBE_EVERY_S`
+/// are the v0.9 knobs. Call once, from `server::start`.
+pub fn spawn_ap_meter(st: &Arc<State>) {
+    use crate::meter::{self, C as MC, H as MH};
+    meter::init("ap", meter::dir_from_env(None));
+    let h = hub(st).clone();
+    // minutes: to the obs sink root
+    meter::on_minute(move |line| h.push_stats_line(line));
+    // probes: every root, every probe_every
+    if !std::env::var("BIFROST_PROBE").is_ok_and(|v| v == "off") {
+        let h = hub(st).clone();
+        let every = probe_every();
+        std::thread::Builder::new()
+            .name("trunk-probe".into())
+            .spawn(move || {
+                let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("tokio");
+                rt.block_on(async move {
+                    println!("  trunk: channel probe every {}s → every online root (CTRL, answered by the bridge)", every.as_secs());
+                    loop {
+                        for id in h.online_ids() {
+                            let t0 = Instant::now();
+                            match h.probe_root(&id).await {
+                                Some(_) => {
+                                    meter::inc(&MC.edge_probe_ok);
+                                    MH.edge_probe_link.since(t0);
+                                }
+                                None => meter::inc(&MC.edge_probe_fail),
+                            }
+                        }
+                        tokio::time::sleep(every).await;
+                    }
+                });
+            })
+            .expect("trunk probe thread");
+    }
+}
+
+/// PROBE_EVERY (ap.rs): the env knob, the default 300 s.
+fn probe_every() -> Duration {
+    let s = std::env::var("BIFROST_PROBE_EVERY_S").ok().and_then(|v| v.parse::<u64>().ok()).filter(|s| *s >= 1);
+    Duration::from_secs(s.unwrap_or(300))
+}
+
+/// `GET /_probe` — public, no token: one channel probe to the door root (A14: the home cron's
+/// "is the trunk and its roots up" check; the answer names the round trip). 204 + the µs in
+/// `X-Bifrost-Link-Us`, 503 when no root is online, 504 when one is but stays silent.
+pub async fn public_probe(st: &Arc<State>) -> Resp {
+    use crate::meter::{self, C as MC};
+    let hub = hub(st).clone();
+    let Some(door) = roots::door_for(st, "") else {
+        meter::inc_named("probe.public.offline");
+        return Resp::text(503, "bridge offline\n");
+    };
+    let t0 = Instant::now();
+    match tokio::time::timeout(Duration::from_secs(3), hub.probe_root(&door)).await {
+        Ok(Some(_)) => {
+            meter::inc(&MC.probe_answered);
+            Resp::new(204, "text/plain", "").header("X-Bifrost-Link-Us", &format!("{}", t0.elapsed().as_micros()))
+        }
+        _ => {
+            meter::inc(&MC.probe_refused);
+            Resp::text(504, "the bridge did not answer\n")
+        }
+    }
 }
 
 /// `listen_ice` (phase 2): framed STUN / ICE-TCP routed by registered ufrag (§5.7).
