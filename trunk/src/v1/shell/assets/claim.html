@@ -42,7 +42,7 @@
       <button class="oz-k ok full" id="c-signup-btn" type="submit">Create admin &amp; set up 2FA →</button>
     </form>
     <p class="msg err" id="c-signup-err" hidden></p>
-    <p class="note"><b>Passkeys (WebAuthn)</b> — phishing-resistant sign-in arrives in a later update; you will add one in your account page.</p>
+    <p class="note"><b>Or safer — a passkey (WebAuthn):</b> once the claim is done, add one in your account page; it replaces password + code on that device and cannot be phished.</p>
   </div>
 </section>
 
@@ -70,5 +70,6 @@
     <p class="lead">Save these offline — each works once if you lose your authenticator:</p>
     <div class="recovery-grid" id="c-codes-grid"></div>
     <a class="oz-k ok full" href="/" id="c-done">I saved them — open my trunk →</a>
+    <p class="note"><b>Safer option:</b> <a href="/account#passkeys" id="c-add-passkey">add a passkey</a> — bound to {{HOST}}, so a phishing site cannot replay it.</p>
   </div>
 </section>

@@ -10,7 +10,7 @@ use serde_json::{json, Value};
 use super::audit::Entry;
 use super::limits::{self, Kind};
 use super::session::{self, Who};
-use super::{claim, password, qr, totp, MfaTicket};
+use super::{claim, passkey, password, qr, totp, MfaTicket};
 use crate::v1::crypto::{random_below, random_bytes, sha256_hex, b64u};
 use crate::v1::db::now_ms;
 use crate::v1::http::Resp;
@@ -171,6 +171,79 @@ fn account_by_email(st: &State, email: &str) -> Option<(String, Option<String>, 
 
 // ---- F1: signup and TOTP confirm (claim ticket only) ----------------------------------------
 
+/// Before the claim completes, an account that never reached its TOTP confirm is replaced. Checked
+/// inside the caller's transaction: once a TOTP is confirmed (the claim is completing) or the trunk
+/// is claimed, nothing is replaced → Ok(false).
+fn clear_unclaimed(tx: &rusqlite::Transaction) -> rusqlite::Result<bool> {
+    let done: i64 = tx.query_row(
+        "SELECT (SELECT count(*) FROM meta WHERE k = 'claimed_at') + (SELECT count(*) FROM totp WHERE enrolled_at IS NOT NULL)",
+        [],
+        |r| r.get(0),
+    )?;
+    if done > 0 {
+        return Ok(false);
+    }
+    tx.execute("DELETE FROM totp", [])?;
+    tx.execute("DELETE FROM recovery_codes", [])?;
+    tx.execute("DELETE FROM oauth_ids", [])?;
+    tx.execute("DELETE FROM passkeys", [])?;
+    tx.execute("DELETE FROM accounts", [])?;
+    Ok(true)
+}
+
+/// The OAuth claim (oauth::claim_with): the admin account bound to (issuer, subject), its e-mail
+/// from the provider, no password; a TOTP enrolment is left pending (`/t/claim/totp`).
+pub fn create_oauth_admin(st: &State, email: &str, issuer: &str, subject: &str) -> Result<String, String> {
+    if st.claimed() {
+        return Err("already claimed".into());
+    }
+    let id = crate::v1::crypto::new_id("acc");
+    let now = now_ms();
+    let made = st.db.with(|c| {
+        let tx = c.transaction()?;
+        if !clear_unclaimed(&tx)? {
+            return Ok(false);
+        }
+        tx.execute("INSERT INTO accounts (id, email, pw_hash, role, status, created_at) VALUES (?1, ?2, NULL, 'admin', 'active', ?3)", params![id, email, now])?;
+        tx.execute("INSERT INTO oauth_ids (account_id, issuer, subject, email, created_at) VALUES (?1, ?2, ?3, ?4, ?5)", params![id, issuer, subject, email, now])?;
+        tx.commit()?;
+        Ok(true)
+    })?;
+    if !made {
+        return Err("already claimed".into());
+    }
+    store_totp(st, &id, &random_bytes::<20>(), None, 0)?;
+    Ok(id)
+}
+
+/// POST /t/claim/totp {ticket} → the pending authenticator of an OAuth claim (QR + key), for the
+/// claim page to show after the provider sent the browser back.
+pub fn claim_totp_view(st: &State, ticket: &str) -> Resp {
+    match claim::check_ticket(st, ticket) {
+        Ok(s) if s == "approved" => {}
+        Ok(_) => return Resp::json(409, &json!({ "error": "approve the claim first", "why": "state" })),
+        Err(e) => return e.resp(),
+    }
+    let acc: Option<(String, Option<String>)> = st.db.with(|c| c.query_row("SELECT id, email FROM accounts LIMIT 1", [], |r| Ok((r.get(0)?, r.get(1)?))).optional()).ok().flatten();
+    let Some((account, email)) = acc else { return Resp::json(409, &json!({ "error": "create the account first", "why": "state" })) };
+    match totp_row(st, &account) {
+        Some((seed, _, None)) => Resp::json(200, &totp_view(st, email.as_deref().unwrap_or(""), &seed)),
+        _ => Resp::json(409, &json!({ "error": "no authenticator is waiting to be confirmed", "why": "state" })),
+    }
+}
+
+/// How the claim's account was made: "password" | "oauth:<provider>" (None = no account yet).
+pub fn pending_via(st: &State) -> Option<String> {
+    let row: Option<(String, Option<String>)> = st.db.with(|c| c.query_row("SELECT id, pw_hash FROM accounts LIMIT 1", [], |r| Ok((r.get(0)?, r.get(1)?))).optional()).ok().flatten();
+    let (id, pw) = row?;
+    if pw.is_some() {
+        return Some("password".into());
+    }
+    let iss: Option<String> = st.db.with(|c| c.query_row("SELECT issuer FROM oauth_ids WHERE account_id = ?1", [&id], |r| r.get(0)).optional()).ok().flatten();
+    let provider = iss.and_then(|i| st.cfg.oauth.iter().find(|(k, p)| p.issuer_of(k) == i).map(|(k, _)| k.clone()));
+    Some(format!("oauth:{}", provider.unwrap_or_default()))
+}
+
 /// POST /t/auth/signup {ticket, email, password} → {totp_uri, qr_svg, secret}
 pub async fn signup(st: &State, ticket: &str, email: &str, pw: &str, ip: IpAddr) -> Resp {
     if st.claimed() {
@@ -193,17 +266,20 @@ pub async fn signup(st: &State, ticket: &str, email: &str, pw: &str, ip: IpAddr)
     let made = st.db.with(|c| {
         let tx = c.transaction()?;
         // a signup that never reached TOTP confirm is replaced (the owner started again)
-        tx.execute("DELETE FROM totp", [])?;
-        tx.execute("DELETE FROM recovery_codes", [])?;
-        tx.execute("DELETE FROM accounts", [])?;
+        if !clear_unclaimed(&tx)? {
+            return Ok(false);
+        }
         tx.execute(
             "INSERT INTO accounts (id, email, pw_hash, role, status, created_at) VALUES (?1, ?2, ?3, 'admin', 'active', ?4)",
             params![id, email, hash, now_ms()],
         )?;
-        tx.commit()
+        tx.commit()?;
+        Ok(true)
     });
-    if let Err(e) = made {
-        return Resp::json(500, &json!({ "error": e }));
+    match made {
+        Ok(true) => {}
+        Ok(false) => return Resp::json(403, &json!({ "error": "this trunk is claimed — nobody else can register", "why": "claimed" })),
+        Err(e) => return Resp::json(500, &json!({ "error": e })),
     }
     if let Err(e) = store_totp(st, &id, &seed, None, 0) {
         return Resp::json(500, &json!({ "error": e }));
@@ -263,12 +339,78 @@ pub fn claim_totp_confirm(st: &State, ticket: &str, code: &str, ip: IpAddr, ua: 
 // ---- F2: sign-in ----------------------------------------------------------------------------
 
 fn new_mfa_ticket(st: &State, account: &str, first: &'static str) -> String {
+    new_mfa_ticket_via(st, account, first, None)
+}
+
+/// A first factor passed (password, OAuth): the ticket for the second.
+pub fn new_mfa_ticket_via(st: &State, account: &str, first: &'static str, provider: Option<&str>) -> String {
     let t = b64u(&random_bytes::<32>());
     st.idp.mfa.lock().unwrap_or_else(|e| e.into_inner()).insert(
         sha256_hex(t.as_bytes()),
-        MfaTicket { account: account.into(), expires: now_ms() + st.idp.t.mfa_ticket_ms, first },
+        MfaTicket { account: account.into(), expires: now_ms() + st.idp.t.mfa_ticket_ms, first, provider: provider.map(str::to_string) },
     );
     t
+}
+
+/// A live (unexpired) second-factor ticket, without using it up.
+pub fn peek_mfa(st: &State, ticket: &str) -> Option<MfaTicket> {
+    let now = now_ms();
+    st.idp.mfa.lock().unwrap_or_else(|e| e.into_inner()).get(&sha256_hex(ticket.as_bytes())).cloned().filter(|t| t.expires > now)
+}
+
+/// Use a second-factor ticket up (true = it was live and is gone now).
+pub fn take_mfa(st: &State, ticket: &str) -> Option<MfaTicket> {
+    let now = now_ms();
+    st.idp.mfa.lock().unwrap_or_else(|e| e.into_inner()).remove(&sha256_hex(ticket.as_bytes())).filter(|t| t.expires > now)
+}
+
+/// The second factors this account can give: TOTP + recovery codes (+ passkey when it has one).
+fn mfa_list(st: &State, account: &str, totp_enrolled: bool) -> Vec<&'static str> {
+    let mut v = if totp_enrolled { vec!["totp", "recovery"] } else { vec!["totp"] };
+    if passkey::count(st, account) > 0 {
+        v.push("passkey");
+    }
+    v
+}
+
+/// What the second step of a sign-in offers: `{mfa:[…]}`, or `{mfa, enroll:{…}}` after a console
+/// 2FA reset (a new authenticator is enrolled now — mandatory).
+fn mfa_offer(st: &State, account: &str, ticket: Option<&str>) -> Resp {
+    let mut body = json!({});
+    if let Some(t) = ticket {
+        body["mfa_ticket"] = json!(t);
+    }
+    match totp_row(st, account) {
+        Some((_, _, Some(_))) => body["mfa"] = json!(mfa_list(st, account, true)),
+        _ => {
+            let seed = random_bytes::<20>();
+            if let Err(e) = store_totp(st, account, &seed, None, 0) {
+                return Resp::json(500, &json!({ "error": e }));
+            }
+            let email: Option<String> = st.db.with(|c| c.query_row("SELECT email FROM accounts WHERE id = ?1", [account], |r| r.get(0))).ok().flatten();
+            body["mfa"] = json!(mfa_list(st, account, false));
+            body["enroll"] = totp_view(st, email.as_deref().unwrap_or(""), &seed);
+        }
+    }
+    Resp::json(200, &body)
+}
+
+/// POST /t/auth/mfa/options {mfa_ticket} → what the second step offers (the OAuth path lands on
+/// /login#mfa=… and asks here).
+pub fn mfa_options(st: &State, ticket: &str) -> Resp {
+    match peek_mfa(st, ticket) {
+        Some(t) => {
+            let mut r = mfa_offer(st, &t.account, None);
+            if let Some(p) = t.provider.as_deref() {
+                if let Ok(mut v) = serde_json::from_slice::<Value>(&r.body) {
+                    v["via"] = json!(p);
+                    r = Resp::json(r.status, &v);
+                }
+            }
+            r
+        }
+        None => Resp::json(401, &json!({ "error": "this sign-in expired — start again", "why": "ticket" })),
+    }
 }
 
 /// POST /t/auth/login {email, password} → {mfa_ticket, mfa:[…]} or {mfa_ticket, enroll:{…}}.
@@ -317,17 +459,8 @@ pub async fn login(st: &State, email: &str, pw: &str, ip: IpAddr) -> Resp {
     limits::clear(&st.db, &pk);
     let (account, _, _) = acc.expect("verified");
     let ticket = new_mfa_ticket(st, &account, "password");
-    match totp_row(st, &account) {
-        Some((_, _, Some(_))) => Resp::json(200, &json!({ "mfa_ticket": ticket, "mfa": ["totp", "recovery"] })),
-        _ => {
-            // 2FA was reset from the console: enrol a new authenticator now (mandatory)
-            let seed = random_bytes::<20>();
-            if let Err(e) = store_totp(st, &account, &seed, None, 0) {
-                return Resp::json(500, &json!({ "error": e }));
-            }
-            Resp::json(200, &json!({ "mfa_ticket": ticket, "mfa": ["totp"], "enroll": totp_view(st, &norm, &seed) }))
-        }
-    }
+    // 2FA reset from the console: the offer enrols a new authenticator now (mandatory)
+    mfa_offer(st, &account, Some(&ticket))
 }
 
 /// POST /t/auth/mfa {mfa_ticket, totp | recovery} → cookies + a new device (admin: the admin's own
@@ -376,14 +509,27 @@ pub fn mfa(st: &State, ticket: &str, totp_code: Option<&str>, recovery: Option<&
             Err(r) => return r,
         }
     }
-    st.idp.mfa.lock().unwrap_or_else(|e| e.into_inner()).remove(&key);
-    let role: String = st.db.with(|c| c.query_row("SELECT role FROM accounts WHERE id = ?1", [&account], |r| r.get(0))).unwrap_or_else(|_| "member".into());
-    let did = match session::create_device(st, &account, &role, "login", ip, ua, true) {
+    if st.idp.mfa.lock().unwrap_or_else(|e| e.into_inner()).remove(&key).is_none() {
+        // a racing request (a passkey, another tab) used the ticket first
+        return Resp::json(401, &json!({ "error": "this sign-in expired — start again", "why": "ticket" }));
+    }
+    let second = if recovery.is_some_and(|r| !r.trim().is_empty()) && totp_code.is_none_or(|c| c.trim().is_empty()) { "recovery" } else { "totp" };
+    complete_login(st, &account, t.first, t.provider.as_deref(), second, ip, ua, extra)
+}
+
+/// Both factors passed: a new device with the account's role (the admin's own second factor
+/// happened on it), the audit entry, cookies.
+pub fn complete_login(st: &State, account: &str, first: &str, provider: Option<&str>, second: &str, ip: IpAddr, ua: &str, extra: Value) -> Resp {
+    let role: String = st.db.with(|c| c.query_row("SELECT role FROM accounts WHERE id = ?1", [account], |r| r.get(0))).unwrap_or_else(|_| "member".into());
+    let did = match session::create_device(st, account, &role, "login", ip, ua, true) {
         Ok(d) => d,
         Err(e) => return Resp::json(500, &json!({ "error": e })),
     };
-    let second = if recovery.is_some_and(|r| !r.trim().is_empty()) && totp_code.is_none_or(|c| c.trim().is_empty()) { "recovery" } else { "totp" };
-    super::audit(st, Entry::new("auth.login").account(&account).device(&did).ip(ip).detail(json!({ "first": t.first, "second": second })));
+    let mut detail = json!({ "first": first, "second": second });
+    if let Some(p) = provider {
+        detail["provider"] = json!(p);
+    }
+    super::audit(st, Entry::new("auth.login").account(account).device(&did).ip(ip).detail(detail));
     let mut body = json!({ "ok": true, "device": did, "next": "/" });
     if let (Some(b), Some(e)) = (body.as_object_mut(), extra.as_object()) {
         b.extend(e.clone());
@@ -410,16 +556,40 @@ pub fn step_up(st: &State, who: &Who, totp_code: Option<&str>, recovery: Option<
 
 pub fn view(st: &State, who: &Who) -> Value {
     let totp = totp_row(st, &who.account);
+    let has_pw: bool = st
+        .db
+        .with(|c| c.query_row("SELECT pw_hash IS NOT NULL FROM accounts WHERE id = ?1", [&who.account], |r| r.get(0)))
+        .unwrap_or(false);
     json!({
         "account": { "id": who.account, "email": who.email, "role": who.role },
         "device": who.view(st),
-        "password": true,
+        "password": has_pw,
         "totp": { "enrolled": totp.as_ref().is_some_and(|t| t.2.is_some()), "enrolled_at": totp.and_then(|t| t.2) },
         "recovery": { "left": recovery_left(st, &who.account), "total": RECOVERY_CODES },
-        "passkeys": [],
-        "passkeys_ready": false,
+        "passkeys": passkey::list(st, &who.account),
+        "passkeys_ready": true,
+        "oauth": oauth_ids(st, &who.account),
         "fresh_s": st.idp.t.fresh_ms / 1000,
     })
+}
+
+/// The OAuth identities bound to the account: `[{provider, issuer, email, created_at}]`.
+fn oauth_ids(st: &State, account: &str) -> Vec<Value> {
+    st.db
+        .with(|c| {
+            let mut s = c.prepare("SELECT issuer, email, created_at FROM oauth_ids WHERE account_id = ?1 ORDER BY created_at")?;
+            let v = s
+                .query_map([account], |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?, r.get::<_, i64>(2)?)))?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(v)
+        })
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(iss, email, at)| {
+            let provider = st.cfg.oauth.iter().find(|(k, p)| p.issuer_of(k) == iss).map(|(k, p)| (k.clone(), p.display_of(k)));
+            json!({ "provider": provider.as_ref().map(|p| p.0.clone()), "name": provider.map(|p| p.1).unwrap_or_else(|| iss.clone()), "issuer": iss, "email": email, "created_at": at })
+        })
+        .collect()
 }
 
 /// POST /t/account/password {current, new} (fresh)

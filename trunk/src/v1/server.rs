@@ -185,6 +185,26 @@ impl State {
         Ok(())
     }
 
+    /// Generate a new Ed25519 access-token signing key, make it active, and push the updated key
+    /// set to every connected root (`relay::keys_changed`). Old keys stay valid until retired.
+    pub fn rotate_signing_key(st: &Arc<State>) -> Result<String, String> {
+        let k = SigningKey::generate();
+        let kid = k.kid();
+        let blob = st.kek.seal(&format!("signing_key:{kid}"), k.seed());
+        st.db.with(|c| {
+            c.execute(
+                "INSERT INTO signing_keys (kid, alg, public, private_enc, created_at) VALUES (?1, 'ed25519', ?2, ?3, ?4)",
+                rusqlite::params![kid, k.public().to_vec(), blob, now_ms()],
+            )
+            .map(|_| ())
+        })?;
+        *st.signing.write().unwrap_or_else(|e| e.into_inner()) = Arc::new(k);
+        st.reload_keys()?;
+        relay::keys_changed(st);
+        idp::audit(st, idp::audit::Entry::new("key.rotate").target("signing_key", &kid));
+        Ok(kid)
+    }
+
     pub fn kill_epoch(&self) -> u64 {
         self.db.meta_get("kill_epoch").and_then(|v| v.parse().ok()).unwrap_or(0)
     }
@@ -217,8 +237,9 @@ impl State {
         let tok = State::token_of(req);
         let region = region_of(ip);
         let keys = self.verify_keys();
+        let issuers = self.cfg.write_origins();
         let denied = |did: &str| self.device_denied(did);
-        let ctx = paseto::Ctx { now: now_ms() / 1000, region: &region, kill_epoch: self.kill_epoch(), denied: &denied };
+        let ctx = paseto::Ctx { now: now_ms() / 1000, region: &region, kill_epoch: self.kill_epoch(), denied: &denied, issuers: &issuers };
         paseto::verify_access(tok.as_deref(), &keys, &ctx)
     }
 
@@ -281,6 +302,8 @@ pub fn run(path: &str) -> Result<(), String> {
         if st.fast {
             println!("  trunk: TRUNK_TEST_FAST=1 — rig timers (never in production)");
         }
+        println!("  trunk: passkeys for rp_id {} from {}", st.cfg.rp_id(), st.cfg.passkey_origins().join(", "));
+        super::idp::oauth::log_startup(&st);
         serve(st).await
     })
 }

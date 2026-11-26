@@ -372,7 +372,13 @@ impl Link {
             Ok(k) => k,
             Err(_) => return,
         };
-        self.cfg.state.update(|s| s.keys = keys);
+        let issuers: Vec<String> = msg["issuers"].as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect()).unwrap_or_default();
+        self.cfg.state.update(|s| {
+            s.keys = keys;
+            if !issuers.is_empty() {
+                s.trunk.issuers = issuers;
+            }
+        });
     }
 
     fn apply_revoke(&self, did: &str, until: u64) {

@@ -4,9 +4,14 @@
 pub mod account;
 pub mod api;
 pub mod audit;
+pub mod challenge;
 pub mod claim;
 pub mod console;
+pub mod devices;
 pub mod limits;
+pub mod oauth;
+pub mod pair;
+pub mod passkey;
 pub mod password;
 pub mod qr;
 pub mod session;
@@ -36,6 +41,12 @@ pub struct Timers {
     pub mfa_lock_ms: i64,
     pub net_window_ms: i64,
     pub limits_idle_ms: i64,
+    pub pair_ttl_ms: i64,
+    pub pair_used_keep_ms: i64,
+    /// an OAuth flow, start → callback (state, PKCE verifier, nonce)
+    pub oauth_ttl_ms: i64,
+    /// a WebAuthn ceremony, begin → finish
+    pub passkey_ttl_ms: i64,
 }
 
 impl Timers {
@@ -54,6 +65,10 @@ impl Timers {
             mfa_lock_ms: 900_000,
             net_window_ms: 3_600_000,
             limits_idle_ms: 86_400_000,
+            pair_ttl_ms: 300_000,
+            pair_used_keep_ms: 3_600_000,
+            oauth_ttl_ms: 600_000,
+            passkey_ttl_ms: 120_000,
         };
         if !fast {
             return normal;
@@ -72,6 +87,10 @@ impl Timers {
             mfa_lock_ms: 15_000,
             net_window_ms: 60_000,
             limits_idle_ms: 120_000,
+            pair_ttl_ms: 15_000,
+            pair_used_keep_ms: 60_000,
+            oauth_ttl_ms: 60_000,
+            passkey_ttl_ms: 30_000,
             ..normal
         }
     }
@@ -82,7 +101,10 @@ impl Timers {
 pub struct MfaTicket {
     pub account: String,
     pub expires: i64,
+    /// "password" | "oauth"
     pub first: &'static str,
+    /// the OAuth provider id when `first` is "oauth"
+    pub provider: Option<String>,
 }
 
 pub struct Idp {
@@ -93,6 +115,8 @@ pub struct Idp {
     pub mfa: Mutex<HashMap<String, MfaTicket>>,
     /// account → (seed, created) of a TOTP reset not confirmed yet
     pub totp_pending: Mutex<HashMap<String, (Vec<u8>, i64)>>,
+    /// OAuth discovery documents and JWKS, per provider
+    pub oauth: oauth::Cache,
 }
 
 impl Idp {
@@ -103,6 +127,7 @@ impl Idp {
             claim: Mutex::new(claim::Runtime::default()),
             mfa: Mutex::new(HashMap::new()),
             totp_pending: Mutex::new(HashMap::new()),
+            oauth: oauth::Cache::default(),
         }
     }
 }
@@ -136,6 +161,8 @@ pub fn spawn_background(st: Arc<State>) {
                 st.idp.mfa.lock().unwrap_or_else(|e| e.into_inner()).retain(|_, t| t.expires > now);
                 st.idp.totp_pending.lock().unwrap_or_else(|e| e.into_inner()).retain(|_, (_, at)| now - *at < 600_000);
                 session::prune_refresh(&st, now);
+                pair::prune(&st, now);
+                challenge::prune(&st, now);
             }
             if now - last_daily > 86_400_000 {
                 last_daily = now;

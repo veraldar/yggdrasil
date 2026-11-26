@@ -116,3 +116,56 @@ input.os-r { position: absolute; opacity: 0; pointer-events: none; }
 .dl-row .dim { font-size: 11px; text-align: right; }
 .dl-row .oz-k { flex: none; }
 .listen { color: var(--oz-success); }
+
+/* M3: /devices rows, confirm sheets, /pair, /audit */
+.dev-row { border: 1px solid var(--oz-border); background: var(--oz-bg); padding: 9px 10px; margin: 0 0 8px; }
+.dev-row .head { display: flex; align-items: baseline; gap: 8px; }
+.dev-row .n { font-size: 13.5px; }
+.dev-row .role { margin-left: auto; font-size: 10.5px; color: var(--oz-dim); white-space: nowrap; }
+.dev-row .role.admin { color: var(--oz-info); }
+.dev-row .role.you { color: var(--oz-success); }
+.dev-row .meta { font-size: 11px; color: var(--oz-dim); margin: 4px 0 0; display: flex; flex-wrap: wrap; gap: 2px 12px; }
+.dev-row .meta .off { color: var(--oz-active); }
+.dev-row .acts { display: flex; gap: 6px; margin-top: 8px; align-items: center; }
+.dev-row .acts .rename { display: flex; gap: 6px; flex: 1 1 130px; min-width: 0; }
+.dev-row .acts input { height: var(--oz-key); font-family: var(--mono); font-size: 12px; }
+.dev-row.gone { opacity: .55; }
+.dev-row.gone .n::after { content: " · revoked"; color: var(--oz-active); font-size: 11px; }
+.tag { display: inline-block; font-size: 10px; color: var(--oz-dim); border: 1px solid var(--oz-border); padding: 0 4px; }
+
+.sheet-back { position: fixed; inset: 0; background: color-mix(in srgb, var(--oz-bg) 75%, transparent); display: grid; place-items: end center; z-index: 40; }
+.sheet { width: 100%; max-width: 480px; background: var(--oz-bg); border: 1px solid var(--oz-border-strong); border-bottom: 0; padding: 14px var(--oz-gap) calc(14px + env(safe-area-inset-bottom, 0px)); }
+.sheet h3 { margin: 0 0 6px; font-size: 15px; }
+.sheet .chk { display: flex; gap: 8px; align-items: baseline; font-size: 12px; color: var(--oz-dim); margin: 10px 0 0; }
+.oz-k.danger { color: var(--oz-danger); border-color: color-mix(in srgb, var(--oz-danger) 55%, transparent); }
+@media (min-width: 520px) { .sheet-back { place-items: center; } .sheet { border-bottom: 1px solid var(--oz-border-strong); } }
+
+/* /pair */
+.pair-qr { display: grid; place-items: center; gap: 6px; margin: 10px 0 12px; }
+.pair-qr .qr { width: 220px; height: 220px; border: 1px solid var(--oz-border-strong); background: #fff; padding: 8px; }
+.pair-qr .qr svg { display: block; width: 100%; height: 100%; }
+
+/* /audit */
+.au-filter { display: flex; gap: 8px; margin: 0 0 10px; }
+.au-filter select { flex: 1 1 auto; height: var(--oz-key); font-family: var(--mono); font-size: 12px; background: var(--oz-bg); color: var(--oz-text); border: 1px solid var(--oz-border); }
+.au-row { border: 1px solid var(--oz-border); background: var(--oz-bg); padding: 7px 9px; margin: 0 0 6px; font-size: 11.5px; }
+.au-row .hd { display: flex; gap: 8px; align-items: baseline; }
+.au-row .at { color: var(--oz-info); }
+.au-row .ts { margin-left: auto; color: var(--oz-dim); font-size: 10.5px; white-space: nowrap; }
+.au-row .bd { color: var(--oz-dim); margin-top: 3px; overflow-wrap: anywhere; }
+.au-row .bd b { color: var(--oz-text); font-weight: 400; }
+#au-chain.ok { color: var(--oz-success); }
+#au-chain.bad { color: var(--oz-danger); }
+
+/* M4 · OAuth buttons, passkeys */
+.oauth-btn { cursor: pointer; text-align: left; }
+.oauth-btn:disabled { opacity: .6; cursor: default; }
+#l-passkey { margin-top: 8px; }
+#l-mfa-passkey, #a-stepup-passkey { margin-top: 8px; }
+.pk-list { display: grid; gap: 8px; margin: 0 0 10px; }
+.pk-list:empty { display: none; }
+.pk-row { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border: 1px solid var(--oz-border); background: var(--oz-bg); }
+.pk-row .txt { flex: 1 1 auto; min-width: 0; display: grid; gap: 2px; }
+.pk-row .n { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12.5px; }
+.pk-row .m { font-size: 10.5px; color: var(--oz-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pk-row .oz-k { flex: none; }

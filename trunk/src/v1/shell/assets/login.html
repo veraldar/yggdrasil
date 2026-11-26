@@ -1,20 +1,26 @@
 <header class="oz-head"><span class="oz-brand">BIFROST</span><span class="head-r"><span class="pill">{{HOST}}</span></span></header>
 
 <section class="oz-blk" id="l-signin">
-  <h2>sign in to your trunk</h2>
+  <h2 id="l-title">sign in to your trunk</h2>
   <div>
-    <div class="oauth-stack" id="l-oauth" hidden></div>
-    <p class="sep">email + password + 2FA</p>
+    <p class="lead" id="l-via" hidden></p>
+    <div id="l-first">
+      <div class="oauth-stack" id="l-oauth" hidden></div>
+      <button class="oz-k full" id="l-passkey" type="button" hidden>Sign in with a passkey</button>
+      <p class="note" id="l-passkey-note" hidden><b>Or safer:</b> a passkey signs you in with this phone's lock — no password or code to type.</p>
+      <p class="sep">email + password + 2FA</p>
+    </div>
     <form class="f-stack" id="l-form" autocomplete="on">
-      <label class="f-field"><span class="f-lbl"><span>email</span></span>
+      <label class="f-field" id="l-email-field"><span class="f-lbl"><span>email</span></span>
         <input class="oz-field" id="l-email" name="email" type="email" autocomplete="username" required></label>
-      <label class="f-field"><span class="f-lbl"><span>password</span></span>
+      <label class="f-field" id="l-password-field"><span class="f-lbl"><span>password</span></span>
         <input class="oz-field" id="l-password" name="password" type="password" autocomplete="current-password" required></label>
       <label class="f-field" id="l-code-field"><span class="f-lbl"><span>authenticator code</span><button class="link" type="button" id="l-use-recovery">use a recovery code</button></span>
         <input class="oz-field code" id="l-code" inputmode="numeric" autocomplete="one-time-code" maxlength="7" placeholder="000000"></label>
       <label class="f-field" id="l-recovery-field" hidden><span class="f-lbl"><span>recovery code</span><button class="link" type="button" id="l-use-code">use the authenticator</button></span>
         <input class="oz-field" id="l-recovery" autocomplete="off" placeholder="XXXX-XXXX"></label>
       <button class="oz-k ok full" id="l-btn" type="submit">Sign in with 2FA →</button>
+      <button class="oz-k full" id="l-mfa-passkey" type="button" hidden>Use a passkey instead</button>
     </form>
     <p class="msg err" id="l-err" hidden></p>
   </div>

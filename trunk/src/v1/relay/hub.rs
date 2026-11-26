@@ -70,6 +70,8 @@ pub trait Registry: Send + Sync {
 /// switch, the deny-list.
 pub trait Authority: Send + Sync {
     fn token_keys(&self) -> Vec<Key>;
+    /// every origin a valid token's `iss` may be (the trunk's public_url + extra_names)
+    fn issuers(&self) -> Vec<String>;
     fn kill(&self) -> (u64, bool);
     fn deny(&self) -> Vec<DenyEntry>;
 }
@@ -82,6 +84,8 @@ struct RootLink {
     epoch: u64,
     out: Frames,
     streams: Arc<Mutex<HashMap<u32, StreamTx>>>,
+    /// which device opened each relayed stream (a revoke cuts its owner's streams)
+    stream_did: Arc<Mutex<HashMap<u32, String>>>,
     since: u64,
     peer: SocketAddr,
 }
@@ -221,7 +225,7 @@ impl Hub {
     }
 
     fn keys_msg(&self) -> Value {
-        proto::sign_json(&self.key, json!({ "t": "keys", "seq": self.keys_seq.load(Ordering::Relaxed), "keys": self.auth.token_keys() }))
+        proto::sign_json(&self.key, json!({ "t": "keys", "seq": self.keys_seq.load(Ordering::Relaxed), "keys": self.auth.token_keys(), "issuers": self.auth.issuers() }))
     }
 
     /// The token keys changed (a rotation, a retirement): every root hears it.
@@ -232,7 +236,33 @@ impl Hub {
     }
 
     /// A device was revoked (spec §5.4): every root denies `did` until its last token expires.
+    /// Is any live relayed stream owned by `did`? (the revoke test watches it go false)
+    pub fn relay_stream_live(&self, did: &str) -> bool {
+        self.links.lock().unwrap().values().any(|l| l.stream_did.lock().unwrap().values().any(|d| d == did))
+    }
+
     pub fn push_revoke(&self, did: &str, until: u64) {
+        // cut this device's live relayed streams first (B13: ≤ 1 s): dropping the tx ends the
+        // writer loop, which shuts the client's connection down; the root is told each stream is
+        // gone so its half ends too
+        let cut = |l: &RootLink| {
+            let ids: Vec<u32> = l
+                .stream_did
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(_, d)| d.as_str() == did)
+                .map(|(i, _)| *i)
+                .collect();
+            for id in ids {
+                l.streams.lock().unwrap().remove(&id);
+                l.stream_did.lock().unwrap().remove(&id);
+                let _ = l.out.send((OP_BIN, proto::mux(proto::CLOSE, id, &[])));
+            }
+        };
+        for l in self.links.lock().unwrap().values() {
+            cut(l);
+        }
         let msg = proto::sign_json(&self.key, json!({ "t": "revoke", "did": did, "until": until }));
         self.send_all(&proto::ctrl(&msg));
     }
@@ -394,6 +424,7 @@ impl Hub {
         head: &[u8],
         rest: Vec<u8>,
         hsts: Option<&str>,
+        did: &str,
     ) -> io::Result<()> {
         // P12 at the trunk too: no chunked bodies, one Content-Length
         if let Ok(h) = wsio::parse_head(head) {
@@ -416,6 +447,7 @@ impl Hub {
         let id = self.ids.fetch_add(1, Ordering::Relaxed) + 1;
         let (tx, mut rx) = mpsc::unbounded_channel::<Option<Vec<u8>>>();
         link.streams.lock().unwrap().insert(id, tx);
+        link.stream_did.lock().unwrap().insert(id, did.to_string());
         let mut open = format!("{}\n", client.to_canonical()).into_bytes();
         open.extend_from_slice(head);
         let _ = link.out.send((OP_BIN, proto::mux(proto::OPEN, id, &open)));
@@ -459,6 +491,7 @@ impl Hub {
         let _ = wr.shutdown().await;
         reader.abort();
         link.streams.lock().unwrap().remove(&id);
+        link.stream_did.lock().unwrap().remove(&id);
         let _ = link.out.send((OP_BIN, proto::mux(proto::CLOSE, id, &[])));
         Ok(())
     }
@@ -602,10 +635,11 @@ impl Hub {
         let deny = self.auth.deny();
         let (out, mut out_rx) = mpsc::unbounded_channel::<(u8, Vec<u8>)>();
         let streams: Arc<Mutex<HashMap<u32, StreamTx>>> = Arc::default();
+        let stream_did: Arc<Mutex<HashMap<u32, String>>> = Arc::default();
         let epoch = self.gens.fetch_add(1, Ordering::Relaxed) + 1;
         let old = self.links.lock().unwrap().insert(
             root_id.clone(),
-            RootLink { epoch, out: out.clone(), streams: streams.clone(), since: now_ms(), peer },
+            RootLink { epoch, out: out.clone(), streams: streams.clone(), stream_did: stream_did.clone(), since: now_ms(), peer },
         );
         if let Some(old) = old {
             old.streams.lock().unwrap().clear();
@@ -802,6 +836,7 @@ impl Registry for MemRegistry {
 #[derive(Default)]
 pub struct MemAuthority {
     pub keys: Mutex<Vec<Key>>,
+    pub issuers: Mutex<Vec<String>>,
     pub kill: Mutex<(u64, bool)>,
     pub deny: Mutex<Vec<DenyEntry>>,
 }
@@ -809,6 +844,9 @@ pub struct MemAuthority {
 impl Authority for MemAuthority {
     fn token_keys(&self) -> Vec<Key> {
         self.keys.lock().unwrap().clone()
+    }
+    fn issuers(&self) -> Vec<String> {
+        self.issuers.lock().unwrap().clone()
     }
     fn kill(&self) -> (u64, bool) {
         *self.kill.lock().unwrap()

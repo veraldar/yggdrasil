@@ -161,6 +161,66 @@ function totp(secret) {
   execFileSync('python3', ['-c', "import sqlite3,sys; c=sqlite3.connect(sys.argv[1]); c.execute(\"INSERT INTO roots (id, name, hostname, os, arch, root_pub, wg_pub, wg_addr, peer_token_hash, enrolled_at) VALUES ('rt_test', 'test', 'test', 'linux', 'x86_64', 'pub_test', 'wg_test', '10.77.0.250', '00', 0)\"); c.commit()", dbPath]);
   await page.waitForURL(url + '/offline', { timeout: 10000 }).catch(() => problems.push('the empty page did not move on when has_roots flipped'));
   await shot('first-root-connected-no-door-yet');
+
+  // M3: /devices (with a second device + a root), /pair (mint + joined), /audit
+  // a phone joins through a QR minted by the console: pair-qr, redeem in this page context
+  const link = JSON.parse(execFileSync(ctl[0], [...ctl.slice(1), 'pair-qr']).toString());
+  // the phone is a different browser (its own cookie jar: it must not clobber this one)
+  const phoneCtx = await browser.newContext({ ...devices['Pixel 7'], viewport: { width: 360, height: 780 }, deviceScaleFactor: 2 });
+  const phone = await phoneCtx.newPage();
+  phone.on('console', (m) => { if (m.type() === 'error' && !m.text().startsWith('Failed to load resource')) problems.push('phone console: ' + m.text()); });
+  await phone.goto(link.url); // /pair#v=2&t=… → the page redeems and shows joined
+  await phone.waitForSelector('#p-joined', { timeout: 8000 }).catch(() => problems.push('phone did not join'));
+  await shot('pair-phone-joined');
+  await phoneCtx.close();
+
+  // minting a QR needs a fresh step-up: confirm with the authenticator first
+  await page.goto(url + '/account');
+  await page.evaluate(async (code) => {
+    await fetch('/t/auth/step-up', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ totp: code }) });
+  }, totp(secret));
+  await page.goto(url + '/pair');
+  await must('#p-qr-img');
+  await page.waitForFunction(() => document.getElementById('p-qr-img').querySelector('svg'));
+  await shot('pair-qr-minted');
+  // regenerate (the storyboard: one QR per phone, regenerate kills the old one)
+  await page.click('#p-regen');
+  await page.waitForTimeout(400);
+  await shot('pair-qr-regenerated');
+  await page.click('#p-done'); // done: burns it and goes to /devices
+  await page.waitForURL(url + '/devices');
+  await must('#d-list');
+  await page.waitForFunction(() => document.querySelectorAll('#d-list .dev-row').length >= 2);
+  await shot('devices');
+  // rename flow + confirm sheet for a device
+  await page.fill('#d-list .dev-row input', 'Pixel 7 phone');
+  await shot('devices-rename');
+  const rm = await page.$('#d-list .dev-row .acts button.danger');
+  if (rm) { await rm.click(); await must('#d-sheet'); await shot('devices-confirm-remove'); await page.click('#d-sheet-no'); }
+  // kill-switch sheet
+  const kill = await page.$('.dev-row .acts button.danger:not(:first-of-type)');
+  const killBtns = await page.$$('button');
+  let killBtn = null;
+  for (const b of killBtns) {
+    const t = await b.textContent();
+    if (t.includes('Kill every device')) { killBtn = b; break; }
+  }
+  if (killBtn) {
+    await killBtn.click();
+    await must('#d-kill-sheet');
+    await page.check('#d-kill-lockdown');
+    await shot('devices-kill-switch-sheet');
+    await page.click('#d-kill-no');
+  }
+  // audit page
+  await page.goto(url + '/audit');
+  await page.waitForFunction(() => document.getElementById('au-chain').textContent.includes('verified'));
+  await page.waitForFunction(() => document.querySelectorAll('#au-list .au-row').length > 3);
+  await shot('audit');
+  await page.selectOption('#au-action', 'auth.login').catch(() => {});
+  await page.waitForTimeout(300);
+  await shot('audit-filtered');
+
   await browser.close();
   fs.writeFileSync(`${out}/problems.json`, JSON.stringify(problems, null, 1));
   if (problems.length) { console.error('PROBLEMS:\n' + problems.join('\n')); process.exit(1); }

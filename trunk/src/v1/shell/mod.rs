@@ -30,6 +30,9 @@ const SHELL_JS: &[u8] = include_bytes!("assets/shell.js");
 const MONO_400: &[u8] = include_bytes!("assets/CommitMono-400-Regular.otf");
 const MONO_700: &[u8] = include_bytes!("assets/CommitMono-700-Regular.otf");
 
+const DEVICES: &str = include_str!("assets/devices.html");
+const PAIR: &str = include_str!("assets/pair.html");
+const AUDIT: &str = include_str!("assets/audit.html");
 const CLAIM: &str = include_str!("assets/claim.html");
 const CLAIMED: &str = include_str!("assets/claimed.html");
 const LOGIN: &str = include_str!("assets/login.html");
@@ -101,6 +104,14 @@ pub async fn page(st: Arc<State>, inc: Incoming) {
         "/account" => Resp::redirect("/login?next=/account"),
         "/offline" if signed_in => html(&st, 200, "offline", "BIFROST · offline", OFFLINE),
         "/offline" => Resp::redirect("/login"),
+        "/devices" if signed_in => html(&st, 200, "devices", "BIFROST · devices", DEVICES),
+        "/devices" => Resp::redirect("/login?next=/devices"),
+        // the phone's side of the QR: anyone with the fragment (minted by an admin)
+        "/pair" if access.is_ok() => html(&st, 200, "pair", "BIFROST · pair a phone", PAIR),
+        "/pair" => html(&st, 200, "pair", "BIFROST · pair a phone", PAIR),
+        "/audit" if signed_in && access.as_ref().is_ok_and(|c| c.role == "admin") => html(&st, 200, "audit", "BIFROST · audit", AUDIT),
+        "/audit" if signed_in => Resp::redirect("/"),
+        "/audit" => Resp::redirect("/login?next=/audit"),
         _ => Resp::text(404, "not here yet\n"),
     };
     inc.answer(r).await
@@ -162,7 +173,7 @@ mod tests {
     /// The CSP allows no inline script, no inline style, nothing from elsewhere.
     #[test]
     fn pages_have_no_inline_script_style_or_third_party() {
-        for (name, body) in [("claim", CLAIM), ("claimed", CLAIMED), ("login", LOGIN), ("account", ACCOUNT), ("offline", OFFLINE), ("empty", EMPTY)] {
+        for (name, body) in [("claim", CLAIM), ("claimed", CLAIMED), ("login", LOGIN), ("account", ACCOUNT), ("offline", OFFLINE), ("empty", EMPTY), ("devices", DEVICES), ("pair", PAIR), ("audit", AUDIT)] {
             let low = body.to_lowercase();
             assert!(!low.contains("<script"), "{name}: inline script");
             assert!(!low.contains("style="), "{name}: inline style");

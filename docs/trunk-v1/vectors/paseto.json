@@ -5,6 +5,10 @@
     {
       "ctx": {
         "deny": [],
+        "issuers": [
+          "https://ljoolq.veraldar.org",
+          "https://ap.veraldar.org"
+        ],
         "kill_epoch": 3,
         "now": 1764072060,
         "region": "net:8.8.0.0/16"
@@ -21,6 +25,10 @@
     {
       "ctx": {
         "deny": [],
+        "issuers": [
+          "https://ljoolq.veraldar.org",
+          "https://ap.veraldar.org"
+        ],
         "kill_epoch": 3,
         "now": 1764072060,
         "region": "net:8.8.0.0/16"
@@ -35,6 +43,10 @@
     {
       "ctx": {
         "deny": [],
+        "issuers": [
+          "https://ljoolq.veraldar.org",
+          "https://ap.veraldar.org"
+        ],
         "kill_epoch": 3,
         "now": 1764072060,
         "region": "net:8.8.0.0/16"
@@ -49,6 +61,10 @@
     {
       "ctx": {
         "deny": [],
+        "issuers": [
+          "https://ljoolq.veraldar.org",
+          "https://ap.veraldar.org"
+        ],
         "kill_epoch": 3,
         "now": 1764072060,
         "region": "net:8.8.0.0/16"
@@ -63,6 +79,10 @@
     {
       "ctx": {
         "deny": [],
+        "issuers": [
+          "https://ljoolq.veraldar.org",
+          "https://ap.veraldar.org"
+        ],
         "kill_epoch": 3,
         "now": 1764072060,
         "region": "net:8.8.0.0/16"
@@ -77,6 +97,10 @@
     {
       "ctx": {
         "deny": [],
+        "issuers": [
+          "https://ljoolq.veraldar.org",
+          "https://ap.veraldar.org"
+        ],
         "kill_epoch": 3,
         "now": 1764072060,
         "region": "net:8.8.0.0/16"
@@ -91,6 +115,10 @@
     {
       "ctx": {
         "deny": [],
+        "issuers": [
+          "https://ljoolq.veraldar.org",
+          "https://ap.veraldar.org"
+        ],
         "kill_epoch": 3,
         "now": 1764072060,
         "region": "net:8.8.0.0/16"
@@ -105,6 +133,104 @@
     {
       "ctx": {
         "deny": [],
+        "issuers": [
+          "https://ljoolq.veraldar.org",
+          "https://ap.veraldar.org"
+        ],
+        "kill_epoch": 3,
+        "now": 1764072060,
+        "region": "net:8.8.0.0/16"
+      },
+      "expect": {
+        "reauth": "login",
+        "why": "invalid"
+      },
+      "name": "invalid: non-canonical footer (padding)",
+      "token": "v4.public.eyJpc3MiOiJodHRwczovL2xqb29scS52ZXJhbGRhci5vcmciLCJzdWIiOiJhY2NfVEVTVGFjY291bnQwMDAwMDAiLCJkaWQiOiJkZXZfVEVTVGRldmljZTAwMDAwMDAiLCJyb2xlIjoiYWRtaW4iLCJyZ24iOiJuZXQ6OC44LjAuMC8xNiIsImtlcCI6MywiaWF0IjoiMjAyNS0xMS0yNVQxMjowMDowMFoiLCJleHAiOiIyMDI1LTExLTI1VDEyOjE1OjAwWiIsImp0aSI6IldXVGFCVnJqSFBqcmNqRGhrS1VFaVEifbH2lky0K_1VbtYnlflVi_5-z50msmwZ1izSAVwMIE-WA1wkDfCLmg6QmIZAkDRHRlykpWSUSyYDeUkmLMoUJQU.eyJraWQiOiJrXzVfc1dGeEVjeDlsMzRvZWkifQ="
+    },
+    {
+      "ctx": {
+        "deny": [],
+        "issuers": [
+          "https://ljoolq.veraldar.org",
+          "https://ap.veraldar.org"
+        ],
+        "kill_epoch": 3,
+        "now": 1764072060,
+        "region": "net:8.8.0.0/16"
+      },
+      "expect": {
+        "reauth": "login",
+        "why": "invalid"
+      },
+      "name": "invalid: wrong iss",
+      "token": "v4.public.eyJpc3MiOiJodHRwczovL2V2aWwuZXhhbXBsZSIsInN1YiI6ImFjY19URVNUYWNjb3VudDAwMDAwMCIsImRpZCI6ImRldl9URVNUZGV2aWNlMDAwMDAwMCIsInJvbGUiOiJhZG1pbiIsInJnbiI6Im5ldDo4LjguMC4wLzE2Iiwia2VwIjozLCJpYXQiOiIyMDI1LTExLTI1VDEyOjAwOjAwWiIsImV4cCI6IjIwMjUtMTEtMjVUMTI6MTU6MDBaIiwianRpIjoiV1dUYUJWcmpIUGpyY2pEaGtLVUVpUSJ9vcqSmsqRE3dSEF47x7nncaN-KqjLRFISNdVbxf9joVydIE5c5-Z3k7KM71TSwTeOH86huta9XA59bcaOUstOCw.eyJraWQiOiJrXzVfc1dGeEVjeDlsMzRvZWkifQ"
+    },
+    {
+      "ctx": {
+        "deny": [],
+        "issuers": [
+          "https://ljoolq.veraldar.org",
+          "https://ap.veraldar.org"
+        ],
+        "kill_epoch": 3,
+        "now": 1764072060,
+        "region": "net:8.8.0.0/16"
+      },
+      "expect": {
+        "did": "dev_TESTdevice0000000",
+        "ok": true,
+        "role": "admin",
+        "sub": "acc_TESTaccount000000"
+      },
+      "name": "ok: iss in extra_names",
+      "token": "v4.public.eyJpc3MiOiJodHRwczovL2FwLnZlcmFsZGFyLm9yZyIsInN1YiI6ImFjY19URVNUYWNjb3VudDAwMDAwMCIsImRpZCI6ImRldl9URVNUZGV2aWNlMDAwMDAwMCIsInJvbGUiOiJhZG1pbiIsInJnbiI6Im5ldDo4LjguMC4wLzE2Iiwia2VwIjozLCJpYXQiOiIyMDI1LTExLTI1VDEyOjAwOjAwWiIsImV4cCI6IjIwMjUtMTEtMjVUMTI6MTU6MDBaIiwianRpIjoiV1dUYUJWcmpIUGpyY2pEaGtLVUVpUSJ9UZxZ2c1bwm4X9XwR7gdCXpLNQ0VyrgQcWcmxBQzJc8eI5xAegQkxrAwqRB4_TRyx_5A8f5fQ58HhKRV5evhCAg.eyJraWQiOiJrXzVfc1dGeEVjeDlsMzRvZWkifQ"
+    },
+    {
+      "ctx": {
+        "deny": [],
+        "issuers": [
+          "https://ljoolq.veraldar.org",
+          "https://ap.veraldar.org"
+        ],
+        "kill_epoch": 3,
+        "now": 1764072060,
+        "region": "net:8.8.0.0/16"
+      },
+      "expect": {
+        "reauth": "login",
+        "why": "invalid"
+      },
+      "name": "invalid: iat more than 60 s in the future",
+      "token": "v4.public.eyJpc3MiOiJodHRwczovL2xqb29scS52ZXJhbGRhci5vcmciLCJzdWIiOiJhY2NfVEVTVGFjY291bnQwMDAwMDAiLCJkaWQiOiJkZXZfVEVTVGRldmljZTAwMDAwMDAiLCJyb2xlIjoiYWRtaW4iLCJyZ24iOiJuZXQ6OC44LjAuMC8xNiIsImtlcCI6MywiaWF0IjoiMjAyNS0xMS0yNVQxMjowMjowMVoiLCJleHAiOiIyMDI1LTExLTI1VDEyOjE1OjAwWiIsImp0aSI6IldXVGFCVnJqSFBqcmNqRGhrS1VFaVEifXL-018a30LSdoWCxDhemF90xFsq5x-PhW-kqEXfZ-uBV14zu1MrlMHHtBMgxrq7mFFM3g3m-JYme7TW7SE3UAI.eyJraWQiOiJrXzVfc1dGeEVjeDlsMzRvZWkifQ"
+    },
+    {
+      "ctx": {
+        "deny": [],
+        "issuers": [
+          "https://ljoolq.veraldar.org",
+          "https://ap.veraldar.org"
+        ],
+        "kill_epoch": 3,
+        "now": 1764072060,
+        "region": "net:8.8.0.0/16"
+      },
+      "expect": {
+        "did": "dev_TESTdevice0000000",
+        "ok": true,
+        "role": "admin",
+        "sub": "acc_TESTaccount000000"
+      },
+      "name": "ok: iat 60 s in the future (within skew)",
+      "token": "v4.public.eyJpc3MiOiJodHRwczovL2xqb29scS52ZXJhbGRhci5vcmciLCJzdWIiOiJhY2NfVEVTVGFjY291bnQwMDAwMDAiLCJkaWQiOiJkZXZfVEVTVGRldmljZTAwMDAwMDAiLCJyb2xlIjoiYWRtaW4iLCJyZ24iOiJuZXQ6OC44LjAuMC8xNiIsImtlcCI6MywiaWF0IjoiMjAyNS0xMS0yNVQxMjowMjowMFoiLCJleHAiOiIyMDI1LTExLTI1VDEyOjE1OjAwWiIsImp0aSI6IldXVGFCVnJqSFBqcmNqRGhrS1VFaVEifYYp6UTTiwndIzsRiQY8cT6wKHbsNO7YhYp75xkGcVNihNT-FlRl5sClbfygyeJxkPOEXBl8HiI3G3WBVqXx_wA.eyJraWQiOiJrXzVfc1dGeEVjeDlsMzRvZWkifQ"
+    },
+    {
+      "ctx": {
+        "deny": [],
+        "issuers": [
+          "https://ljoolq.veraldar.org",
+          "https://ap.veraldar.org"
+        ],
         "kill_epoch": 3,
         "now": 1764072900,
         "region": "net:8.8.0.0/16"
@@ -119,6 +245,10 @@
     {
       "ctx": {
         "deny": [],
+        "issuers": [
+          "https://ljoolq.veraldar.org",
+          "https://ap.veraldar.org"
+        ],
         "kill_epoch": 3,
         "now": 1764072060,
         "region": "lan:192.168.1.0/24"
@@ -133,6 +263,10 @@
     {
       "ctx": {
         "deny": [],
+        "issuers": [
+          "https://ljoolq.veraldar.org",
+          "https://ap.veraldar.org"
+        ],
         "kill_epoch": 4,
         "now": 1764072060,
         "region": "net:8.8.0.0/16"
@@ -152,6 +286,10 @@
             "until": 1764072900000
           }
         ],
+        "issuers": [
+          "https://ljoolq.veraldar.org",
+          "https://ap.veraldar.org"
+        ],
         "kill_epoch": 3,
         "now": 1764072060,
         "region": "net:8.8.0.0/16"
@@ -170,6 +308,10 @@
             "did": "dev_other",
             "until": 1764072900000
           }
+        ],
+        "issuers": [
+          "https://ljoolq.veraldar.org",
+          "https://ap.veraldar.org"
         ],
         "kill_epoch": 3,
         "now": 1764072060,
@@ -192,6 +334,10 @@
             "until": 1764072030000
           }
         ],
+        "issuers": [
+          "https://ljoolq.veraldar.org",
+          "https://ap.veraldar.org"
+        ],
         "kill_epoch": 3,
         "now": 1764072060,
         "region": "net:8.8.0.0/16"
@@ -208,6 +354,10 @@
     {
       "ctx": {
         "deny": [],
+        "issuers": [
+          "https://ljoolq.veraldar.org",
+          "https://ap.veraldar.org"
+        ],
         "kill_epoch": 3,
         "now": 1764072901,
         "region": "loopback"
@@ -222,6 +372,10 @@
     {
       "ctx": {
         "deny": [],
+        "issuers": [
+          "https://ljoolq.veraldar.org",
+          "https://ap.veraldar.org"
+        ],
         "kill_epoch": 9,
         "now": 1764072060,
         "region": "loopback"
@@ -236,6 +390,10 @@
     {
       "ctx": {
         "deny": [],
+        "issuers": [
+          "https://ljoolq.veraldar.org",
+          "https://ap.veraldar.org"
+        ],
         "kill_epoch": 3,
         "now": 1764081999,
         "region": "net:8.8.0.0/16"
@@ -250,6 +408,10 @@
     {
       "ctx": {
         "deny": [],
+        "issuers": [
+          "https://ljoolq.veraldar.org",
+          "https://ap.veraldar.org"
+        ],
         "kill_epoch": 3,
         "now": 1764072060,
         "region": "net:8.8.0.0/16"
@@ -266,6 +428,10 @@
     {
       "ctx": {
         "deny": [],
+        "issuers": [
+          "https://ljoolq.veraldar.org",
+          "https://ap.veraldar.org"
+        ],
         "kill_epoch": 3,
         "now": 1764072060,
         "region": "net:8.8.0.0/16"
