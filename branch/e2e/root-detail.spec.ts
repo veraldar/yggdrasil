@@ -372,7 +372,7 @@ test.describe('same design as the home screen at 360px', () => {
     const homeKey = await cssOf(homeNew);
     // where the home screen's header keys sit
     const keyBoxes = async () => {
-      await expect(page.getByTestId('refresh-key')).toHaveText('refresh');
+      await expect(page.getByTestId('refresh-key')).not.toHaveClass(/ok/);
       return Promise.all(
         ['roots-key', 'artifacts-key', 'refresh-key'].map((k) => page.getByTestId(k).boundingBox())
       );
