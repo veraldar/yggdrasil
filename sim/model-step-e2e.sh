@@ -12,7 +12,10 @@ HERE=$ROOT/sim/model-step
 DIST=${MSM_DIST:-$HOME/.cache/p4-rig/ms-dist/0.9.1-rc.2}   # the TEST release under test (prebuilt: release.sh X --no-build with a throwaway key)
 STATE=${MSM_STATE:-$HOME/.cache/p4-msmatrix/run}; rm -rf "$STATE"; mkdir -p "$STATE/log"
 LOG=$STATE/log/run.log; : >"$LOG"
-NET=msm-net; UP=msm-upstream; VER=0.9.1-rc.2
+PREFIX=${MSM_PREFIX:-msm}
+if [ "$PREFIX" = msm ]; then SUBNET=${MSM_SUBNET:-172.28.7}; else SUBNET=${MSM_SUBNET:-172.28.8}; fi
+NET="${PREFIX}-net"; UP="${PREFIX}-upstream"; VER=0.9.1-rc.2
+IMG_UP="${UP}:latest"; IMG_CASE="${PREFIX}-case:latest"
 HU=lay; HH=/home/lay; ENVF=$HH/.config/yggdrasil/yggdrasil.env
 NAMES="api.z.ai openrouter.ai api.anthropic.com api.openai.com other.tree.test"
 FAIL=0; declare -a ROWS
@@ -31,38 +34,38 @@ openssl x509 -req -in "$STATE/leaf.csr" -CA "$STATE/ca.pem" -CAkey "$STATE/ca.ke
   -out "$STATE/leaf.pem" -days 2 -extfile "$STATE/san.ext" 2>>"$LOG"
 mkdir -p "$STATE/up"
 cp "$HERE/msm_upstream.py" "$STATE/leaf.pem" "$STATE/leaf.key" "$STATE/up/"
-docker rmi -f msm-upstream:latest >/dev/null 2>&1
+docker rmi -f "$IMG_UP" >/dev/null 2>&1
 cat >"$STATE/up/Dockerfile" <<'EOF'
 FROM python:3.12-slim
 COPY msm_upstream.py /up/msm_upstream.py
 COPY leaf.pem leaf.key /up/
 CMD python3 /up/msm_upstream.py 8080 /up/http.log & python3 /up/msm_upstream.py 443 /up/https.log /up/leaf.pem /up/leaf.key & wait
 EOF
-( cd "$STATE/up" && nice -n 10 docker build -q -t msm-upstream:latest . ) >/dev/null 2>>"$LOG" || { echo "docker build failed"; cat "$LOG"; exit 1; }
+( cd "$STATE/up" && nice -n 10 docker build -q -t "$IMG_UP" . ) >/dev/null 2>>"$LOG" || { echo "docker build failed"; cat "$LOG"; exit 1; }
 
 docker network rm "$NET" >/dev/null 2>&1
-docker network create --subnet 172.28.7.0/24 "$NET" >/dev/null
-AH=""; for n in $NAMES; do AH="$AH --add-host $n:172.28.7.9"; done
+docker network create --subnet "${SUBNET}.0/24" "$NET" >/dev/null
+AH=""; for n in $NAMES; do AH="$AH --add-host $n:${SUBNET}.9"; done
 docker rm -f "$UP" >/dev/null 2>&1
-docker run -d --name "$UP" --hostname msm-upstream --network "$NET" --ip 172.28.7.9 \
-  -v "$STATE/up":/up msm-upstream:latest >/dev/null || { echo "upstream run failed"; exit 1; }
+docker run -d --name "$UP" --hostname msm-upstream --network "$NET" --network-alias msm-upstream --ip "${SUBNET}.9" \
+  -v "$STATE/up":/up "$IMG_UP" >/dev/null || { echo "upstream run failed"; exit 1; }
 for i in $(seq 30); do docker exec "$UP" python3 -c "import socket;socket.create_connection(('127.0.0.1',8080))" 2>/dev/null && break; sleep 1; done
-say "upstream up on msm-net (https 443 for the five names, http 8080)"
+say "upstream up on $NET (https 443 for the five names, http 8080)"
 
 uplog() { docker exec "$UP" cat /up/https.log /up/http.log 2>/dev/null; }
 
 # ---------------------------------------------------------------- a fresh container per case
 say "prebaking the case image (debian:12 + what install.sh asks for)"
-docker rmi -f msm-case:latest >/dev/null 2>&1
-nice -n 10 docker build -q -t msm-case:latest - >/dev/null <<'EOF'
+docker rmi -f "$IMG_CASE" >/dev/null 2>&1
+nice -n 10 docker build -q -t "$IMG_CASE" - >/dev/null <<'EOF'
 FROM debian:12
 RUN apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
     curl ca-certificates openssh-client procps python3 && rm -rf /var/lib/apt/lists/* && useradd -m -s /bin/bash lay
 EOF
 mkcase() { # NAME — debian:12, the CA trusted, a normal user, the release unpacked in ~lay
-  local c=msm-$1
+  local c="${PREFIX}-$1"
   docker rm -f "$c" >/dev/null 2>&1
-  docker run -d --name "$c" --hostname "$c" --network "$NET" $AH msm-case:latest sleep infinity >/dev/null
+  docker run -d --name "$c" --hostname "$c" --network "$NET" $AH "$IMG_CASE" sleep infinity >/dev/null
   docker cp "$STATE/ca.pem" "$c":/usr/local/share/ca-certificates/msm-test-ca.crt >/dev/null
   docker exec "$c" update-ca-certificates >>"$LOG" 2>&1
   docker exec "$c" mkdir -p /rel && docker cp "$DIST/yggdrasil-$VER-linux-x86_64.tar.gz" "$c":/rel/ >/dev/null
@@ -74,18 +77,19 @@ typed() { # NAME ENVSTRING LOGOUT — install.sh --brain-only --now on a pty, ty
   # Detached inside the container (docker exec -d — an attached client wedged nondeterministically);
   # a timeout inside kills a stuck driver; the host polls for the done marker; 3 attempts,
   # a fresh home between them. Done = the env file exists (written only after the model step).
-  docker cp "$HERE/drive_install.py" msm-"$1":/tmp/drive_install.py >/dev/null
-  docker cp "$HERE/msm_run.sh" msm-"$1":/tmp/msm_run.sh >/dev/null
+  local c="${PREFIX}-$1"
+  docker cp "$HERE/drive_install.py" "$c":/tmp/drive_install.py >/dev/null
+  docker cp "$HERE/msm_run.sh" "$c":/tmp/msm_run.sh >/dev/null
   for try in 1 2 3; do
-    docker exec -u "$HU" -w $HH msm-"$1" rm -f /tmp/transcript /tmp/drive.done
+    docker exec -u "$HU" -w $HH "$c" rm -f /tmp/transcript /tmp/drive.done
     docker exec -d -u "$HU" -e HOME=$HH -e MSM_INPUTS="$2" -e TRANSCRIPT=/tmp/transcript -e DONEFILE=/tmp/drive.done \
-      msm-"$1" bash /tmp/msm_run.sh
-    for i in $(seq 120); do docker exec -u "$HU" msm-"$1" test -e /tmp/drive.done >/dev/null 2>&1 && break; sleep 2; done
-    docker exec -u "$HU" -w $HH msm-"$1" test -e .config/yggdrasil/yggdrasil.env >/dev/null 2>&1 && break
-    docker exec -u "$HU" -w $HH msm-"$1" rm -rf .config .local
+      "$c" bash /tmp/msm_run.sh
+    for i in $(seq 120); do docker exec -u "$HU" "$c" test -e /tmp/drive.done >/dev/null 2>&1 && break; sleep 2; done
+    docker exec -u "$HU" -w $HH "$c" test -e .config/yggdrasil/yggdrasil.env >/dev/null 2>&1 && break
+    docker exec -u "$HU" -w $HH "$c" rm -rf .config .local
   done
-  docker cp msm-"$1":/tmp/transcript "$STATE/log/$3" >/dev/null 2>&1
-  docker exec -u "$HU" msm-"$1" rm -f /tmp/transcript /tmp/drive.done /tmp/drive_install.py /tmp/msm_run.sh
+  docker cp "$c":/tmp/transcript "$STATE/log/$3" >/dev/null 2>&1
+  docker exec -u "$HU" "$c" rm -f /tmp/transcript /tmp/drive.done /tmp/drive_install.py /tmp/msm_run.sh
 }
 
 # one model turn: start the brain with its env file, create a session, post a message
@@ -104,8 +108,8 @@ for i in $(seq 120); do python3 -c 'import json;d=json.load(open("reply.json"));
 sleep 1
 echo TURN-DONE
 T
-  docker cp "$STATE/turn.sh" msm-"$1":/tmp/turn.sh >/dev/null
-  docker exec -u "$HU" -e HOME=$HH -w $HH msm-"$1" bash /tmp/turn.sh >"$STATE/log/$2" 2>&1
+  docker cp "$STATE/turn.sh" "${PREFIX}-$1":/tmp/turn.sh >/dev/null
+  docker exec -u "$HU" -e HOME=$HH -w $HH "${PREFIX}-$1" bash /tmp/turn.sh >"$STATE/log/$2" 2>&1
 }
     (setsid nohup env $(sed -n 's/^\([A-Z_]*\)=\(.*\)$/\1=\2/p' ~/.config/yggdrasil/yggdrasil.env | xargs) \
        ~/.local/bin/yggdrasil >brain.log 2>&1 </dev/null &)
@@ -117,7 +121,7 @@ T
 
 # the checks every keyed case runs
 sweep() { # NAME KEY — the key is only in the env file: mode 600, once, nowhere else
-  local c=msm-$1 k=$2 out
+  local c="${PREFIX}-$1" k=$2 out
   out=$(docker exec -u "$HU" "$c" bash -c "
     e=~/.config/yggdrasil/yggdrasil.env
     m=\$(stat -c %a \$e)
@@ -132,7 +136,7 @@ sweep() { # NAME KEY — the key is only in the env file: mode 600, once, nowher
 
 # env-file expectations: URL STYLE MODEL (and KEY, or '' for none)
 chk_env() { # NAME URL STYLE MODEL KEY
-  docker exec -u "$HU" msm-"$1" bash -c '
+  docker exec -u "$HU" "${PREFIX}-$1" bash -c '
     e=~/.config/yggdrasil/yggdrasil.env
     g() { sed -n "s/^$1=//p" $e | tail -1; }
     [ "$(g YGG_UPSTREAM_BASE_URL)" = "'"$2"'" ] && [ "$(g YGG_UPSTREAM_STYLE)" = "'"$3"'" ] &&
@@ -241,7 +245,7 @@ row other-local $([ $ok = 1 ] && echo PASS || echo FAIL) "arrived over http 8080
 
 say "case flag-zai (no terminal)"
 mkcase flag-zai
-docker exec -u "$HU" -e HOME=$HH -e YGG_UPSTREAM_API_KEY=$KZ msm-flag-zai \
+docker exec -u "$HU" -e HOME=$HH -e YGG_UPSTREAM_API_KEY=$KZ "${PREFIX}-flag-zai" \
   bash -c "cd ~/yggdrasil-$VER/root/install && YGG_UPSTREAM_API_KEY=$KZ bash install.sh --brain-only --now --model-provider zai </dev/null" \
   >"$STATE/log/flag-zai-install.log" 2>&1
 turn flag-zai flag-zai-turn.log
@@ -255,7 +259,7 @@ row flag-zai $([ $ok = 1 ] && echo PASS || echo FAIL) "$ev"
 say "case flag-model (--model-provider anthropic --model claude-haiku-5-5)"
 mkcase flag-model
 docker exec -u "$HU" -e HOME=$HH bash -c "cd ~" >/dev/null 2>&1
-docker exec -u "$HU" -e HOME=$HH -e YGG_UPSTREAM_API_KEY=$KA msm-flag-model \
+docker exec -u "$HU" -e HOME=$HH -e YGG_UPSTREAM_API_KEY=$KA "${PREFIX}-flag-model" \
   bash -c "cd ~/yggdrasil-$VER/root/install && YGG_UPSTREAM_API_KEY=$KA bash install.sh --brain-only --now --model-provider anthropic --model claude-haiku-5-5 </dev/null" \
   >"$STATE/log/flag-model-install.log" 2>&1
 turn flag-model flag-model-turn.log
@@ -269,7 +273,7 @@ row flag-model $([ $ok = 1 ] && echo PASS || echo FAIL) "$ev"
 wc -l < <(docker exec "$UP" cat /up/https.log /up/http.log 2>/dev/null) >"$STATE/log/flag-nokey-marker"
 say "case flag-nokey (openai, no key in the environment: refuse, nothing written)"
 mkcase flag-nokey
-docker exec -u "$HU" -e HOME=$HH msm-flag-nokey \
+docker exec -u "$HU" -e HOME=$HH "${PREFIX}-flag-nokey" \
   bash -c "cd ~/yggdrasil-$VER/root/install && bash install.sh --brain-only --now --model-provider openai </dev/null; echo RC=\$?" \
   >"$STATE/log/flag-nokey-install.log" 2>&1
 n_before=$(cat "$STATE/log/flag-nokey-marker" 2>/dev/null || echo 0)   # the openai case hit api.openai.com too
@@ -277,7 +281,7 @@ n=$(( $(uplog | wc -l) - n_before ))
 
 ev=$(grep -o 'YGG_UPSTREAM_API_KEY[^;]*' "$STATE/log/flag-nokey-install.log" | head -1)
 rc=$(sed -n 's/.*RC=\([0-9]*\).*/\1/p' "$STATE/log/flag-nokey-install.log" | tail -1)
-nowritten=$(docker exec -u "$HU" msm-flag-nokey bash -c '[ ! -e ~/.config/yggdrasil/yggdrasil.env ] && echo none || grep -c "YGG_UPSTREAM_API_KEY=." ~/.config/yggdrasil/yggdrasil.env' 2>&1)
+nowritten=$(docker exec -u "$HU" "${PREFIX}-flag-nokey" bash -c '[ ! -e ~/.config/yggdrasil/yggdrasil.env ] && echo none || grep -c "YGG_UPSTREAM_API_KEY=." ~/.config/yggdrasil/yggdrasil.env' 2>&1)
 ok=1
 [ "$rc" = 64 ] || ok=0
 [ -n "$ev" ] || { ok=0; ev="(no YGG_UPSTREAM_API_KEY in the message)"; }
@@ -288,7 +292,7 @@ row flag-nokey $([ $ok = 1 ] && echo PASS || echo FAIL) "exit $rc, \"$ev\", $now
 # ------------------------------------------------------------------------ the CA fact
 say "CA probe: does the brain (reqwest 0.13) trust the system store?"
 mkcase caprobe
-docker exec -u "$HU" msm-caprobe bash -c '
+docker exec -u "$HU" "${PREFIX}-caprobe" bash -c '
   mkdir -p ~/.config/yggdrasil
   printf "YGG_UPSTREAM_BASE_URL=https://api.z.ai/api/anthropic\nYGG_UPSTREAM_STYLE=anthropic\nYGG_UPSTREAM_API_KEY=sk-test-zai-0123456789abcdef\nYGG_UPSTREAM_MODEL=glm-5.3-flash\nYGG_LISTEN=127.0.0.1:4196\n" >~/.config/yggdrasil/yggdrasil.env
   cd ~/yggdrasil-0.9.1-rc.2-linux-x86_64
@@ -301,13 +305,13 @@ caev=$(uplog | grep -c api.z.ai || true)
 if [ "$caev" -gt 0 ]; then CA_RESULT="YES: with the CA in the container's system store (update-ca-certificates), the brain reached https://api.z.ai — reqwest reads the system store (no SSL_CERT_FILE needed)."
 else
   # retry with SSL_CERT_FILE to find what it honours
-  docker exec -u "$HU" msm-caprobe bash -c '
+  docker exec -u "$HU" "${PREFIX}-caprobe" bash -c '
     cd ~/yggdrasil-0.9.1-rc.2-linux-x86_64
     (setsid nohup env SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt $(cat ~/.config/yggdrasil/yggdrasil.env | xargs) ./bin/yggdrasil >~/brain-ca2.log 2>&1 </dev/null & echo $! >~/brain2.pid)
     sleep 5; kill $(cat ~/brain2.pid) 2>/dev/null; exit 0' >>"$STATE/log/caprobe.log" 2>&1
   caev2=$(uplog | grep -c api.z.ai || true)
   [ "$caev2" -gt 0 ] && CA_RESULT="NO by system store alone; YES with SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt" \
-                    || CA_RESULT="NO with the system store and NO with SSL_CERT_FILE — see $STATE/log/caprobe.log and brain-ca*.log in msm-caprobe"
+                    || CA_RESULT="NO with the system store and NO with SSL_CERT_FILE — see $STATE/log/caprobe.log and brain-ca*.log in ${PREFIX}-caprobe"
 fi
 say "CA: $CA_RESULT"
 
