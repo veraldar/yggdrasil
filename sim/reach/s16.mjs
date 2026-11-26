@@ -32,6 +32,12 @@
  *
  * S16_SAY / S16_KEYWORDS: the sentence and its key words. (S16_ROOT + S16_WAYS, the older knobs,
  * still pick the walks: S16_ROOT=home S16_WAYS=hold = hold@home.)
+ *
+ * v1 (sim/trunk-rtc-v1-e2e.sh --scenario s16, PW_TRUNK_V1=1): the "box console" is the admin's
+ * laptop signed in to the v1 trunk (PW_ADMIN): S16.1 pairs by the trunk's single-use QR (/pair →
+ * POST /t/pair/redeem, sim/reach/v1-lib.mjs); lab is a light v1 root named by its root id
+ * (PW_LAB_ROOT, spec A5), reached from home over WireGuard relayed by the trunk. The steps and
+ * their checks are the same.
  */
 import { appendFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -39,6 +45,7 @@ import {
   STATE, brain, chromium, devices, env, failed, hydrated, must, pair, phoneFetch, poll, renderSay,
   rowOf, screens, sleep, step, sttOf, textOf, tool, touchDown, wavOf, words,
 } from './rig-lib.mjs';
+import { adminDesk, pairV1 } from './v1-lib.mjs';
 
 const AP = env('PW_AP_URL');
 const AP_IP = env('PW_AP_IP');
@@ -53,9 +60,13 @@ const WALKS = (OLD
   ? env('S16_WAYS', 'hold,free').split(',').filter(Boolean).map((w) => `${w}@${env('S16_ROOT', 'lab')}`)
   : env('S16_WALKS', 'hold@home,hold@lab,free@lab').split(',').filter(Boolean)
 ).map((k) => ({ key: k, way: k.split('@')[0], root: k.split('@')[1] }));
+const V1 = env('PW_TRUNK_V1') === '1';
+// the name home's brain knows lab by: v0.9 its static peer name, v1 its root id (spec A5)
+const LAB_ROOT = env('PW_LAB_ROOT', 'lab');
 const SAY = env('S16_SAY', 'please add oat milk and eggs to the shopping list');
 const KEY = words(env('S16_KEYWORDS', 'oat milk eggs shopping list'));
 must(AP && STATE && BASE && HOME && VOICE && PHONE_CHROME && APP, 'run by sim/trunk-rtc-e2e.sh --scenario s16');
+must(!V1 || env('PW_ADMIN'), 'v1 needs PW_ADMIN (sim/trunk-rtc-v1-e2e.sh --scenario s16)');
 must(WALKS.length && WALKS.every((w) => ['hold', 'free'].includes(w.way) && ['home', 'lab'].includes(w.root)), `S16_WALKS ${JSON.stringify(WALKS)}`);
 must(WALKS.every((w) => w.root === 'home') || LAB, 'a walk on lab needs PW_LAB');
 const whereOf = (root) => (root === 'lab' ? LAB : HOME); // the brain whose store holds the real session
@@ -76,9 +87,11 @@ const WAV = {
 };
 process.stderr.write(`s16: walks ${WALKS.map((w) => w.key)}; Ása's WAVs: hold ${WAV.hold.speech.toFixed(1)} s, free ${WAV.free.speech.toFixed(1)} s of speech (+ ${LEAD} s lead, 45 s tail)\n`);
 
-const box = await chromium.launch();
-const desk = await box.newContext({ viewport: { width: 1280, height: 900 } });
-const consolePage = await desk.newPage();
+// the box console: v0.9 the box's own browser on loopback; v1 the admin's laptop signed in to the trunk
+const v1desk = V1 ? await adminDesk({ ap: AP, apIp: AP_IP, adminPath: env('PW_ADMIN') }) : null;
+const box = v1desk ? v1desk.browser : await chromium.launch();
+const desk = v1desk ? v1desk.ctx : await box.newContext({ viewport: { width: 1280, height: 900 } });
+const consolePage = v1desk ? v1desk.page : await desk.newPage();
 const offAp = [];
 /** one launch of Ása's phone: its fake mic = `wavPath`; `storage` = the paired phone's state */
 async function phoneFor(wavPath, storage) {
@@ -325,7 +338,8 @@ async function walk(w, P) {
 try {
   await step('S16.1', 'box console QR → the phone pairs through vps:443 (the ap) → its list', async () => {
     const P = await phoneFor(WAV.hold.path, null);
-    await pair(consolePage, P.page, { base: BASE, ap: AP, png: join(STATE, 's16-pair-qr.png') });
+    if (v1desk) await pairV1(v1desk, P.page, { ap: AP, png: join(STATE, 's16-pair-qr.png') });
+    else await pair(consolePage, P.page, { base: BASE, ap: AP, png: join(STATE, 's16-pair-qr.png') });
     mainId = String((await phoneFetch(P.page, '/api/session/main')).body.id || '');
     paired = await P.ctx.storageState();
     await P.browser.close();
@@ -342,14 +356,14 @@ try {
       const WHERE = whereOf(ROOT);
       const r = await brain(HOME, `/session/${mainId}/message`, {
         method: 'POST',
-        body: { parts: [{ type: 'text', text: tool([['session_start', { title, agent: 'build', brief: 'Reply with exactly: READY', ...(ROOT === 'lab' ? { root: 'lab' } : {}) }]]) }] },
+        body: { parts: [{ type: 'text', text: tool([['session_start', { title, agent: 'build', brief: 'Reply with exactly: READY', ...(ROOT === 'lab' ? { root: LAB_ROOT } : {}) }]]) }] },
         timeout: 120_000,
       });
       must(r.status === 200, `MAIN answered ${r.status}`);
       const row = await poll(async () => ((await brain(HOME, '/tree')).body || []).find((t) => t.title === title), 30_000, `no row "${title}" on home`);
       const info = (await brain(HOME, `/session/${row.id}`)).body;
       const real = ROOT === 'lab' ? info?.remote?.id : row.id;
-      must(real && (ROOT === 'home' || info?.remote?.root === 'lab'), `"${title}" remote ${JSON.stringify(info?.remote)}`);
+      must(real && (ROOT === 'home' || info?.remote?.root === LAB_ROOT), `"${title}" remote ${JSON.stringify(info?.remote)}`);
       await poll(async () => ((await brain(WHERE, `/session/${real}/message`)).body || []).some((m) => m.info.role === 'assistant' && textOf(m).includes('READY')), 30_000, `the brief of "${title}" never ran on ${ROOT}`);
       S[w.key] = { proxy: row.id, real };
       out.push(`${title}: ${row.id}${ROOT === 'lab' ? ` → ${real} on lab` : ''}`);

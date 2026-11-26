@@ -1266,6 +1266,14 @@ fn load_or_create_cert(path: Option<&std::path::Path>) -> Result<DtlsCert, Strin
     Ok(cert)
 }
 
+/// `bifrost-net dtls-id FILE`: the bridge's DTLS identity (its `dtls_cert_file`), made mode 600 when
+/// missing, exactly as the bridge makes it on first start. Returns the fingerprint ("sha-256 AB:…") an
+/// installer sends as `dtls_fp` at enrollment (`POST /t/roots/enroll`), so the trunk's directory pins
+/// the key the bridge will answer `/offer` with (spec §5.2, C6 `/t/me/roots`).
+pub fn dtls_identity(path: &std::path::Path) -> Result<String, String> {
+    Ok(fingerprint_of(&load_or_create_cert(Some(path))?))
+}
+
 /// The SDP form: "sha-256 AB:CD:…" over the DER certificate.
 pub fn fingerprint_of(cert: &DtlsCert) -> String {
     use sha2::Digest as _;
@@ -2826,6 +2834,29 @@ mod switch_url_tests {
         assert_eq!(v[0]["id"], "mac");
         assert!((4_900..10_000).contains(&ago), "since is {ago} ms ago");
         assert_eq!(super::roots_list_json(&[]), "[]");
+    }
+}
+
+#[cfg(test)]
+mod dtls_identity_tests {
+    /// `bifrost-net dtls-id`: the file it makes is the one the bridge loads, so the fingerprint an
+    /// installer enrolls (`dtls_fp`) is the one every `/offer` answer carries.
+    #[test]
+    fn made_once_then_the_bridge_loads_the_same_key() {
+        let dir = std::env::temp_dir().join(format!("dtls-id-{}-{}", std::process::id(), crate::tokens::now_ms()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("bridge-dtls.json");
+        let fp = super::dtls_identity(&f).unwrap();
+        let hex = fp.strip_prefix("sha-256 ").unwrap_or_default();
+        assert!(hex.split(':').count() == 32 && hex.split(':').all(|b| b.len() == 2 && b.chars().all(|c| c.is_ascii_hexdigit())), "{fp}");
+        assert_eq!(super::dtls_identity(&f).unwrap(), fp, "a second call loads, never remakes");
+        assert_eq!(super::fingerprint_of(&super::load_or_create_cert(Some(&f)).unwrap()), fp);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            assert_eq!(std::fs::metadata(&f).unwrap().permissions().mode() & 0o777, 0o600);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 

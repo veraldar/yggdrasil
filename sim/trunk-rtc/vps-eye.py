@@ -11,7 +11,11 @@ link (`GET /rootlink`, sim/trunk-e2e.sh) is `root`.
 
 MITM_FILE present = an ACTIVE attack: on phone connections, every DTLS fingerprint the VPS
 carries (a=fingerprint:sha-256 …, in the /offer answer) is swapped for its own — the phone
-must refuse the pinned channel (lib/pinned.ts), and send nothing.
+must refuse the pinned channel (lib/pinned.ts), and send nothing. When MITM_FILE's text names
+"directory", the v1 trunk's directory pins on phone connections (`"dtls_fp":"sha-256 …"` in
+/t/me/roots) are swapped too — a phone that remembered the real key must raise the pin-change
+alarm (spec §5.2, D3). The v1 trunk's root channel (`GET /t/root`, sim/trunk-rtc-v1-e2e.sh) is
+`bridge`, like the v0.9 `GET /ap`.
 
 sni-443.py routes the ap's name here with `proxy`: the PROXY v1 line comes first, and is passed on.
 """
@@ -25,6 +29,7 @@ import sys
 import time
 
 FP = re.compile(rb"(a=fingerprint:sha-256 )((?:[0-9A-Fa-f]{2}:){31}[0-9A-Fa-f]{2})")
+DIR_FP = re.compile(rb'("dtls_fp"\s*:\s*"sha-256 )((?:[0-9A-Fa-f]{2}:){31}[0-9A-Fa-f]{2})')
 FAKE = b":".join([b"66"] * 32)
 
 
@@ -68,6 +73,8 @@ def main(listen, ap, cert, key, logpath, mitm_file):
             write(cid, who, d, b, src)
             if rewrite and os.path.exists(mitm_file):
                 b = FP.sub(lambda m: m.group(1) + FAKE, carry + b)
+                if b"directory" in open(mitm_file, "rb").read():
+                    b = DIR_FP.sub(lambda m: m.group(1) + FAKE, b)
                 carry, b = b[-120:], b[:-120]  # a fingerprint may straddle two reads
             if b:
                 w.write(b)
@@ -98,7 +105,8 @@ def main(listen, ap, cert, key, logpath, mitm_file):
         cid = seq[0]
         # the first request line tells the home bridge's channel (GET /ap) and a joined root's link
         # (GET /rootlink) from a phone; the PROXY line names the client's real address
-        who = "bridge" if first.startswith(b"GET /ap ") else "root" if first.startswith(b"GET /rootlink") else "phone"
+        who = ("bridge" if first.startswith((b"GET /ap ", b"GET /t/root ")) else "root"
+               if first.startswith(b"GET /rootlink") else "phone")
         parts = line.split()
         src = parts[2].decode() if len(parts) >= 6 and parts[0] == b"PROXY" else ""
         await asyncio.gather(pipe(r, uw, cid, who, src, "c2s", False, first),

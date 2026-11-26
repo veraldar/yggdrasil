@@ -866,14 +866,36 @@ function wireChannelHooks() {
 
 type MeRoot = { id?: string; name?: string; dtls_fp?: string; door?: boolean };
 
-async function bootTrunkPinned(): Promise<void> {
-  const b = await buildReady();
-  if (!isTrunk(b)) return;
+/** this page came through a trunk-mode door (lib/gate.ts TRUNK_MODE_COOKIE), read synchronously */
+function trunkPage(): boolean {
+  try {
+    return /(?:^|;\s*)bifrost_mode=trunk(?:;|$)/.test(document.cookie);
+  } catch {
+    return false;
+  }
+}
+
+/** a channel can be pinned here: a secure context (or loopback) with WebRTC */
+function pinnable(): boolean {
   const secureOrLoopback =
     location.protocol === 'https:' ||
     location.hostname === '127.0.0.1' ||
     location.hostname === 'localhost';
-  if (!secureOrLoopback || !('RTCPeerConnection' in window)) return;
+  return secureOrLoopback && 'RTCPeerConnection' in window;
+}
+
+/** `held`: bootPinned already wired the hooks and holds the page's requests (state connecting) —
+ *  every way out of here that opens no channel must let them go (state off) */
+async function bootTrunkPinned(held = false): Promise<void> {
+  const release = () => {
+    if (held && state === 'connecting') setState('off');
+  };
+  // held: the door said trunk; never wait for /api/build here (it is one of the held requests)
+  if (!held) {
+    const b = await buildReady();
+    if (!isTrunk(b)) return;
+    if (!pinnable()) return;
+  }
   const remembered = loadTrunkPins();
   let list: MeRoot[] | null = null;
   try {
@@ -935,7 +957,7 @@ async function bootTrunkPinned(): Promise<void> {
     Object.values(remembered).find((p) => p.door) ||
     Object.values(remembered)[0];
   const fp = door?.dtls_fp?.trim() || rememberedDoor?.fp || '';
-  if (!fp) return;
+  if (!fp) return release();
   wireChannelHooks();
   const trunkPin: Pin = {
     fp,
@@ -965,8 +987,17 @@ export function bootPinned(): void {
   patchBeacon();
   const pin = loadPin();
   if (!pin?.fp) {
+    // v1: a page its door served behind a trunk (lib/gate.ts marks it) learns the root's key from
+    // the trunk's directory — a round trip. Until then the page's /api and /rtc wait (P11: nothing
+    // of the box's data to the trunk's TLS at boot); no key known at all → off, and they go as before.
+    if (trunkPage() && pinnable()) {
+      wireChannelHooks();
+      setState('connecting', "asking the trunk for this computer's key");
+      void bootTrunkPinned(true);
+      return;
+    }
     setState('off');
-    void bootTrunkPinned();
+    void bootTrunkPinned(false);
     return;
   }
   if (location.protocol !== 'https:' || !('RTCPeerConnection' in window)) {

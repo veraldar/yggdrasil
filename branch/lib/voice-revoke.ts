@@ -28,12 +28,25 @@ type State = {
   watches: Map<string, Watch>;
   timer: ReturnType<typeof setInterval> | null;
   busy: boolean;
+  /** trunk mode: the deny-list / kill epoch last seen, and its watcher */
+  sig?: string;
+  fast?: ReturnType<typeof setInterval> | null;
+  /** a sweep was asked for while one ran: run once more after it */
+  again?: boolean;
 };
 
 const SWEEP_MS = Number(process.env.BIFROST_VOICE_SWEEP_MS) || 1000;
+// trunk mode: how often the bridge's trunk-state.json is looked at (a stat; re-read on change only)
+const AUTHORITY_MS = Number(process.env.BIFROST_VOICE_AUTHORITY_MS) || 100;
 // one state per process, whatever module instance the route bundle loads
 const g = globalThis as unknown as { __bifrostVoiceRevoke?: State };
 const state: State = (g.__bifrostVoiceRevoke ??= { watches: new Map(), timer: null, busy: false });
+
+/** the part of the trunk's authority a revoke or a kill changes */
+const authoritySig = () => {
+  const a = authority();
+  return `${a.kill_epoch}|${a.deny.map((d) => d.did).join(',')}`;
+};
 
 let client: RoomServiceClient | null = null;
 
@@ -50,6 +63,20 @@ export function watchVoice(
     state.timer = setInterval(() => void sweep(), SWEEP_MS);
     state.timer.unref?.();
   }
+  // trunk mode (spec §5.4: voice cut ≤ 1 s): the trunk's revoke lands in the bridge's
+  // trunk-state.json within ~200 ms — sweep the moment the deny-list or the kill epoch moves,
+  // not at the next 1 s tick (which alone gave 0–1 s + LiveKit's answer, past 1 s at times)
+  if (process.env.BIFROST_AUTH === 'trunk' && !state.fast) {
+    state.sig = authoritySig();
+    state.fast = setInterval(() => {
+      if (!state.watches.size) return;
+      const sig = authoritySig();
+      if (sig === state.sig) return;
+      state.sig = sig;
+      void sweep();
+    }, AUTHORITY_MS);
+    state.fast.unref?.();
+  }
 }
 
 async function live(device: string, kep: number | undefined): Promise<boolean> {
@@ -58,7 +85,11 @@ async function live(device: string, kep: number | undefined): Promise<boolean> {
 }
 
 async function sweep(): Promise<void> {
-  if (state.busy || !client) return;
+  if (!client) return;
+  if (state.busy) {
+    state.again = true;
+    return;
+  }
   state.busy = true;
   try {
     for (const [k, w] of state.watches) {
@@ -83,5 +114,9 @@ async function sweep(): Promise<void> {
     }
   } finally {
     state.busy = false;
+    if (state.again) {
+      state.again = false;
+      void sweep();
+    }
   }
 }

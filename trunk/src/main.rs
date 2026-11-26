@@ -94,6 +94,24 @@ fn main() {
                 2
             }
         },
+        // trunk v1: the bridge's DTLS identity before it first starts (the installer's `dtls_fp`)
+        #[cfg(feature = "bridge")]
+        Some("dtls-id") => match args.get(1) {
+            Some(path) => match bridge::dtls_identity(std::path::Path::new(path)) {
+                Ok(fp) => {
+                    println!("fingerprint = \"{fp}\"");
+                    0
+                }
+                Err(e) => {
+                    eprintln!("dtls-id: {e}");
+                    1
+                }
+            },
+            None => {
+                eprintln!("dtls-id: FILE (the bridge's dtls_cert_file; created mode 600 if missing; prints its fingerprint)");
+                2
+            }
+        },
         #[cfg(feature = "trunk")]
         Some("trunk-rig") => v1::rig::cmd(&args[1..]),
         #[cfg(feature = "bridge")]

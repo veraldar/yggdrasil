@@ -211,3 +211,22 @@ test('devices: /pair still passes; a stranger’s /api still gets the v0.9 body;
   assert.match(p.headers.get('x-middleware-rewrite') || '', /\/pair\?unpaired=1$/);
   assert.ok(passed(await gate.deviceGate(req('/api/pair/claim', { method: 'POST' }))), 'pair routes authenticate themselves');
 });
+
+test('trunk pages carry the mode marker lib/pinned.ts reads at boot (P11); /api, a 302, tailnet and devices do not', async () => {
+  const marker = (r) => (r.headers.get('set-cookie') || '').split(/,(?=\s*\w+=)/).find((c) => c.trim().startsWith(`${gate.TRUNK_MODE_COOKIE}=`)) || '';
+  mode('trunk');
+  const page = await gate.pageGate(req('/', { cookie: token() }));
+  assert.ok(passed(page));
+  const c = marker(page);
+  assert.match(c, /^bifrost_mode=trunk;/, c);
+  assert.match(c, /Path=\//i);
+  assert.match(c, /SameSite=Strict/i);
+  assert.doesNotMatch(c, /HttpOnly/i, 'the page script must read it');
+  assert.ok(marker(await gate.pageGate(req('/', { peer: '127.0.0.1' }))), "the box's console too");
+  assert.equal(marker(await gate.pageGate(req('/'))), '', 'no token: the 302 to /login carries none');
+  assert.equal(marker(await gate.deviceGate(req('/api/session', { cookie: token() }))), '', '/api answers carry none');
+  mode('tailnet');
+  assert.equal(marker(await gate.pageGate(req('/'))), '', 'tailnet unchanged (W2)');
+  mode('devices');
+  assert.equal(marker(await gate.pageGate(req('/pair'))), '', 'devices unchanged');
+});
