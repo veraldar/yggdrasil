@@ -263,7 +263,8 @@ pub fn redeem(st: &State, token: &str, name: Option<&str>, ip: IpAddr, ua: &str)
     match session::issue(st, &did, ip) {
         Ok(i) => session::set_cookies(
             st,
-            Resp::json(200, &json!({ "ok": true, "device": { "id": did, "name": dev_name, "role": role }, "next": "/" })),
+            // the phone lands where a fresh sign-in lands: the door (its tree door, S8), or /offline
+            Resp::json(200, &json!({ "ok": true, "device": { "id": did, "name": dev_name, "role": role }, "next": crate::v1::relay::landing(st) })),
             &i,
         ),
         Err(e) => Resp::json(500, &json!({ "error": e })),

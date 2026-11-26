@@ -41,6 +41,22 @@ impl Relay {
             h.push_revoke(did, until_ms);
         }
     }
+
+    /// Is a root that runs the app online right now (a door for a device with no choice yet)?
+    pub fn door_online(&self) -> bool {
+        self.hub.get().is_some_and(|h| h.door_for(None).is_some())
+    }
+}
+
+/// Where a freshly made device goes (spec §5.6 F2 step 4, F5 step 3): `/` — the door root, whose
+/// first contact is the tree door (S8) — or, with no root enrolled yet, the empty-trunk page that
+/// `/` serves; `/offline` when roots exist but none that runs the app is online.
+pub fn landing(st: &State) -> &'static str {
+    if !has_roots(st) || st.relay.door_online() {
+        "/"
+    } else {
+        "/offline"
+    }
 }
 
 /// The hub (made on first use: its registry reads trunk.db through the `Arc<State>`).
