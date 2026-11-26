@@ -60,8 +60,34 @@ def atomic_json(path, obj):
     os.replace(tmp, path)
 
 
+_TOOL_PATH = {}
+
+
+def tool_path(path):
+    """PATH with the real tool dirs ahead of mise shims. A shim re-reads mise's configs under the rig's fake HOME, finds
+    ~/.config/mise/config.toml by walking up from the cwd, calls it untrusted and exits (G2.2 apps never came up from a
+    systemd unit, whose PATH has the shims). Resolved once, with the real HOME."""
+    if path not in _TOOL_PATH:
+        dirs = []
+        for tool in ("node", "uv", "claude", "playwright"):
+            p = shutil.which(tool, path=path)
+            if not p or "/mise/shims/" not in p:
+                continue
+            try:
+                r = subprocess.run(["mise", "which", tool], capture_output=True, text=True, timeout=30)
+            except (OSError, subprocess.TimeoutExpired):
+                continue
+            d = os.path.dirname(r.stdout.strip()) if r.returncode == 0 else ""
+            if d and d not in dirs:
+                dirs.append(d)
+        _TOOL_PATH[path] = os.pathsep.join(dirs + [path])
+    return _TOOL_PATH[path]
+
+
 def clean_env(extra=None, tmpdir=None):
     env = {k: v for k, v in os.environ.items() if k in ENV_KEEP or k.startswith("LC_")}
+    if env.get("PATH"):
+        env["PATH"] = tool_path(env["PATH"])
     if tmpdir:
         env["TMPDIR"] = tmpdir
     env.update(extra or {})
