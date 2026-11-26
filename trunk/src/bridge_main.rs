@@ -198,7 +198,13 @@ pub fn run(path: &str) -> Result<(), String> {
             let cell = link_cell.clone();
             std::sync::Arc::new(move |ufrag: &str| {
                 if let Some(l) = cell.get() {
-                    l.register_wait(&[ufrag.to_string()], crate::v1::link::ICE_ACK_WAIT);
+                    let t = std::time::Instant::now();
+                    let acked = l.register_wait(&[ufrag.to_string()], crate::v1::link::ICE_ACK_WAIT);
+                    eprintln!(
+                        "  offer: pinned-channel ufrag {ufrag} registered with the trunk — {} in {} ms",
+                        if acked { "acked" } else { "NO ack (ice.reg_timeout)" },
+                        t.elapsed().as_millis()
+                    );
                 }
             }) as std::sync::Arc<dyn Fn(&str) + Send + Sync>
         }),

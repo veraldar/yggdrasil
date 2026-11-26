@@ -86,12 +86,24 @@ async function trunkDeviceGate(req: NextRequest): Promise<NextResponse> {
  * devices mode) → the page; the box's console → the page; anyone else → 302 /login (same origin: the
  * trunk serves it), relative on the wire, so it holds behind the trunk whatever this server's host is.
  */
+/** Trunk mode marks every page it lets through: `bifrost_mode=trunk`, a plain (script-readable) cookie
+ *  carrying no secret. lib/pinned.ts reads it before the page's first request: behind a trunk the
+ *  root's key comes from the directory (/t/me/roots, one round trip), and until it is known the
+ *  page's /api and /rtc wait — nothing of the box's data goes to the trunk's TLS at boot (P11). The
+ *  pages are static (built without BIFROST_AUTH), so the mode cannot ride the HTML itself. */
+export const TRUNK_MODE_COOKIE = 'bifrost_mode';
+function trunkPage(): NextResponse {
+  const res = NextResponse.next();
+  res.cookies.set(TRUNK_MODE_COOKIE, 'trunk', { path: '/', sameSite: 'strict', maxAge: 86_400 });
+  return res;
+}
+
 async function trunkPageGate(req: NextRequest): Promise<NextResponse> {
   if (servedByTrunk(req.nextUrl.pathname)) return notHere();
   const cookie = req.cookies.get('bifrost_device')?.value || '';
-  if (!cookie && adminOk(req)) return NextResponse.next();
+  if (!cookie && adminOk(req)) return trunkPage();
   const v = checkTrunkAccess(presented(req), regionOfReq(req));
-  if (v.ok || TRUNK_REAUTH[v.why] === 'refresh') return NextResponse.next();
+  if (v.ok || TRUNK_REAUTH[v.why] === 'refresh') return trunkPage();
   // Next's middleware adapter takes an absolute URL only, and relativizes one on the request's own host
   // (server.mjs keeps that host `localhost`): the browser gets `Location: /login`
   const login = new URL('/login', req.url);

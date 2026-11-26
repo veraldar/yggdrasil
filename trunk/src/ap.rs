@@ -1985,7 +1985,15 @@ async fn pump_livekit_rtc(
                 .filter(|u| seen.insert(u.clone()))
                 .collect();
             if !ufrags.is_empty() {
-                link.register_rtc_wait(stream_id, &ufrags, crate::v1::link::ICE_ACK_WAIT).await;
+                let t = Instant::now();
+                let acked = link.register_rtc_wait(stream_id, &ufrags, crate::v1::link::ICE_ACK_WAIT).await;
+                // one line per LiveKit SDP (join, ICE restart): what the trunk now routes to this root
+                eprintln!(
+                    "  rtc: LiveKit ufrag {} registered with the trunk — {} in {} ms (/rtc #{stream_id})",
+                    ufrags.join(","),
+                    if acked { "acked" } else { "NO ack, forwarded anyway (ice.reg_timeout)" },
+                    t.elapsed().as_millis()
+                );
             }
             for f in msg_frames.drain(..) {
                 if !send_chunked(&f) {
