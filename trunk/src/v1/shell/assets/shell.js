@@ -368,7 +368,7 @@ async function accountPage() {
 async function whoami() {
   const r = await authed('GET', '/t/me');
   if (r && r.status === 200) {
-    const e = $('e-email') || $('o-email');
+    const e = $('e-email') || $('o-email') || $('d-email');
     if (e && r.data.account.email) e.textContent = r.data.account.email;
     return r.data;
   }
@@ -396,6 +396,450 @@ async function offlinePage() {
   setTimeout(() => location.replace('/'), 10000);
 }
 
-const pages = { claim: claimPage, login: loginPage, account: accountPage, empty: emptyPage, offline: offlinePage };
+// ---- /devices -------------------------------------------------------------------------------
+
+async function devicesPage() {
+  let me = null;
+  let roots = null;
+  const sheet = {
+    title: $('d-sheet-title'), body: $('d-sheet-body'), yes: $('d-sheet-yes'),
+    pending: null,
+  };
+  const ask = (title, body, action) => {
+    sheet.title.textContent = title;
+    sheet.body.textContent = body;
+    sheet.pending = action;
+    show($('d-sheet'));
+  };
+  $('d-sheet-no').addEventListener('click', () => { sheet.pending = null; show($('d-sheet'), false); });
+  $('d-sheet-yes').addEventListener('click', async () => {
+    const fn = sheet.pending;
+    sheet.pending = null;
+    show($('d-sheet'), false);
+    if (fn) await fn();
+    await load();
+  });
+
+  const guarded = async (fn) => {
+    const r = await fn();
+    if (r && r.status === 403 && r.data && r.data.step_up) {
+      show($('d-stepup'));
+      stepUp.pending = fn;
+      window.scrollTo(0, 0);
+      return null;
+    }
+    return r;
+  };
+  const stepUp = async (ev) => {
+    if (ev) ev.preventDefault();
+    const v = $('d-stepup-code').value.trim();
+    const body = /^[\d\d ]*$/.test(v) && v.replace(/\D/g, '').length >= 6 && !v.includes('-') ? { totp: v.replace(/\D/g, '') } : { recovery: v };
+    const r = await authed('POST', '/t/auth/step-up', body);
+    if (!r) return;
+    if (r.status !== 200) { say($('d-stepup-err'), errText(r), 'err'); return; }
+    say($('d-stepup-err'), '');
+    $('d-stepup-code').value = '';
+    show($('d-stepup'), false);
+    const fn = stepUp.pending;
+    stepUp.pending = null;
+    if (fn) await fn();
+    await load();
+  };
+  stepUp.pending = null;
+  $('d-stepup-form').addEventListener('submit', stepUp);
+
+  function fmtWhen(t) {
+    if (!t) return 'never';
+    const s = (Date.now() - t) / 1000;
+    if (s < 90) return 'just now';
+    if (s < 3600) return Math.round(s / 60) + ' min ago';
+    if (s < 86400) return Math.round(s / 3600) + ' h ago';
+    return new Date(t).toLocaleDateString();
+  }
+
+  async function load() {
+    const r = await authed('GET', '/t/devices');
+    if (!r) return;
+    const d = r.data;
+    me = { device: { id: d.self_id, role: d.role, fresh: d.fresh } };
+    const mi = (d.devices || []).find((x) => x.id === d.self_id);
+    if (mi) me.device = Object.assign(me.device, mi);
+    const em = await whoami();
+    if (em && em.account && em.account.email) $('d-email').textContent = em.account.email;
+    const list = $('d-list');
+    list.textContent = '';
+    show($('d-empty'), !d.devices.length);
+    for (const dev of d.devices) {
+      list.appendChild(deviceRow(dev));
+    }
+    // roots (from WIRE's /t/roots) — admins only see this section
+    const rr = await authed('GET', '/t/roots');
+    if (rr && rr.status === 200 && Array.isArray(rr.data)) {
+      roots = rr.data;
+      show($('d-roots-blk'), true);
+      $('d-roots-count').textContent = roots.length ? roots.length + (roots.length === 1 ? ' root' : ' roots') : '';
+      const rl = $('d-roots-list');
+      rl.textContent = '';
+      show($('d-roots-empty'), !roots.length);
+      for (const rt of roots) rl.appendChild(rootRow(rt));
+    } else {
+      roots = [];
+      show($('d-roots-blk'), false);
+    }
+  }
+
+  function deviceRow(dev) {
+    const row = document.createElement('div');
+    row.className = 'dev-row' + (dev.revoked ? ' gone' : '');
+    const you = me && me.device && dev.id === me.device.id;
+    const hd = document.createElement('div');
+    hd.className = 'head';
+    const n = document.createElement('span');
+    n.className = 'n';
+    n.textContent = dev.name;
+    const role = document.createElement('span');
+    role.className = 'role ' + (dev.role || 'member') + (you ? ' you' : '');
+    role.textContent = (dev.role || 'member') + (you ? ' · this device' : '');
+    hd.append(n, role);
+    row.append(hd);
+    const meta = document.createElement('p');
+    meta.className = 'meta';
+    const items = [ 'added ' + fmtWhen(dev.created_at), 'last seen ' + fmtWhen(dev.last_seen), dev.created_via ];
+    if (dev.door) items.push('door: ' + dev.door);
+    for (const t of items) {
+      const sp = document.createElement('span');
+      sp.textContent = t;
+      meta.append(sp);
+    }
+    row.append(meta);
+    if (!dev.revoked) {
+      const acts = document.createElement('div');
+      acts.className = 'acts';
+      const rename = document.createElement('div');
+      rename.className = 'rename';
+      const inp = document.createElement('input');
+      inp.value = dev.name;
+      inp.maxLength = 40;
+      inp.placeholder = 'name';
+      inp.ariaLabel = 'rename ' + dev.name;
+      const save = document.createElement('button');
+      save.className = 'oz-k';
+      save.type = 'button';
+      save.textContent = 'Save';
+      save.addEventListener('click', async () => {
+        const name = inp.value.trim();
+        if (!name || name === dev.name) return;
+        const r = await authed('PATCH', '/t/devices/' + encodeURIComponent(dev.id), { name });
+        if (!r) return;
+        if (r.status !== 200) { say($('p-msg') || $('d-empty'), errText(r), 'err'); return; }
+        await load();
+      });
+      rename.append(inp, save);
+      acts.append(rename);
+      if (me && me.device && me.device.role === 'admin') {
+        const roleBtn = document.createElement('button');
+        roleBtn.className = 'oz-k';
+        roleBtn.type = 'button';
+        roleBtn.textContent = dev.role === 'admin' ? '→ member' : '→ admin';
+        roleBtn.addEventListener('click', async () => {
+          const target = dev.role === 'admin' ? 'member' : 'admin';
+          const r = await guarded(() => authed('PATCH', '/t/devices/' + encodeURIComponent(dev.id), { role: target }));
+          if (!r) return;
+          if (r.status === 200) { await load(); return; }
+          if (r.status === 403 && r.data && r.data.why === '2fa-on-device') {
+            say($('p-msg') || $('d-empty'), r.data.error, 'err');
+            return;
+          }
+          say($('p-msg') || $('d-empty'), errText(r), 'err');
+        });
+        acts.append(roleBtn);
+        const rm = document.createElement('button');
+        rm.className = 'oz-k danger';
+        rm.type = 'button';
+        rm.textContent = 'Remove';
+        rm.addEventListener('click', () => {
+          ask('remove ' + dev.name + '?',
+              you ? 'This is the device you are using — you sign out of it now.'
+                  : 'Its sessions, routes and voice die with it. It signs in again with email + 2FA.',
+              async () => {
+                const r = await authed('DELETE', '/t/devices/' + encodeURIComponent(dev.id), {});
+                if (!r) return;
+                if (r.status !== 200) { say($('p-msg') || $('d-empty'), errText(r), 'err'); }
+              });
+        });
+        acts.append(rm);
+      } else if (you) {
+        const rm = document.createElement('button');
+        rm.className = 'oz-k danger';
+        rm.type = 'button';
+        rm.textContent = 'Sign out';
+        rm.addEventListener('click', () => ask('sign out ' + dev.name + '?', 'This device signs out.', async () => {
+          await authed('DELETE', '/t/devices/' + encodeURIComponent(dev.id), {});
+        }));
+        acts.append(rm);
+      }
+      row.append(acts);
+    }
+    return row;
+  }
+
+  function rootRow(rt) {
+    const row = document.createElement('div');
+    row.className = 'dev-row' + (rt.revoked_at ? ' gone' : '');
+    const hd = document.createElement('div');
+    hd.className = 'head';
+    const n = document.createElement('span');
+    n.className = 'n';
+    n.textContent = rt.name + (rt.hostname && rt.hostname !== rt.name ? ' (' + rt.hostname + ')' : '');
+    const role = document.createElement('span');
+    role.className = 'role' + (rt.online ? ' you' : '');
+    role.textContent = rt.online ? 'online' : 'offline';
+    hd.append(n, role);
+    row.append(hd);
+    const meta = document.createElement('p');
+    meta.className = 'meta';
+    for (const t of [ (rt.os || '') + (rt.arch ? ' · ' + rt.arch : ''), rt.door ? 'door root' : '', 'enrolled ' + fmtWhen(rt.enrolled_at) ]) {
+      if (!t) continue;
+      const sp = document.createElement('span');
+      sp.textContent = t;
+      meta.append(sp);
+    }
+    row.append(meta);
+    if (!rt.revoked_at && me && me.device && me.device.role === 'admin') {
+      const acts = document.createElement('div');
+      acts.className = 'acts';
+      const rm = document.createElement('button');
+      rm.className = 'oz-k danger';
+      rm.type = 'button';
+      rm.textContent = 'Revoke';
+      rm.addEventListener('click', () => {
+        ask('revoke ' + rt.name + '?', 'It disconnects for good; devices using it as their door move off it.', async () => {
+          const r = await authed('DELETE', '/t/roots/' + encodeURIComponent(rt.id), {});
+          if (!r) return;
+          if (r.status !== 200) { say($('p-msg') || $('d-empty'), errText(r), 'err'); }
+        });
+      });
+      acts.append(rm);
+      row.append(acts);
+    }
+    return row;
+  }
+
+  // the kill-switch (admin)
+  if (true) {
+    const killOpen = async () => { show($('d-kill-sheet')); $('d-kill-lockdown').checked = false; };
+    $('d-kill-no').addEventListener('click', () => show($('d-kill-sheet'), false));
+    $('d-kill-yes').addEventListener('click', async () => {
+      show($('d-kill-sheet'), false);
+      const lockdown = $('d-kill-lockdown').checked;
+      const r = await authed('POST', '/t/kill', { lockdown });
+      if (!r) return;
+      if (r.status === 200) { location.replace('/login'); return; }
+      say($('p-msg') || $('d-empty'), errText(r), 'err');
+    });
+    (async () => {
+      // the kill button only appears for admins, and only after step-up
+      const r = await authed('GET', '/t/me');
+      if (r && r.status === 200 && r.data.device.role === 'admin') {
+        const blk = document.createElement('div');
+        blk.className = 'dev-row';
+        const hd = document.createElement('div');
+        hd.className = 'head';
+        const n = document.createElement('span');
+        n.className = 'n';
+        n.textContent = 'kill-switch';
+        const role = document.createElement('span');
+        role.className = 'role';
+        role.textContent = 'every device';
+        hd.append(n, role);
+        const acts = document.createElement('div');
+        acts.className = 'acts';
+        const btn = document.createElement('button');
+        btn.className = 'oz-k danger';
+        btn.type = 'button';
+        btn.textContent = 'Kill every device';
+        btn.addEventListener('click', async () => {
+          if (!r.data.device.fresh) { show($('d-stepup')); stepUp.pending = killOpen; window.scrollTo(0, 0); return; }
+          killOpen();
+        });
+        acts.append(btn);
+        blk.append(hd, acts);
+        $('d-list').after(blk);
+      }
+    })();
+  }
+
+  await load();
+}
+
+// ---- /pair: the phone's side (a fragment to redeem) or the admin's side (mint) --------------
+
+async function pairPage() {
+  const tok = new URLSearchParams(location.hash.slice(1)).get('t');
+  if (tok) return pairRedeem(tok);
+  let id = null;
+  let timer = null;
+  let closed = false;
+  const clearTimer = () => { if (timer) { clearInterval(timer); timer = null; } };
+  const draw = (qr) => {
+    putSvg($('p-qr-img'), qr.qr_svg);
+    $('p-qr-count').textContent = 'expires in ' + mmss(qr.expires_in);
+  };
+  const tick = async () => {
+    if (!id || closed) return;
+    const r = await authed('GET', '/t/pair/qr/' + encodeURIComponent(id));
+    if (!r) return;
+    if (r.status === 200 && r.data.expires_in !== undefined && r.data.status === 'waiting') {
+      $('p-qr-count').textContent = 'expires in ' + mmss(r.data.expires_in);
+      return;
+    }
+    if (r.status === 200 && r.data.status === 'waiting') return;
+    clearTimer();
+    if (r.status === 200 && r.data.status === 'joined') {
+      closed = true;
+      // B4: the token is in the fragment; wipe it before showing the joined state
+      history.replaceState(null, '', '/pair');
+      show($('p-qr'), false);
+      $('p-joined-role').textContent = r.data.role || 'member';
+      $('p-joined-line').textContent = 'joined: ' + (r.data.device_name || 'phone') + ' · ' + (r.data.role || 'member');
+      show($('p-joined'));
+      return;
+    }
+    closed = true;
+    history.replaceState(null, '', '/pair');
+    show($('p-qr'), false);
+    $('p-burned-line').textContent = (r.data && r.data.status === 'burned')
+      ? 'This QR was cancelled (regenerated or closed).'
+      : 'This QR expired or was used — mint a new one on your devices page.';
+    show($('p-burned'));
+  };
+  const mint = async (regen) => {
+    const r = regen && id
+      ? await authed('POST', '/t/pair/qr/' + encodeURIComponent(id) + '/regenerate', {})
+      : await authed('POST', '/t/pair/qr', {});
+    if (!r) return;
+    if (r.status === 403 && r.data && r.data.step_up) { location.replace('/account?step-up=1'); return; }
+    if (r.status !== 200) { say($('p-msg'), errText(r), 'err'); return; }
+    say($('p-msg'), '');
+    id = r.data.id;
+    draw(r.data);
+    clearTimer();
+    timer = setInterval(tick, 2000);
+    tick();
+  };
+  $('p-regen').addEventListener('click', () => { closed = false; show($('p-burned'), false); show($('p-joined'), false); show($('p-qr')); mint(true); });
+  $('p-done').addEventListener('click', async () => {
+    closed = true;
+    clearTimer();
+    if (id) {
+      await authed('DELETE', '/t/pair/qr/' + encodeURIComponent(id), {});
+      history.replaceState(null, '', '/pair');
+    }
+    location.replace('/devices');
+  });
+  await mint(false);
+}
+
+// ---- /audit (admin) ---------------------------------------------------------------------
+
+async function auditPage() {
+  let before = null;
+  let filter = '';
+  const draw = (entries, total, chain) => {
+    $('au-count').textContent = total + ' entries';
+    const c = $('au-chain');
+    c.className = chain ? 'ok' : 'bad';
+    c.textContent = chain ? 'hash chain verified ✓' : 'HASH CHAIN BROKEN — run trunk-ctl audit verify';
+    const list = $('au-list');
+    for (const e of entries) {
+      const row = document.createElement('div');
+      row.className = 'au-row';
+      const hd = document.createElement('div');
+      hd.className = 'hd';
+      const at = document.createElement('span');
+      at.className = 'at';
+      at.textContent = e.action;
+      const ts = document.createElement('span');
+      ts.className = 'ts';
+      ts.textContent = new Date(e.ts).toLocaleString();
+      hd.append(at, ts);
+      const bd = document.createElement('div');
+      bd.className = 'bd';
+      const parts = [];
+      if (e.actor_account) parts.push('by ' + (e.actor_device || e.actor_account));
+      if (e.target_kind) parts.push(e.target_kind + ' ' + (e.target_id || ''));
+      if (e.ip) parts.push(e.ip);
+      if (e.region) parts.push(e.region);
+      if (e.detail && Object.keys(e.detail).length) parts.push(JSON.stringify(e.detail));
+      for (const t of parts) {
+        const b = document.createElement('b');
+        b.textContent = t + '  ';
+        bd.append(b);
+      }
+      row.append(hd, bd);
+      list.append(row);
+    }
+    if (!entries.length) {
+      const p = document.createElement('p');
+      p.className = 'dim';
+      p.textContent = 'No entries.';
+      list.append(p);
+    }
+    const last = entries[entries.length - 1];
+    if (last) before = last.seq;
+    $('au-more').disabled = entries.length < 50;
+  };
+  const load = async () => {
+    const q = new URLSearchParams();
+    q.set('limit', '50');
+    if (before) q.set('before', String(before));
+    if (filter) q.set('action', filter);
+    const r = await authed('GET', '/t/audit?' + q.toString());
+    if (!r) return;
+    if (r.status === 403) { location.replace('/'); return; }
+    if (r.status !== 200) return;
+    // first load fills the filter's options
+    if (!filter && !$('au-action').options.length && r.data.actions) {
+      for (const a of r.data.actions) {
+        const o = document.createElement('option');
+        o.value = a;
+        o.textContent = a;
+        $('au-action').append(o);
+      }
+    }
+    draw(r.data.entries || [], r.data.total || 0, r.data.chain_ok !== false);
+  };
+  $('au-action').addEventListener('change', () => {
+    filter = $('au-action').value;
+    before = null;
+    $('au-list').textContent = '';
+    load();
+  });
+  $('au-more').addEventListener('click', load);
+  whoami();
+  await load();
+}
+
+// the phone side: redeem the QR's fragment, then land in the tree
+async function pairRedeem(tok) {
+  const sections = ['p-qr', 'p-joined', 'p-burned'];
+  const only = (...ids) => sections.forEach((x) => show($(x), ids.includes(x)));
+  // B4: the token never stays in the address bar (the history cannot hold it)
+  history.replaceState(null, '', '/pair');
+  only('p-qr');
+  $('p-qr-img').textContent = '';
+  $('p-qr-count').textContent = 'joining…';
+  const r = await post('/t/pair/redeem', { token: tok });
+  if (r.status === 200) {
+    only('p-joined');
+    $('p-joined-role').textContent = (r.data.device && r.data.device.role) || 'member';
+    $('p-joined-line').textContent = 'joined: ' + ((r.data.device && r.data.device.name) || 'phone') + ' · ' + ((r.data.device && r.data.device.role) || 'member');
+    return;
+  }
+  only('p-burned');
+  $('p-burned-line').textContent = r.data && r.data.error ? r.data.error : 'This QR is not valid any more.';
+}
+
+const pages = { claim: claimPage, login: loginPage, account: accountPage, empty: emptyPage, offline: offlinePage, devices: devicesPage, pair: pairPage, audit: auditPage };
 const run = pages[document.body.dataset.page];
 if (run) run();

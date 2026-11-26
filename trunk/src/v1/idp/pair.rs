@@ -23,6 +23,8 @@ use crate::v1::server::State;
 struct Minted {
     id: String,
     url: String,
+    /// the fragment token itself (`bfnp-`…), for rigs (the page never needs it: the QR is the url)
+    token: String,
     qr_svg: String,
     expires_in: i64,
     role: String,
@@ -55,7 +57,7 @@ fn mint_row(st: &State, account: &str, minted_by: &str, role: &str, ip: Option<I
         e = e.ip(ip);
     }
     super::audit(st, e);
-    Ok(Minted { id, url, qr_svg, expires_in: ttl / 1000, role: role.to_string() })
+    Ok(Minted { id, url, token: raw, qr_svg, expires_in: ttl / 1000, role: role.to_string() })
 }
 
 fn burn_row(st: &State, id: &str, account: Option<&str>, by_device: Option<&str>, why: &str, ip: Option<IpAddr>) -> bool {
@@ -101,7 +103,7 @@ pub fn mint_http(st: &State, who: &Who, ip: IpAddr) -> Resp {
         return r;
     }
     match mint_row(st, &who.account, &who.did, "member", Some(ip)) {
-        Ok(m) => Resp::json(200, &json!({ "id": m.id, "url": m.url, "qr_svg": m.qr_svg, "expires_in": m.expires_in, "role": m.role })),
+        Ok(m) => Resp::json(200, &json!({ "id": m.id, "url": m.url, "token": m.token, "qr_svg": m.qr_svg, "expires_in": m.expires_in, "role": m.role })),
         Err(e) => Resp::json(500, &json!({ "error": e })),
     }
 }
@@ -113,7 +115,7 @@ pub fn regenerate(st: &State, who: &Who, old_id: &str, ip: IpAddr) -> Resp {
     }
     burn_row(st, old_id, Some(&who.account), Some(&who.did), "regenerated", Some(ip));
     match mint_row(st, &who.account, &who.did, "member", Some(ip)) {
-        Ok(m) => Resp::json(200, &json!({ "id": m.id, "url": m.url, "qr_svg": m.qr_svg, "expires_in": m.expires_in, "role": m.role })),
+        Ok(m) => Resp::json(200, &json!({ "id": m.id, "url": m.url, "token": m.token, "qr_svg": m.qr_svg, "expires_in": m.expires_in, "role": m.role })),
         Err(e) => Resp::json(500, &json!({ "error": e })),
     }
 }

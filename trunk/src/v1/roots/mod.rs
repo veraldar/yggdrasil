@@ -167,8 +167,7 @@ pub fn same_origin(st: &State, inc: &Incoming) -> Result<(), Resp> {
     }
 }
 
-/// Admin only (§8 roles). The IDP owns this check (idp::session::Who); until it is merged here
-/// the device row is read directly: role admin, not revoked.
+/// Admin only (§8 roles): the IDP's own check (idp::session::Who).
 pub fn admin(st: &State, who: &Claims) -> Result<(), Resp> {
     let row: Option<(String, Option<i64>)> = st
         .db
@@ -182,28 +181,53 @@ pub fn admin(st: &State, who: &Claims) -> Result<(), Resp> {
     }
 }
 
-/// Admin with a fresh step-up (2FA within 600 s on this device): root approval (§8). The IDP's
-/// helper (`Who::fresh`) replaces this read at merge time.
+/// Admin with a fresh step-up (2FA within 600 s on this device): root approval (§8) — the IDP's
+/// `Who::fresh` (same freshness the /t/account changes use).
 pub fn admin_fresh(st: &State, who: &Claims) -> Result<(), Resp> {
     admin(st, who)?;
-    let fresh_ms = if st.fast { 60_000 } else { FRESH_MS };
-    let last: Option<i64> = st
-        .db
-        .with(|c| c.query_row("SELECT last_2fa_at FROM devices WHERE id = ?1", [&who.did], |r| r.get(0)).optional())
-        .ok()
-        .flatten()
-        .flatten();
-    if last.is_some_and(|t| t + fresh_ms > now_ms()) {
+    let w = who_row(st, who).ok_or_else(|| Resp::json(401, &json!({ "why": "revoked", "reauth": "login" })))?;
+    if w.fresh(st) {
         Ok(())
     } else {
         Err(Resp::json(403, &json!({ "error": "confirm it's you first", "step_up": true })))
     }
 }
 
-/// An audit entry. The IDP owns the hash-chained log (idp::audit); WIRE's events go through this
-/// one function so the merge is one line. Until then: the console.
-pub fn audit(_st: &State, who: Option<&Claims>, action: &str, kind: &str, target: &str, detail: Value) {
-    eprintln!("  trunk: audit {action} {kind} {target} by {} {detail}", who.map(|w| w.did.as_str()).unwrap_or("-"));
+/// The full device + account row behind a token's claims (idp::session::Who for WIRE's callers).
+fn who_row(st: &State, who: &Claims) -> Option<crate::v1::idp::session::Who> {
+    let row = st
+        .db
+        .with(|c| {
+            c.query_row(
+                "SELECT d.account_id, a.email, d.role, d.name, d.created_via, d.created_at, d.last_2fa_at, d.revoked_at
+                 FROM devices d JOIN accounts a ON a.id = d.account_id WHERE d.id = ?1",
+                [&who.did],
+                |r| {
+                    Ok((
+                        r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?,
+                    ))
+                },
+            )
+            .optional()
+        })
+        .ok()
+        .flatten();
+    let row = row?;
+    let (account, email, role, name, created_via, created_at, last_2fa_at, revoked_at): (String, Option<String>, String, String, String, i64, Option<i64>, Option<i64>) = row;
+    (revoked_at.is_none()).then(|| crate::v1::idp::session::Who {
+        account, email, did: who.did.clone(), role, name, created_via, created_at, last_2fa_at,
+        claims: who.clone(),
+    })
+}
+
+/// An audit entry, through the IDP's hash-chained log (idp::audit): WIRE's events land in the
+/// same chain, same mirror, same retention.
+pub fn audit(st: &State, who: Option<&Claims>, action: &str, kind: &str, target: &str, detail: Value) {
+    let mut e = crate::v1::idp::audit::Entry::new(action).target(kind, target).detail(detail);
+    if let Some(w) = who {
+        e = e.account(&w.sub).device(&w.did);
+    }
+    crate::v1::idp::audit(st, e);
 }
 
 fn clean(s: &str, max: usize, ok: impl Fn(u8) -> bool) -> Option<String> {

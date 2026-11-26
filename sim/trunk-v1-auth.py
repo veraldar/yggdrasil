@@ -20,6 +20,13 @@ from its own client address (X-Forwarded-For). Nothing live is touched.
   step-up   fresh 600 s (fast 10 s) gates 2FA changes; step-up by TOTP; password change
   console   account list / reset-password / reset-2fa (→ enrol at next sign-in) / unlock,
             backup + backup check, audit verify; an edited audit row is caught
+  devices   /t/devices list, rename, role with the 2fa-on-device rule, revoke (burns refresh
+            lineage), member sees only itself, console devices list|revoke
+  pair      QR mint/status/regenerate (kills the old token)/close (burns)/redeem → member device;
+            replay 410 used; member and no-token cannot mint
+  kill      kill-switch: everything revoked, QRs burned, epoch moved, lockdown blocks sign-in,
+            unlock; audit chain still verifies
+  audit     /t/audit rows, limit/before/action filter, chain_ok; member 403
   roots     has_roots flips with WIRE's first root row; then pages go to the door (/offline)
   helper    sim/trunk-v1/claim-admin.py claims a second trunk end to end
   tls       the phase-2 listener: PROXY v1 believed only from trusted_proxies, then TLS; the client
@@ -160,7 +167,7 @@ def t_surface(t):
     r = c.get("/.well-known/acme-challenge/short")
     check("surface: ACME name rule ([A-Za-z0-9_-]{16,128})", r.status == 404, r)
     r = c.get("/install/root.sh")
-    check("surface: /install/root.sh placeholder names this trunk", r.status == 503 and t.public_url in str(r.data), r)
+    check("surface: /install/root.sh is INSTALL's real script and names this trunk", r.status == 200 and t.public_url in str(r.data) and str(r.data).startswith("#!"), r.status)
     mode = lambda p: oct(os.stat(p).st_mode & 0o777)
     check("surface: ctl socket 0600", mode(t.sock) == "0o600", mode(t.sock))
     check("surface: claim code file 0600", mode(os.path.join(t.root, "cred", "claim")) == "0o600")
@@ -400,6 +407,10 @@ def t_refresh(t):
     r = c.post("/t/auth/refresh")
     r1 = c.jar["bifrost_refresh"][0]
     check("refresh: rotates (a new refresh and access cookie)", r.status == 200 and r1 != r0, r)
+    # A7: the body carries the new access token (for pinned.ts over the tunnel); never the bfnr-
+    at = r.j("access_token", "")
+    check("refresh: body carries access_token = the new cookie (A7)", r.status == 200 and at.startswith("v4.public.") and at == c.jar["bifrost_device"][0], (at[:20], c.jar.get("bifrost_device", ("",))[0][:20]))
+    check("refresh: the bfnr- refresh token never appears in the body", "bfnr-" not in json.dumps(r.data), json.dumps(r.data)[:80])
     check("refresh: the refresh cookie is sent only to /t/auth", "bifrost_refresh" not in c.cookie_header("/t/me") and "bifrost_refresh" in c.cookie_header("/t/auth/refresh"))
     racer = t.client(xff=ip(70))
     racer.jar["bifrost_refresh"] = (r0, "/t/auth")
@@ -538,6 +549,171 @@ def t_tamper(t):
     check("audit: an edited row is caught by trunk-ctl audit verify", not ok and ("entry %d" % seq) in out, out)
 
 
+def t_devices_m3(t):
+    """M3: /t/devices list, rename, role change (2FA-on-device rule), revoke, member visibility."""
+    # a member device (joined through a QR minted by the console, for the rig)
+    ok, out = t.ctl("pair-qr", "--json") if False else t.ctl("pair-qr")
+    try:
+        mj = json.loads(out) if ok else {}
+    except ValueError:
+        mj = {}
+    check("devices: trunk-ctl pair-qr mints a member link (json)", ok and mj.get("url", "").startswith(t.public_url + "/pair#v=2&t=") and mj.get("role") == "member", out)
+    phone = t.client(xff=ip(120))
+    r = phone.post("/t/pair/redeem", {"token": mj.get("url", "").split("t=", 1)[1] if mj else ""})
+    check("devices: a console QR redeems into a member device with cookies", r.status == 200 and "bifrost_device" in phone.jar and r.j("device", {}).get("role") == "member", r)
+    member = phone
+    # admin list
+    admin, a = login(t, xff=ip(121), password=PASSWORD, second={"recovery": S.recovery_code()})
+    check("devices: admin signs in for device management", a.status == 200, a)
+    r = admin.get("/t/devices")
+    check("devices: GET /t/devices (admin: every device + roots + itself)", r.status == 200 and r.j("role") == "admin" and len(r.j("devices", [])) >= 2 and r.j("self_id"), (r.status, len(r.j("devices", []))))
+    devs = r.j("devices", [])
+    try:
+        mem_dev = next(d for d in devs if d["role"] == "member" and not d.get("revoked_at"))
+    except StopIteration:
+        mem_dev = None
+        print("DEBUG devices:", json.dumps(devs)[:1200])
+    my_id = r.j("self_id")
+    # rename
+    r = admin.signed("PATCH", "/t/devices/" + my_id, {"name": "Pixel 9"})
+    check("devices: rename self", r.status == 200 and r.j("device", {}).get("name") == "Pixel 9", r)
+    # role changes: the §8 rule — a device may become admin only if the admin's own 2FA happened
+    # on THAT device (last_2fa_at set). The QR phone never had one → 403; the claim device did.
+    qr_dev = mem_dev
+    r = admin.signed("PATCH", "/t/devices/" + qr_dev["id"], {"role": "admin"})
+    check("devices: promoting a QR phone (no 2FA on it) → 403 no-2fa-on-device", r.status == 403 and r.j("why") == "no-2fa-on-device", r)
+    claim_dev = next((d for d in devs if d.get("created_via") == "claim" and not d.get("revoked_at")), None)
+    if claim_dev:
+        r = admin.signed("PATCH", "/t/devices/" + claim_dev["id"], {"role": "member"})
+        check("devices: demoting the claim device (fresh) → ok", r.status == 200, r)
+        r = admin.signed("PATCH", "/t/devices/" + claim_dev["id"], {"role": "admin"})
+        check("devices: promoting it back (the admin's 2FA happened on it) → ok", r.status == 200, r)
+    # member sees only itself
+    r = member.get("/t/devices")
+    check("devices: a member sees only itself", r.status == 200 and len(r.j("devices", [])) == 1 and r.j("role") == "member", r)
+    # member cannot revoke/rename the admin's device
+    admin_id = next((d["id"] for d in devs if d["role"] == "admin" and d["id"] != my_id), None) or my_id
+    r = member.signed("DELETE", "/t/devices/" + admin_id, {})
+    check("devices: a member cannot revoke someone else's device", r.status == 403, r)
+    # rename someone else as member → 403
+    if admin_id != my_id:
+        r = member.signed("PATCH", "/t/devices/" + admin_id, {"name": "x"})
+        check("devices: a member cannot rename someone else's device", r.status == 403, r)
+    # admin revokes the member's phone
+    r = admin.signed("DELETE", "/t/devices/" + (mem_dev or qr_dev)["id"], {})
+    check("devices: admin revokes the phone", r.status == 200, r)
+    r = member.get("/t/me")
+    check("devices: the revoked phone's token is dead (401 revoked)", r.status == 401 and r.j("why") == "revoked", r)
+    r = member.post("/t/auth/refresh")
+    check("devices: its refresh token is dead too", r.status == 401, r)
+    ok, out = t.ctl("devices", "list")
+    check("devices: trunk-ctl devices list", ok and "Pixel 9" in out and "member" in out, out[:200])
+    ok, out = t.ctl("devices", "revoke", my_id)
+    check("devices: trunk-ctl devices revoke (this device: revokes and answers)", ok, out)
+    r = admin.get("/t/me")
+    check("devices: the console-revoked device is dead", r.status == 401 and r.j("why") == "revoked", r)
+
+
+def t_pair_m3(t):
+    """M3: the QR lifecycle — mint, status, regenerate kills the old token, close burns, replay 410/used."""
+    admin, a = login(t, xff=ip(130), password=PASSWORD, second={"recovery": S.recovery_code()})
+    check("pair: admin signs in", a.status == 200, a)
+    r = admin.post("/t/pair/qr")
+    check("pair: POST /t/pair/qr (admin, fresh) → id + token + qr", r.status == 200 and r.j("id") and r.j("token", "").startswith("bfnp-") and r.j("qr_svg", "").lstrip().startswith(("<svg", "<?xml")) and r.j("url", "").startswith(t.public_url + "/pair#v=2&t="), r)
+    qr_id, tok1 = r.j("id"), r.j("token")
+    check("pair: 16 B token (22 b64url chars)", len(tok1) == len("bfnp-") + 22, tok1)
+    r = admin.get("/t/pair/qr/" + qr_id)
+    check("pair: status waiting", r.status == 200 and r.j("status") == "waiting" and r.j("expires_in", 0) > 0, r)
+    # regenerate kills the old token
+    r = admin.post("/t/pair/qr/" + qr_id + "/regenerate")
+    check("pair: regenerate → a new token (the old QR is dead)", r.status == 200 and r.j("token", "").startswith("bfnp-") and r.j("token") != tok1, r.j("id"))
+    tok2 = r.j("token")
+    phone = t.client(xff=ip(131))
+    r = phone.post("/t/pair/redeem", {"token": tok1})
+    check("pair: the regenerated-away token is dead (410)", r.status == 410, r)
+    # second scan of the live one → 410 used
+    r = phone.post("/t/pair/redeem", {"token": tok2})
+    check("pair: redeem → member device + cookies", r.status == 200 and "bifrost_device" in phone.jar, r)
+    r = t.client(xff=ip(132)).post("/t/pair/redeem", {"token": tok2})
+    check("pair: a second scan → 410 used", r.status == 410 and r.j("why") == "used", r)
+    r = admin.get("/t/pair/qr/" + qr_id)
+    check("pair: the old QR's status says what happened (burned/regenerated)", r.status == 200 and r.j("status") in ("burned", "expired"), r)
+    # mint a new one and close it: burned
+    r = admin.post("/t/pair/qr")
+    qr_id2, tok3 = r.j("id"), r.j("token")
+    r = admin.req("DELETE", "/t/pair/qr/" + qr_id2, {})
+    check("pair: close (DELETE) burns it", r.status == 200 and r.j("burned") is True, r)
+    r = t.client(xff=ip(133)).post("/t/pair/redeem", {"token": tok3})
+    check("pair: redeem after close → 410", r.status == 410, r)
+    # a member (the QR-redeemed phone above) cannot mint, regenerate, read or close
+    r = phone.post("/t/pair/qr")
+    check("pair: a member cannot mint a QR (403)", r.status == 403 and r.j("why") == "role", r)
+    r = phone.post("/t/pair/qr/" + qr_id2 + "/regenerate")
+    check("pair: a member cannot regenerate (403)", r.status == 403, r)
+    r = phone.get("/t/pair/qr/" + qr_id)
+    check("pair: a member cannot read a QR's status (403)", r.status == 403, r)
+    r = phone.req("DELETE", "/t/pair/qr/" + qr_id, {})
+    check("pair: a member cannot close a QR (403)", r.status == 403, r)
+    # a stale admin token cannot mint
+    r = t.client(xff=ip(135)).post("/t/pair/qr")
+    check("pair: no token, no QR (401)", r.status == 401, r)
+
+
+def t_kill_m3(t):
+    """M3: the kill-switch — everything revoked, QRs burned, epoch moved, lockdown, unlock."""
+    admin, a = login(t, xff=ip(140), password=PASSWORD, second={"recovery": S.recovery_code()})
+    ok, out = t.ctl("pair-qr")
+    mj = json.loads(out) if ok else {}
+    tok = mj.get("url", "").split("t=", 1)[1] if mj else ""
+    phone = t.client(xff=ip(141))
+    phone.post("/t/pair/redeem", {"token": tok})
+    access = admin.jar.get("bifrost_device", ("",))[0]
+    r = admin.signed("POST", "/t/kill", {"lockdown": True})
+    check("kill: POST /t/kill with lockdown → ok, epoch moved", r.status == 200 and r.j("kill_epoch", 0) >= 1, r)
+    oldc = t.client(xff=ip(144))
+    oldc.jar["bifrost_device"] = (access, "/")
+    r = oldc.get("/t/me")
+    check("kill: the killer's own token is dead (401 revoked)", r.status == 401 and r.j("why") == "revoked", r)
+    r = phone.get("/t/me")
+    check("kill: the phone's token is dead", r.status == 401, r)
+    r = t.client(xff=ip(142)).post("/t/auth/login", {"email": EMAIL, "password": PASSWORD})
+    check("kill + lockdown: sign-in is blocked (403 lockdown)", r.status == 403 and r.j("why") == "lockdown", r)
+    ok, out = t.ctl("unlock")
+    r = t.client(xff=ip(142)).post("/t/pair/redeem", {"token": tok})
+    check("kill: the QR is burned (410)", r.status == 410, r)
+    check("kill: trunk-ctl unlock lifts the lockdown", ok, out)
+    c, m = login(t, xff=ip(143), password=PASSWORD, second={"recovery": S.recovery_code()})
+    check("kill: after unlock, sign-in works again (fresh epoch in the new token)", m.status == 200 and c.get("/t/me").j("token", {}).get("exp"), m)
+    ok, out = t.ctl("audit", "verify")
+    check("kill: audit chain still verifies after the kill", ok and out.startswith("audit chain ok"), out)
+    ok, out = t.ctl("audit", "tail", "300")
+    acts = [json.loads(l)["action"] for l in out.splitlines()] if ok else []
+    check("kill: audit has the kill and the device revokes", "kill.switch" in acts and acts.count("device.revoke") >= 2, sorted(set(acts))[-12:])
+    return c
+
+
+def t_audit_page_m3(t, c):
+    """M3: /t/audit (admin only), filter, pagination, chain flag; a member gets 403."""
+    r = c.signed("GET", "/t/audit")
+    check("audit page api: admin sees entries with chain ok", r.status == 200 and len(r.j("entries", [])) > 0 and r.j("chain_ok") is True and "actions" in r.data, r.status)
+    r = c.signed("GET", "/t/audit?limit=5")
+    check("audit page api: limit + before pagination", r.status == 200 and len(r.j("entries", [])) <= 5, r.status)
+    first_seq = r.j("entries", [{}])[0]["seq"]
+    r2 = c.signed("GET", "/t/audit?limit=5&before=" + str(first_seq))
+    check("audit page api: before= works", r2.status == 200 and r2.j("entries", [{}])[0]["seq"] < first_seq, r2.status)
+    r = c.signed("GET", "/t/audit?action=auth.login")
+    check("audit page api: action filter", r.status == 200 and all(e["action"] == "auth.login" for e in r.j("entries", [])), r.status)
+    # a genuine member (QR-redeemed) gets 403; an admin device does not
+    ok, out = t.ctl("pair-qr")
+    mj = json.loads(out) if ok else {}
+    mem, r = t.client(xff=ip(151)), None
+    if mj:
+        r = mem.post("/t/pair/redeem", {"token": mj.get("url", "").split("t=", 1)[1]})
+    check("audit page api: the member device joined", r.status == 200, r)
+    r = mem.signed("GET", "/t/audit")
+    check("audit page api: a member gets 403", r.status == 403, r)
+
+
 def t_has_roots(t):
     """WIRE's stand-in: a row in its roots table flips has_roots; signed-in pages then go to the door."""
     c, m = login(t, ip(110), second={"recovery": S.recovery_code()})
@@ -658,6 +834,10 @@ def main():
         c = t_step_up(t)
         t_logout(t, c)
         t_console(t)
+        t_devices_m3(t)
+        t_pair_m3(t)
+        c = t_kill_m3(t)
+        t_audit_page_m3(t, c)
         t_has_roots(t)
         t_tamper(t)
         t_helper(a.bin, root)

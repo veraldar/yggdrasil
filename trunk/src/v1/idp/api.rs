@@ -213,7 +213,8 @@ pub async fn handle(st: Arc<State>, mut inc: Incoming) {
                 let action = inc.req.query("action");
                 let (entries, total) = audit::list_page(&st.db, limit, before, action.as_deref());
                 let chain_ok = audit::verify(&st.db).is_ok();
-                Resp::json(200, &json!({ "entries": entries, "total": total, "chain_ok": chain_ok }))
+                let actions = if before.is_none() && action.is_none() { audit::actions(&st.db) } else { vec![] };
+                Resp::json(200, &json!({ "entries": entries, "total": total, "chain_ok": chain_ok, "actions": actions }))
             }
             Ok(_) => Resp::json(403, &json!({ "error": "admin only", "why": "role" })),
             Err(r) => r,

@@ -14,6 +14,7 @@ use std::time::{Duration, Instant};
 use serde_json::{json, Value};
 
 use super::hub::*;
+use crate::v1::state::DenyEntry;
 use crate::v1::proto;
 use crate::v1::state::now_ms;
 use crate::v1::link::{Link, LinkConfig};
@@ -97,6 +98,7 @@ struct Trunk {
     reg: Arc<MemRegistry>,
     tok: Arc<SignKey>,
     doors: Arc<Mutex<HashMap<String, String>>>,
+    auth: Arc<MemAuthority>,
 }
 
 /// The minimal v1 server around the relay: `/t/root` → the relay; `/t/ice/owner`; everything else
@@ -112,6 +114,7 @@ fn mini_trunk() -> Trunk {
     let doors: Arc<Mutex<HashMap<String, String>>> = Arc::default();
     let (tx, rx) = std::sync::mpsc::channel();
     let (h2, d2, a2) = (hub.clone(), doors.clone(), auth.clone());
+    let auth_out = auth.clone();
     std::thread::spawn(move || {
         let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap();
         rt.block_on(async move {
@@ -160,7 +163,7 @@ fn mini_trunk() -> Trunk {
                             let pref = doors.lock().unwrap().get(&c.did).cloned();
                             match hub.door_for(pref.as_deref()) {
                                 Some(door) => {
-                                    let _ = hub.relay_http(&door, tcp, peer.ip(), &head, rest, Some("max-age=31536000")).await;
+                                    let _ = hub.relay_http(&door, tcp, peer.ip(), &head, rest, Some("max-age=31536000"), &c.did).await;
                                 }
                                 None => {
                                     let _ = tcp.write_all(&reply(503, json!({ "offline": true }))).await;
@@ -173,7 +176,7 @@ fn mini_trunk() -> Trunk {
         });
     });
     let (addr, ice) = rx.recv_timeout(Duration::from_secs(5)).unwrap();
-    Trunk { addr, ice, hub, reg, tok, doors }
+    Trunk { addr, ice, hub, reg, tok, doors, auth: auth_out }
 }
 
 impl Trunk {
@@ -498,4 +501,67 @@ impl Root {
     fn link_dial(&self) -> Arc<crate::ap::DialConfig> {
         self.link.dial()
     }
+}
+
+// ---- M3: a device revoke reaches the root and cuts the live channel (B13, timing) ------------
+
+/// One round: a device with a live relayed channel, then a revoke pushed the way
+/// idp::devices::revoke_http sends it (deny until the token's exp + a signed `revoke` to every
+/// root). The root's next call must be refused with 401 `login`, and the live relayed stream must
+/// be cut. Prints each round's times (the ×5 bounds: push ≤ 200 ms, cut ≤ 1 s).
+fn revoke_round(round: usize) -> (u128, u128) {
+    let t = mini_trunk();
+    let dir = tmpdir(&format!("revoke-x5-{round}"));
+    let _b = root(&t, &dir, "rt_a", "a", "10.66.0.1", true);
+    wait_for("root linked", Duration::from_secs(10), || t.hub.online("rt_a"));
+    let did = format!("dev_revoke_{round}");
+    let tok = t.token(&did, "loopback", 0, 120_000);
+    let hdr = format!("Host: t\r\nCookie: bifrost_device={tok}\r\nContent-Length: 2\r\n\r\n{{}}");
+    // a live relayed call (the device's app talking through its door root)
+    let (st, body) = http(t.addr, &format!("POST /api/session HTTP/1.1\r\n{hdr}"));
+    assert_eq!(st, 200, "the live call must be relayed: {body}");
+    // the revoke, exactly as idp::devices::revoke_http sends it
+    let t0 = std::time::Instant::now();
+    *t.auth.deny.lock().unwrap() = vec![DenyEntry { did: did.clone(), until: now_ms() + 120_000 }];
+    t.hub.push_revoke(&did, now_ms() + 120_000);
+    let push_ms = t0.elapsed().as_millis();
+    assert!(push_ms < 200, "push_revoke took {push_ms} ms (bound: 200 ms)");
+    // the root refuses the device's next call (401 → the app signs in again)
+    let mut refuse_ms = None;
+    for _ in 0..300 {
+        let (st, body) = http(t.addr, &format!("POST /api/session HTTP/1.1\r\n{hdr}"));
+        if st == 401 && body.contains("reauth") {
+            refuse_ms = Some(t0.elapsed().as_millis());
+            break;
+        }
+        assert!(t0.elapsed() < Duration::from_secs(3), "round {round}: never refused: {st} {body}");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    // the live channel is severed: the trunk no longer holds a relayed stream for the device
+    let mut sever_ms = None;
+    for _ in 0..300 {
+        let live = t.hub.relay_stream_live(&did);
+        if !live {
+            sever_ms = Some(t0.elapsed().as_millis());
+            break;
+        }
+        assert!(t0.elapsed() < Duration::from_secs(3), "round {round}: not severed in 3 s");
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    (refuse_ms.unwrap_or(u128::MAX), sever_ms.unwrap_or(u128::MAX))
+}
+
+#[test]
+fn revoke_reaches_the_root_and_cuts_the_live_channel_x5() {
+    let mut refuse: Vec<u128> = vec![];
+    let mut sever: Vec<u128> = vec![];
+    for round in 0..5 {
+        let (a, b) = revoke_round(round);
+        refuse.push(a);
+        sever.push(b);
+    }
+    println!("revoke → root refuses next call (401 login): ×5 {:?}", refuse);
+    println!("revoke → live channel severed:            ×5 {:?}", sever);
+    assert!(sever.iter().all(|ms| *ms < 1_000), "the 1 s sever bound is broken: {sever:?}");
+    assert!(refuse.iter().all(|ms| *ms < 1_000), "the 1 s refuse bound is broken: {refuse:?}");
 }

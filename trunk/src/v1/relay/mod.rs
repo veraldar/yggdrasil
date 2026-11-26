@@ -180,7 +180,7 @@ pub async fn to_door(st: &Arc<State>, inc: Incoming, who: Claims) {
     };
     let hsts = inc.tls.then_some("max-age=31536000");
     let Incoming { io, head, rest, ip, .. } = inc;
-    let _ = hub(st).relay_http(&door, io, ip, &head, rest, hsts).await;
+    let _ = hub(st).relay_http(&door, io, ip, &head, rest, hsts, &who.did).await;
 }
 
 /// `listen_ice` (phase 2): framed STUN / ICE-TCP routed by registered ufrag (§5.7).

@@ -199,7 +199,7 @@ pub fn tail(db: &Db, n: i64) -> Vec<Value> {
 pub fn list_page(db: &Db, limit: i64, before: Option<i64>, action: Option<&str>) -> (Vec<Value>, i64) {
     let limit = limit.clamp(1, 500);
     let total: i64 = db.with(|c| c.query_row("SELECT count(*) FROM audit", [], |r| r.get(0))).unwrap_or(0);
-    let prefix = action.map(|a| format!("{a}%"));
+    let prefix = action.map(|a| format!("{a}"));
     let rows = db
         .with(|c| {
             let mut s = c.prepare(
@@ -226,6 +226,16 @@ pub fn list_page(db: &Db, limit: i64, before: Option<i64>, action: Option<&str>)
         })
         .unwrap_or_default();
     (rows, total)
+}
+
+/// The distinct action names (the /audit page's filter).
+pub fn actions(db: &Db) -> Vec<String> {
+    db.with(|c| {
+        let mut s = c.prepare("SELECT DISTINCT action FROM audit ORDER BY action")?;
+        let v = s.query_map([], |r| r.get(0))?.collect::<Result<Vec<String>, _>>()?;
+        Ok(v)
+    })
+    .unwrap_or_default()
 }
 
 /// Drop entries older than 400 days; the chain then starts at the first kept entry's prev_hash.
