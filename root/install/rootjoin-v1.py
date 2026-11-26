@@ -2,7 +2,7 @@
 """rootjoin-v1 — the v1 enrollment helper root.sh runs (no deps, stdlib only).
 
   rootjoin-v1.py enroll --state DIR --trunk URL --name N --os OS --host H --arch A
-                        --root-pub KEY --wg-pub KEY --brain-port P --app-port P --bridge-port P
+                        --root-pub KEY --wg-pub KEY --dtls-fp "sha-256 AB:…" --brain-port P --app-port P --bridge-port P
                         [--qr-png FILE]
 
 The trunk's enrollment API (WIRE.md):
@@ -332,12 +332,8 @@ def show_qr(text):
     say(qr_terminal(qr_matrix(text)))
 
 
-# ── dtls identity: the bridge makes it on first start; we only need its fingerprint for the
-# ── enrollment card. The bridge's own dtls_cert_file (state/bridge-dtls.json) is created by
-# ── `bifrost-net bridge` when it first runs; enrollment sends the fingerprint the trunk will
-# ── show on the card. We cannot know it before the bridge runs, so: empty at enrollment (the
-# ── trunk allows ""), and the phone pins it at first /offer (B5: directory pins + alarm).
-# ── (WIRE's dtls_fp is optional; a root may also update it later.)
+# ── dtls identity: root.sh makes it (`bifrost-net dtls-id <dtls_cert_file>`) before enrolling and
+# ── passes its fingerprint as --dtls-fp, so the trunk directory pins what the bridge answers /offer with.
 
 
 def build_id():
@@ -369,7 +365,7 @@ def cmd_enroll(o):
         "name": o.name, "hostname": o.host, "os": o.os, "arch": o.arch,
         "version": "1.0.0", "build_id": build_id(),
         "has_app": True, "has_voice": True,
-        "root_pub": o.root_pub, "wg_pub": o.wg_pub, "dtls_fp": "",
+        "root_pub": o.root_pub, "wg_pub": o.wg_pub, "dtls_fp": o.dtls_fp,
     }
     if pend:
         say("==> resuming the enrollment sent earlier (no new request)")
@@ -581,6 +577,7 @@ def main(argv):
     e.add_argument("--arch", required=True)
     e.add_argument("--root-pub", required=True)
     e.add_argument("--wg-pub", required=True)
+    e.add_argument("--dtls-fp", required=True)  # `bifrost-net dtls-id FILE` of the bridge's dtls_cert_file
     e.add_argument("--brain-port", type=int, default=4180)
     e.add_argument("--app-port", type=int, default=4182)
     e.add_argument("--bridge-port", type=int, default=4190)

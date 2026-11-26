@@ -645,7 +645,10 @@ fn kill_round(round: usize) -> (u128, u128, u128) {
     wait_for("root linked", Duration::from_secs(10), || t.hub.online("rt_a"));
     // a raw stream no device owns (LiveKit's ICE-TCP by registered ufrag)
     let uf = format!("ufragK{round}xx");
-    assert!(a.link.register_wait(std::slice::from_ref(&uf), crate::v1::link::ICE_ACK_WAIT));
+    // (setup, not what this test measures: the 500 ms ack bound is trunk_two_roots_…'s; under the
+    // whole suite's load the ack can be late, so wait for the route itself)
+    let _ = a.link.register_wait(std::slice::from_ref(&uf), crate::v1::link::ICE_ACK_WAIT);
+    wait_for("the ufrag routed to rt_a", Duration::from_secs(5), || t.hub.ice_owner_now(&uf).as_deref() == Some("rt_a"));
     let mut ice = StdTcp::connect(t.ice).unwrap();
     ice.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
     let pkt = stun_binding(&uf);
