@@ -240,16 +240,19 @@ function quietPieces(pcm: Buffer, rate: number): Buffer[] {
   const look = Math.round(rate * 0.5);
   const energy = (s: number) => {
     let e = 0;
-    for (let i = s; i < Math.min(n, s + frame); i++) e += pcm.readInt16LE(i * 2) ** 2;
+    for (let i = s; i < s + frame; i++) e += pcm.readInt16LE(i * 2) ** 2;
     return e;
   };
+  // no piece under 0.5 s (a few samples crash the rig's speech server; a short rest joins the last
+  // piece), and only whole 20 ms frames are weighed (a partial one at the end is not "quiet")
+  const least = Math.round(rate * 0.5);
   const cuts = [0];
-  while (cuts[cuts.length - 1] + step < n) {
+  while (cuts[cuts.length - 1] + step + least < n) {
     const last = cuts[cuts.length - 1];
     const target = last + step;
     let best = target;
     let low = Infinity;
-    for (let s = Math.max(last + frame, target - look); s < Math.min(n, target + look); s += frame) {
+    for (let s = Math.max(last + least, target - look); s + frame <= n - least && s < target + look; s += frame) {
       const e = energy(s);
       if (e < low) [low, best] = [e, s];
     }
