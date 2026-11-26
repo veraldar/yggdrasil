@@ -497,6 +497,7 @@ test('G3.2 v1 trunk rtc: QR pairing, voice over the trunk, ufrag routing, revoke
     const redeemed = page.waitForResponse((r) => r.url().endsWith('/t/pair/redeem'));
     await page.goto(url);
     const r = await redeemed;
+    // the redeem's whole answer is read (r.text) before the clock: its body is the pairing exchange
     expect(r.status(), await r.text().catch(() => '')).toBe(200);
     const t = Date.now();
     await expect(page.locator('#p-joined')).toBeVisible({ timeout: 10_000 });

@@ -489,7 +489,9 @@ test('trunk rtc: phone ⇄ vps:443 ⇄ box — pair, talk, hear the reply, media
         const claimed = phone.waitForResponse((r) => r.url().endsWith('/api/pair/claim'));
         loadAt = Date.now();
         await phone.goto(qrUrl);
-        await claimed;
+        // the claim's WHOLE answer (a response event fires on its headers; its chunked body — the
+        // device, its token, MAIN's id — is still the pairing exchange, not "after pairing")
+        await (await claimed).finished();
         pairedAt = Date.now();
         await phone.waitForURL(`${AP}/`, { timeout: 30_000 });
         await expect(phone.getByTestId('roots')).toBeVisible({ timeout: 30_000 });
