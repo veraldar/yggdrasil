@@ -10,7 +10,12 @@
 #   G53_DRY_RUN=1 (default)  no model tokens: suite.py --dry-run (every scenario loads, v-all-agents excluded)
 #                            + sim/voice/v1probe.py (a Pixel 7 pairs by console QR and opens MAIN through the trunk)
 #   G53_DRY_RUN=0            the paid run: sim/voice/suite.py --target <trunk> --brain :4250 --pair-cmd <trunk-ctl pair-qr>
-#                            (needs the voice leg: LiveKit + a voice agent behind this trunk's /rtc — see docs/trunk-v1/LADDER.md)
+#                            The voice leg is real in this mode (WIRE-2's pieces, not forks): the twin's root is enrolled with
+#                            --has-voice (sim/trunk-v1/enroll-root.py), its bridge carries [trunk] livekit/tcp/ice_tcp, and
+#                            LiveKit (~/.cache/trunk-rtc/livekit-server), the speech server and the voice agent
+#                            (~/.cache/trunk-rtc/{voice,agent-venv}) run on the twin's loopback (ports 18720-18724). The phone
+#                            gets /rtc through the trunk and ICE-TCP at the trunk's listen_ice (127.0.0.1:$ICE_PORT).
+#                            G53.3-voice-smoke (default mode): a paired Pixel 7 speaks a question, MAIN's mock reply is spoken back.
 #
 # Spec §9 G5.1 8-step drive:
 #   1. sign in (Pixel 7 on /login)
@@ -36,6 +41,15 @@ B=$ROOT/branch
 TRUNK_PORT=18600 ICE_PORT=18601 BR_HTTP=18602 BR_MEDIA=18603 WG_HTTP=18604 WG_UDP=18605 WG_RELAY=18606
 MAC_BRAIN=18607 MAC_BR=18608 MAC_WG_HTTP=18609 MOCK_PORT=18610
 MAC_MEDIA=18611 MAC_WG_UDP=18612 MAC_RELAY=18613
+# G53 voice leg (LADDER's 18700-18799)
+VOICEP=18720 AGENTP=18721 LKP=18722 LKTCP=18723 LKUDP=18724
+CACHE=${TRUNK_RTC_CACHE:-$HOME/.cache/trunk-rtc}
+LK_BIN=${LIVEKIT_BIN:-$CACHE/livekit-server}; VOICE_DIR=${VOICE_DIR:-$CACHE/voice}; AGENT_VENV=${AGENT_VENV:-$CACHE/agent-venv}
+G53=${G53:-0}
+if [ "$G53" = 1 ]; then
+  [ -x "$LK_BIN" ] && [ -x "$VOICE_DIR/venv/bin/python" ] && [ -d "$VOICE_DIR/models" ] && [ -x "$AGENT_VENV/bin/python" ] ||
+    { echo "G53 needs livekit-server, the voice server and the agent venv in $CACHE (sim/trunk-rtc/setup.sh)"; exit 2; }
+fi
 
 BASE_TMP=${TMPDIR:-$HOME/.cache/trunk-v1/tmp/ladder}
 mkdir -p "$BASE_TMP"
@@ -103,7 +117,15 @@ assert res.get("status") == "approved", res
 json.dump(res, open(out, "w"), indent=2)
 PY
 }
-enroll_one twin true "$STATE/twin"
+if [ "$G53" = 1 ]; then
+  mkdir -p "$STATE/twin"
+  python3 "$ROOT/sim/trunk-v1/enroll-root.py" --url "$TRUNK_URL" --origin "$TRUNK_URL" --admin "$STATE/admin.json" \
+    --bin "$BIN" --dir "$STATE/twin" --name twin --hostname twin --has-app --has-voice --dtls "$STATE/twin/bridge-dtls.json" >"$STATE/twin/enroll.out" ||
+    { echo "enroll twin failed"; cat "$STATE/twin/enroll.out"; exit 1; }
+  cp "$STATE/twin/enroll.json" "$STATE/twin/enrolled.json"
+else
+  enroll_one twin true "$STATE/twin"
+fi
 enroll_one mac false "$STATE/mac"
 
 TWIN_ID=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["root_id"])' "$STATE/twin/enrolled.json")
@@ -128,6 +150,12 @@ TOML
 pids+=($!)
 
 PRIV1=$("$BIN" keygen | sed -n 's/^private_key = "\(.*\)"/\1/p')
+TW_ICE='ice_tcp = []' TW_BR_EXTRA='' TW_TRUNK_EXTRA=''
+if [ "$G53" = 1 ]; then
+  TW_ICE="ice_tcp = [\"127.0.0.1:$ICE_PORT\"]"
+  TW_BR_EXTRA=$(printf 'candidates = ["127.0.0.1"]\ndtls_cert_file = "%s/twin/bridge-dtls.json"' "$STATE")
+  TW_TRUNK_EXTRA=$(printf 'livekit = "127.0.0.1:%s"\ntcp = { livekit-ice = "127.0.0.1:%s" }' "$LKP" "$LKTCP")
+fi
 cat >"$STATE/twin/bridge.toml" <<TOML
 [node]
 name = "twin"
@@ -137,6 +165,7 @@ http = "127.0.0.1:$BR_HTTP"
 media = "127.0.0.1:$BR_MEDIA"
 tokens_file = "$STATE/twin/devices.json"
 opencode_url = "http://127.0.0.1:4250"
+$TW_BR_EXTRA
 [trunk]
 url = "$TRUNK_URL"
 trunk_key = "$TWIN_TK"
@@ -144,9 +173,10 @@ root_key_file = "$STATE/twin/root.key"
 root_id = "$TWIN_ID"
 state_file = "$STATE/twin/trunk-state.json"
 upstream = "127.0.0.1:8250"
-ice_tcp = []
+$TW_ICE
 wg_relay = "127.0.0.1:$WG_RELAY"
 wg_local = "127.0.0.1:$WG_UDP"
+$TW_TRUNK_EXTRA
 TOML
 "$BIN" bridge -c "$STATE/twin/bridge.toml" >"$STATE/bridge-twin.log" 2>&1 &
 pids+=($!)
@@ -168,6 +198,32 @@ TWIN_AUTH=tailnet TWIN_SEED_MAIN=1 TWIN_TAP=0 bash "$ROOT/sim/acceptance/twin-up
 # Replace the tailnet next-start app with server.mjs in BIFROST_AUTH=trunk reading the real bridge's trunk-state.json
 systemctl --user stop "acc-$RUN-app" >/dev/null 2>&1 || true
 systemctl --user reset-failed "acc-$RUN-app" >/dev/null 2>&1 || true
+APP_VOICE_ENV=()
+if [ "$G53" = 1 ]; then
+  LK_KEY=APIsim$(head -c 6 /dev/urandom | od -An -tx1 | tr -d ' \n'); LK_SECRET=$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')
+  env EDGE_MODELS="$VOICE_DIR/models" EDGE_PORT=$VOICEP EDGE_THREADS=4 \
+    "$VOICE_DIR/venv/bin/python" -m uvicorn --app-dir "$VOICE_DIR" voice_server:app --host 127.0.0.1 --port $VOICEP >"$STATE/voice.log" 2>&1 &
+  pids+=($!)
+  cat >"$STATE/livekit.yaml" <<YAML
+port: $LKP
+bind_addresses: [127.0.0.1]
+rtc:
+  tcp_port: $LKTCP
+  udp_port: $LKUDP
+  use_external_ip: false
+  node_ip: 127.0.0.1
+keys:
+  $LK_KEY: $LK_SECRET
+logging:
+  level: info
+YAML
+  chmod 600 "$STATE/livekit.yaml"
+  "$LK_BIN" --config "$STATE/livekit.yaml" >"$STATE/livekit.log" 2>&1 &
+  pids+=($!)
+  APP_VOICE_ENV=(BIFROST_BRIDGE_URL="http://127.0.0.1:$BR_HTTP" BIFROST_PUBLIC_URL="$TRUNK_URL"
+    LIVEKIT_URL="ws://127.0.0.1:$TRUNK_PORT" LIVEKIT_API_URL="http://127.0.0.1:$LKP" LIVEKIT_API_KEY="$LK_KEY" LIVEKIT_API_SECRET="$LK_SECRET"
+    BIFROST_TRUNK_ICE="127.0.0.1:$ICE_PORT" SPEACHES_URL="http://127.0.0.1:$VOICEP/v1" TTS_MODEL_EN=local-vits-en-lessac TTS_VOICE_EN=en_lessac)
+fi
 mkdir -p "$STATE/twin/artifacts"
 printf '<!doctype html><h1>G5.1 sandbox artifact</h1><script>window.__xss=1</script>\n' >"$STATE/twin/artifacts/g51-check.html"
 (
@@ -177,9 +233,20 @@ printf '<!doctype html><h1>G5.1 sandbox artifact</h1><script>window.__xss=1</scr
     BIFROST_TRUNK_STATE="$STATE/twin/trunk-state.json" BIFROST_TRUNK_URL="$TRUNK_URL" \
     BIFROST_MAIN_TITLE='[MAIN]' OPENCODE_URL="http://127.0.0.1:4250" \
     ARTIFACTS_DIR="$STATE/twin/artifacts" YGG_PEER_TOKEN="$TWIN_PT" \
-    NEXT_TELEMETRY_DISABLED=1 node server.mjs
+    "${APP_VOICE_ENV[@]}" NEXT_TELEMETRY_DISABLED=1 node server.mjs
 ) >"$STATE/app.log" 2>&1 &
 pids+=($!)
+if [ "$G53" = 1 ]; then
+  # AGENT_LOAD_THRESHOLD=inf + AGENT_LOAD=off: the worker's availability must not follow this machine's cpu load
+  (
+    cd "$B/voice"
+    exec env -i PATH="$PATH" HOME="$HOME" HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 LIVEKIT_URL="ws://127.0.0.1:$LKP" \
+      LIVEKIT_API_KEY="$LK_KEY" LIVEKIT_API_SECRET="$LK_SECRET" OPENCODE_URL="http://127.0.0.1:4250" \
+      SPEACHES_URL="http://127.0.0.1:$VOICEP/v1" AGENT_HTTP_PORT=$AGENTP AGENT_TTS=off APP_URL="http://127.0.0.1:8250" \
+      AGENT_LOAD_THRESHOLD=inf AGENT_LOAD=off "$AGENT_VENV/bin/python" agent.py start
+  ) >"$STATE/agent.log" 2>&1 &
+  pids+=($!)
+fi
 for _ in $(seq 60); do curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:8250/api/build" | grep -qE '^(200|401)$' && break; sleep 0.5; done
 
 # ---- 5. start second (light) root "mac" ----
@@ -241,8 +308,14 @@ if [ "${G53:-0}" = 1 ]; then
   }
   g53_step G53.1-suite-plan python3 "$ROOT/sim/voice/suite.py" --dry-run --out "$VOUT" -- --target "$TRUNK_URL" --brain http://127.0.0.1:4250 --pair-cmd "$PAIR_CMD"
   g53_step G53.2-phone-probe python3 "$ROOT/sim/voice/v1probe.py" --target "$TRUNK_URL" --brain http://127.0.0.1:4250 --pair-cmd "$PAIR_CMD" --out "$VOUT/probe"
+  # G53.3: the voice leg, end to end (the persona's speech engines are the local speech server; no persona LLM / judge)
+  g53_step G53.3-voice-smoke python3 "$ROOT/sim/voice/v1smoke.py" --target "$TRUNK_URL" --brain http://127.0.0.1:4250 --pair-cmd "$PAIR_CMD" --out "$VOUT/smoke"
+  # the voice path really used the trunk: the bridge registered LiveKit's ufrag over /t/root (the phone's /rtc went through the
+  # trunk), and the trunk's ICE-TCP listener was up. (This single-host twin cannot forbid the direct loopback UDP path for the
+  # media itself — the namespace rig sim/trunk-rtc-v1-e2e.sh G3.2 proves the ICE-TCP media path with its UDP firewall.)
+  g53_step G53.3b-ufrag-registered bash -c "grep 'LiveKit ufrag .* registered with the trunk' '$STATE/bridge-twin.log' | tail -1; grep -q 'LiveKit ufrag .* registered with the trunk' '$STATE/bridge-twin.log' && grep -q 'ICE-TCP Some(127.0.0.1:$ICE_PORT)' '$STATE/trunk.log'"
   if [ "$G53_DRY" = 0 ]; then
-    g53_step G53.3-voice-suite python3 "$ROOT/sim/voice/suite.py" --out "$VOUT" -- --target "$TRUNK_URL" --brain http://127.0.0.1:4250 --pair-cmd "$PAIR_CMD"
+    g53_step G53.4-voice-suite python3 "$ROOT/sim/voice/suite.py" --out "$VOUT" -- --target "$TRUNK_URL" --brain http://127.0.0.1:4250 --pair-cmd "$PAIR_CMD"
   fi
   echo ""; printf '%-22s %-8s %s\n' "STEP" "RES" "WHAT"
   fails=0
