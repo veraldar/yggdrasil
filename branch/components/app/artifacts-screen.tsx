@@ -15,6 +15,7 @@
  *  — the same page, its list from GET /api/roots/<name>/artifacts, its files fetched from that
  *  computer (`?root=`), back to that computer's own page. A computer that is off keeps its
  *  last known list, greyed: nothing opens. */
+import { useHomeHref } from '@/lib/home-path';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
 import { Streamdown } from 'streamdown';
@@ -245,6 +246,10 @@ function RootWorld({ root }: { root: string }) {
 }
 
 function Gallery({ root }: { root: string }) {
+  // opened from MAIN's header key (`?from=main`): back returns there, not to the home screen
+  const [fromMain, setFromMain] = useState(false);
+  useEffect(() => setFromMain(new URLSearchParams(window.location.search).get('from') === 'main'), []);
+  const homeHref = useHomeHref();
   const cacheKey = root ? `${CACHE_KEY}:${root}` : CACHE_KEY;
   const [files, setFiles] = useState<Entry[]>(() => {
     try {
@@ -357,7 +362,7 @@ function Gallery({ root }: { root: string }) {
     >
       <header className="oz-head">
         <Link
-          href={root ? `/roots/${encodeURIComponent(root)}` : '/'}
+          href={root ? `/roots/${encodeURIComponent(root)}` : fromMain ? '/session/main' : homeHref}
           className="flex min-w-0 items-center gap-2.5"
           aria-label="back to sessions"
           data-testid="artifacts-back"

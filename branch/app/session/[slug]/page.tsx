@@ -14,6 +14,8 @@ import { useRouter } from 'next/navigation';
 import { Room, RoomEvent, Track, createAudioAnalyser } from 'livekit-client';
 import Link from 'next/link';
 import { LineIcon, StopSquare } from '@/components/line-icon';
+import { ArtifactsKey } from '@/components/app/home-parts';
+import { countUnseen, seenInit } from '@/lib/artifact-read';
 import { ContextSheet } from '@/components/context-sheet';
 import { type Msg, SessionMessage, senderName, userProse } from '@/components/session-message';
 import { MessageHistory } from '@/components/message-history';
@@ -312,6 +314,30 @@ export default function SessionView({
 }) {
   const router = useRouter();
   const [slug, setSlug] = useState('');
+  // the artifacts key in MAIN's header: what this phone has not opened (as home counts it)
+  const [unseenArts, setUnseenArts] = useState(0);
+  const onMain = isMainSlug(slug);
+  useEffect(() => {
+    if (!onMain) return;
+    let live = true;
+    const load = () =>
+      fetch('/api/artifact', { cache: 'no-store', signal: AbortSignal.timeout(10_000) })
+        .then((r) => r.json())
+        .then((arts) => {
+          if (!live || !Array.isArray(arts)) return;
+          seenInit(arts);
+          setUnseenArts(countUnseen(arts));
+        })
+        .catch(() => {});
+    void load();
+    const t = setInterval(() => {
+      if (!document.hidden) void load();
+    }, 10_000);
+    return () => {
+      live = false;
+      clearInterval(t);
+    };
+  }, [onMain]);
   // tts deck store (speak-last-reply dock) + seek-bar drag state
   const speech = useSyncExternalStore(subscribeSpeech, getSpeech, getSpeechServer);
   const [seekFrac, setSeekFrac] = useState<number | null>(null);
@@ -3131,6 +3157,8 @@ export default function SessionView({
             test room ✕
           </button>
         )}
+        {/* MAIN's header carries the artifacts key as home's does: same look, badge, target */}
+        {isMainSlug(slug) && <ArtifactsKey href="/artifacts?from=main" unseen={unseenArts} />}
         {/* the full log — internal turns + tool calls, muted; tap again for
             the clean conversation */}
         <button

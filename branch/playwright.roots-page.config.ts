@@ -9,7 +9,7 @@ const BASE = process.env.PW_BASE_URL || 'http://127.0.0.1:18620';
 export default defineConfig({
   ...base,
   testIgnore: undefined,
-  testMatch: /roots-page\.spec\.ts/,
+  testMatch: /roots-(page|main-artifacts)\.spec\.ts/,
   use: {
     ...base.use,
     baseURL: BASE,
