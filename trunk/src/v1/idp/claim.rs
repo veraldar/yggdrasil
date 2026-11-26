@@ -255,7 +255,9 @@ pub fn info(st: &State, ticket: &str) -> Result<serde_json::Value, Err> {
         "host": st.cfg.host(),
         "expires_in": (exp - now_ms()).max(0) / 1000,
         "pending_email": pending_account,
-        "providers": st.cfg.oauth.keys().collect::<Vec<_>>(),
+        // "password" | "oauth:<provider>" once the account exists (the page resumes there)
+        "pending_via": super::account::pending_via(st),
+        "providers": super::oauth::public_list(st),
     }))
 }
 

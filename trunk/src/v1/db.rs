@@ -11,7 +11,10 @@ use rusqlite::{params, Connection, OptionalExtension};
 /// (number, name, sql)
 pub type Migration = (u32, &'static str, &'static str);
 
-pub const IDP_MIGRATIONS: &[Migration] = &[(1, "idp_core", include_str!("migrations/001_idp_core.sql"))];
+pub const IDP_MIGRATIONS: &[Migration] = &[
+    (1, "idp_core", include_str!("migrations/001_idp_core.sql")),
+    (2, "auth_challenges", include_str!("migrations/002_auth_challenges.sql")),
+];
 
 pub struct Db {
     conn: Mutex<Connection>,
@@ -20,6 +23,9 @@ pub struct Db {
 pub fn now_ms() -> i64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0)
 }
+
+/// The migrations every binary had before `schema_migrations` existed (M1–M3: 001, 100).
+const LEGACY: &[u32] = &[1, 100];
 
 fn all_migrations() -> Vec<Migration> {
     let mut v: Vec<Migration> = IDP_MIGRATIONS.iter().chain(super::relay::MIGRATIONS.iter()).copied().collect();
@@ -75,10 +81,36 @@ impl Db {
                 return Err(format!("trunk.db schema_version {have} is newer than this binary ({max}) — refusing to run an older trunk on it"));
             }
         }
-        for (n, name, sql) in list.into_iter().filter(|m| m.0 > have) {
+        // Each stream numbers in its own range (IDP 001–099, WIRE 100–199), so a high-water mark
+        // alone would skip a new low number once a higher one ran: every applied number is kept.
+        let tracked: bool = c
+            .query_row("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'schema_migrations'", [], |_| Ok(()))
+            .optional()
+            .map_err(|e| e.to_string())?
+            .is_some();
+        if !tracked {
+            let tx = c.transaction().map_err(|e| e.to_string())?;
+            tx.execute_batch("CREATE TABLE schema_migrations (n INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at INTEGER NOT NULL)")
+                .map_err(|e| e.to_string())?;
+            // a db from before this table ran exactly the migrations every such binary had
+            for (n, name, _) in list.iter().filter(|m| LEGACY.contains(&m.0) && m.0 <= have) {
+                tx.execute("INSERT INTO schema_migrations (n, name, applied_at) VALUES (?1, ?2, 0)", params![n, name]).map_err(|e| e.to_string())?;
+            }
+            tx.commit().map_err(|e| e.to_string())?;
+        }
+        let applied: Vec<u32> = {
+            let mut s = c.prepare("SELECT n FROM schema_migrations").map_err(|e| e.to_string())?;
+            s.query_map([], |r| r.get::<_, u32>(0)).map_err(|e| e.to_string())?.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())?
+        };
+        if let Some(n) = applied.iter().find(|n| !list.iter().any(|m| m.0 == **n)) {
+            return Err(format!("trunk.db has migration {n:03}, which this binary does not know — refusing to run an older trunk on it"));
+        }
+        for (n, name, sql) in list.into_iter().filter(|m| !applied.contains(&m.0)) {
             let tx = c.transaction().map_err(|e| e.to_string())?;
             tx.execute_batch(sql).map_err(|e| format!("migration {n:03}_{name}: {e}"))?;
-            tx.execute("INSERT INTO meta (k, v) VALUES ('schema_version', ?1) ON CONFLICT(k) DO UPDATE SET v = excluded.v", params![n.to_string()])
+            tx.execute("INSERT INTO schema_migrations (n, name, applied_at) VALUES (?1, ?2, ?3)", params![n, name, now_ms()]).map_err(|e| e.to_string())?;
+            let top: u32 = tx.query_row("SELECT max(n) FROM schema_migrations", [], |r| r.get(0)).map_err(|e| e.to_string())?;
+            tx.execute("INSERT INTO meta (k, v) VALUES ('schema_version', ?1) ON CONFLICT(k) DO UPDATE SET v = excluded.v", params![top.to_string()])
                 .map_err(|e| e.to_string())?;
             tx.commit().map_err(|e| e.to_string())?;
         }
@@ -152,6 +184,32 @@ mod tests {
         assert!(Db::open(ps).err().unwrap().contains("newer"));
         use std::os::unix::fs::PermissionsExt as _;
         assert_eq!(std::fs::metadata(&p).unwrap().permissions().mode() & 0o777, 0o600);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_new_low_number_still_runs_after_a_higher_one() {
+        // a db made by an M3 binary: 001 + 100 ran, schema_version 100, no schema_migrations
+        let dir = std::env::temp_dir().join(format!("db-{}", crate::v1::crypto::new_id("m")));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("trunk.db");
+        {
+            let c = Connection::open(&p).unwrap();
+            c.execute_batch("CREATE TABLE meta (k TEXT PRIMARY KEY, v TEXT NOT NULL)").unwrap();
+            for (n, _, sql) in all_migrations().iter().filter(|m| LEGACY.contains(&m.0)) {
+                c.execute_batch(sql).unwrap();
+                c.execute("INSERT INTO meta (k, v) VALUES ('schema_version', ?1) ON CONFLICT(k) DO UPDATE SET v = excluded.v", [n.to_string()]).unwrap();
+            }
+        }
+        let db = Db::open(p.to_str().unwrap()).unwrap();
+        assert!(db.table_exists("auth_challenges"), "002 ran after 100");
+        let ns: Vec<u32> = db.with(|c| c.prepare("SELECT n FROM schema_migrations ORDER BY n")?.query_map([], |r| r.get(0))?.collect()).unwrap();
+        assert_eq!(ns, all_migrations().iter().map(|m| m.0).collect::<Vec<_>>());
+        assert_eq!(db.schema_version(), all_migrations().last().unwrap().0);
+        // and a number this binary does not know is refused
+        db.with(|c| c.execute("INSERT INTO schema_migrations (n, name, applied_at) VALUES (99, 'future', 1)", [])).unwrap();
+        drop(db);
+        assert!(Db::open(p.to_str().unwrap()).err().unwrap().contains("does not know"));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

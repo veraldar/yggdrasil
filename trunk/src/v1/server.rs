@@ -302,6 +302,8 @@ pub fn run(path: &str) -> Result<(), String> {
         if st.fast {
             println!("  trunk: TRUNK_TEST_FAST=1 — rig timers (never in production)");
         }
+        println!("  trunk: passkeys for rp_id {} from {}", st.cfg.rp_id(), st.cfg.passkey_origins().join(", "));
+        super::idp::oauth::log_startup(&st);
         serve(st).await
     })
 }

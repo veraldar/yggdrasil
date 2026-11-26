@@ -36,6 +36,9 @@ subtle = { version = "2.6", optional = true }
 argon2 = { version = "0.5", optional = true }
 flate2 = { version = "1", optional = true }
 qrcode = { version = "0.14", default-features = false, features = ["svg"], optional = true }
+# WebAuthn L2 passkeys (spec §8): pure Rust (RustCrypto via crypto-glue), no OpenSSL. The challenge state is
+# kept server-side (auth_challenges, sealed under trunk-kek), hence the state-serialisation feature.
+webauthn-rs = { version = "0.6.2", default-features = false, features = ["danger-allow-state-serialisation"], optional = true }
 
 [features]
 # The full bifrost-net: the bridge (WebRTC, voice, speech), the access point, the mesh lab. Its
@@ -44,6 +47,6 @@ default = ["bridge", "trunk"]
 bridge = ["dep:etherparse", "dep:str0m", "dep:opus", "dep:tracing-subscriber", "dep:tracing", "dep:webpki", "dep:rcgen"]
 # The v1 trunk server and its console (src/v1/). Pure Rust plus ring's and SQLite's C (any C compiler).
 # (ring itself is not optional: the root build checks the trunk's signed directory too)
-trunk = ["dep:rusqlite", "dep:subtle", "dep:argon2", "dep:flate2", "dep:qrcode"]
+trunk = ["dep:rusqlite", "dep:subtle", "dep:argon2", "dep:flate2", "dep:qrcode", "dep:webauthn-rs"]
 # `cargo build --release --no-default-features`: the ROOT build — what a joined root runs
 # (keygen, root-key, wg-key, wg, bridge [trunk] light link, rootlink mint). Pure Rust plus ring's C (any C compiler): no cmake, no libopus.

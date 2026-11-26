@@ -69,15 +69,88 @@ fn default_region_policy() -> String {
     "refresh".into()
 }
 
+/// `[oauth.<id>]` (C2 + M4). `[oauth.google]` and `[oauth.github]` are presets: only `client_id`
+/// and `client_secret_file` are needed. Any other id is a generic OpenID Connect provider found by
+/// discovery at `<issuer>/.well-known/openid-configuration`. The endpoint overrides exist for
+/// providers without discovery and for rigs (a mock provider on loopback).
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OAuth {
+    /// required for a generic provider; the presets know theirs
+    #[serde(default)]
     pub issuer: String,
     pub client_id: String,
-    /// a file name inside cred_dir
+    /// a file name inside cred_dir (the secret itself never sits in trunk.toml or a log)
     pub client_secret_file: String,
+    /// the button's label ("Google"); default: from the preset or the id
     #[serde(default)]
     pub display: Option<String>,
+    /// "oidc" (ID token + JWKS) or "github" (GitHub's OAuth apps: no ID token, verified e-mail
+    /// from the API); default: "github" for `[oauth.github]`, else "oidc"
+    #[serde(default)]
+    pub kind: Option<String>,
+    #[serde(default)]
+    pub scopes: Option<String>,
+    #[serde(default)]
+    pub authorize_url: Option<String>,
+    #[serde(default)]
+    pub token_url: Option<String>,
+    /// kind "github": the REST API base (default https://api.github.com)
+    #[serde(default)]
+    pub api_url: Option<String>,
+}
+
+impl OAuth {
+    /// "oidc" | "github"
+    pub fn kind_of(&self, id: &str) -> &str {
+        match self.kind.as_deref() {
+            Some(k) => k,
+            None if id == "github" => "github",
+            None => "oidc",
+        }
+    }
+
+    pub fn issuer_of(&self, id: &str) -> String {
+        if !self.issuer.is_empty() {
+            return self.issuer.trim_end_matches('/').to_string();
+        }
+        match (id, self.kind_of(id)) {
+            ("google", "oidc") => "https://accounts.google.com".into(),
+            (_, "github") => "https://github.com".into(),
+            _ => String::new(),
+        }
+    }
+
+    pub fn display_of(&self, id: &str) -> String {
+        if let Some(d) = self.display.as_deref().filter(|d| !d.trim().is_empty()) {
+            return d.trim().chars().take(32).collect();
+        }
+        match id {
+            "google" => "Google".into(),
+            "github" => "GitHub".into(),
+            _ => {
+                let mut c = id.chars();
+                c.next().map(|f| f.to_uppercase().collect::<String>() + c.as_str()).unwrap_or_default()
+            }
+        }
+    }
+}
+
+/// An endpoint a provider may use: https, or plain http to a loopback address (a rig's mock).
+pub fn provider_url_ok(u: &str) -> bool {
+    let Some(o) = origin_of(u) else { return false };
+    if o.starts_with("https://") {
+        return true;
+    }
+    matches!(strip_port(o.trim_start_matches("http://")), "127.0.0.1" | "localhost" | "[::1]")
+}
+
+/// "host:8080" → "host"; "[::1]:80" → "[::1]"; "host" → "host".
+pub fn strip_port(h: &str) -> &str {
+    match h.rsplit_once(':') {
+        Some((host, port)) if !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit()) && (!host.contains(':') || host.ends_with(']')) => host,
+        _ => h,
+    }
 }
 
 /// A CIDR like "10.0.0.1/32" or "fd00::/8" (a bare address = a single host).
@@ -172,8 +245,33 @@ impl Config {
             return Err("auth.region_policy must be \"refresh\" or \"repair\"".into());
         }
         for (k, p) in &self.oauth {
-            if p.client_id.is_empty() || p.client_secret_file.contains('/') {
+            if k.is_empty() || k.len() > 32 || !k.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_') {
+                return Err(format!("oauth.{k}: the id must be 1–32 of a-z 0-9 - _ (it is part of the callback URL)"));
+            }
+            if p.client_id.is_empty() || p.client_secret_file.is_empty() || p.client_secret_file.contains('/') || p.client_secret_file.starts_with('.') {
                 return Err(format!("oauth.{k}: client_id required; client_secret_file is a name inside cred_dir"));
+            }
+            let kind = p.kind_of(k);
+            if kind != "oidc" && kind != "github" {
+                return Err(format!("oauth.{k}: kind must be \"oidc\" or \"github\""));
+            }
+            let iss = p.issuer_of(k);
+            if iss.is_empty() {
+                return Err(format!("oauth.{k}: issuer required (a generic OpenID Connect provider)"));
+            }
+            for u in [Some(&iss), p.authorize_url.as_ref(), p.token_url.as_ref(), p.api_url.as_ref()].into_iter().flatten() {
+                if !provider_url_ok(u) {
+                    return Err(format!("oauth.{k}: '{u}' must be https (plain http only on loopback)"));
+                }
+            }
+        }
+        // passkeys (§8): the RP ID must be the trunk's host or a parent of it, and of every origin
+        // a passkey may be used from (so passkeys made on ljoolq. still work on ap.)
+        let rp = self.rp_id();
+        for o in self.passkey_origins() {
+            let host = strip_port(o.split_once("://").map(|(_, h)| h).unwrap_or(&o));
+            if !(host == rp || host.ends_with(&format!(".{rp}"))) {
+                return Err(format!("rp_id '{rp}' does not cover the origin '{o}' (it must be that host or a parent domain of it)"));
             }
         }
         for (k, v) in [("db", &self.db), ("state_dir", &self.state_dir), ("cred_dir", &self.cred_dir), ("ctl_socket", &self.ctl_socket)] {
@@ -193,6 +291,27 @@ impl Config {
     pub fn write_origins(&self) -> Vec<String> {
         let mut v = vec![self.origin()];
         v.extend(self.extra_names.iter().map(|n| format!("https://{n}")));
+        v
+    }
+
+    /// The WebAuthn RP ID: `rp_id`, or the public host without its port.
+    pub fn rp_id(&self) -> String {
+        if !self.rp_id.trim().is_empty() {
+            return self.rp_id.trim().to_ascii_lowercase();
+        }
+        strip_port(&self.host()).to_string()
+    }
+
+    /// Origins a passkey ceremony may come from: public_url, each extra name, and `origins`
+    /// (exact matches; no subdomain or port wildcards).
+    pub fn passkey_origins(&self) -> Vec<String> {
+        let mut v = self.write_origins();
+        for o in &self.origins {
+            let o = o.trim_end_matches('/').to_ascii_lowercase();
+            if !v.contains(&o) {
+                v.push(o);
+            }
+        }
         v
     }
 
@@ -281,6 +400,38 @@ client_secret_file = "oauth-google"
         assert!(c.trusted()[0].contains("10.0.0.1".parse().unwrap()));
         assert!(!c.trusted()[0].contains("10.0.0.2".parse().unwrap()));
         assert_eq!(c.oauth["google"].client_secret_file, "oauth-google");
+    }
+
+    #[test]
+    fn oauth_presets_and_generic_providers() {
+        let c = Config::parse(&format!("{MIN}\n[oauth.google]\nclient_id=\"g\"\nclient_secret_file=\"oauth-google\"\n[oauth.github]\nclient_id=\"h\"\nclient_secret_file=\"oauth-github\"\n")).unwrap();
+        let (g, h) = (&c.oauth["google"], &c.oauth["github"]);
+        assert_eq!((g.kind_of("google"), g.issuer_of("google").as_str(), g.display_of("google").as_str()), ("oidc", "https://accounts.google.com", "Google"));
+        assert_eq!((h.kind_of("github"), h.issuer_of("github").as_str(), h.display_of("github").as_str()), ("github", "https://github.com", "GitHub"));
+        // a generic provider needs its issuer; https, or plain http only on loopback (a rig's mock)
+        assert!(Config::parse(&format!("{MIN}\n[oauth.acme]\nclient_id=\"a\"\nclient_secret_file=\"x\"\n")).is_err());
+        assert!(Config::parse(&format!("{MIN}\n[oauth.acme]\nissuer=\"http://idp.example\"\nclient_id=\"a\"\nclient_secret_file=\"x\"\n")).is_err());
+        let m = Config::parse(&format!("{MIN}\n[oauth.mock]\nissuer=\"http://127.0.0.1:18850/\"\nclient_id=\"a\"\nclient_secret_file=\"x\"\ndisplay=\"Mock ID\"\n")).unwrap();
+        assert_eq!((m.oauth["mock"].issuer_of("mock").as_str(), m.oauth["mock"].display_of("mock").as_str()), ("http://127.0.0.1:18850", "Mock ID"));
+        // the id is part of the callback path; the secret is a file name inside cred_dir
+        assert!(Config::parse(&format!("{MIN}\n[oauth.Bad]\nissuer=\"https://x.example\"\nclient_id=\"a\"\nclient_secret_file=\"x\"\n")).is_err());
+        assert!(Config::parse(&format!("{MIN}\n[oauth.google]\nclient_id=\"a\"\nclient_secret_file=\"../etc/x\"\n")).is_err());
+        assert!(Config::parse(&format!("{MIN}\n[oauth.google]\nclient_id=\"a\"\nclient_secret_file=\"x\"\nkind=\"saml\"\n")).is_err());
+    }
+
+    #[test]
+    fn the_rp_id_must_cover_every_passkey_origin() {
+        assert_eq!(Config::parse(MIN).unwrap().rp_id(), "ljoolq.veraldar.org");
+        let local = MIN.replace("https://ljoolq.veraldar.org", "http://localhost:18801");
+        assert_eq!(Config::parse(&local).unwrap().rp_id(), "localhost");
+        let moved = format!("{MIN}\nrp_id = \"veraldar.org\"\nextra_names = [\"ap.veraldar.org\"]\norigins = [\"https://ljoolq.veraldar.org\"]\n");
+        let c = Config::parse(&moved).unwrap();
+        assert_eq!(c.passkey_origins(), vec!["https://ljoolq.veraldar.org", "https://ap.veraldar.org"]);
+        assert!(Config::parse(&format!("{MIN}\nrp_id = \"example.org\"\n")).is_err());
+        assert!(Config::parse(&format!("{MIN}\nrp_id = \"veraldar.org\"\norigins = [\"https://evil.example\"]\n")).is_err());
+        assert!(Config::parse(&format!("{MIN}\nrp_id = \"ar.org\"\n")).is_err(), "a suffix that is not a parent domain");
+        assert_eq!(strip_port("[::1]:80"), "[::1]");
+        assert_eq!(strip_port("host"), "host");
     }
 
     #[test]
