@@ -37,7 +37,7 @@ for a in asks:
                  f'<div class="o">{e(a["who"])}{ls}</div>{delivery}</div>')
 # approvals: approvals.json, state = pending | approved | denied (+ "at" time) ; "commit"/"branch" once the work lands
 AST = {"pending": "pending", "approved": "approved", "denied": "denied"}
-acards = []
+acards, lcards = [], []
 for x in json.load(open(os.path.join(here, "approvals.json"))):
     stt = x["state"]
     line = ["pending"]
@@ -50,13 +50,14 @@ for x in json.load(open(os.path.join(here, "approvals.json"))):
     ls = f' · session {e(live.get(x["sid"], "?"))}' if live is not None and x.get("sid") else ""
     nt = (f'<div class="n">{e(x["note"])}</div>' if x.get("note") else "") + (f'<div class="n">▶ {e(x["action"])}</div>' if x.get("action") and x["state"] == "pending" else "")
     pend = "pending" if stt == "pending" else "ok"
-    acards.append(f'<div class="c ap {pend}"><div class="t"><span class="k">{e(x["code"])}</span><span class="w">asked {e(x["asked"])}</span></div>'
+    (lcards if x.get("group") == "lead" else acards).append(f'<div class="c ap {pend}"><div class="t"><span class="k">{e(x["code"])}</span><span class="w">asked {e(x["asked"])}</span></div>'
                   f'<div class="q">{e(x["ask"])}</div><div class="o">{e(x["who"])} ({e(x["role"])}){ls}</div>'
                   f'<div class="d">unblocks: {e(x["unblocks"])}</div>{nt}{lk}<div class="st">{" → ".join(line)}</div></div>')
-npend = sum(1 for x in json.load(open(os.path.join(here, "approvals.json"))) if x["state"] == "pending")
+npend = sum(1 for x in json.load(open(os.path.join(here, "approvals.json"))) if x["state"] == "pending" and x.get("group") != "lead")
 if not acards: acards = ['<div class="c ok"><div class="q">Nothing is waiting on you.</div></div>']
 approvals = ('<h2>## approvals — waiting on you</h2><div class="s">reply in chat with the card code: “ok A1” approves, “no A1” denies</div>'
-             + "".join(acards))
+             + "".join(acards)
+             + ('<h2>## lead approves — not you</h2><div class="s">owner delegated to the trunk lead; the lead follows the architect’s verdicts. Shown until the lead rules.</div>' + "".join(lcards) if lcards else ""))
 now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
 summ = " · ".join(f"{counts[s]} {s}" for s in ORDER if s in counts)
 page = f'''<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Requests</title>
