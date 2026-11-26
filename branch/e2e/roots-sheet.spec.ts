@@ -1,4 +1,4 @@
-import { readFileSync } from 'fs';
+import { readFileSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { type APIRequestContext, type Locator, type Page, expect, test } from '@playwright/test';
 
@@ -17,6 +17,7 @@ const LAB = process.env.PW_LAB_BRAIN || '';
 const TOKEN = process.env.PW_DEVICE_TOKEN || '';
 const STATE = process.env.PW_RIG_STATE || '';
 const SHOTS = process.env.PW_SHOTS || '';
+const TRUNK = process.env.PW_TRUNK_AUTH === '1';
 const LIVE = /:(4096|4100|4101|4191|4310|4501|4502|4503|8080|8090|8101|8191|8443|8447)\b/;
 
 test.skip(
@@ -203,19 +204,56 @@ test('roots sheet → a computer\'s page: its settings, theme saved on lab, sess
     await page.getByTestId('root-remove').tap();
     await expect(lab).toHaveCount(0);
     await expect(page.getByTestId('root-row')).toHaveCount(1);
-    const rec = JSON.parse(readFileSync(join(STATE, 'roots.json'), 'utf8')).roots.find(
-      (r: { id: string }) => r.id === 'lab'
-    );
-    expect(rec.revoked).toBe(true);
-    expect(Date.parse(rec.revoked_at)).toBeGreaterThan(Date.now() - 120_000);
-    const after = (await (await request.get(`${HOME}/root`)).json()) as { roots?: RootJ[] };
-    expect(after.roots?.some((x) => x.name === 'lab')).toBe(false);
-    await page.goto('/');
-    await openSheet(page);
-    await expect(page.getByTestId('root-row')).toHaveCount(1);
+    if (TRUNK) {
+      const removed = readFileSync(join(STATE, 'roots-removed.jsonl'), 'utf8')
+        .trim()
+        .split('\n')
+        .map((l) => JSON.parse(l) as { id?: string });
+      expect(removed.some((r) => r.id === 'rt_lab')).toBe(true);
+    } else {
+      const rec = JSON.parse(readFileSync(join(STATE, 'roots.json'), 'utf8')).roots.find(
+        (r: { id: string }) => r.id === 'lab'
+      );
+      expect(rec.revoked).toBe(true);
+      expect(Date.parse(rec.revoked_at)).toBeGreaterThan(Date.now() - 120_000);
+      const after = (await (await request.get(`${HOME}/root`)).json()) as { roots?: RootJ[] };
+      expect(after.roots?.some((x) => x.name === 'lab')).toBe(false);
+      await page.goto('/');
+      await openSheet(page);
+      await expect(page.getByTestId('root-row')).toHaveCount(1);
+    }
   });
 
   await test.step('pending joins show in the roots sheet with code & countdown and can be refused', async () => {
+    if (TRUNK) {
+      writeFileSync(
+        join(STATE, 'roots-pending.json'),
+        JSON.stringify([
+          {
+            id: 'enr_debian01',
+            hostname: 'debian-box',
+            name: 'debian-box',
+            os: 'linux',
+            wg_fp: 'AB12CD34',
+            expires_at: Date.now() + 4 * 60_000,
+          },
+        ])
+      );
+      await page.goto('/');
+      await openSheet(page);
+      const row = page.locator('[data-testid="join-row"][data-join="debian-box"]');
+      await expect(row).toBeVisible({ timeout: 15_000 });
+      await expect(row.getByTestId('join-left')).toContainText(':');
+      await expect(row.getByTestId('join-add')).toBeVisible();
+      await row.getByTestId('join-refuse').tap();
+      await expect(row).toHaveCount(0, { timeout: 10_000 });
+      const removed = readFileSync(join(STATE, 'roots-removed.jsonl'), 'utf8')
+        .trim()
+        .split('\n')
+        .map((l) => JSON.parse(l) as { enroll?: string; refused?: boolean });
+      expect(removed.some((r) => r.enroll === 'enr_debian01' && r.refused === true)).toBe(true);
+      return;
+    }
     const wg = Buffer.alloc(32, 0x55).toString('base64');
     const res = await request.post(`${base.origin}/api/roots/join`, {
       data: { name: 'debian-box', os: 'linux', host: 'debian-box', wg_pub: wg },
