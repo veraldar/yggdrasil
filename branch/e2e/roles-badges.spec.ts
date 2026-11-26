@@ -364,7 +364,7 @@ test('the roles page has no engines block; engines live on /settings and save to
           )?.model
       )
       .toBe(to === 'default' ? null : to);
-    await expect(eng('claude')).toContainText(`${to} ›`);
+    await expect(eng('claude')).toContainText(`· ${to}`);
   } finally {
     await request.put(`${OC}/engine/claude`, { data: { model: before.model } }).catch(() => {});
   }
