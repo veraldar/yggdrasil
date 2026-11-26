@@ -2,7 +2,7 @@
 // steps). Prints one JSON line {"shots": [{name, ok, problems}]}; exit 1 when a page had a console
 // error, a CSP refusal, a missing element or anything wider than the screen.
 //
-//   NODE_PATH=branch/node_modules node sim/trunk-v1/page-shot.cjs <out dir> <JSON [{name, url, wait}]>
+//   NODE_PATH=branch/node_modules node sim/trunk-v1/page-shot.cjs <out dir> <JSON [{name, url, first?, wait}]>
 'use strict';
 const { chromium, devices } = require('playwright');
 
@@ -20,6 +20,8 @@ const list = JSON.parse(listJson);
     page.on('pageerror', (e) => problems.push('pageerror: ' + e.message));
     try {
       await page.goto(s.url);
+      // an element that must show before the page moves on by itself (e.g. /pair's "joined")
+      if (s.first) await page.waitForSelector(s.first, { timeout: 10000 });
       if (s.wait) await page.waitForSelector(s.wait, { timeout: 10000 });
       await page.waitForTimeout(300);
       await page.screenshot({ path: out + '/' + s.name + '.png', fullPage: true });

@@ -1384,8 +1384,8 @@ def t_kill_live(binp, root):
         check("pair-landing: redeem with the door root online → next \"/\", and / is the door's app (its tree door)",
               r is not None and r.status == 200 and r.j("next") == "/" and door.status == 200 and "fake-door" in str(door.data), (r, door))
         ok, q = t.ctl("pair-qr")
-        res = page_shots([{"name": "m4-pair-lands-door", "url": json.loads(q)["url"], "wait": "#fake-door"}]) if ok else []
-        check("pair-landing: the phone's /pair page goes to the door by itself (no tap)", res and res[0]["final"].rstrip("/") == t.public_url, res)
+        res = page_shots([{"name": "m4-pair-lands-door", "url": json.loads(q)["url"], "first": "#p-joined", "wait": "#fake-door"}]) if ok else []
+        check("pair-landing: the phone's /pair page shows \"joined\", then goes to the door by itself (no tap)", res and res[0]["ok"] and res[0]["final"].rstrip("/") == t.public_url, res)
 
         # a member phone (QR) and the admin, each holding a live event stream through the trunk
         ok, q = t.ctl("pair-qr")
@@ -1449,8 +1449,8 @@ def t_kill_live(binp, root):
         check("pair-landing: redeem with no door root online → next \"/offline\" (and / sends there too)",
               gone and r is not None and r.status == 200 and r.j("next") == "/offline" and off.status == 302 and off.headers.get("Location") == "/offline", (gone, r, off))
         ok, q = t.ctl("pair-qr")
-        res = page_shots([{"name": "m4-pair-lands-offline", "url": json.loads(q)["url"], "wait": "body[data-page=offline]"}]) if ok else []
-        check("pair-landing: the phone's /pair page goes to /offline by itself", res and res[0]["final"] == t.public_url + "/offline", res)
+        res = page_shots([{"name": "m4-pair-lands-offline", "url": json.loads(q)["url"], "first": "#p-joined", "wait": "body[data-page=offline]"}]) if ok else []
+        check("pair-landing: the phone's /pair page shows \"joined\", then goes to /offline by itself", res and res[0]["ok"] and res[0]["final"] == t.public_url + "/offline", res)
     finally:
         if bridge and bridge.poll() is None:
             bridge.terminate()  # our own child, by PID

@@ -1106,6 +1106,9 @@ async function auditPage() {
 }
 
 // the phone side: redeem the QR's fragment, then land in the tree
+// how long the phone shows "joined" before it opens BIFROST by itself
+const PAIR_LANDING_MS = 1500;
+
 async function pairRedeem(tok) {
   const sections = ['p-qr', 'p-joined', 'p-burned'];
   const only = (...ids) => sections.forEach((x) => show($(x), ids.includes(x)));
@@ -1120,10 +1123,11 @@ async function pairRedeem(tok) {
     $('p-joined-role').textContent = (r.data.device && r.data.device.role) || 'member';
     $('p-joined-line').textContent = 'joined: ' + ((r.data.device && r.data.device.name) || 'phone') + ' · ' + ((r.data.device && r.data.device.role) || 'member') + ' — opening BIFROST…';
     // F5 step 3: the phone goes where a fresh sign-in goes — the door (its first contact is the
-    // tree door, S8) or /offline; the trunk names it. The card stays as the next page loads.
+    // tree door, S8) or /offline; the trunk names it. "joined" stays up a moment first (tapping
+    // BIFROST or "Open" goes at once; the same place either way).
     const next = typeof r.data.next === 'string' && /^\/(?!\/)[^\\\s\u0000-\u001f\u007f]*$/.test(r.data.next) && !r.data.next.startsWith('/t/') ? r.data.next : '/';
     $('p-open').href = next;
-    location.replace(next);
+    setTimeout(() => location.replace(next), PAIR_LANDING_MS);
     return;
   }
   only('p-burned');
