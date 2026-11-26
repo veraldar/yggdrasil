@@ -178,6 +178,8 @@ class Trunk:
         subprocess.run([self.bin, "trunk-kek", os.path.join(root, "cred", "trunk-kek")], check=True, capture_output=True)
         self.proc = None
         self.log = os.path.join(root, "trunk.log")
+        # e.g. ["taskset", "-c", "0"] (it execs the trunk: the PID stays ours)
+        self.bin_prefix = []
 
     @property
     def ctl_prefix(self):
@@ -190,7 +192,7 @@ class Trunk:
         env = dict(os.environ)
         if self.fast:
             env["TRUNK_TEST_FAST"] = "1"
-        self.proc = subprocess.Popen([self.bin, "trunk", "-c", self.cfg], stdout=open(self.log, "ab"), stderr=subprocess.STDOUT, env=env)
+        self.proc = subprocess.Popen(self.bin_prefix + [self.bin, "trunk", "-c", self.cfg], stdout=open(self.log, "ab"), stderr=subprocess.STDOUT, env=env)
         deadline = time.time() + 15
         while time.time() < deadline:
             if self.proc.poll() is not None:

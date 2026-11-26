@@ -94,12 +94,117 @@ function nextPath() {
   return /^\/(?!\/)[^\\]*$/.test(n) && !n.startsWith('/t/') ? n : '/';
 }
 
+// ---- OAuth buttons and WebAuthn (passkeys) ---------------------------------------------------
+
+// The fragment's key=value pairs (the claim ticket, a second-factor ticket, an error flag).
+function hashParams() { return new URLSearchParams(location.hash.slice(1)); }
+
+// One button per configured provider ({id, name} from /t/state or the claim ticket).
+function oauthButtons(el, providers, sub, onPick) {
+  if (!el) return;
+  el.textContent = '';
+  for (const p of providers || []) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'oauth-btn';
+    b.dataset.provider = p.id;
+    const ic = document.createElement('span');
+    ic.className = 'oauth-ic';
+    ic.textContent = p.id === 'github' ? 'GH' : String(p.name || p.id).slice(0, 1).toUpperCase();
+    const t = document.createElement('span');
+    t.textContent = 'Continue with ' + (p.name || p.id);
+    const s2 = document.createElement('span');
+    s2.className = 'sub';
+    s2.textContent = sub;
+    b.append(ic, t, s2);
+    b.addEventListener('click', () => onPick(p, b));
+    el.appendChild(b);
+  }
+  show(el, (providers || []).length > 0);
+}
+
+const hasWebAuthn = () => !!(window.PublicKeyCredential && navigator.credentials && navigator.credentials.create && window.isSecureContext);
+
+function b64uToBuf(s) {
+  s = String(s || '').replace(/-/g, '+').replace(/_/g, '/');
+  while (s.length % 4) s += '=';
+  const bin = atob(s);
+  const u = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i);
+  return u.buffer;
+}
+
+function bufToB64u(b) {
+  const u = new Uint8Array(b);
+  let s = '';
+  for (let i = 0; i < u.length; i++) s += String.fromCharCode(u[i]);
+  return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+// The trunk's options (JSON, binary fields as base64url) → what navigator.credentials wants.
+function pkCreateOptions(o) {
+  const pk = Object.assign({}, o.publicKey);
+  pk.challenge = b64uToBuf(pk.challenge);
+  pk.user = Object.assign({}, pk.user, { id: b64uToBuf(pk.user.id) });
+  if (pk.excludeCredentials) pk.excludeCredentials = pk.excludeCredentials.map((c) => Object.assign({}, c, { id: b64uToBuf(c.id) }));
+  return { publicKey: pk };
+}
+
+function pkGetOptions(o) {
+  const pk = Object.assign({}, o.publicKey);
+  pk.challenge = b64uToBuf(pk.challenge);
+  if (pk.allowCredentials) pk.allowCredentials = pk.allowCredentials.map((c) => Object.assign({}, c, { id: b64uToBuf(c.id) }));
+  return { publicKey: pk };
+}
+
+function pkRegJson(c) {
+  return {
+    id: c.id, rawId: bufToB64u(c.rawId), type: c.type, extensions: {},
+    response: { attestationObject: bufToB64u(c.response.attestationObject), clientDataJSON: bufToB64u(c.response.clientDataJSON) },
+  };
+}
+
+function pkAuthJson(c) {
+  return {
+    id: c.id, rawId: bufToB64u(c.rawId), type: c.type, extensions: {},
+    response: {
+      authenticatorData: bufToB64u(c.response.authenticatorData), clientDataJSON: bufToB64u(c.response.clientDataJSON),
+      signature: bufToB64u(c.response.signature), userHandle: c.response.userHandle ? bufToB64u(c.response.userHandle) : null,
+    },
+  };
+}
+
+const PK_CANCELLED = { status: 0, data: { error: 'the passkey prompt was closed — nothing changed', why: 'cancelled' } };
+
+// A passkey assertion for `intent` (login | step-up | mfa); `via` is call or authed.
+async function passkeyUse(intent, extra, via) {
+  via = via || call;
+  const b = await via('POST', '/t/auth/passkey/begin', Object.assign({ intent }, extra || {}));
+  if (!b || b.status !== 200) return b;
+  let cred;
+  try { cred = await navigator.credentials.get(pkGetOptions(b.data.options)); } catch (e) { return PK_CANCELLED; }
+  if (!cred) return PK_CANCELLED;
+  return via('POST', '/t/auth/passkey/finish', Object.assign({ intent, challenge: b.data.challenge, credential: pkAuthJson(cred) }, extra || {}));
+}
+
+// Enrol a passkey on this (admin, fresh) device.
+async function passkeyAdd(name) {
+  const b = await authed('POST', '/t/account/passkeys/begin', { name });
+  if (!b || b.status !== 200) return b;
+  let cred;
+  try { cred = await navigator.credentials.create(pkCreateOptions(b.data.options)); } catch (e) { return PK_CANCELLED; }
+  if (!cred) return PK_CANCELLED;
+  return authed('POST', '/t/account/passkeys/finish', { challenge: b.data.challenge, credential: pkRegJson(cred), name });
+}
+
 // ---- /claim ------------------------------------------------------------------------------
 
 async function claimPage() {
   // the agent may open the link in a tab already on /claim: a new fragment is a new claim
   window.addEventListener('hashchange', () => location.reload());
-  const ticket = new URLSearchParams(location.hash.slice(1)).get('t') || '';
+  const hp = hashParams();
+  const ticket = hp.get('t') || '';
+  const oauthErr = hp.get('e') === 'oauth';
   const steps = ['c-wait', 'c-approve', 'c-signup', 'c-totp', 'c-codes'];
   const pills = { 'c-wait': 'admin claim', 'c-approve': 'agent claim', 'c-signup': 'admin claim', 'c-totp': '2FA required', 'c-codes': 'claimed ✓' };
   const only = (...ids) => {
@@ -140,10 +245,31 @@ async function claimPage() {
   const toSignup = () => {
     only('c-signup');
     show($('c-ribbon'));
-    if (d.pending_email) $('c-email').value = d.pending_email;
+    if (d.pending_email && d.pending_via === 'password') $('c-email').value = d.pending_email;
+    if (oauthErr) say($('c-signup-err'), 'that sign-in was not accepted — try again, or use email + password', 'err');
     $('c-email').focus();
   };
-  if (d.state === 'approved') toSignup(); else only('c-approve');
+  // back from the provider: the admin exists (no password); enrol the authenticator — mandatory
+  const toTotp = async () => {
+    const r = await post('/t/claim/totp', { ticket });
+    if (r.status !== 200) { toSignup(); say($('c-signup-err'), errText(r), 'err'); return; }
+    putSvg($('c-qr'), r.data.qr_svg);
+    $('c-secret').textContent = (r.data.secret || '').replace(/(.{4})/g, '$1 ').trim();
+    only('c-totp');
+    show($('c-ribbon2'));
+    $('c-code').focus();
+  };
+  oauthButtons($('c-oauth'), d.providers, 'OAuth', async (p, btn) => {
+    busy(btn, true);
+    say($('c-signup-err'), '');
+    const r = await post('/t/auth/oauth/' + encodeURIComponent(p.id) + '/start', { intent: 'claim', ticket });
+    if (r.status === 200 && r.data.url) { location.assign(r.data.url); return; }
+    busy(btn, false);
+    say($('c-signup-err'), errText(r, 'that provider is not answering'), 'err');
+  });
+  if (d.state === 'approved' && String(d.pending_via || '').startsWith('oauth:') && !oauthErr) toTotp();
+  else if (d.state === 'approved') toSignup();
+  else only('c-approve');
 
   $('c-approve-btn').addEventListener('click', async () => {
     busy($('c-approve-btn'), true);
@@ -192,10 +318,17 @@ async function claimPage() {
 // ---- /login --------------------------------------------------------------------------------
 
 async function loginPage() {
+  const hp = hashParams();
+  // back from an OAuth provider: the first factor passed, the second is owed (#mfa=<ticket>)
+  const oauthTicket = hp.get('mfa') || '';
+  const oauthErr = hp.get('e') === 'oauth';
+  if (location.hash) history.replaceState(null, '', location.pathname + location.search);
   // a page sent here by an expired (or moved) access token: the refresh cookie (path /t/auth)
   // may still be good — try it once, quietly, before asking for the password
-  const f = await post('/t/auth/refresh');
-  if (f.status === 200) { location.replace(nextPath()); return; }
+  if (!oauthTicket) {
+    const f = await post('/t/auth/refresh');
+    if (f.status === 200) { location.replace(nextPath()); return; }
+  }
   let mode = 'totp';
   const setMode = (m) => {
     mode = m;
@@ -217,6 +350,67 @@ async function loginPage() {
     }
     location.replace(nextPath());
   };
+  // the second step only (after OAuth): no email or password on screen
+  const secondOnly = (via, offer) => {
+    show($('l-first'), false);
+    show($('l-email-field'), false);
+    show($('l-password-field'), false);
+    $('l-email').required = false;
+    $('l-password').required = false;
+    $('l-title').textContent = 'one more step';
+    const v = $('l-via');
+    v.textContent = 'Signed in with ' + via + '. Now your second factor:';
+    show(v);
+    $('l-btn').textContent = 'Confirm →';
+    show($('l-mfa-passkey'), hasWebAuthn() && (offer.mfa || []).includes('passkey'));
+    setMode('totp');
+  };
+  const pkErr = (r) => say($('l-err'), r.status === 0 ? r.data.error : errText(r, 'that passkey was not accepted'), 'err');
+  $('l-mfa-passkey').addEventListener('click', async () => {
+    say($('l-err'), '');
+    busy($('l-mfa-passkey'), true);
+    const r = await passkeyUse('mfa', { mfa_ticket: ticket });
+    busy($('l-mfa-passkey'), false);
+    if (r && r.status === 200) { finish(r); return; }
+    if (r && r.data && r.data.why === 'ticket') ticket = '';
+    pkErr(r || {});
+  });
+  if (hasWebAuthn()) {
+    show($('l-passkey'));
+    show($('l-passkey-note'));
+    $('l-passkey').addEventListener('click', async () => {
+      say($('l-err'), '');
+      busy($('l-passkey'), true);
+      const r = await passkeyUse('login');
+      busy($('l-passkey'), false);
+      if (r && r.status === 200) { location.replace(nextPath()); return; }
+      pkErr(r || {});
+    });
+  }
+  const st = await call('GET', '/t/state');
+  if (st.status === 200) {
+    oauthButtons($('l-oauth'), st.data.providers, 'same account', (p) => {
+      const n = nextPath();
+      location.assign('/t/auth/oauth/' + encodeURIComponent(p.id) + '/start?intent=login' + (n !== '/' ? '&next=' + encodeURIComponent(n) : ''));
+    });
+  }
+  if (oauthErr) say($('l-err'), 'that sign-in was not accepted', 'err');
+  if (oauthTicket) {
+    const o = await post('/t/auth/mfa/options', { mfa_ticket: oauthTicket });
+    if (o.status === 200) {
+      ticket = oauthTicket;
+      const p = ((st.data && st.data.providers) || []).find((x) => x.id === o.data.via);
+      secondOnly(p ? p.name : 'your provider', o.data);
+      if (o.data.enroll) {
+        putSvg($('l-qr'), o.data.enroll.qr_svg);
+        $('l-secret').textContent = (o.data.enroll.secret || '').replace(/(.{4})/g, '$1 ').trim();
+        show($('l-signin'), false);
+        show($('l-enroll'));
+      }
+    } else {
+      say($('l-err'), 'that sign-in expired — start again', 'err');
+    }
+  }
   $('l-form').addEventListener('submit', async (ev) => {
     ev.preventDefault();
     say($('l-err'), '');
@@ -228,6 +422,7 @@ async function loginPage() {
         const r = await post('/t/auth/login', { email: $('l-email').value, password: $('l-password').value });
         if (r.status !== 200) { say($('l-err'), errText(r), 'err'); return; }
         ticket = r.data.mfa_ticket;
+        show($('l-mfa-passkey'), hasWebAuthn() && (r.data.mfa || []).includes('passkey'));
         if (r.data.enroll) {
           putSvg($('l-qr'), r.data.enroll.qr_svg);
           $('l-secret').textContent = (r.data.enroll.secret || '').replace(/(.{4})/g, '$1 ').trim();
@@ -252,7 +447,7 @@ async function loginPage() {
     const m = await post('/t/auth/mfa', { mfa_ticket: ticket, totp: digitsOnly($('l-enroll-code').value) });
     if (m.status === 200) finish(m); else say($('l-enroll-err'), errText(m), 'err');
   });
-  $('l-email').focus();
+  if (oauthTicket) ($('l-enroll').hidden ? $('l-code') : $('l-enroll-code')).focus(); else $('l-email').focus();
 }
 
 // ---- /account ------------------------------------------------------------------------------
@@ -279,13 +474,75 @@ async function accountPage() {
     $('a-totp').textContent = a.totp.enrolled ? 'on · since ' + new Date(a.totp.enrolled_at).toLocaleDateString() : 'not set';
     $('a-recovery').textContent = a.recovery.left + ' of ' + a.recovery.total + ' left';
     $('a-recovery').className = a.recovery.left < 3 ? 'v warn' : 'v';
+    // an OAuth-only account has no password to change
+    show($('a-pw-form'), a.password);
+    show($('a-pw-none'), !a.password);
+    if (!a.password && a.oauth && a.oauth.length) $('a-oauth-name').textContent = a.oauth[0].name + (a.oauth[0].email ? ' (' + a.oauth[0].email + ')' : '');
+    drawPasskeys(a);
     return a;
   };
-  // run `fn`; when the trunk asks for step-up, ask for a code first and run it again
-  const guarded = async (fn) => {
+  let acct = null;
+  const drawPasskeys = (a) => {
+    acct = a;
+    const keys = a.passkeys || [];
+    const admin = a.device.role === 'admin';
+    $('a-pk-count').textContent = keys.length ? keys.length + (keys.length === 1 ? ' passkey' : ' passkeys') : '';
+    show($('a-pk-none'), !keys.length);
+    show($('a-pk-form'), admin && hasWebAuthn());
+    show($('a-pk-unsupported'), admin && !hasWebAuthn());
+    show($('a-pk-member'), !admin);
+    show($('a-stepup-passkey'), keys.length > 0 && hasWebAuthn());
+    if (!$('a-pk-name').value) $('a-pk-name').value = a.device.name || '';
+    const list = $('a-pk-list');
+    list.textContent = '';
+    for (const k of keys) {
+      const row = document.createElement('div');
+      row.className = 'pk-row';
+      row.dataset.id = k.id;
+      const txt = document.createElement('div');
+      txt.className = 'txt';
+      const n = document.createElement('span');
+      n.className = 'n';
+      n.textContent = k.name || 'passkey';
+      const m = document.createElement('span');
+      m.className = 'm';
+      m.textContent = 'added ' + new Date(k.created_at).toLocaleDateString() + ' · ' + (k.last_used ? 'last used ' + new Date(k.last_used).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : 'not used yet');
+      txt.append(n, m);
+      row.append(txt);
+      if (admin) {
+        const del = document.createElement('button');
+        del.type = 'button';
+        del.className = 'oz-k red';
+        del.textContent = 'Remove';
+        let armed = null;
+        // a second tap within 4 s confirms (no dialog)
+        const removeIt = async () => {
+          const r = await guarded(() => authed('DELETE', '/t/account/passkeys/' + encodeURIComponent(k.id)), removeIt);
+          if (!r) return;
+          say($('a-pk-msg'), r.status === 200 ? 'passkey removed — it no longer signs in' : errText(r), r.status === 200 ? 'ok' : 'err');
+          load();
+        };
+        del.addEventListener('click', async () => {
+          if (!armed) {
+            del.textContent = 'Tap again';
+            armed = setTimeout(() => { armed = null; del.textContent = 'Remove'; }, 4000);
+            return;
+          }
+          clearTimeout(armed);
+          armed = null;
+          await removeIt();
+        });
+        row.append(del);
+      }
+      list.appendChild(row);
+    }
+  };
+  // run `fn`; when the trunk asks for step-up, ask for a code first, then run `again` — the whole
+  // action, so what it shows (new recovery codes, the new QR) is shown after the step-up too
+  const guarded = async (fn, again) => {
     const r = await fn();
     if (r && r.status === 403 && r.data && r.data.step_up) {
-      pending = fn;
+      pending = again || fn;
       show($('a-stepup'));
       $('a-stepup-code').focus();
       window.scrollTo(0, 0);
@@ -300,16 +557,43 @@ async function accountPage() {
     const r = await authed('POST', '/t/auth/step-up', body);
     if (!r) return;
     if (r.status !== 200) { say($('a-stepup-err'), errText(r), 'err'); return; }
+    await stepped();
+  });
+  const stepped = async () => {
     say($('a-stepup-err'), '');
     $('a-stepup-code').value = '';
     show($('a-stepup'), false);
     await load();
     if (pending) { const fn = pending; pending = null; await fn(); }
+  };
+  $('a-stepup-passkey').addEventListener('click', async () => {
+    busy($('a-stepup-passkey'), true);
+    const r = await passkeyUse('step-up', {}, authed);
+    busy($('a-stepup-passkey'), false);
+    if (!r) return;
+    if (r.status !== 200) { say($('a-stepup-err'), r.status === 0 ? r.data.error : errText(r, 'that passkey was not accepted'), 'err'); return; }
+    await stepped();
   });
+  const addPasskey = async () => {
+    say($('a-pk-msg'), '');
+    busy($('a-pk-add'), true);
+    const r = await guarded(() => passkeyAdd($('a-pk-name').value.trim()), addPasskey);
+    busy($('a-pk-add'), false);
+    if (!r) return r;
+    if (r.status === 200) {
+      say($('a-pk-msg'), 'passkey added — use it on the sign-in page', 'ok');
+      $('a-pk-name').value = '';
+      load();
+    } else {
+      say($('a-pk-msg'), r.status === 0 ? r.data.error : errText(r, 'the passkey was not added'), 'err');
+    }
+    return r;
+  };
+  $('a-pk-form').addEventListener('submit', (ev) => { ev.preventDefault(); pending = null; addPasskey(); });
 
   const msg2 = $('a-2fa-msg');
   const resetTotp = async () => {
-    const r = await guarded(() => authed('POST', '/t/account/totp/reset'));
+    const r = await guarded(() => authed('POST', '/t/account/totp/reset'), resetTotp);
     if (!r) return r;
     if (r.status !== 200) { say(msg2, errText(r), 'err'); return r; }
     putSvg($('a-qr'), r.data.qr_svg);
@@ -320,9 +604,8 @@ async function accountPage() {
     return r;
   };
   $('a-totp-reset').addEventListener('click', () => { pending = null; resetTotp(); });
-  $('a-totp-form').addEventListener('submit', async (ev) => {
-    ev.preventDefault();
-    const r = await guarded(() => authed('POST', '/t/account/totp/confirm', { code: digitsOnly($('a-totp-code').value) }));
+  const confirmTotp = async () => {
+    const r = await guarded(() => authed('POST', '/t/account/totp/confirm', { code: digitsOnly($('a-totp-code').value) }), confirmTotp);
     if (!r) return;
     if (r.status === 200) {
       show($('a-totp-box'), false);
@@ -331,9 +614,10 @@ async function accountPage() {
     } else {
       say(msg2, errText(r), 'err');
     }
-  });
+  };
+  $('a-totp-form').addEventListener('submit', (ev) => { ev.preventDefault(); confirmTotp(); });
   const newCodes = async () => {
-    const r = await guarded(() => authed('POST', '/t/account/recovery/regenerate'));
+    const r = await guarded(() => authed('POST', '/t/account/recovery/regenerate'), newCodes);
     if (!r) return r;
     if (r.status !== 200) { say(msg2, errText(r), 'err'); return r; }
     putCodes($('a-codes-grid'), r.data.recovery_codes);
@@ -343,10 +627,9 @@ async function accountPage() {
     return r;
   };
   $('a-recovery-new').addEventListener('click', () => newCodes());
-  $('a-pw-form').addEventListener('submit', async (ev) => {
-    ev.preventDefault();
+  const changePw = async () => {
     const body = { current: $('a-pw-current').value, new: $('a-pw-new').value };
-    const r = await guarded(() => authed('POST', '/t/account/password', body));
+    const r = await guarded(() => authed('POST', '/t/account/password', body), changePw);
     if (!r) return;
     if (r.status === 200) {
       $('a-pw-current').value = '';
@@ -355,7 +638,8 @@ async function accountPage() {
     } else {
       say($('a-pw-msg'), errText(r), 'err');
     }
-  });
+  };
+  $('a-pw-form').addEventListener('submit', (ev) => { ev.preventDefault(); changePw(); });
   $('a-logout').addEventListener('click', async () => {
     await post('/t/auth/logout');
     location.replace('/login');

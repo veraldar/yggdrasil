@@ -8,6 +8,7 @@
       <input class="oz-field code grow" id="a-stepup-code" inputmode="numeric" autocomplete="one-time-code" maxlength="9" placeholder="000000" aria-label="6-digit code or a recovery code" required>
       <button class="oz-k ok" type="submit">Confirm</button>
     </form>
+    <button class="oz-k full" id="a-stepup-passkey" type="button" hidden>Confirm with a passkey</button>
     <p class="dim small">Lost the authenticator? A recovery code works here too.</p>
     <p class="msg err" id="a-stepup-err" hidden></p>
   </div>
@@ -60,6 +61,7 @@
 <section class="oz-blk">
   <h2>password</h2>
   <div>
+    <p class="dim small" id="a-pw-none" hidden>This account signs in with <b id="a-oauth-name">its provider</b> — it has no password.</p>
     <form class="f-stack" id="a-pw-form" autocomplete="on">
       <input class="oz-field" type="email" id="a-pw-user" autocomplete="username" hidden>
       <label class="f-field"><span class="f-lbl"><span>current password</span></span>
@@ -72,9 +74,19 @@
   </div>
 </section>
 
-<section class="oz-blk">
-  <h2>passkeys</h2>
-  <div><p class="dim small">Passkey sign-in (WebAuthn) arrives in a later update.</p></div>
+<section class="oz-blk" id="passkeys">
+  <h2>passkeys<span class="r" id="a-pk-count"></span></h2>
+  <div>
+    <p class="dim small" id="a-pk-none">No passkey yet. A passkey signs you in with this device's lock — no password, no code — and a phishing site cannot use it.</p>
+    <div class="pk-list" id="a-pk-list"></div>
+    <form class="row" id="a-pk-form" hidden>
+      <input class="oz-field grow" id="a-pk-name" maxlength="40" autocomplete="off" placeholder="name, e.g. Pixel 7" aria-label="passkey name">
+      <button class="oz-k ok" id="a-pk-add" type="submit">Add a passkey</button>
+    </form>
+    <p class="dim small" id="a-pk-member" hidden>Passkeys are added and removed from an admin device.</p>
+    <p class="dim small" id="a-pk-unsupported" hidden>This browser cannot make passkeys.</p>
+    <p class="msg" id="a-pk-msg" hidden></p>
+  </div>
 </section>
 
 <div class="row">

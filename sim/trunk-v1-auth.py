@@ -31,6 +31,19 @@ from its own client address (X-Forwarded-For). Nothing live is touched.
   helper    sim/trunk-v1/claim-admin.py claims a second trunk end to end
   tls       the phase-2 listener: PROXY v1 believed only from trusted_proxies, then TLS; the client
             address is the PROXY line's (XFF ignored)
+  passkeys  (M4, Chromium + CDP virtual authenticator) enrol on /account (step-up first), sign in
+            with the passkey alone (→ admin device), password + passkey as the second factor; forged
+            assertions signed with the credential's own key: another origin, another RP ID, no UV, a
+            counter that did not move, a used or wrong-kind challenge, webauthn.create, bad signatures
+            ×5 → lockout; a cloned authenticator (old counter) refused on /login; step-up by passkey;
+            remove; audit chain
+  oauth     (M4) a mock OpenID Connect provider + a GitHub-shaped app (sim/trunk-v1/mock-oidc.cjs,
+            18890–18899): the claim through each (mandatory TOTP before the claim completes), sign-in
+            + second factor; refused and audited: unknown/replayed/other-browser state, wrong nonce,
+            another key, alg none, other issuer/audience/azp, expired, email_verified false or missing,
+            an unbound identity, a cancel, an unpublished kid; a rotated key re-fetches the JWKS;
+            ES256; lockdown; no secret in any file but its own
+  load      (M4) 50 concurrent password sign-ins against a trunk pinned to one CPU
 
     sim/trunk-v1-auth.py [--bin trunk/target/release/bifrost-net] [--keep]
 
@@ -807,10 +820,416 @@ def t_helper(binp, root):
         t2.stop()
 
 
+# ---- M4 · OAuth (mock OIDC + GitHub-shaped provider) -------------------------------------------
+
+class Mock:
+    """sim/trunk-v1/mock-oidc.cjs on a free port of 18890–18899 (our own child, stopped by PID)."""
+
+    def __init__(self, root):
+        from trunklib import free_port
+        self.root = root
+        self.port = free_port(18890, 18899)
+        self.url = "http://127.0.0.1:%d" % self.port
+        self.proc = None
+        self.cfg = os.path.join(root, "mock.json")
+
+    def start(self, clients):
+        fd = os.open(self.cfg, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as f:
+            json.dump({"clients": clients}, f)
+        self.log = open(os.path.join(self.root, "mock.log"), "ab")
+        self.proc = subprocess.Popen(["node", os.path.join(HERE, "trunk-v1", "mock-oidc.cjs"), str(self.port), self.cfg],
+                                     stdout=subprocess.PIPE, stderr=self.log)
+        line = self.proc.stdout.readline().decode()
+        if '"ready":true' not in line:
+            raise RuntimeError("mock-oidc did not start: " + line)
+        return self
+
+    def c(self):
+        return Client(self.url)
+
+    def next(self, **profile):
+        return self.c().post("/_mock/next", profile)
+
+    def stats(self):
+        return self.c().get("/_mock/stats").data
+
+    def stop(self):
+        if self.proc and self.proc.poll() is None:
+            self.proc.terminate()
+            self.proc.wait(5)
+
+
+def oauth_cfg(mock):
+    return ('\n[oauth.mock]\nissuer = "%s"\nclient_id = "trunk-mock"\nclient_secret_file = "oauth-mock"\ndisplay = "Mock ID"\n'
+            '[oauth.github]\nclient_id = "trunk-gh"\nclient_secret_file = "oauth-github"\n'
+            'authorize_url = "%s/gh/login/oauth/authorize"\ntoken_url = "%s/gh/login/oauth/access_token"\napi_url = "%s/gh/api"\n'
+            '[oauth.google]\nclient_id = "x.apps.googleusercontent.com"\nclient_secret_file = "oauth-google-not-here"\n'
+            % (mock.url, mock.url, mock.url, mock.url))
+
+
+def put_secret(t, name, value):
+    p = os.path.join(t.root, "cred", name)
+    fd = os.open(p, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        f.write(value + "\n")
+
+
+def last_audit(t, n=1):
+    ok, out = t.ctl("audit", "tail", str(n))
+    try:
+        return [json.loads(x) for x in out.splitlines() if x.strip()] if ok else []
+    except ValueError:
+        return []
+
+
+def oauth_flow(t, mock, c, provider, intent="login", ticket=None, profile=None, mangle=None, other=None):
+    """Start on the trunk, sign in at the mock, come back to the callback (as browser `other`
+    when given). Returns (the callback's response, the callback path)."""
+    if profile is not None:
+        mock.next(**profile)
+    if intent == "claim":
+        r = c.post("/t/auth/oauth/%s/start" % provider, {"intent": "claim", "ticket": ticket})
+        if r.status != 200:
+            return r, None
+        loc = r.j("url")
+    else:
+        r = c.get("/t/auth/oauth/%s/start?intent=login" % provider)
+        if r.status != 302:
+            return r, None
+        loc = r.headers.get("Location", "")
+    if not loc.startswith(mock.url):
+        return r, None
+    a = mock.c().get(loc[len(mock.url):])
+    cb = a.headers.get("Location", "") if a.status == 302 else ""
+    if not cb.startswith(t.public_url):
+        return a, None
+    path = cb[len(t.public_url):]
+    if mangle:
+        path = mangle(path)
+    return (other or c).get(path), path
+
+
+def refused_as(t, name, r, why, c=None):
+    loc = r.headers.get("Location", "") if r.status == 302 else ""
+    a = last_audit(t, 1)
+    row = a[-1] if a else {}
+    ok = r.status == 302 and loc.endswith("#e=oauth") and row.get("action") == "auth.oauth_fail" and row.get("detail", {}).get("why") == why
+    if c is not None:
+        ok = ok and "bifrost_device" not in c.jar
+    check("oauth: %s → refused (%s), audited" % (name, why), ok, (r.status, loc, row.get("action"), row.get("detail")))
+
+
+def oauth_claim(t, mock, provider, xff):
+    """Claim trunk `t` through `provider`: approve, sign in at the mock, enrol TOTP. → (client, totp secret, codes)."""
+    c = t.client(xff=xff)
+    ok, out = t.ctl("claim-code", "--json")
+    ticket = c.post("/t/claim/begin", {"code": json.loads(out)["code"]}).j("ticket")
+    r = c.post("/t/auth/oauth/%s/start" % provider, {"intent": "claim", "ticket": ticket})
+    check("oauth claim (%s): start before approve → 409" % provider, r.status == 409, r)
+    c.post("/t/claim/approve", {"ticket": ticket})
+    if provider == "mock":
+        page_shots([{"name": "m4-claim-oauth", "url": t.public_url + "/claim#t=" + ticket, "wait": "#c-oauth .oauth-btn"}])
+    r, path = oauth_flow(t, mock, c, provider, intent="claim", ticket=ticket)
+    if provider == "mock":
+        page_shots([{"name": "m4-claim-oauth-totp", "url": t.public_url + "/claim#t=%s&via=mock" % ticket, "wait": "#c-totp:not([hidden])"}])
+    loc = r.headers.get("Location", "") if r.status == 302 else ""
+    check("oauth claim (%s): the provider sends the browser back to /claim (no device yet)" % provider,
+          loc.startswith("/claim#t=" + ticket) and "via=" + provider in loc and "bifrost_device" not in c.jar, (r, loc))
+    info = c.post("/t/claim/ticket", {"ticket": ticket})
+    check("oauth claim (%s): the account exists, bound to the provider, TOTP still owed" % provider,
+          info.j("state") == "approved" and info.j("pending_via") == "oauth:" + provider and c.get("/t/state").j("claimed") is False, info)
+    r = c.get("/t/auth/oauth/%s/start?intent=login" % provider)
+    check("oauth claim (%s): no OAuth sign-in before the claim completes" % provider, r.status == 302 and r.headers.get("Location") == "/login#e=oauth", r)
+    v = c.post("/t/claim/totp", {"ticket": ticket})
+    secret = v.j("secret", "")
+    check("oauth claim (%s): mandatory TOTP enrolment (QR + 160-bit key)" % provider, v.status == 200 and len(secret) == 32 and v.j("totp_uri", "").startswith("otpauth://totp/"), v)
+    r = c.post("/t/auth/totp/confirm", {"ticket": ticket, "code": wrong(totp_at(secret, step_now()))})
+    check("oauth claim (%s): a wrong code does not finish the claim" % provider, r.status == 401 and c.get("/t/state").j("claimed") is False, r)
+    code, step = totp_fresh(secret, 0)
+    r = c.post("/t/auth/totp/confirm", {"ticket": ticket, "code": code})
+    check("oauth claim (%s): TOTP confirm → claimed, 10 recovery codes, admin cookies" % provider,
+          r.status == 200 and len(r.j("recovery_codes", [])) == 10 and "bifrost_device" in c.jar and c.get("/t/state").j("claimed") is True, r)
+    me = c.get("/t/me")
+    acct = c.get("/t/account")
+    check("oauth claim (%s): admin, e-mail from the provider, no password, the identity listed" % provider,
+          me.j("account", {}).get("role") == "admin" and me.j("account", {}).get("email") == "owner@example.org" and acct.j("password") is False
+          and [o.get("provider") for o in acct.j("oauth", [])] == [provider], (me, acct.j("oauth")))
+    r = t.client(xff=xff).post("/t/auth/login", {"email": "owner@example.org", "password": PASSWORD})
+    check("oauth claim (%s): the OAuth admin has no password to sign in with (generic 401)" % provider, r.status == 401 and r.j("why") == "credentials", r)
+    return c, secret, step, r
+
+
+def t_oauth(binp, root):
+    d = os.path.join(root, "oauth")
+    os.makedirs(d, exist_ok=True)
+    import secrets as _s
+    sec_mock, sec_gh = "mock-" + _s.token_urlsafe(24), "gh-" + _s.token_urlsafe(24)
+    mock = Mock(d)  # its port is picked now, bound last
+    trunks = []
+    for name in ("t1", "t2"):
+        # each trunk binds before the next picks a port
+        t = Trunk(binp, os.path.join(d, name), extra=oauth_cfg(mock))
+        put_secret(t, "oauth-mock", sec_mock)
+        put_secret(t, "oauth-github", sec_gh)
+        t.start()
+        trunks.append(t)
+    t1, t2 = trunks
+    cb = lambda t, p: "%s/t/auth/oauth/%s/callback" % (t.public_url, p)  # noqa: E731
+    mock.start({"trunk-mock": {"secret": sec_mock, "redirect_uris": [cb(t1, "mock"), cb(t2, "mock")]},
+                "trunk-gh": {"secret": sec_gh, "redirect_uris": [cb(t1, "github"), cb(t2, "github")]}})
+    try:
+        c = t1.client(xff=ip(60))
+        r = c.get("/t/state")
+        check("oauth: /t/state lists the providers whose secret is in place ({id, name}); no secret → no button",
+              r.j("providers") == [{"id": "github", "name": "GitHub"}, {"id": "mock", "name": "Mock ID"}], r)
+        r = c.post("/t/auth/oauth/google/start", {"intent": "login"})
+        check("oauth: a provider without its secret file cannot start", r.status == 404, r)
+        r = c.get("/t/auth/oauth/mock/start?intent=login")
+        check("oauth: OAuth sign-in before the claim → refused (back to /login)", r.status == 302 and r.headers.get("Location") == "/login#e=oauth", r)
+
+        # the claim through the generic OIDC provider (t1) and through the GitHub preset (t2)
+        admin1, sec1, step1, _ = oauth_claim(t1, mock, "mock", ip(61))
+        st = mock.stats()
+        q = st.get("last_authorize") or {}
+        check("oauth: the provider saw code flow + PKCE S256 + state + nonce; the trunk proved the verifier (client_secret_basic)",
+              q.get("response_type") == "code" and q.get("code_challenge_method") == "S256" and len(q.get("code_challenge", "")) == 43
+              and len(q.get("state", "")) == 43 and len(q.get("nonce", "")) >= 32 and st.get("last_verifier_ok") is True and st.get("last_token_auth") == "basic", st)
+        admin2, sec2, step2, _ = oauth_claim(t2, mock, "github", ip(62))
+        st = mock.stats()
+        check("oauth: the GitHub preset: PKCE, client_secret in the form, identity from the API", st.get("last_token_auth") == "post" and st.get("gh_api_calls", 0) >= 2 and st.get("last_verifier_ok") is True, st)
+
+        # sign-in with a known identity: the second factor is still owed
+        last = {"t1": step1, "t2": step2}
+
+        def code_for(key, secret):
+            code, s = totp_fresh(secret, last[key])
+            last[key] = s
+            return code
+
+        b = t1.client(xff=ip(63))
+        f0 = mock.stats().get("jwks_fetches", 0)
+        r, _ = oauth_flow(t1, mock, b, "mock")
+        loc = r.headers.get("Location", "") if r.status == 302 else ""
+        check("oauth: a known identity → /login#mfa=… (no device, no cookies yet)", loc.startswith("/login#mfa=") and "via=mock" in loc and "bifrost_device" not in b.jar, (r, loc))
+        ticket = loc.split("mfa=", 1)[1].split("&", 1)[0] if "mfa=" in loc else ""
+        o = b.post("/t/auth/mfa/options", {"mfa_ticket": ticket})
+        check("oauth: the second step offers TOTP + recovery codes", o.status == 200 and o.j("mfa") == ["totp", "recovery"] and o.j("via") == "mock", o)
+        m = b.post("/t/auth/mfa", {"mfa_ticket": ticket, "totp": code_for("t1", sec1)})
+        me = b.get("/t/me")
+        check("oauth: OAuth + TOTP → an admin device", m.status == 200 and me.j("account", {}).get("role") == "admin" and me.j("device", {}).get("role") == "admin", (m, me))
+        row = [a for a in last_audit(t1, 3) if a.get("action") == "auth.login"]
+        check("oauth: audited as first=oauth (provider mock), second=totp", row and row[-1]["detail"] == {"first": "oauth", "second": "totp", "provider": "mock"}, row)
+        m2 = t1.client(xff=ip(63)).post("/t/auth/mfa", {"mfa_ticket": ticket, "totp": code_for("t1", sec1)})
+        sb = t1.client(xff=ip(63))
+        r, _ = oauth_flow(t1, mock, sb, "mock")
+        tk = r.headers.get("Location", "").split("mfa=", 1)[-1].split("&", 1)[0]
+        page_shots([{"name": "m4-login-oauth", "url": t1.public_url + "/login", "wait": "#l-oauth .oauth-btn"},
+                    {"name": "m4-login-oauth-second-step", "url": t1.public_url + "/login#mfa=%s&via=mock" % tk, "wait": "#l-via:not([hidden])"}])
+        check("oauth: the second-factor ticket works once", m2.status == 401 and m2.j("why") == "ticket", m2)
+        check("oauth: the JWKS is cached (no fetch for a known kid)", mock.stats().get("jwks_fetches", 0) == f0, mock.stats())
+
+        # the refusals, each from its own network and browser
+        n = [64]
+
+        def fresh():
+            n[0] += 1
+            return t1.client(xff=ip(n[0]))
+
+        bb = fresh()
+        r, _ = oauth_flow(t1, mock, bb, "mock", mangle=lambda p: p.replace("state=", "state=x"))
+        refused_as(t1, "a state the trunk never issued", r, "state", bb)
+        bb = fresh()
+        r, path = oauth_flow(t1, mock, bb, "mock")
+        ok1 = r.status == 302 and r.headers.get("Location", "").startswith("/login#mfa=")
+        r = bb.get(path)
+        check("oauth: replaying a used callback (state is one-use) — the first one worked", ok1)
+        refused_as(t1, "the same state a second time", r, "state", None)
+        bb, other = fresh(), fresh()
+        r, _ = oauth_flow(t1, mock, bb, "mock", other=other)
+        refused_as(t1, "a callback finished in another browser (no binding cookie)", r, "state", other)
+        for name, prof, why in [
+            ("an ID token with the wrong nonce", {"tamper": "nonce"}, "nonce"),
+            ("an ID token signed by another key", {"tamper": "sig"}, "signature"),
+            ("an ID token with alg none", {"tamper": "alg"}, "alg"),
+            ("an ID token from another issuer", {"tamper": "iss"}, "iss"),
+            ("an ID token for another client", {"tamper": "aud"}, "aud"),
+            ("an ID token authorized for another party (azp)", {"tamper": "azp"}, "aud"),
+            ("an expired ID token", {"tamper": "exp"}, "exp"),
+            ("email_verified: false", {"email_verified": False}, "email_unverified"),
+            ("no email_verified claim", {"email_verified": None}, "email_unverified"),
+            ("an identity nobody bound (outside the claim)", {"sub": "stranger-9", "email": "stranger@example.org"}, "unknown_identity"),
+            ("the owner cancelling at the provider", {"deny": True}, "denied"),
+        ]:
+            if prof.get("email_verified", 1) is None:
+                prof = {"email_verified": "__drop__"}
+            bb = fresh()
+            r, _ = oauth_flow(t1, mock, bb, "mock", profile=prof)
+            refused_as(t1, name, r, why, bb)
+        # a key the trunk has not cached yet: the JWKS is fetched again, once
+        mock.c().post("/_mock/rotate", {})
+        f1 = mock.stats().get("jwks_fetches", 0)
+        bb = fresh()
+        r, _ = oauth_flow(t1, mock, bb, "mock", profile={"tamper": "rotate"})
+        check("oauth: a rotated provider key (unknown kid) → the JWKS is fetched again and the token verifies",
+              r.status == 302 and r.headers.get("Location", "").startswith("/login#mfa=") and mock.stats().get("jwks_fetches", 0) == f1 + 1, (r, mock.stats().get("jwks_fetches"), f1))
+        bb = fresh()
+        r, _ = oauth_flow(t1, mock, bb, "mock", profile={"tamper": "kid"})
+        refused_as(t1, "a kid the provider never published", r, "kid", bb)
+        bb = fresh()
+        r, _ = oauth_flow(t1, mock, bb, "mock", profile={"tamper": "es256"})
+        check("oauth: an ES256-signed ID token verifies", r.status == 302 and r.headers.get("Location", "").startswith("/login#mfa="), r)
+        bb = fresh()
+        r, _ = oauth_flow(t1, mock, bb, "github")
+        refused_as(t1, "a GitHub identity nobody bound", r, "unknown_identity", bb)
+
+        # GitHub preset on t2: sign in, and refuse an account with no verified primary e-mail
+        b2 = t2.client(xff=ip(90))
+        r, _ = oauth_flow(t2, mock, b2, "github")
+        loc = r.headers.get("Location", "") if r.status == 302 else ""
+        ticket = loc.split("mfa=", 1)[1].split("&", 1)[0] if "mfa=" in loc else ""
+        m = b2.post("/t/auth/mfa", {"mfa_ticket": ticket, "totp": code_for("t2", sec2)})
+        check("oauth: GitHub sign-in + TOTP → an admin device", m.status == 200 and b2.get("/t/me").j("device", {}).get("role") == "admin", (r, m))
+        b3 = t2.client(xff=ip(91))
+        r, _ = oauth_flow(t2, mock, b3, "github", profile={"gh_emails": [{"email": "owner@example.org", "primary": True, "verified": False}]})
+        refused_as(t2, "GitHub with no verified primary e-mail", r, "email_unverified", b3)
+        b3 = t2.client(xff=ip(92))
+        r, _ = oauth_flow(t2, mock, b3, "mock")
+        refused_as(t2, "the OIDC identity bound on another trunk", r, "unknown_identity", b3)
+
+        # the state expires (fast: 60 s) — checked by the unit tests; here: lockdown stops OAuth sign-in
+        ok, out = t1.ctl("kill", "--lockdown")
+        r = fresh().get("/t/auth/oauth/mock/start?intent=login")
+        check("oauth: lockdown → no OAuth sign-in", ok and r.status == 302 and r.headers.get("Location") == "/login#e=oauth", (out, r))
+        t1.ctl("unlock")
+
+        # the secrets never left their files
+        leaks = []
+        for t in (t1, t2):
+            blobs = []
+            for dirpath, _, files in os.walk(t.root):
+                for fn in files:
+                    if fn in ("oauth-mock", "oauth-github"):
+                        continue
+                    try:
+                        blobs.append((fn, open(os.path.join(dirpath, fn), "rb").read()))
+                    except OSError:
+                        pass
+            for fn, b in blobs:
+                for sec in (sec_mock, sec_gh):
+                    if sec.encode() in b:
+                        leaks.append(fn)
+        check("oauth: the client secrets appear in no log, config, db or audit file", not leaks, leaks)
+        ok, out = t1.ctl("audit", "verify")
+        ok2, out2 = t2.ctl("audit", "verify")
+        check("oauth: both audit chains verify", ok and ok2, (out, out2))
+    finally:
+        t1.stop()
+        t2.stop()
+        mock.stop()
+
+
+SHOTS = os.path.expanduser("~/.cache/trunk-v1/tmp/idp/shots-m4")
+
+
+def node_env():
+    return dict(os.environ, NODE_PATH=os.path.join(REPO, "branch", "node_modules"))
+
+
+def page_shots(items):
+    """360 px screenshots (sim/trunk-v1/page-shot.cjs) → a check per page."""
+    os.makedirs(SHOTS, exist_ok=True)
+    p = subprocess.run(["node", os.path.join(HERE, "trunk-v1", "page-shot.cjs"), SHOTS, json.dumps(items)], capture_output=True, text=True, timeout=180, env=node_env())
+    try:
+        res = json.loads(p.stdout.strip().splitlines()[-1])["shots"]
+    except (ValueError, IndexError, KeyError):
+        check("shots: page-shot.cjs ran", False, (p.stdout[-400:], p.stderr[-400:]))
+        return
+    for r in res:
+        check("shot %s (360 px): drawn, no console error, nothing wider than the screen" % r["name"], r["ok"], r["problems"])
+
+
+def t_passkeys(t):
+    """The browser half of the passkey cases (sim/trunk-v1/passkeys.cjs, Chromium + CDP virtual authenticator)."""
+    os.makedirs(SHOTS, exist_ok=True)
+    params = {"email": EMAIL, "password": PASSWORD, "secret": S.totp, "last_step": S.last_step}
+    p = subprocess.Popen(["node", os.path.join(HERE, "trunk-v1", "passkeys.cjs"), t.public_url, SHOTS, json.dumps(params)],
+                         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=node_env())
+    done = False
+    try:
+        for line in p.stdout:
+            line = line.strip()
+            if not line.startswith("{"):
+                continue
+            try:
+                o = json.loads(line)
+            except ValueError:
+                continue
+            if "check" in o:
+                check("passkeys: " + o["check"], o["ok"], o.get("detail"))
+            elif o.get("done"):
+                done = True
+                S.last_step = max(S.last_step, o.get("last_step", 0))
+        p.wait(timeout=300)
+    finally:
+        if p.poll() is None:
+            p.terminate()
+    if not done:
+        check("passkeys: passkeys.cjs finished", False, p.stderr.read()[-800:] if p.stderr else "")
+    ok, out = t.ctl("audit", "verify")
+    check("passkeys: the audit chain still verifies", ok, out)
+
+
+def t_load(binp, root):
+    """§12 load check: 50 concurrent sign-ins on one CPU (taskset), argon2id m=19 MiB t=2 p=1, at most 2 at once."""
+    import concurrent.futures as cf
+    d = os.path.join(root, "load")
+    t = Trunk(binp, os.path.join(d, "trunk"))
+    env_cpu = shutil.which("taskset")
+    if env_cpu:
+        t.bin_prefix = ["taskset", "-c", "0"]
+    t.start()
+    try:
+        p = subprocess.run([sys.executable, os.path.join(HERE, "trunk-v1", "claim-admin.py"), "--url", t.url, "--origin", t.public_url,
+                            "--ctl", " ".join(t.ctl_prefix), "--xff", "100.64.250.1"], capture_output=True, text=True, timeout=60)
+        ok = p.returncode == 0
+        try:
+            cpus = [l.split(":", 1)[1].strip() for l in open("/proc/%d/status" % t.proc.pid) if l.startswith("Cpus_allowed_list")][0]
+        except (OSError, IndexError):
+            cpus = "?"
+        check("load: a throwaway trunk pinned to one CPU (Cpus_allowed_list %s), claimed" % cpus, ok and cpus == "0", (p.stderr[-300:], env_cpu, cpus))
+        if not ok:
+            return
+        email = json.loads(p.stdout).get("email", "owner@example.org")
+        pw = json.loads(p.stdout).get("password", PASSWORD)
+
+        def one(i):
+            c = t.client(xff="100.65.%d.%d" % (i // 200, i % 200 + 1))
+            t0 = time.monotonic()
+            r = c.post("/t/auth/login", {"email": email, "password": pw}, timeout=120)
+            return r.status, time.monotonic() - t0, bool(r.j("mfa_ticket"))
+
+        t0 = time.monotonic()
+        with cf.ThreadPoolExecutor(max_workers=50) as ex:
+            res = list(ex.map(one, range(50)))
+        wall = time.monotonic() - t0
+        lat = sorted(x[1] for x in res)
+        p95 = lat[int(len(lat) * 0.95) - 1]
+        okc = sum(1 for s, _, tk in res if s == 200 and tk)
+        print("  load: 50 concurrent sign-ins on 1 CPU: %d ok, wall %.1f s, p50 %.2f s, p95 %.2f s, max %.2f s" % (okc, wall, lat[24], p95, lat[-1]), flush=True)
+        check("load: 50 concurrent password sign-ins on 1 CPU all answer 200 with a second-factor ticket", okc == 50, [s for s, _, _ in res])
+        check("load: … within 30 s wall, p95 under 20 s (argon2 queued 2 at a time)", wall < 30 and p95 < 20, (wall, p95))
+        r = t.client(xff="100.66.0.1").get("/t/state")
+        check("load: the trunk still answers right after", r.status == 200 and r.j("claimed") is True, r)
+    finally:
+        t.stop()
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--bin", default=os.path.join(REPO, "trunk", "target", "release", "bifrost-net"))
     ap.add_argument("--keep", action="store_true", help="keep the rig dir")
+    ap.add_argument("--skip-browser", action="store_true", help="skip the Chromium passkey cases")
     a = ap.parse_args()
     base = os.environ.get("TMPDIR") or os.path.expanduser("~/.cache/trunk-v1/tmp/idp")
     os.makedirs(base, exist_ok=True)
@@ -838,10 +1257,14 @@ def main():
         t_pair_m3(t)
         c = t_kill_m3(t)
         t_audit_page_m3(t, c)
+        if not a.skip_browser:
+            t_passkeys(t)
         t_has_roots(t)
         t_tamper(t)
         t_helper(a.bin, root)
         t_tls(a.bin, root)
+        t_oauth(a.bin, root)
+        t_load(a.bin, root)
     except Exception as e:  # a rig error is a failure, never a pass
         import traceback
         traceback.print_exc()

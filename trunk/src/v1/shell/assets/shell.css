@@ -156,3 +156,16 @@ input.os-r { position: absolute; opacity: 0; pointer-events: none; }
 .au-row .bd b { color: var(--oz-text); font-weight: 400; }
 #au-chain.ok { color: var(--oz-success); }
 #au-chain.bad { color: var(--oz-danger); }
+
+/* M4 · OAuth buttons, passkeys */
+.oauth-btn { cursor: pointer; text-align: left; }
+.oauth-btn:disabled { opacity: .6; cursor: default; }
+#l-passkey { margin-top: 8px; }
+#l-mfa-passkey, #a-stepup-passkey { margin-top: 8px; }
+.pk-list { display: grid; gap: 8px; margin: 0 0 10px; }
+.pk-list:empty { display: none; }
+.pk-row { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border: 1px solid var(--oz-border); background: var(--oz-bg); }
+.pk-row .txt { flex: 1 1 auto; min-width: 0; display: grid; gap: 2px; }
+.pk-row .n { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12.5px; }
+.pk-row .m { font-size: 10.5px; color: var(--oz-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pk-row .oz-k { flex: none; }
