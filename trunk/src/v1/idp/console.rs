@@ -8,6 +8,7 @@ use super::{account, audit, claim};
 use crate::v1::crypto::{b64u, random_bytes};
 use crate::v1::db::now_ms;
 use crate::v1::server::State;
+use std::sync::Arc;
 
 pub const USAGE: &str = "usage: trunk-ctl [--sock PATH | -c trunk.toml] <command>
   state                                the trunk's state (json)
@@ -20,11 +21,15 @@ pub const USAGE: &str = "usage: trunk-ctl [--sock PATH | -c trunk.toml] <command
   account unlock [EMAIL]               clear the password and 2FA lockouts
   unlock                               lift a kill-switch lockdown
   audit tail [N]                       the last N audit entries (json lines)
+  roots list                           the roots of this trunk (id, name, keys, online, rebind)
+  roots revoke ID [WHY..]              cut a root: link closed, key refused, directory pushed
+  import-v0 --roots roots.json [--dtls bridge-dtls.json | --hub-dtls-fp PIN] --hub-name NAME
+          --hub-wg-pub PUB --hub-root-pub PUB                bring the v0.9 trunk's roots in (§11)
   audit verify                         recompute the audit hash chain
   backup [DIR]                         an encrypted copy of trunk.db (default <state_dir>/backups)
   backup check FILE                    decrypt a backup in memory and check it";
 
-pub async fn run(st: &State, args: &[String]) -> (bool, String) {
+pub async fn run(st: &Arc<State>, args: &[String]) -> (bool, String) {
     let a: Vec<&str> = args.iter().map(String::as_str).collect();
     let r: Result<String, String> = match a.as_slice() {
         ["state"] => Ok(String::from_utf8_lossy(&super::api::state(st).body).into_owned()),
@@ -53,6 +58,10 @@ pub async fn run(st: &State, args: &[String]) -> (bool, String) {
             Ok((n, head)) => Ok(format!("audit chain ok: {n} entries, head {head}")),
             Err((seq, why)) => Err(format!("AUDIT CHAIN BROKEN at entry {seq}: {why}")),
         },
+        ["roots", "list"] => crate::v1::import::roots_list(st),
+        ["roots", "revoke", id] => crate::v1::import::roots_revoke(st, id, "removed by the console"),
+        ["roots", "revoke", id, rest @ ..] => crate::v1::import::roots_revoke(st, id, &rest.join(" ")),
+        ["import-v0", rest @ ..] => { let args: Vec<String> = rest.iter().map(|s| s.to_string()).collect(); crate::v1::import::import_v0(st, &args) },
         ["backup"] => backup(st, None),
         ["backup", "check", f] => backup_check(st, f),
         ["backup", dir] => backup(st, Some(dir)),

@@ -32,6 +32,8 @@ pub mod relay;
 #[cfg(feature = "trunk")]
 pub mod roots;
 #[cfg(feature = "trunk")]
+pub mod import;
+#[cfg(feature = "trunk")]
 pub mod rig;
 #[cfg(feature = "trunk")]
 pub mod install;

@@ -86,6 +86,13 @@ impl Db {
     }
 
     /// Run `f` with the connection (short statements only: this is one lock for the process).
+    /// The locked connection, for work that needs its own transaction shape (WIRE's import-v0:
+    /// string errors inside a transaction). The lock is held while the closure runs.
+    pub fn with_tx(&self, f: impl FnOnce(&mut Connection) -> Result<(), String>) -> Result<(), String> {
+        let mut c = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        f(&mut c).map_err(|e| format!("db: {e}"))
+    }
+
     pub fn with<T>(&self, f: impl FnOnce(&mut Connection) -> rusqlite::Result<T>) -> Result<T, String> {
         let mut c = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         f(&mut c).map_err(|e| format!("db: {e}"))
