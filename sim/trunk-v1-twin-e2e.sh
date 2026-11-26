@@ -15,7 +15,7 @@
 #                            LiveKit (~/.cache/trunk-rtc/livekit-server), the speech server and the voice agent
 #                            (~/.cache/trunk-rtc/{voice,agent-venv}) run on the twin's loopback (ports 18720-18724). The phone
 #                            gets /rtc through the trunk and ICE-TCP at the trunk's listen_ice (127.0.0.1:$ICE_PORT).
-#                            G53.3-voice-smoke (default mode): a paired Pixel 7 speaks a question, MAIN's mock reply is spoken back.
+#                            G53.3-smoke (default mode): a paired Pixel 7 speaks a question, MAIN's mock reply is spoken back.
 #
 # Spec §9 G5.1 8-step drive:
 #   1. sign in (Pixel 7 on /login)
@@ -306,16 +306,16 @@ if [ "${G53:-0}" = 1 ]; then
     if "$@" >"$STATE/$n.log" 2>&1; then printf '%s\tPASS\t%s\n' "$n" "$(tail -1 "$STATE/$n.log" | cut -c1-110)" >>"$STATE/steps.tsv"
     else printf '%s\tFAIL\t%s\n' "$n" "$(tail -3 "$STATE/$n.log" | tr '\n' ' ' | cut -c1-140)" >>"$STATE/steps.tsv"; fi
   }
-  g53_step G53.1-suite-plan python3 "$ROOT/sim/voice/suite.py" --dry-run --out "$VOUT" -- --target "$TRUNK_URL" --brain http://127.0.0.1:4250 --pair-cmd "$PAIR_CMD"
-  g53_step G53.2-phone-probe python3 "$ROOT/sim/voice/v1probe.py" --target "$TRUNK_URL" --brain http://127.0.0.1:4250 --pair-cmd "$PAIR_CMD" --out "$VOUT/probe"
+  g53_step G53.1-plan python3 "$ROOT/sim/voice/suite.py" --dry-run --out "$VOUT" -- --target "$TRUNK_URL" --brain http://127.0.0.1:4250 --pair-cmd "$PAIR_CMD"
+  g53_step G53.2-probe python3 "$ROOT/sim/voice/v1probe.py" --target "$TRUNK_URL" --brain http://127.0.0.1:4250 --pair-cmd "$PAIR_CMD" --out "$VOUT/probe"
   # G53.3: the voice leg, end to end (the persona's speech engines are the local speech server; no persona LLM / judge)
-  g53_step G53.3-voice-smoke python3 "$ROOT/sim/voice/v1smoke.py" --target "$TRUNK_URL" --brain http://127.0.0.1:4250 --pair-cmd "$PAIR_CMD" --out "$VOUT/smoke"
+  g53_step G53.3-smoke python3 "$ROOT/sim/voice/v1smoke.py" --target "$TRUNK_URL" --brain http://127.0.0.1:4250 --pair-cmd "$PAIR_CMD" --out "$VOUT/smoke"
   # the voice path really used the trunk: the bridge registered LiveKit's ufrag over /t/root (the phone's /rtc went through the
   # trunk), and the trunk's ICE-TCP listener was up. (This single-host twin cannot forbid the direct loopback UDP path for the
   # media itself — the namespace rig sim/trunk-rtc-v1-e2e.sh G3.2 proves the ICE-TCP media path with its UDP firewall.)
-  g53_step G53.3b-ufrag-registered bash -c "grep 'LiveKit ufrag .* registered with the trunk' '$STATE/bridge-twin.log' | tail -1; grep -q 'LiveKit ufrag .* registered with the trunk' '$STATE/bridge-twin.log' && grep -q 'ICE-TCP Some(127.0.0.1:$ICE_PORT)' '$STATE/trunk.log'"
+  g53_step G53.3b-ufrag bash -c "grep 'LiveKit ufrag .* registered with the trunk' '$STATE/bridge-twin.log' | tail -1; grep -q 'LiveKit ufrag .* registered with the trunk' '$STATE/bridge-twin.log' && grep -q 'ICE-TCP Some(127.0.0.1:$ICE_PORT)' '$STATE/trunk.log'"
   if [ "$G53_DRY" = 0 ]; then
-    g53_step G53.4-voice-suite python3 "$ROOT/sim/voice/suite.py" --out "$VOUT" -- --target "$TRUNK_URL" --brain http://127.0.0.1:4250 --pair-cmd "$PAIR_CMD"
+    g53_step G53.4-suite python3 "$ROOT/sim/voice/suite.py" --out "$VOUT" -- --target "$TRUNK_URL" --brain http://127.0.0.1:4250 --pair-cmd "$PAIR_CMD"
   fi
   echo ""; printf '%-22s %-8s %s\n' "STEP" "RES" "WHAT"
   fails=0
