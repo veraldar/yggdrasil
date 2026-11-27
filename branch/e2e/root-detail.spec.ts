@@ -68,6 +68,9 @@ test('a computer\'s page on sim twin at 360px: page, artifacts, settings, per-ro
     await expect(homeRow).toBeVisible();
     // the roots page is plain white: no swatch, each row wears its own root's world (roots-page.spec)
     await expect(homeRow.getByTestId('root-swatch')).toHaveCount(0);
+    const appWorld = (await page.locator('html').getAttribute('data-theme')) ?? '';
+    expect(appWorld).not.toBe('');
+    await expect(homeRow).toHaveAttribute('data-theme', appWorld);
     await expect(homeRow.getByTestId('root-state')).toHaveText('on');
     await shot(page, '1-roots-sheet');
 
