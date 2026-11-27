@@ -49,6 +49,7 @@ use crate::roots::{resolve_root, root_allowed, RootSel};
 use crate::speech::{resample_to_48k, Pcm, SpeechClient};
 use crate::region::region_of;
 use crate::ws;
+use crate::meter::{self, C as MC, H as MH, L as ML, P as MP};
 use crate::tokens::{bearer, now_ms, Grant, TokenStore};
 
 pub struct BridgeConfig {
@@ -125,6 +126,14 @@ const RUN_TIMEOUT: Duration = Duration::from_secs(120);
 const FRAME_SAMPLES: usize = 960; // 20ms @ 48k
 /// how often every live peer is re-checked against the registry
 const RECHECK: Duration = Duration::from_millis(500);
+/// DTLS-QUEUE-FIX: at most this many received datagrams go into one peer before it is polled.
+/// str0m queues every incoming DTLS record in dimpl's receive queue (30 records, not
+/// configurable through str0m) and only `Rtc::poll_output` drains it into SCTP. The loop used
+/// to hand a peer everything its sockets held (a UDP drain, a TCP read of many RFC 4571 frames)
+/// before polling it: past 30 the rest was refused ("Receive queue full") and SCTP had to
+/// resend it. Draining every few datagrams keeps the queue near empty; a datagram carries one
+/// record (sometimes two or three), so 8 stays far below 30.
+const FEED_BATCH: usize = 8;
 /// an access token may lapse this long before the peer is severed (renewal
 /// rides `auth.refresh` over the channel a minute before expiry)
 const EXPIRY_GRACE_MS: u64 = 30_000;
@@ -172,6 +181,53 @@ struct Peer {
     tun_streams: HashMap<u32, tokio::sync::mpsc::UnboundedSender<Option<Vec<u8>>>>,
     tun_out: (crate::ap::Frames, tokio::sync::mpsc::UnboundedReceiver<(u8, Vec<u8>)>),
     tun_pending: VecDeque<Vec<u8>>,
+    /// DTLS-QUEUE-FIX: what arrived for this peer this turn of the loop (proto, source,
+    /// destination, bytes), fed FEED_BATCH at a time with a poll between batches
+    inbound: VecDeque<(Protocol, SocketAddr, SocketAddr, Vec<u8>)>,
+    /// the meter: when it was admitted, when its first channel opened, and which path its
+    /// packets came by (datagrams over UDP vs ICE-TCP frames via the ap's :443)
+    admitted: Instant,
+    opened: bool,
+    in_udp: u64,
+    in_tcp: u64,
+}
+
+impl Peer {
+    fn path(&self) -> &'static str {
+        match (self.in_udp, self.in_tcp) {
+            (0, 0) => "none",
+            (u, t) if t > u => "tcp",
+            _ => "udp",
+        }
+    }
+}
+
+/// A refresh on the pinned channel (`auth.refresh`, or the tunnel's AUTH frame): ok or why
+/// not, and how early it came — seconds the old access token still had (negative = after it
+/// expired). Counted and written as an event; never the token.
+fn note_refresh(via: &str, p: &Peer, old_exp: u64, res: Result<(), &str>) {
+    let lead_ms = if old_exp == crate::tokens::NO_EXPIRY { None } else { Some(old_exp as i64 - now_ms() as i64) };
+    match res {
+        Ok(()) => {
+            meter::inc(&MC.refresh_ok);
+            if let Some(l) = lead_ms {
+                if l < 0 {
+                    meter::inc(&MC.refresh_late);
+                } else {
+                    MH.refresh_lead.us(l as u64 * 1000);
+                }
+            }
+        }
+        Err(why) => {
+            meter::inc(&MC.refresh_denied);
+            meter::inc_named(&format!("peer.refresh.denied.{why}"));
+        }
+    }
+    meter::event(
+        "refresh",
+        serde_json::json!({ "src": "bridge", "via": via, "device": p.device, "ok": res.is_ok(), "why": res.err(),
+                            "lead_s": lead_ms.map(|l| l / 1000), "region": p.region }),
+    );
 }
 
 /// One ICE-TCP connection (RFC 4571 framing) handed over by the ap dial-out.
@@ -515,6 +571,16 @@ pub fn start(cfg: BridgeConfig) -> Result<BridgeHandle, String> {
                 Ok(None) => continue,
                 Err(_) => break,
             };
+            // the meter (trunk observability): this process's last hour, its totals, and the
+            // minutes the VPS sent home — loopback only, the same guards as /_root/
+            if request.url() == "/_obs" || request.url().starts_with("/_obs?") {
+                let r = match root_call_guard(&request) {
+                    Ok(()) => json_response(200, meter::snapshot().to_string()),
+                    Err(e) => json_response(403, serde_json::json!({ "error": e.replace("/_root", "/_obs") }).to_string()),
+                };
+                let _ = request.respond(r);
+                continue;
+            }
             // the box's own brain learns which roots are linked (loopback
             // only, same guards as /_root/; answered inline, never blocks)
             if is_roots_list_url(request.url()) {
@@ -586,6 +652,7 @@ pub fn start(cfg: BridgeConfig) -> Result<BridgeHandle, String> {
                     return;
                 }
                 let now = Instant::now();
+                let mut n_in = 0u64;
 
                 // worker outcomes
                 loop {
@@ -654,6 +721,7 @@ pub fn start(cfg: BridgeConfig) -> Result<BridgeHandle, String> {
 
                 // admit peers
                 while let Ok(adm) = admit_rx.try_recv() {
+                    meter::inc(&MC.peer_admit);
                     let id = next_id;
                     next_id += 1;
                     peers.insert(
@@ -669,6 +737,11 @@ pub fn start(cfg: BridgeConfig) -> Result<BridgeHandle, String> {
                                 (tx, rx)
                             },
                             tun_pending: VecDeque::new(),
+                            inbound: VecDeque::new(),
+                            admitted: Instant::now(),
+                            opened: false,
+                            in_udp: 0,
+                            in_tcp: 0,
                             rtc: adm.rtc,
                             mid: None,
                             pt: None,
@@ -728,10 +801,13 @@ pub fn start(cfg: BridgeConfig) -> Result<BridgeHandle, String> {
                                 Some(id) => Some(id),
                                 None => peers.iter().find(|(_, p)| p.rtc.accepts(&input)).map(|(id, _)| *id),
                             };
+                            n_in += 1;
                             if let Some(id) = owner {
                                 c.peer = Some(id);
                                 if let Some(p) = peers.get_mut(&id) {
-                                    let _ = p.rtc.handle_input(input);
+                                    p.in_tcp += 1;
+                                    // fed in batches below, with a poll between (FEED_BATCH)
+                                    p.inbound.push_back((Protocol::Tcp, c.src, dest, pkt));
                                 }
                             }
                         }
@@ -762,10 +838,13 @@ pub fn start(cfg: BridgeConfig) -> Result<BridgeHandle, String> {
                                     contents: (&buf[..n]).try_into().expect("contents"),
                                 },
                             );
+                            n_in += 1;
                             if let Some((_, p)) =
                                 peers.iter_mut().find(|(_, p)| p.rtc.accepts(&input))
                             {
-                                let _ = p.rtc.handle_input(input);
+                                p.in_udp += 1;
+                                // fed in batches below, with a poll between (FEED_BATCH)
+                                p.inbound.push_back((Protocol::Udp, source, advertise_addr, buf[..n].to_vec()));
                             }
                         }
                         Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
@@ -779,82 +858,107 @@ pub fn start(cfg: BridgeConfig) -> Result<BridgeHandle, String> {
                 // peers map isn't borrowed twice)
                 let mut room_audio: Vec<(usize, MediaData)> = vec![];
                 for (id, p) in peers.iter_mut() {
-                    let _ = p.rtc.handle_input(Input::Timeout(now));
+                    // DTLS-QUEUE-FIX: what arrived goes in FEED_BATCH datagrams at a time, each batch
+                    // followed by a full poll (which drains dimpl's receive queue into SCTP)
                     loop {
-                        match p.rtc.poll_output() {
-                            Ok(Output::Transmit(t)) => {
-                                if t.proto == Protocol::Tcp {
-                                    if let Some(c) = ice_conns.iter_mut().find(|c| c.src == t.destination && !c.dead) {
-                                        c.wbuf.extend_from_slice(&(t.contents.len() as u16).to_be_bytes());
-                                        c.wbuf.extend_from_slice(&t.contents);
-                                    }
-                                } else {
-                                    let _ = media_sock.send_to(&t.contents, t.destination);
-                                }
+                        let take = p.inbound.len().min(FEED_BATCH);
+                        for (proto, source, destination, data) in p.inbound.drain(..take) {
+                            if let Ok(contents) = data.as_slice().try_into() {
+                                let _ = p.rtc.handle_input(Input::Receive(now, Receive { proto, source, destination, contents }));
                             }
-                            Ok(Output::Timeout(_)) => break,
-                            Ok(Output::Event(e)) => match e {
-                                Event::MediaAdded(ma) => {
-                                    if ma.kind == MediaKind::Audio {
-                                        p.mid = Some(ma.mid);
-                                    }
-                                }
-                                Event::MediaData(d) => {
-                                    p.pt = Some(d.pt);
-                                    // trunk-v2: keep feeding the owner's voice
-                                    // pipeline AND relay to the room
-                                    if p.capturing {
-                                        p.voice_buf.push(d.data.to_vec());
-                                        if p.voice_buf.len() > 3000 {
-                                            p.voice_buf.remove(0);
+                        }
+                        let _ = p.rtc.handle_input(Input::Timeout(now));
+                        loop {
+                            match p.rtc.poll_output() {
+                                Ok(Output::Transmit(t)) => {
+                                    if t.proto == Protocol::Tcp {
+                                        if let Some(c) = ice_conns.iter_mut().find(|c| c.src == t.destination && !c.dead) {
+                                            c.wbuf.extend_from_slice(&(t.contents.len() as u16).to_be_bytes());
+                                            c.wbuf.extend_from_slice(&t.contents);
                                         }
-                                    }
-                                    room_audio.push((*id, d));
-                                }
-                                Event::ChannelOpen(cid, label) => {
-                                    if label == "tun" && tunnel.is_some() {
-                                        p.tun = Some(cid);
                                     } else {
-                                        p.channels.push(cid);
+                                        let _ = media_sock.send_to(&t.contents, t.destination);
                                     }
                                 }
-                                Event::ChannelData(cd) if Some(cd.id) == p.tun => {
-                                    if let Some((cfg, rt)) = tunnel.as_ref() {
-                                        tunnel_frame(p, &tokens, cfg, rt, &cd.data);
-                                    }
-                                }
-                                Event::ChannelData(cd) => {
-                                    if let Ok(txt) = std::str::from_utf8(&cd.data) {
-                                        // v0.9: in-band credential renewal,
-                                        // answered inline (cached map lookup)
-                                        if let Some(reply) = auth_refresh(&tokens, p, txt) {
-                                            if let Some(mut ch) = p.rtc.channel(cd.id) {
-                                                let _ = ch.write(false, reply.as_bytes());
-                                            }
-                                            continue;
+                                Ok(Output::Timeout(_)) => break,
+                                Ok(Output::Event(e)) => match e {
+                                    Event::MediaAdded(ma) => {
+                                        if ma.kind == MediaKind::Audio {
+                                            p.mid = Some(ma.mid);
                                         }
-                                        let opus = match serde_json::from_str::<serde_json::Value>(txt)
-                                        {
-                                            Ok(v) if v.get("op").and_then(|o| o.as_str()) == Some("voice.commit") =>
-                                                std::mem::take(&mut p.voice_buf),
-                                            _ => vec![],
-                                        };
-                                        dispatch(
-                                            &job_tx,
-                                            &out_tx,
-                                            &p.roots,
-                                            &p.device,
-                                            &roots_reg,
-                                            *id,
-                                            cd.id,
-                                            txt,
-                                            opus,
-                                        );
                                     }
-                                }
-                                _ => {}
-                            },
-                            Err(_) => break,
+                                    Event::MediaData(d) => {
+                                        p.pt = Some(d.pt);
+                                        // trunk-v2: keep feeding the owner's voice
+                                        // pipeline AND relay to the room
+                                        if p.capturing {
+                                            p.voice_buf.push(d.data.to_vec());
+                                            if p.voice_buf.len() > 3000 {
+                                                p.voice_buf.remove(0);
+                                            }
+                                        }
+                                        room_audio.push((*id, d));
+                                    }
+                                    Event::ChannelOpen(cid, label) => {
+                                        if !p.opened {
+                                            p.opened = true;
+                                            meter::inc(&MC.peer_open);
+                                            MH.peer_open_ms.since(p.admitted);
+                                            let path = p.path();
+                                            meter::inc(if path == "tcp" { &MC.peer_path_tcp } else { &MC.peer_path_udp });
+                                            meter::event(
+                                                "peer.open",
+                                                serde_json::json!({ "device": p.device, "path": path,
+                                                                    "ms": p.admitted.elapsed().as_millis() as u64 }),
+                                            );
+                                        }
+                                        if label == "tun" && tunnel.is_some() {
+                                            p.tun = Some(cid);
+                                        } else {
+                                            p.channels.push(cid);
+                                        }
+                                    }
+                                    Event::ChannelData(cd) if Some(cd.id) == p.tun => {
+                                        if let Some((cfg, rt)) = tunnel.as_ref() {
+                                            tunnel_frame(p, &tokens, cfg, rt, &cd.data);
+                                        }
+                                    }
+                                    Event::ChannelData(cd) => {
+                                        if let Ok(txt) = std::str::from_utf8(&cd.data) {
+                                            // v0.9: in-band credential renewal,
+                                            // answered inline (cached map lookup)
+                                            if let Some(reply) = auth_refresh(&tokens, p, txt) {
+                                                if let Some(mut ch) = p.rtc.channel(cd.id) {
+                                                    let _ = ch.write(false, reply.as_bytes());
+                                                }
+                                                continue;
+                                            }
+                                            let opus = match serde_json::from_str::<serde_json::Value>(txt)
+                                            {
+                                                Ok(v) if v.get("op").and_then(|o| o.as_str()) == Some("voice.commit") =>
+                                                    std::mem::take(&mut p.voice_buf),
+                                                _ => vec![],
+                                            };
+                                            dispatch(
+                                                &job_tx,
+                                                &out_tx,
+                                                &p.roots,
+                                                &p.device,
+                                                &roots_reg,
+                                                *id,
+                                                cd.id,
+                                                txt,
+                                                opus,
+                                            );
+                                        }
+                                    }
+                                    _ => {}
+                                },
+                                Err(_) => break,
+                            }
+                        }
+                        if p.inbound.is_empty() {
+                            break;
                         }
                     }
                 }
@@ -875,6 +979,7 @@ pub fn start(cfg: BridgeConfig) -> Result<BridgeHandle, String> {
                             _ => break,
                         }
                     }
+                    meter::peak(&MP.tun_backlog, p.tun_pending.len() as u64);
                 }
                 for c in ice_conns.iter_mut() {
                     while !c.wbuf.is_empty() && !c.dead {
@@ -936,10 +1041,17 @@ pub fn start(cfg: BridgeConfig) -> Result<BridgeHandle, String> {
                             if why != "gone" {
                                 println!("  bridge: severed peer {} ({}) — {why}", id, p.device);
                             }
+                            note_cut(&tokens, &p, why);
                         }
                     }
+                    meter::set(&ML.peers, peers.len() as u64);
                 }
 
+                // the loop's own health: how long this turn took, how much it was handed
+                meter::peak(&MP.loop_inputs, n_in);
+                let iter = now.elapsed();
+                MH.loop_iter.dur(iter);
+                meter::peak(&MP.loop_lag_us, iter.as_micros() as u64);
                 std::thread::sleep(Duration::from_millis(2));
             }
         });
@@ -974,6 +1086,7 @@ fn tunnel_frame(
     let Some((kind, id, body)) = crate::ap::unmux(data) else { return };
     match kind {
         crate::ap::OPEN => {
+            meter::inc(&MC.tun_streams);
             let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
             p.tun_streams.insert(id, tx);
             rt.spawn(crate::ap::tunnel_stream(
@@ -998,11 +1111,15 @@ fn tunnel_frame(
         }
         AUTH => {
             let raw = String::from_utf8_lossy(body).trim().to_string();
-            if let Ok(g) = tokens.check(&raw, &p.region) {
-                if g.device == p.device {
+            let old = p.exp_ms;
+            match tokens.check(&raw, &p.region) {
+                Ok(g) if g.device == p.device => {
                     p.token = raw;
                     p.exp_ms = g.exp_ms;
+                    note_refresh("tunnel", p, old, Ok(()));
                 }
+                Ok(_) => note_refresh("tunnel", p, old, Err("other-device")),
+                Err(d) => note_refresh("tunnel", p, old, Err(d.why())),
             }
         }
         _ => {}
@@ -1038,17 +1155,48 @@ fn auth_refresh(tokens: &TokenStore, p: &mut Peer, txt: &str) -> Option<String> 
     }
     let req = v.get("req").and_then(|r| r.as_u64()).unwrap_or(0);
     let token = v.get("token").and_then(|t| t.as_str()).unwrap_or_default();
+    let old = p.exp_ms;
     Some(
         match tokens.check(token, &p.region) {
             Ok(g) if g.device == p.device => {
                 p.exp_ms = g.exp_ms;
+                note_refresh("channel", p, old, Ok(()));
                 serde_json::json!({ "req": req, "ok": true, "exp": g.exp_ms })
             }
-            Ok(_) => serde_json::json!({ "req": req, "ok": false, "err": "token belongs to another device" }),
-            Err(d) => serde_json::json!({ "req": req, "ok": false, "err": d.why(), "reauth": d.reauth() }),
+            Ok(_) => {
+                note_refresh("channel", p, old, Err("other-device"));
+                serde_json::json!({ "req": req, "ok": false, "err": "token belongs to another device" })
+            }
+            Err(d) => {
+                note_refresh("channel", p, old, Err(d.why()));
+                serde_json::json!({ "req": req, "ok": false, "err": d.why(), "reauth": d.reauth() })
+            }
         }
         .to_string(),
     )
+}
+
+/// A peer cut (or gone): counted by reason; a revocation also measures revoke → cut, from
+/// the app's `revokedAt` to now (the sims' target: about a second).
+fn note_cut(tokens: &TokenStore, p: &Peer, why: &str) {
+    let life = p.admitted.elapsed().as_secs();
+    let mut ev = serde_json::json!({ "src": "bridge", "device": p.device, "why": why, "path": p.path(), "life_s": life });
+    match why {
+        "kill-switch" | "revoked" => {
+            meter::inc(if why == "revoked" { &MC.peer_cut_revoked } else { &MC.peer_cut_kill });
+            let at = if why == "revoked" { tokens.revoked_at(&p.device) } else { tokens.killed_at() };
+            if let Some(at) = at {
+                let ms = now_ms().saturating_sub(at);
+                if ms < 86_400_000 {
+                    MH.revoke_cut.us(ms * 1000);
+                    ev["revoke_ms"] = ms.into();
+                }
+            }
+        }
+        "token expired" => meter::inc(&MC.peer_cut_expired),
+        _ => meter::inc(&MC.peer_gone),
+    }
+    meter::event(if why == "gone" { "peer.end" } else { "cut" }, ev);
 }
 
 /// CORS: the token IS the gate (no cookies are ever read), so the bridge is
@@ -1259,9 +1407,14 @@ fn handle_signaling_request(
         let _ = request.respond(cors(tiny_http::Response::from_string("bifrost bridge")));
         return;
     }
+    let t_offer = Instant::now();
+    meter::inc(&MC.offer);
     let grant = match authorize_offer(&request, tokens) {
         Ok(g) => g,
         Err(d) => {
+            meter::inc(&MC.offer_denied);
+            let device = tokens.device_of(&raw_credential(&request));
+            crate::ap::count_deny(d, "offer", "offer", device.as_deref(), &request_region(&request));
             let _ = request.respond(deny_response(d.why(), d.reauth()));
             return;
         }
@@ -1272,7 +1425,10 @@ fn handle_signaling_request(
         return;
     };
     let epoch = tokens.kill_epoch();
-    let bad = |msg: String| json_response(400, serde_json::json!({ "error": msg }).to_string());
+    let bad = |msg: String| {
+        meter::inc(&MC.offer_bad);
+        json_response(400, serde_json::json!({ "error": msg }).to_string())
+    };
     let mut body = String::new();
     let _ = request.as_reader().read_to_string(&mut body);
     // Chrome is trickle-only: the offer SDP carries NO candidates; they
@@ -1387,9 +1543,13 @@ fn handle_signaling_request(
     if !ufrag.is_empty() {
         ufrags.lock().unwrap().insert(ufrag.clone());
     }
+    let device = grant.device.clone();
     if admit_tx.send(Admit { rtc, grant, epoch, token: raw_token, ip: client_ip, ufrag }).is_err() {
         return;
     }
+    meter::inc(&MC.offer_ok);
+    MH.offer_answer.since(t_offer);
+    meter::event("offer", serde_json::json!({ "device": device, "ms": t_offer.elapsed().as_millis() as u64 }));
     let _ = request.respond(json_response(200, body));
 }
 
@@ -2652,5 +2812,355 @@ mod switch_url_tests {
         assert_eq!(v[0]["id"], "mac");
         assert!((4_900..10_000).contains(&ago), "since is {ago} ms ago");
         assert_eq!(super::roots_list_json(&[]), "[]");
+    }
+}
+
+/// The phone channel under load (DTLS-QUEUE-FIX): several MB through the pinned tunnel
+/// ("tun", the path of api.file and of page loads), up and down, over UDP and over ICE-TCP (the
+/// owner's carrier path), must arrive whole with no DTLS record refused by the bridge's DTLS
+/// engine. dimpl keeps at most 30 received records until `Rtc::poll_output` drains them; a loop
+/// that hands one peer more than that between two polls gets the rest refused ("Receive queue
+/// full", counted as `peer.dtls.rxq_full`) and SCTP must resend them (live 11-23: 1,162 refusals
+/// in 39 minutes, 155 in the worst minute). `cargo test dtls_load -- --nocapture` prints each
+/// case's time and refusals.
+#[cfg(test)]
+mod dtls_load {
+    use super::*;
+    use crate::ap::{mux, unmux, CLOSE, DATA, OPEN};
+    use std::io::{BufRead, BufReader};
+    use std::sync::atomic::Ordering::Relaxed;
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::util::SubscriberInitExt;
+
+    const TOTAL: usize = 8 << 20;
+
+    /// dimpl warns through `log`: the same counting layer as the bridge's own process.
+    fn count_dtls_refusals() {
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| {
+            let _ = tracing_subscriber::registry().with(crate::bridge_main::CountWarnings).try_init();
+        });
+    }
+
+    /// One case at a time: the refusal counter is process-wide.
+    fn serial() -> std::sync::MutexGuard<'static, ()> {
+        static M: Mutex<()> = Mutex::new(());
+        M.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// The upstream: POST → counts the body and answers the count; GET → TOTAL bytes.
+    fn upstream() -> SocketAddr {
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        let a = l.local_addr().unwrap();
+        std::thread::spawn(move || {
+            for s in l.incoming().flatten() {
+                std::thread::spawn(move || {
+                    let mut w = s.try_clone().unwrap();
+                    let mut r = BufReader::new(s);
+                    let (mut len, mut first) = (0usize, String::new());
+                    loop {
+                        let mut line = String::new();
+                        if r.read_line(&mut line).unwrap_or(0) == 0 {
+                            return;
+                        }
+                        if first.is_empty() {
+                            first = line.clone();
+                        }
+                        let t = line.trim_end().to_ascii_lowercase();
+                        if t.is_empty() {
+                            break;
+                        }
+                        if let Some(v) = t.strip_prefix("content-length:") {
+                            len = v.trim().parse().unwrap_or(0);
+                        }
+                    }
+                    if first.starts_with("GET") {
+                        let _ = write!(w, "HTTP/1.1 200 OK\r\nContent-Length: {TOTAL}\r\nConnection: close\r\n\r\n");
+                        let block = vec![0x5a_u8; 64 * 1024];
+                        for _ in 0..TOTAL / block.len() {
+                            if w.write_all(&block).is_err() {
+                                return;
+                            }
+                        }
+                        return;
+                    }
+                    let (mut got, mut buf) = (0usize, vec![0u8; 65536]);
+                    while got < len {
+                        match r.read(&mut buf) {
+                            Ok(0) | Err(_) => break,
+                            Ok(n) => got += n,
+                        }
+                    }
+                    let body = got.to_string();
+                    let _ = write!(w, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+                });
+            }
+        });
+        a
+    }
+
+    /// How the phone reaches the bridge: UDP to its media socket, or ICE-TCP (RFC 4571 frames)
+    /// to the bridge's ICE-TCP listener (what the access point hands it from :443).
+    enum Wire {
+        Udp(UdpSocket),
+        Tcp { sock: TcpStream, rbuf: Vec<u8>, advertised: SocketAddr },
+    }
+
+    /// A phone: one str0m peer with the "tun" channel, pumped by hand (as fast as it can send).
+    struct Phone {
+        rtc: Rtc,
+        wire: Wire,
+        local: SocketAddr,
+        buf: Vec<u8>,
+        tun: str0m::channel::ChannelId,
+        open: bool,
+        got: Vec<u8>,
+        closed: bool,
+    }
+
+    impl Phone {
+        fn connect(sig: SocketAddr, token: &str, tcp: Option<(SocketAddr, SocketAddr)>) -> Phone {
+            let mut rtc = Rtc::new(Instant::now());
+            let (wire, local) = match tcp {
+                None => {
+                    let sock = UdpSocket::bind("127.0.0.1:0").unwrap();
+                    sock.set_nonblocking(true).unwrap();
+                    let local = sock.local_addr().unwrap();
+                    rtc.add_local_candidate(Candidate::host(local, "udp").unwrap()).unwrap();
+                    (Wire::Udp(sock), local)
+                }
+                Some((listen, advertised)) => {
+                    let sock = TcpStream::connect(listen).unwrap();
+                    sock.set_nonblocking(true).unwrap();
+                    sock.set_nodelay(true).unwrap();
+                    let local = sock.local_addr().unwrap();
+                    let c = Candidate::builder().tcp().host(local).tcptype(TcpType::Active).build().unwrap();
+                    rtc.add_local_candidate(c).unwrap();
+                    (Wire::Tcp { sock, rbuf: vec![], advertised }, local)
+                }
+            };
+            let mut change = rtc.sdp_api();
+            let tun = change.add_channel("tun".into());
+            let (offer, pending) = change.apply().unwrap();
+            let (status, body) = http_post(sig, "/offer", Some(token), &serde_json::to_string(&offer).unwrap()).unwrap();
+            assert!(status.starts_with('2'), "offer refused: {status} {body}");
+            let answer: str0m::change::SdpAnswer = serde_json::from_str(&body).unwrap();
+            rtc.sdp_api().accept_answer(pending, answer).unwrap();
+            Phone { rtc, wire, local, buf: vec![0u8; 65536], tun, open: false, got: vec![], closed: false }
+        }
+
+        fn pump(&mut self) {
+            let now = Instant::now();
+            let mut inputs: Vec<(Protocol, SocketAddr, Vec<u8>)> = vec![];
+            match &mut self.wire {
+                Wire::Udp(sock) => {
+                    while let Ok((n, source)) = sock.recv_from(&mut self.buf) {
+                        inputs.push((Protocol::Udp, source, self.buf[..n].to_vec()));
+                    }
+                }
+                Wire::Tcp { sock, rbuf, advertised } => {
+                    while let Ok(n) = sock.read(&mut self.buf) {
+                        if n == 0 {
+                            break;
+                        }
+                        rbuf.extend_from_slice(&self.buf[..n]);
+                    }
+                    while rbuf.len() >= 2 {
+                        let n = u16::from_be_bytes([rbuf[0], rbuf[1]]) as usize;
+                        if rbuf.len() < 2 + n {
+                            break;
+                        }
+                        inputs.push((Protocol::Tcp, *advertised, rbuf.drain(..2 + n).skip(2).collect()));
+                    }
+                }
+            }
+            // a well-behaved receiver (a browser's DTLS is not dimpl): the phone, too, polls
+            // between small batches, so every refusal this test counts is the bridge's
+            let mut rest = inputs.as_slice();
+            loop {
+                let (batch, more) = rest.split_at(rest.len().min(FEED_BATCH));
+                rest = more;
+                for (proto, source, data) in batch {
+                    let input = Input::Receive(
+                        now,
+                        Receive { proto: *proto, source: *source, destination: self.local, contents: data.as_slice().try_into().unwrap() },
+                    );
+                    if self.rtc.accepts(&input) {
+                        let _ = self.rtc.handle_input(input);
+                    }
+                }
+                self.poll(now);
+                if rest.is_empty() {
+                    break;
+                }
+            }
+        }
+
+        fn poll(&mut self, now: Instant) {
+            let _ = self.rtc.handle_input(Input::Timeout(now));
+            loop {
+                match self.rtc.poll_output() {
+                    Ok(Output::Transmit(t)) => match &mut self.wire {
+                        Wire::Udp(sock) => {
+                            let _ = sock.send_to(&t.contents, t.destination);
+                        }
+                        Wire::Tcp { sock, .. } => {
+                            let mut f = (t.contents.len() as u16).to_be_bytes().to_vec();
+                            f.extend_from_slice(&t.contents);
+                            // loopback: a short blocking write is fine for a test
+                            sock.set_nonblocking(false).unwrap();
+                            let _ = sock.write_all(&f);
+                            sock.set_nonblocking(true).unwrap();
+                        }
+                    },
+                    Ok(Output::Event(Event::ChannelOpen(cid, _))) if cid == self.tun => self.open = true,
+                    Ok(Output::Event(Event::ChannelData(cd))) if cd.id == self.tun => {
+                        if let Some((kind, _, body)) = unmux(&cd.data) {
+                            match kind {
+                                DATA => self.got.extend_from_slice(body),
+                                CLOSE => self.closed = true,
+                                _ => {}
+                            }
+                        }
+                    }
+                    Ok(Output::Timeout(_)) | Err(_) => break,
+                    Ok(_) => {}
+                }
+            }
+        }
+
+        /// Write one tunnel frame if the channel takes it now.
+        fn send(&mut self, frame: &[u8]) -> bool {
+            self.rtc.channel(self.tun).is_some_and(|mut ch| ch.write(true, frame).unwrap_or(false))
+        }
+    }
+
+    /// One case: a bridge, a phone over `tcp` or UDP, TOTAL bytes up (`upload`) or down.
+    /// Returns the seconds it took and the DTLS records the bridge refused meanwhile.
+    fn run(upload: bool, tcp: bool) -> (f64, u64) {
+        count_dtls_refusals();
+        let up = upstream();
+        let dir = std::env::temp_dir().join(format!("bfn-dtls-load-{}", uuid_like()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let tok = format!("bfnd-load-{}", uuid_like());
+        let reg = serde_json::json!({ "version": 2, "killEpoch": 0, "codes": [], "devices": [{
+            "id": "dev_load", "name": "load", "revoked": false,
+            "access": [{ "hash": crate::tokens::hash_token(&tok), "exp": now_ms() + 600_000, "region": "loopback" }] }] });
+        std::fs::write(dir.join("devices.json"), reg.to_string()).unwrap();
+        let tokens = Arc::new(TokenStore::open(dir.join("devices.json")));
+        let dial = Arc::new(crate::ap::DialConfig {
+            url: "wss://unused.invalid/ap".into(),
+            pin: String::new(),
+            token: String::new(),
+            upstream: up.to_string(),
+            livekit: None,
+            tcp: Default::default(),
+            rootlink: None,
+            branch: None,
+            tokens,
+            ice_demux: None,
+        });
+        // the ICE-TCP candidate the bridge advertises (the ap's :443 in real life): the phone
+        // talks to the bridge's listener and calls it by this address
+        let advertised: SocketAddr = "127.0.0.2:443".parse().unwrap();
+        let h = start(BridgeConfig {
+            http: "127.0.0.1:0".parse().unwrap(),
+            media: "127.0.0.1:0".parse().unwrap(),
+            tokens_file: dir.join("devices.json"),
+            opencode_url: "http://127.0.0.1:9".into(),
+            speaches_url: "http://127.0.0.1:9/v1".into(),
+            stt_model: String::new(),
+            tts_model: String::new(),
+            tts_voice: String::new(),
+            candidates: vec![IpAddr::from([127, 0, 0, 1])],
+            root_link_secret: None,
+            root_ids: vec![],
+            root_link_enabled: false,
+            root_link_listen: None,
+            root_link_ping_secs: 15,
+            root_link_max_inflight: 1,
+            root_link_result_secs: 20,
+            root_link_wg_relay: None,
+            root_link_wg_local: None,
+            root_link_plaintext_http: false,
+            name: "dtls-load".into(),
+            dtls_cert_file: Some(dir.join("dtls.json")),
+            public_url: None,
+            ice_tcp: if tcp { vec![advertised] } else { vec![] },
+            tunnel: Some(dial),
+        })
+        .unwrap();
+        let wire = tcp.then(|| (h.ice_listen.expect("the bridge's ICE-TCP listener"), advertised));
+        let mut phone = Phone::connect(h.http, &tok, wire);
+        let t_open = Instant::now();
+        while !phone.open {
+            assert!(t_open.elapsed() < Duration::from_secs(15), "the tun channel never opened");
+            phone.pump();
+            std::thread::sleep(Duration::from_millis(2));
+        }
+
+        let head = if upload {
+            format!("POST /upload HTTP/1.1\r\nHost: box\r\nContent-Length: {TOTAL}\r\n\r\n")
+        } else {
+            "GET /download HTTP/1.1\r\nHost: box\r\n\r\n".to_string()
+        };
+        while !phone.send(&mux(OPEN, 1, head.as_bytes()).1) {
+            phone.pump();
+        }
+        let before = meter::C.dtls_rxq_full.load(Relaxed);
+        let t0 = Instant::now();
+        let chunk = vec![0x5a_u8; 16 * 1024];
+        let mut sent = 0;
+        while !phone.closed {
+            assert!(t0.elapsed() < Duration::from_secs(120), "not finished: {sent} B up, {} B down", phone.got.len());
+            phone.pump();
+            while upload && sent < TOTAL {
+                let n = chunk.len().min(TOTAL - sent);
+                if !phone.send(&mux(DATA, 1, &chunk[..n]).1) {
+                    break;
+                }
+                sent += n;
+            }
+        }
+        let took = t0.elapsed().as_secs_f64();
+        let refused = meter::C.dtls_rxq_full.load(Relaxed) - before;
+        let answer = String::from_utf8_lossy(&phone.got[..phone.got.len().min(200)]).to_string();
+        assert!(answer.starts_with("HTTP/1.1 200"), "answer: {answer}");
+        if upload {
+            assert!(String::from_utf8_lossy(&phone.got).ends_with(&TOTAL.to_string()), "the upstream did not get every byte: {answer}");
+        } else {
+            let body = phone.got.windows(4).position(|w| w == b"\r\n\r\n").map(|p| phone.got.len() - p - 4);
+            assert_eq!(body, Some(TOTAL), "the phone did not get every byte");
+        }
+        eprintln!(
+            "dtls-load {} over {}: {} MB in {took:.2} s ({:.1} MB/s); DTLS records refused (Receive queue full): {refused}",
+            if upload { "upload" } else { "download" },
+            if tcp { "ICE-TCP" } else { "UDP" },
+            TOTAL >> 20,
+            TOTAL as f64 / 1e6 / took
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+        (took, refused)
+    }
+
+    #[test]
+    fn an_upload_over_udp_loses_no_dtls_record() {
+        let _one = serial();
+        let (_, refused) = run(true, false);
+        assert_eq!(refused, 0, "the bridge's DTLS engine refused {refused} records under load");
+    }
+
+    #[test]
+    fn a_download_over_udp_loses_no_dtls_record() {
+        let _one = serial();
+        let (_, refused) = run(false, false);
+        assert_eq!(refused, 0, "the bridge's DTLS engine refused {refused} records under load");
+    }
+
+    #[test]
+    fn an_upload_over_ice_tcp_loses_no_dtls_record() {
+        let _one = serial();
+        let (_, refused) = run(true, true);
+        assert_eq!(refused, 0, "the bridge's DTLS engine refused {refused} records under load");
     }
 }

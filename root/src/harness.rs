@@ -65,7 +65,7 @@ impl Kind {
     }
 
     /// argv (program first) + whether the prompt goes on stdin.
-    fn argv(self, model: Option<&str>, resume: Option<&str>, cwd: &Path, prompt: &str, system: Option<&str>, attach: Attach) -> (Vec<String>, bool) {
+    pub(crate) fn argv(self, model: Option<&str>, resume: Option<&str>, cwd: &Path, prompt: &str, system: Option<&str>, attach: Attach) -> (Vec<String>, bool) {
         let mut a: Vec<String> = Vec::new();
         let mut push = |xs: &[&str]| a.extend(xs.iter().map(|x| x.to_string()));
         match self {
@@ -361,6 +361,47 @@ pub fn parse(kind: Kind, v: &Value) -> Vec<Ev> {
 /// What the owner reads when Antigravity is not signed in (the session's error).
 pub const ANTIGRAVITY_SIGNED_OUT: &str = "Antigravity is not signed in — run `agy` once in a terminal and sign in with Google, or set GEMINI_API_KEY in the brain's environment.";
 
+/// Hard quota / usage-limit exhaustion reported by a harness (Claude 5-hour/weekly limit,
+/// Antigravity RESOURCE_EXHAUSTED / quota exceeded, Codex insufficient_quota, z.ai 1310/1113…).
+/// Transient rate limits, auth failures, invalid models and generic crashes return `false`.
+pub fn is_quota_error(msg: &str) -> bool {
+    let low = msg.to_ascii_lowercase();
+    // Claude Code: "You've hit your 5-hour limit · resets ...", "You've hit your weekly limit",
+    // "You've hit your limit", "You've hit your usage limit"
+    if let Some(i) = low.find("hit your ") {
+        let tail: String = low[i + "hit your ".len()..].chars().take(48).collect();
+        if tail.contains("limit") {
+            return true;
+        }
+    }
+    const MARKERS: &[&str] = &[
+        "usage limit",
+        "5-hour limit",
+        "5 hour limit",
+        "weekly limit",
+        "daily limit",
+        "monthly limit",
+        "spending limit",
+        "spend limit",
+        "out of extra usage",
+        "quota",
+        "resource_exhausted",
+        "resource exhausted",
+        "limit exhausted",
+        "exhausted your capacity",
+        "capacity exhausted",
+        "insufficient balance",
+        "credit balance",
+        "billing_hard_limit_reached",
+        "billing limit",
+        "package expired",
+    ];
+    MARKERS.iter().any(|m| low.contains(m))
+}
+
+#[cfg(test)]
+pub static TEST_PATH_LOCK: std::sync::LazyLock<tokio::sync::Mutex<()>> = std::sync::LazyLock::new(|| tokio::sync::Mutex::new(()));
+
 /// A harness failure, said plainly (Antigravity's, as agy 1.5.9 words them): no credentials, a key
 /// Google refuses, a model this sign-in does not serve.
 fn explain(kind: Kind, msg: &str) -> Option<String> {
@@ -620,9 +661,17 @@ pub async fn run(kind: Kind, model: Option<&str>, resume: Option<&str>, cwd: &Pa
     });
     let mut lines = BufReader::new(child.stdout.take().ok_or("no stdout")?).lines();
     let (mut text, mut fin, mut session, mut error) = (String::new(), None::<String>, resume.map(String::from), None::<String>);
+    let mut plain_stdout = String::new();
     let mut after_tool = false;
     while let Ok(Some(line)) = lines.next_line().await {
-        let Ok(v) = serde_json::from_str::<Value>(line.trim()) else { continue };
+        let trimmed = line.trim();
+        let Ok(v) = serde_json::from_str::<Value>(trimmed) else {
+            if !trimmed.is_empty() && plain_stdout.len() < 4000 {
+                plain_stdout.push_str(trimmed);
+                plain_stdout.push('\n');
+            }
+            continue;
+        };
         for mut ev in parse(kind, &v) {
             match &mut ev {
                 Ev::Session(id) if !id.is_empty() => session = Some(id.clone()),
@@ -668,9 +717,16 @@ pub async fn run(kind: Kind, model: Option<&str>, resume: Option<&str>, cwd: &Pa
     if let Some(e) = error {
         return Err(explain(kind, &e).unwrap_or_else(|| format!("{}: {e}", kind.name())));
     }
-    if !status.success() && text.trim().is_empty() {
-        let tail: String = stderr.lines().rev().take(6).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("\n");
-        return Err(explain(kind, &stderr).unwrap_or_else(|| format!("{} exited {status}: {tail}", kind.name())));
+    if !status.success() && (text.trim().is_empty() || is_quota_error(&text)) {
+        let raw = if !stderr.trim().is_empty() {
+            stderr.as_str()
+        } else if !text.trim().is_empty() {
+            text.as_str()
+        } else {
+            plain_stdout.as_str()
+        };
+        let tail: String = raw.lines().rev().take(6).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("\n");
+        return Err(explain(kind, raw).unwrap_or_else(|| format!("{} exited {status}: {tail}", kind.name())));
     }
     Ok(Outcome { text, session })
 }
@@ -678,6 +734,12 @@ pub async fn run(kind: Kind, model: Option<&str>, resume: Option<&str>, cwd: &Pa
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_terminal_conversation_keeps_its_own_permission_check() {
+        let (argv, _) = Kind::Claude.argv(None, Some("070d6b89-df88-495a-b061-1a0a80cfbea0"), Path::new("/w"), "hi", None, Attach { guarded: true, fork: false });
+        assert!(argv.windows(2).any(|w| w == ["--permission-mode", "auto"]));
+    }
 
     #[test]
     fn claude_stream() {
@@ -912,8 +974,10 @@ mod tests {
         };
         let stdin_file = dir.join("stdin.json");
         put(format!("#!/bin/sh\necho \"$@\" > '{}/argv'\ncat > '{}'\ncat '{}'\n", dir.display(), stdin_file.display(), fx.join("tool-error.stream.jsonl").display()));
-        let path = format!("{}:{}", dir.display(), std::env::var("PATH").unwrap_or_default());
-        // SAFETY: this test is the only one that runs an `agy`; PATH gains a directory in front
+        let _path_guard = TEST_PATH_LOCK.lock().await;
+        let orig_path = std::env::var("PATH").unwrap_or_default();
+        let path = format!("{}:{}", dir.display(), orig_path);
+        // SAFETY: serialized by TEST_PATH_LOCK
         unsafe { std::env::set_var("PATH", path) };
         let mut seen = Vec::new();
         let out = run(Kind::Antigravity, Some("gemini-3.8-flash-low"), None, &dir, "check missing.txt", Some("be terse"), Attach::default(), |e| seen.push(e.clone())).await.unwrap();
@@ -931,6 +995,38 @@ mod tests {
         put(format!("#!/bin/sh\ncat >/dev/null\ncat '{}'\ncat '{}' >&2\nexit 1\n", fx.join("signed-out.stream.jsonl").display(), fx.join("signed-out.stderr.txt").display()));
         let err = run(Kind::Antigravity, None, Some("c1"), &dir, "hi", None, Attach::default(), |_| {}).await.err();
         assert_eq!(err.as_deref(), Some(ANTIGRAVITY_SIGNED_OUT));
+        unsafe { std::env::set_var("PATH", orig_path) };
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn quota_error_detection() {
+        for yes in [
+            "claude: You've hit your 5-hour limit · resets 11:30pm (Europe/Paris)",
+            "claude: You've hit your weekly limit · resets Sun 9pm",
+            "claude: You've hit your limit",
+            "claude: Claude usage limit reached",
+            "claude: Out of extra usage",
+            "claude: Credit balance is too low",
+            "antigravity: RESOURCE_EXHAUSTED: You have exhausted your capacity on this model.",
+            "antigravity: quota exceeded for gemini-4-neon-high",
+            "codex: insufficient_quota: You exceeded your current quota",
+            "opencode: [1310][Weekly/Monthly Limit Exhausted.]",
+            "claude exited exit status: 1: You've hit your 5-hour limit",
+        ] {
+            assert!(is_quota_error(yes), "expected quota error: {yes}");
+        }
+        for no in [
+            "",
+            ANTIGRAVITY_SIGNED_OUT,
+            "Antigravity does not offer bad-model on this sign-in",
+            "claude not runnable: No such file or directory",
+            "claude exited exit status: 1: unknown flag --bogus",
+            "this Claude Code conversation is open in a terminal right now",
+            "claude: rate limit exceeded, retry in 2s",
+            "antigravity: authentication failed or timed out",
+        ] {
+            assert!(!is_quota_error(no), "should not be quota error: {no}");
+        }
     }
 }

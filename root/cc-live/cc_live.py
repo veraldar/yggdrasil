@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """cc-live — the box's running Claude Code sessions, live on the phone.
 
-The app's "Claude Code live" page talks to this helper (never the brain: it runs outside the
-brain's sandbox, because `claude attach` needs the Claude Code daemon's sockets in /tmp and
-/run/user, the claude binary and its sign-in). It only ever runs three things:
+The app's "Claude Code live" page talks to this helper (`claude attach` needs the Claude Code
+daemon's sockets in /tmp and /run/user, the claude binary and its sign-in). It only ever runs
+three things:
 
   claude agents --json        which sessions are running (interactive and background)
   claude attach <short id>    a PTY on ONE background session, to type into it
@@ -14,8 +14,8 @@ only a background session (kind "background") takes input, and a page's input go
 session its URL names, through the PTY attached to that session's short id. Interactive sessions
 (a terminal's own `claude`) can't be attached: they are watch-only.
 
-HTTP on loopback only, every call with the header x-cc-live-token (the token file, 0600, is
-outside the brain's sandbox; the app reads it):
+HTTP on loopback only, every call with the header x-cc-live-token (the token file, 0600; the app
+reads it):
 
   GET  /sessions                      the running sessions {sessionId, short, name, kind, status,
                                       state, cwd, startedAt, title, canType}

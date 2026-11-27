@@ -1,0 +1,37 @@
+{
+ "id": "not-visible",
+ "title": "\"I don't see it\": MAIN has it checked where the user looks, never says refresh",
+ "persona": "A phone user who asked for a small page and then cannot see what they asked for. Short messages. They do not explain why.",
+ "goals": [
+  "Have main get a tiny HTML page built in a folder named export-demo: index.html with a heading and an 'Export' button.",
+  "When main says it is done, tell main you don't see the Export button (say only that, nothing about why).",
+  "Get a concrete answer: was the button there, where exactly, or what was wrong and fixed."
+ ],
+ "script": [
+  "Ask for the page in your own short words.",
+  "Wait for main to report it built.",
+  "Say you don't see the Export button.",
+  "Read what main finds out, then finish."
+ ],
+ "brain_env": {},
+ "max_minutes": 15,
+ "max_turns": 10,
+ "checks": [
+  {
+   "name": "the page has the button",
+   "cmd": "grep -ci 'export' export-demo/index.html",
+   "expect": "^[1-9]"
+  },
+  {
+   "name": "main never says refresh / reopen / reload / clear the cache",
+   "kind": "main_says",
+   "absent": true,
+   "regex": "refresh|re-?open|reload|force[- ]?quit|clear (the |your )?cache|hard[- ]reload"
+  },
+  {
+   "name": "main had it checked (a session read or re-sent)",
+   "kind": "main_tool",
+   "regex": "session_send|session_read|session_start"
+  }
+ ]
+}

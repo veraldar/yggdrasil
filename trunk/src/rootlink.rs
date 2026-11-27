@@ -27,6 +27,7 @@ use std::time::{Duration, Instant};
 
 use sha2::{Digest, Sha256};
 
+use crate::meter;
 use crate::registry::{ConnMsg, Registry, RootHandle};
 use crate::roots;
 use crate::switch::Switchboard;
@@ -39,6 +40,19 @@ const MAX_ROOT_FRAME: usize = 8 << 20;
 /// the listener is reachable from the internet (`/rootlink`): an unauthenticated
 /// flood is turned away at accept instead of each holding a thread for 10 s.
 const MAX_PREAUTH: usize = 64;
+
+/// The ids roots.json marks `revoked` (no file, or not readable: none).
+pub fn revoked_roots(path: &std::path::Path) -> HashSet<String> {
+    let Ok(raw) = std::fs::read(path) else { return HashSet::new() };
+    let v: serde_json::Value = serde_json::from_slice(&raw).unwrap_or_default();
+    v["roots"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|r| r["revoked"] == true)
+        .filter_map(|r| r["id"].as_str().map(String::from))
+        .collect()
+}
 
 pub struct RootLinkPlane {
     pub secret: Vec<u8>,
@@ -82,6 +96,17 @@ impl RootLinkPlane {
 
     /// Bind + accept loop. One thread per conn (few roots; keeps reads honest).
     pub fn spawn(self: &Arc<Self>, listener: TcpListener) {
+        // a root removed on the phone (roots.json `revoked`) loses its link within 2 s
+        let sweep = self.clone();
+        std::thread::spawn(move || loop {
+            std::thread::sleep(std::time::Duration::from_secs(2));
+            let revoked = revoked_roots(&sweep.tokens.roots_file());
+            for root in sweep.registry.linked() {
+                if revoked.contains(&root) {
+                    sweep.registry.unlink(&root, "it was removed from the tree (roots.json revoked)");
+                }
+            }
+        });
         let me = self.clone();
         std::thread::spawn(move || {
             for stream in listener.incoming() {
@@ -174,6 +199,7 @@ impl RootLinkPlane {
             Ok(lt) => lt,
             Err(e) => {
                 eprintln!("root-link: refused dial from {peer:?}: {e}");
+                refused("token");
                 Self::refuse(&mut *writer.lock().unwrap(), &e);
                 return;
             }
@@ -185,7 +211,15 @@ impl RootLinkPlane {
         // ---- 4. reuse tokens.rs auth: the dev claim must be a live device ----
         if !self.tokens.knows_dev(&lt.dev) {
             eprintln!("root-link: refused dial for root '{}' — dev '{}' unknown/revoked", lt.root, lt.dev);
+            refused("device");
             Self::refuse(&mut *writer.lock().unwrap(), "device unknown or revoked");
+            return;
+        }
+        // ---- 4b. a root removed from the tree (roots.json `revoked`) dials in vain ----
+        if revoked_roots(&self.tokens.roots_file()).contains(&lt.root) {
+            eprintln!("root-link: refused dial for root '{}' — it was removed from the tree", lt.root);
+            refused("removed");
+            Self::refuse(&mut *writer.lock().unwrap(), "this root was removed from the tree");
             return;
         }
         // ---- 5. SINGLE-USE (check+insert atomic under one lock) ----
@@ -194,6 +228,7 @@ impl RootLinkPlane {
             let mut used = self.used.lock().unwrap();
             if used.contains(&th) {
                 eprintln!("root-link: refused SECOND dial with a spent token (root '{}')", lt.root);
+                refused("spent");
                 Self::refuse(&mut *writer.lock().unwrap(), "link-token already used");
                 return;
             }
@@ -220,6 +255,9 @@ impl RootLinkPlane {
             "root-link: root '{}' LINKED from {peer:?} (dev {}, gen_no {gen_no})",
             lt.root, lt.dev
         );
+        meter::inc(&meter::C.root_link_up);
+        meter::event("root.link", serde_json::json!({ "root": lt.root, "up": true }));
+        let linked_at = Instant::now();
         let ack = serde_json::json!({ "op": "root-link.ok", "root": lt.root, "gen_no": gen_no }).to_string();
         if wsend!(OP_TEXT, ack.as_bytes()).is_err() {
             self.registry.drop_if_current(&lt.root, gen_no);
@@ -232,7 +270,10 @@ impl RootLinkPlane {
         // root's PROCESS must answer with `root.pong` (proves the agent loop,
         // not the socket). 3 consecutive misses → auto-unlink.
         let probe_fails = Arc::new(Mutex::new(0u32));
+        // the meter: when the last agent-level probe went out (its root.pong closes the round)
+        let probe_sent: Arc<Mutex<Option<Instant>>> = Arc::default();
         {
+            let probe_sent = probe_sent.clone();
             let kill = kill.clone();
             let last = last_pong.clone();
             let fails = probe_fails.clone();
@@ -266,6 +307,7 @@ impl RootLinkPlane {
                     *f += 1;
                 }
                 let probe = serde_json::json!({ "op": "root.ping", "tid": "health" }).to_string();
+                *probe_sent.lock().unwrap() = Some(Instant::now());
                 if ws::write_frame(&mut *hb_writer.lock().unwrap(), OP_TEXT, probe.as_bytes()).is_err() {
                     let _ = hb_kick.shutdown(Shutdown::Both);
                     return;
@@ -339,6 +381,9 @@ impl RootLinkPlane {
                             Some("root.pong") => {
                                 *last_pong.lock().unwrap() = Instant::now();
                                 *probe_fails.lock().unwrap() = 0;
+                                if let Some(t) = probe_sent.lock().unwrap().take() {
+                                    meter::H.root_rtt.since(t);
+                                }
                             }
                             Some("root.ping") => {
                                 *last_pong.lock().unwrap() = Instant::now();
@@ -384,7 +429,15 @@ impl RootLinkPlane {
         // switchboard calls waiting on THIS conn fail now, not after 120 s
         self.switch.link_down(&lt.root, gen_no);
         eprintln!("root-link: root '{}' unlinked (gen_no {gen_no})", lt.root);
+        meter::inc(&meter::C.root_link_down);
+        meter::event("root.link", serde_json::json!({ "root": lt.root, "up": false, "life_s": linked_at.elapsed().as_secs() }));
     }
+}
+
+/// A root's dial turned away, counted by why (token / device / removed / spent).
+fn refused(why: &str) {
+    meter::inc(&meter::C.root_link_refused);
+    meter::inc_named(&format!("root.link.refused.{why}"));
 }
 
 /// One pre-auth slot; released once (explicitly after the token check, or on drop).
@@ -469,5 +522,23 @@ fn first_frame_token(frames: &mut FrameReader, stream: &mut dyn Read) -> Result<
             Err(WsErr::Closed) => return Err("socket closed before root-link op".into()),
             Err(WsErr::Protocol(e)) => return Err(e.into()),
         }
+    }
+}
+
+#[cfg(test)]
+mod removed_root_tests {
+    use super::*;
+
+    #[test]
+    fn revoked_roots_reads_the_tree_registry() {
+        let dir = std::env::temp_dir().join(format!("rl-revoked-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("roots.json");
+        assert!(revoked_roots(&f).is_empty(), "no file: none");
+        std::fs::write(&f, r#"{"version":1,"roots":[{"id":"mac"},{"id":"lab","revoked":true},{"id":"x","revoked":"yes"}]}"#).unwrap();
+        assert_eq!(revoked_roots(&f), HashSet::from(["lab".to_string()]));
+        std::fs::write(&f, "not json").unwrap();
+        assert!(revoked_roots(&f).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

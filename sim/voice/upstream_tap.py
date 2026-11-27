@@ -9,10 +9,12 @@ counts (input, cache read/write, output), time to the response head, to the firs
 and tool_use block, and to the end; the stop reason; the tool names asked for. The key is passed
 through untouched and never logged. Point a brain at it with SIM_UPSTREAM_BASE_URL (brain-up.sh).
 """
-import argparse, http.server, json, socketserver, sys, threading, time, urllib.request, urllib.error
+import argparse, http.server, json, os, socketserver, sys, threading, time, urllib.request, urllib.error
 
 LOG = None
+BODIES = None  # --bodies DIR: every request body dumped to DIR/<seq>_<ms>.json (the twin's byte-equality checks)
 LOCK = threading.Lock()
+SEQ = 0
 
 
 def note(rec):
@@ -33,6 +35,14 @@ class H(http.server.BaseHTTPRequestHandler):
         body = self.rfile.read(n) if n else b""
         t0 = time.time()
         rec = {"t": round(t0, 3), "path": self.path, "bytes": len(body)}
+        if BODIES:
+            with LOCK:
+                global SEQ
+                SEQ += 1
+                seq = SEQ
+            with open(os.path.join(BODIES, f"{seq:04d}_{int(t0*1000)}.json"), "wb") as f:
+                f.write(body)
+            rec["body_file"] = f"{seq:04d}_{int(t0*1000)}.json"
         try:
             j = json.loads(body)
             sysv = j.get("system")
@@ -111,7 +121,11 @@ if __name__ == "__main__":
     ap.add_argument("--upstream", required=True)
     ap.add_argument("--port", type=int, required=True)
     ap.add_argument("--log", required=True)
+    ap.add_argument("--bodies", help="dump every request body to this directory")
     a = ap.parse_args()
     H.upstream = a.upstream.rstrip("/")
     LOG = open(a.log, "a")
+    if a.bodies:
+        os.makedirs(a.bodies, exist_ok=True)
+        BODIES = a.bodies
     S(("127.0.0.1", a.port), H).serve_forever()

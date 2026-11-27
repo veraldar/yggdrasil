@@ -53,6 +53,8 @@ def _request(text):
     if m:
         text = m.group(1)
     text = re.sub(r"^<instructions>.*?</instructions>\s*", "", text, flags=re.S)
+    # a copy of a conversation (agy has no fork) opens with the earlier one: not what was asked
+    text = re.sub(r"^<earlier_conversation>.*?</earlier_conversation>\s*", "", text, flags=re.S)
     return text.strip()
 
 

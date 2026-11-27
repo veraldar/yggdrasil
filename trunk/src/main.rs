@@ -49,6 +49,7 @@ mod speech;
 mod switch;
 mod tokens;
 mod keys;
+mod meter;
 #[cfg(feature = "bridge")]
 mod mesh;
 #[cfg(feature = "bridge")]

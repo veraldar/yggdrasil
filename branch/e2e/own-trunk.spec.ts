@@ -253,7 +253,8 @@ test('own trunk: a lay user pairs a phone, talks to MAIN, joins a root, delegate
           [
             'exec', '-u', 'ubuntu', MAC_C, 'bash', '-c',
             `${JOIN_CMD} --hub ${AP} --cacert /sim/trunk-ca.pem --name mac ` +
-              '--upstream-env /home/ubuntu/model.env ' +
+              // OT_JOIN_MODEL=home: no model given — join.sh's default without a terminal, "Same as the home root"
+              (process.env.OT_JOIN_MODEL === 'home' ? '' : '--upstream-env /home/ubuntu/model.env ') +
               '--supervisor nohup --qr-png /sim/join-qr.png >/sim/join.log 2>&1; echo "exit $?" >>/sim/join.log',
           ],
           { stdio: 'ignore' }
@@ -298,12 +299,16 @@ test('own trunk: a lay user pairs a phone, talks to MAIN, joins a root, delegate
         await expect
           .poll(() => (hubGet(7893, '/_wg') as unknown as J[]).map((p) => p.id), { timeout: 30_000 })
           .toEqual([rootId]);
+        // every call between roots carries the tree's peer token (L8): with it the new root's brain answers,
+        // a bare call through the tunnel is refused
+        const peer = `-H "x-ygg-peer: $(sed -n 's/^YGG_PEER_TOKEN=//p' ~/.config/yggdrasil/yggdrasil.env)"`;
         let r = {} as J & J[];
         for (let i = 0; i < 30 && r.name !== rootId; i++) {
-          r = JSON.parse(home(`curl -s -m 10 http://127.0.0.1:7893/_wg/${rootId}/root || echo '{}'`) || '{}');
+          r = JSON.parse(home(`curl -s -m 10 ${peer} http://127.0.0.1:7893/_wg/${rootId}/root || echo '{}'`) || '{}');
           if (r.name !== rootId) await phone.waitForTimeout(500);
         }
         expect(r.name).toBe(rootId);
+        expect(home(`curl -s -m 10 -o /dev/null -w '%{http_code}' http://127.0.0.1:7893/_wg/${rootId}/root`)).toBe('401');
         expect(r.peers).toEqual([HUB_NAME]);
         // the old plaintext switchboard is refused at the bridge
         expect(home(`curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:7890/_root/${rootId}/root`)).toBe('403');

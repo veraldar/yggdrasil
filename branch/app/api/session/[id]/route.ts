@@ -1,4 +1,5 @@
 import { NextResponse } from 'next/server';
+import { engineOf } from '@/lib/agents';
 import { brainDefault } from '@/lib/brain-default';
 import { OC, ocFetch, resolveId } from '@/lib/oc';
 import { bustCache } from '@/lib/oc-cache';
@@ -65,17 +66,51 @@ async function modelRef(providerID: string, raw: string) {
  *  No explicit model (never set — e.g. MAIN before any voice seed) → the
  *  session runs on the brain's default: reported as `defaultModel`, apart
  *  from `model`, so the page shows it AS the default; null = the brain
- *  didn't say (shown as unknown, never guessed). */
-async function summary(s: any) {
+ *  didn't say (shown as unknown, never guessed). `agent` is the role,
+ *  `engine` what runs it; a harness session adds `harness` (kind /
+ *  conversation id / attached); fork/origin and cwd stay server-side. */
+/** a brain session info, as far as the summary reads it */
+type BrainSession = {
+  id: string;
+  title?: string;
+  agent?: string | null;
+  engine?: unknown;
+  steps?: unknown;
+  model?: { id?: string; modelID?: string; providerID: string } | null;
+  harness?: { kind?: string | null; id?: string | null; attached?: boolean } | null;
+  card?: { root?: string | null; kind?: string | null } | null;
+  instructions?: unknown;
+  agent_was?: unknown;
+};
+
+async function summary(s: BrainSession) {
   const raw = s.model ? s.model.id || s.model.modelID : null;
-  const model = raw ? await modelRef(s.model.providerID, raw) : null;
+  const model = raw && s.model ? await modelRef(s.model.providerID, raw) : null;
   const d = model ? null : await brainDefault();
   return {
     id: s.id,
     title: s.title || s.id,
     agent: s.agent || null,
+    // the computer this session lives on (null = this home root)
+    root: typeof s.card?.root === 'string' && s.card.root ? s.card.root : null,
+    // the step cap of this session's turns; null = none (the default)
+    steps: typeof s.steps === 'number' && s.steps > 0 ? s.steps : null,
     model,
     defaultModel: d ? await modelRef(d.providerID, d.modelID) : null,
+    // what runs it — root · claude · antigravity · opencode · codex (an older root: from harness)
+    engine: engineOf(s),
+    harness: s.harness
+      ? {
+          kind: s.harness.kind ?? null,
+          id: s.harness.id ?? null,
+          attached: s.harness.attached === true,
+        }
+      : undefined,
+    // "shared" = it reads only the shared prompt, no role text (a relabelled old session, a
+    // terminal conversation); null = its role's instructions
+    instructions: typeof s.instructions === 'string' ? s.instructions : null,
+    // a relabelled session's old agent name (claude | agy), kept for undo
+    agent_was: typeof s.agent_was === 'string' ? s.agent_was : null,
   };
 }
 
@@ -83,7 +118,7 @@ export async function GET(_req: Request, ctx: { params: Promise<{ id: string }> 
   const { id } = await ctx.params;
   try {
     const sid = await resolveId(id);
-    return NextResponse.json(await summary(await ocFetch(`/session/${sid}`)));
+    return NextResponse.json(await summary((await ocFetch(`/session/${sid}`)) as BrainSession));
   } catch (e) {
     return NextResponse.json({ error: String(e) }, { status: 500 });
   }
@@ -108,7 +143,8 @@ async function ocWrite(path: string, method: string, body: unknown) {
 
 /** Settings writes. title → session PATCH; model+think → v2 model switch
  *  onto the derived think model (the only variant carrier that survives
- *  v1.18 runs — see splitThink); agent → v2 agent switch. */
+ *  v1.18 runs — see splitThink); agent → the role switch; engine → the
+ *  engine switch (a harness engine starts a fresh conversation there). */
 export async function PATCH(req: Request, ctx: { params: Promise<{ id: string }> }) {
   const { id } = await ctx.params;
   try {
@@ -161,14 +197,35 @@ export async function PATCH(req: Request, ctx: { params: Promise<{ id: string }>
       }
     }
 
+    if (body.steps !== undefined) {
+      const n = body.steps === null ? null : Number(body.steps);
+      if (n !== null && !(Number.isInteger(n) && n > 0 && n <= 100_000))
+        return NextResponse.json(
+          { error: 'steps: a whole number, or null for no cap' },
+          { status: 400 }
+        );
+      const no = await ocWrite(`/session/${sid}`, 'PATCH', { steps: n });
+      if (no) return no;
+    }
+
+    // the ROLE only: the engine and the model stay
     if (body.agent !== undefined) {
-      if (!body.agent) return NextResponse.json({ error: 'empty agent' }, { status: 400 });
+      if (!body.agent) return NextResponse.json({ error: 'empty role' }, { status: 400 });
       const no = await ocWrite(`/api/session/${sid}/agent`, 'POST', { agent: String(body.agent) });
       if (no) return no;
     }
 
+    // the ENGINE only: the role stays; the brain picks the model (the role's own on its default
+    // engine, else the engine's default) and refuses MAIN, a terminal conversation, an unknown one
+    if (body.engine !== undefined) {
+      if (!body.engine || typeof body.engine !== 'string')
+        return NextResponse.json({ error: 'empty engine' }, { status: 400 });
+      const no = await ocWrite(`/api/session/${sid}/engine`, 'POST', { engine: body.engine });
+      if (no) return no;
+    }
+
     bustCache(); // home list reflects a rename on its next poll
-    return NextResponse.json(await summary(await ocFetch(`/session/${sid}`)));
+    return NextResponse.json(await summary((await ocFetch(`/session/${sid}`)) as BrainSession));
   } catch (e) {
     return NextResponse.json({ error: String(e) }, { status: 500 });
   }

@@ -14,7 +14,7 @@
  *  next turn, "over and out" ends it, the stop key ends it. A drop (slid
  *  off) sends nothing and undoes the hold.
  *
- *  Loaded lazily by components/roots.tsx: livekit-client never rides the
+ *  Loaded lazily by components/main-bar.tsx: livekit-client never rides the
  *  front page's first load. One instance per page, disposed on leave. */
 import { Room, RoomEvent, Track, createAudioAnalyser } from 'livekit-client';
 import type { Msg } from '@/components/session-message';
@@ -31,13 +31,7 @@ import {
   subscribeSpeech,
 } from '@/lib/speech';
 import { isOnboardPrompt, stripMarkers } from '@/lib/tree-first';
-import {
-  ECHO_TAIL_MS,
-  agentInRoom,
-  releaseMicDevice,
-  tellDeckState,
-  withTimeout,
-} from '@/lib/voice-room';
+import { ECHO_TAIL_MS, agentInRoom, releaseMicDevice, servingAgent, tellDeckState, withTimeout } from '@/lib/voice-room';
 import { VOICE_OFF_NOTE, isVoiceUnavailable, voiceToken } from '@/lib/voice-token';
 import { voiceRoom } from '@/lib/voice-tts';
 
@@ -435,7 +429,7 @@ export class RootsLine {
   }
 
   private async rpc(room: Room, method: string) {
-    const agent = Array.from(room.remoteParticipants.values())[0];
+    const agent = servingAgent(room);
     if (!agent) return;
     await room.localParticipant
       .performRpc({

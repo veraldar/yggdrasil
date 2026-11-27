@@ -1,23 +1,25 @@
 'use client';
 
-/** /agents — the root's agents: name, where it runs (the root, or a harness:
- *  Claude Code / Antigravity / opencode / Codex), its model, what it is for. A row opens
- *  its editor (/agents/[name]); '+ new agent' names one and opens it empty.
- *  Reached from MAIN's settings ('agents ›') and the app settings. */
+/** /agents — the ROLES page (roles rework 11-22; the URL stays): each role with its badge, the
+ *  engine it runs on by default (the root, or Claude Code / Antigravity / opencode / Codex), its
+ *  model, what it is for. A row opens its editor (/agents/[name]); '+ new role' names one and
+ *  opens it empty. Engines live in /settings. Reached from MAIN's settings ('roles ›') and the
+ *  app settings. */
 import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { LineIcon } from '@/components/line-icon';
-import { type AgentRow, harnessLabel } from '@/lib/agents';
+import { type AgentRow, type EngineRow, byRole, engineLabel, roleTag } from '@/lib/agents';
 
-export default function AgentsPage() {
+export default function RolesPage() {
   const router = useRouter();
   const [agents, setAgents] = useState<AgentRow[] | null>(null);
   const [err, setErr] = useState('');
+  const [engines, setEngines] = useState<EngineRow[] | null>(null);
   const [naming, setNaming] = useState(false);
   const [name, setName] = useState('');
 
-  // retry until the list lands — a flaky fetch must not read as "no agents"
+  // retry until the list lands — a flaky fetch must not read as "no roles"
   useEffect(() => {
     if (agents) return;
     let stop = false;
@@ -38,6 +40,15 @@ export default function AgentsPage() {
     };
   }, [agents]);
 
+  // the engines' default models (a role on its default engine without a model of its own runs on it)
+  useEffect(() => {
+    fetch('/api/engines', { cache: 'no-store' })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => Array.isArray(d) && setEngines(d))
+      .catch(() => {});
+  }, []);
+  const engineModel = (e: string) => engines?.find((x) => x.name === e)?.model || null;
+
   const ok = /^[A-Za-z0-9_-]+$/.test(name.trim());
   const create = () => {
     const n = name.trim();
@@ -52,27 +63,40 @@ export default function AgentsPage() {
         <button onClick={() => router.back()} className="oz-k sm">
           <LineIcon name="back" size={13} /> back
         </button>
-        <span className="text-[13px]">agents</span>
+        <span className="text-[13px]">roles</span>
       </header>
 
       <section className="oz-blk">
-        <h2>agents</h2>
+        <h2>roles</h2>
         <ul className="oz-alist">
-          {(agents || []).map((a) => (
-            <li key={a.name}>
-              <Link href={`/agents/${a.name}`} data-testid="agent-row">
-                <span className="r1">
-                  <span className="truncate">{a.name}</span>
-                  <span className="tag">{harnessLabel(a.harness)}</span>
-                  <span className="m">{a.model || 'default'} ›</span>
-                </span>
-                {a.description && <span className="r2">{a.description}</span>}
-              </Link>
-            </li>
-          ))}
+          {[...(agents || [])].sort(byRole).map((a) => {
+            const e = a.harness || 'root';
+            const model = a.model || engineModel(e) || 'default';
+            // the coordinator is MAIN's: always on the root (its model can still change)
+            const door = a.name === 'coordinator';
+            return (
+              <li key={a.name}>
+                <Link href={`/agents/${a.name}`} data-testid="agent-row" data-role={a.name}>
+                  <span className="r1">
+                    <span className="truncate">
+                      <span className="mr-1 opacity-60" aria-hidden="true">
+                        [{roleTag(a.name)}]
+                      </span>
+                      {a.name}
+                    </span>
+                    <span className="tag">{engineLabel(e)}</span>
+                    <span className="m">
+                      {model} {door ? <span className="text-[10px]">locked</span> : '›'}
+                    </span>
+                  </span>
+                  {a.description && <span className="r2">{a.description}</span>}
+                </Link>
+              </li>
+            );
+          })}
           {!agents && (
             <li className="py-2 text-[11px] text-[var(--oz-dim)]">
-              {err ? `couldn't load agents — ${err} · retrying` : 'loading agents…'}
+              {err ? `couldn't load roles — ${err} · retrying` : 'loading roles…'}
             </li>
           )}
         </ul>
@@ -84,7 +108,7 @@ export default function AgentsPage() {
               onChange={(e) => setName(e.target.value)}
               onKeyDown={(e) => e.key === 'Enter' && create()}
               placeholder="name — letters, digits, - _"
-              aria-label="new agent name"
+              aria-label="new role name"
               className="oz-field"
             />
             <button onClick={create} disabled={!ok} className="oz-k ok px-3 disabled:opacity-40">
@@ -97,21 +121,17 @@ export default function AgentsPage() {
               onClick={() => setNaming(true)}
               className="oz-k ok h-9 w-full justify-start px-3 text-[12px]"
             >
-              <LineIcon name="plus" size={13} /> new agent
+              <LineIcon name="plus" size={13} /> new role
             </button>
           </div>
         )}
-        <p className="note">
-          on the root an agent is yours to shape — model, thinking, tools, instructions. on a
-          harness (Claude Code, Antigravity, opencode, Codex) the harness brings its own tools.
-        </p>
       </section>
       <SharedPrompt />
     </main>
   );
 }
 
-/** The system prompt every agent reads first — stored once in the brain, edited here once. */
+/** The system prompt every role reads first — stored once in the brain, edited here once. */
 function SharedPrompt() {
   const [got, setGot] = useState<{ prompt: string; default: string; custom: boolean } | null>(null);
   const [text, setText] = useState('');
@@ -137,13 +157,13 @@ function SharedPrompt() {
     setGot(d);
     setText(d.prompt);
     setNote(
-      prompt.trim() ? 'saved — every agent reads it from its next turn' : 'back to the default'
+      prompt.trim() ? 'saved — every role reads it from its next turn' : 'back to the default'
     );
   };
   if (!got) return null;
   return (
     <section className="oz-blk">
-      <h2>shared by all agents</h2>
+      <h2>shared by all roles</h2>
       <div>
         <textarea
           value={text}
@@ -162,9 +182,7 @@ function SharedPrompt() {
         </button>
         {got.custom && <button onClick={() => void save('')}>reset to default</button>}
       </div>
-      <p className="note">
-        {note || 'every agent reads this first, then its own prompt — stored once, not per agent'}
-      </p>
+      {note && <p className="note">{note}</p>}
     </section>
   );
 }

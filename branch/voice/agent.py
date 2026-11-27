@@ -165,6 +165,50 @@ _SILENCE_HALLUCINATIONS = {
 }
 
 
+class Presence:
+    """Is the person in the room? By connection (sid), and by what they just did: a call from the
+    phone in the last seconds (a hold, a commit, the deck) is a person here, whatever the lists say."""
+
+    ALIVE_S = 8.0
+
+    def __init__(self, sids: set[str] | None = None) -> None:
+        self.sids: set[str] = set(sids or ())
+        self.touched = time.monotonic() if self.sids else 0.0
+
+    def joined(self, sid: str) -> None:
+        self.sids.add(sid)
+        self.touch()
+
+    def left(self, sid: str) -> None:
+        self.sids.discard(sid)
+
+    def touch(self) -> None:
+        self.touched = time.monotonic()
+
+    def here(self, by_name: bool = False) -> bool:
+        return bool(self.sids) or by_name or (self.touched > 0 and time.monotonic() - self.touched < self.ALIVE_S)
+
+
+WAITING_ATTR = "bifrost.waiting"  # a job that waits for the room
+SERVING_ATTR = "bifrost.serving"  # the job that has the room (the phone sends its calls to it)
+DRAINING_ATTR = "bifrost.draining"  # …and its person is away: it leaves unless they come back
+
+
+def sibling_verdict(me: str, others: list[tuple[str, bool, bool, bool]]) -> str:
+    """One agent per room, never none. `others`: the other agents in the room as (identity,
+    waits, serves, drains).
+    - one serves and its person is there: "leave" at once (a job dispatched by a page load or a
+      second hold is a duplicate — it used to stay 20 s, run its own speech-to-text, and take the
+      phone's calls it could not answer);
+    - one serves but drains, or says nothing yet (starting, or an older agent): "wait";
+    - only waiting ones left, or none: "take" when this identity sorts first, else "leave"."""
+    if any(serves and not drains for _, _, serves, drains in others):
+        return "leave"
+    if any(not waits for _, waits, _, _ in others):
+        return "wait"
+    return "take" if all(me < ident for ident, _, _, _ in others) else "leave"
+
+
 def _is_noise_turn(text: str) -> bool:
     # punctuation → space (so "uh-huh" == "uh huh"), keep letters + CJK
     norm = re.sub(r"[^a-z0-9\u4e00-\u9fff]+", " ", text.lower()).strip()
@@ -191,10 +235,14 @@ class OpenCodeLLM(llm.LLM):
         # VAD re-commits turns as A, A+B, A+B+C… while the previous reply is
         # still playing; only the delta may reach opencode (see _run)
         self.last_prompt = ""
+        # the stored turn `last_prompt` came from, and when it was sent (see OpenCodeStream._run)
+        self.last_item: str | None = None
+        self.last_sent_at = 0.0
         # the keyword commit's own words (voice-fixes 11-14): the session's user-turn buffer also
         # holds what the agent dropped (the reply's echo, speech over a reply), so a keyword commit
         # hands its curated text here and that — not the buffer — is what reaches opencode
         self.curated: str | None = None
+        self.written_reply = False
 
     @staticmethod
     def _slugify(title: str) -> str:
@@ -243,8 +291,10 @@ class OpenCodeLLM(llm.LLM):
             try:
                 async with httpx.AsyncClient(timeout=5) as c:
                     self._modality = (await c.get(f"{self._base}/tree")).status_code == 200
-            except Exception:  # noqa: BLE001 — unknown brain: keep the text tag
-                self._modality = False
+            except Exception:  # noqa: BLE001 — no answer right now (the root restarting): this
+                # turn goes without, and the next one asks again (an answer is remembered, a
+                # silence never is — else one slow moment made every later turn unspoken)
+                return False
         return self._modality
 
     @staticmethod
@@ -285,14 +335,30 @@ class OpenCodeLLM(llm.LLM):
             llm=self, chat_ctx=chat_ctx, tools=tools, conn_options=conn_options
         )
 
+    class Delivered(Exception):
+        """The brain answered the POST: the turn is there. Sending it again would run it twice
+        (a session on another root, a link that dropped mid-answer)."""
+
     async def ask_stream(self, text: str, voice: bool = False) -> AsyncIterable[str]:
         """Streaming first-sound (reviewer fix 3): consume yggdrasil's SSE reply
         and yield each COMPLETED sentence as it arrives, so the TTS speaks the
         first sentence seconds before the run completes. Raises on upstream
         failure only if nothing was yielded yet."""
         sid = await self._ensure_session()
-        buf = ""
-        event = ""
+        try:
+            async for sentence in self._stream(sid, text, voice):
+                yield sentence
+        except (httpx.ConnectError, httpx.ConnectTimeout):
+            raise  # the brain was never reached: sending it again is the first time
+        except OpenCodeLLM.Delivered:
+            raise
+        except Exception as e:  # noqa: BLE001
+            # it may have reached the brain (a timeout waiting for the answer, a cut line):
+            # never send it a second time
+            why = "no answer in time; it may still be working" if isinstance(e, httpx.TimeoutException) else (str(e)[:200] or "the line was cut")
+            raise OpenCodeLLM.Delivered(why) from e
+
+    async def _stream(self, sid: str, text: str, voice: bool) -> AsyncIterable[str]:
         async with httpx.AsyncClient(timeout=300) as c:
             async with c.stream(
                 "POST",
@@ -300,36 +366,55 @@ class OpenCodeLLM(llm.LLM):
                 json=self._body(text, voice),
                 headers={"Accept": "text/event-stream"},
             ) as r:
-                r.raise_for_status()
-                async for line in r.aiter_lines():
-                    if line.startswith("event:"):
-                        event = line[6:].strip()
-                        continue
-                    if not line.startswith("data:"):
-                        continue
-                    payload = line[5:].strip()
-                    if not payload:
-                        continue
+                try:
+                    r.raise_for_status()
+                except httpx.HTTPStatusError as e:
+                    # the brain answered (a refusal, or "no answer from <root>"): never send it again
+                    await r.aread()
                     try:
-                        d = json.loads(payload)
+                        why = (r.json() or {}).get("error") or str(e)
                     except ValueError:
-                        continue
-                    if event == "error":
-                        if not buf:
-                            raise RuntimeError(str(d)[:200])
+                        why = str(e)
+                    raise OpenCodeLLM.Delivered(str(why)[:200]) from e
+                try:
+                    async for sentence in self._sse_lines(r):
+                        yield sentence
+                except Exception as e:  # noqa: BLE001
+                    raise OpenCodeLLM.Delivered(str(e)[:200]) from e
+
+    async def _sse_lines(self, r) -> AsyncIterable[str]:
+        """The sentences of one accepted SSE reply, as they complete."""
+        buf = ""
+        event = ""
+        async for line in r.aiter_lines():
+            if line.startswith("event:"):
+                event = line[6:].strip()
+                continue
+            if not line.startswith("data:"):
+                continue
+            payload = line[5:].strip()
+            if not payload:
+                continue
+            try:
+                d = json.loads(payload)
+            except ValueError:
+                continue
+            if event == "error":
+                if not buf:
+                    raise RuntimeError(str(d.get("error") if isinstance(d, dict) else d)[:200])
+                break
+            if event == "message.completed":
+                break
+            if isinstance(d, dict) and "text" in d and "info" not in d:
+                buf += d["text"]
+                while True:
+                    m = re.search(r"^(.*?[.!?])(\s|$)", buf, re.S)
+                    if not m:
                         break
-                    if event == "message.completed":
-                        break
-                    if isinstance(d, dict) and "text" in d and "info" not in d:
-                        buf += d["text"]
-                        while True:
-                            m = re.search(r"^(.*?[.!?])(\s|$)", buf, re.S)
-                            if not m:
-                                break
-                            sent = m.group(1).strip()
-                            buf = buf[m.end():]
-                            if sent:
-                                yield sent
+                    sent = m.group(1).strip()
+                    buf = buf[m.end():]
+                    if sent:
+                        yield sent
         if buf.strip():
             yield buf.strip()
 
@@ -357,6 +442,9 @@ class OpenCodeStream(LLMStream):
         last = messages[-1] if messages else None
         prompt = (last.text_content or "").strip() if last is not None and last.role == "user" else ""
         curated, self._oc.curated = self._oc.curated, None
+        # "over and out" (the radio exit): this turn's answer comes in writing — taken here, for
+        # this turn only, whatever happens to it below
+        written, self._oc.written_reply = getattr(self._oc, "written_reply", False), False
         if not prompt:
             logger.info("opencode bridge: empty or absent user turn, skipping")
             return
@@ -365,13 +453,21 @@ class OpenCodeStream(LLMStream):
         # transcript with A, A+呃, A+呃+B…) — identical means already sent,
         # a strict extension means only the new tail is actually new
         prev = self._oc.last_prompt
-        if prev and prompt == prev:
+        # identical words are "already sent" only when it is the SAME stored turn again (a hold
+        # that caught nothing leaves the earlier turn newest; one utterance committed twice in a
+        # burst). The same words said AGAIN are a new turn: "yes" … "yes", "next" … "next" — a
+        # job stays in its room for hours, and the second one was dropped in silence (11-20).
+        item = getattr(last, "id", None)
+        again = item is None or item == self._oc.last_item or time.monotonic() - self._oc.last_sent_at < 2.0
+        if prev and prompt == prev and again:
             logger.info("opencode bridge: duplicate cumulative turn, skipping")
             return
-        send = prompt[len(prev) :].strip() if prev and prompt.startswith(prev) else prompt
+        send = prompt[len(prev) :].strip() if prev and prompt != prev and prompt.startswith(prev) else prompt
         # update even when dropping: a discarded noise prefix must never
         # resurface later as the "new tail" of a cumulative re-commit
         self._oc.last_prompt = prompt
+        self._oc.last_item = item
+        self._oc.last_sent_at = time.monotonic()
         if curated is not None:
             if curated != send:
                 logger.info("keyword turn sends its own words (%d of %d chars)", len(curated), len(send))
@@ -392,10 +488,13 @@ class OpenCodeStream(LLMStream):
         # mode context rides the payload (req 10-02): appended AFTER the
         # cumulative-dedup bookkeeping so last_prompt stays the raw speech
         mode = str(self._oc.mode_state.get("mode") or "text")
-        # hands-free: a root takes the turn as `modality: voice` (its own hidden note — nothing
-        # extra in the user's words); any other brain still gets the text tag
-        voice = mode == "free" and await self._oc.speaks_modality()
-        if mode == "free" and not voice:
+        # L16 (owner rule 11-20): a turn you speak is answered aloud — held or hands-free, every
+        # turn that comes through here was spoken. A root takes it as `modality: voice` (its own
+        # hidden note — nothing extra in the user's words); any other brain still gets the text
+        # tag, hands-free only as before
+        # (an "over and out" turn is answered in writing: not a voice turn)
+        voice = (not written) and await self._oc.speaks_modality()
+        if mode == "free" and not voice and not written:
             send = send + CTX_TAG
         logger.info("turn → opencode (mode=%s)", mode)
         # Streaming first-sound (AGENT_STREAM_TTS=1 default): speak sentences as
@@ -415,12 +514,20 @@ class OpenCodeStream(LLMStream):
                     llm.ChatChunk(id="opencode", delta=llm.ChoiceDelta(content="(opencode returned no text)"))
                 )
                 return
+            except OpenCodeLLM.Delivered as e:
+                # the brain has the turn: say what went wrong, never send it a second time
+                logger.warning("reply stream failed after the brain took the turn: %s", e)
+                self._event_ch.send_nowait(
+                    llm.ChatChunk(id="opencode", delta=llm.ChoiceDelta(content=f"(connection lost: {e})" if spoke else f"({e})"))
+                )
+                return
             except Exception as e:  # noqa: BLE001
                 if spoke:
                     self._event_ch.send_nowait(
                         llm.ChatChunk(id="opencode", delta=llm.ChoiceDelta(content=f"(connection lost: {e})"))
                     )
                     return
+                # the POST never reached the brain (it was down): sending it now is the first time
                 logger.warning("opencode stream failed before first sentence, falling back: %s", e)
         try:
             reply = await self._oc.ask(send, voice)
@@ -511,9 +618,32 @@ async def entrypoint(ctx: JobContext) -> None:
     # the old job's exit left ~30s of dead air and every hold/tap failed
     # with "no voice agent in the room". Wait out the drain; only a
     # sibling that will not leave is a real duplicate.
+    # Two jobs that wait at the same time used to wait for EACH OTHER: the one serving left, each
+    # still saw the other, both shut down after 20 s — a room with no agent, the turn spoken into
+    # it lost (11-20, both doors used back to back). A waiting job says so (an attribute); once
+    # only waiting jobs are left, the one whose identity sorts first takes the room and the
+    # others leave at once.
+    me = ctx.room.local_participant
+
+    async def _mark(**attrs: bool) -> None:
+        try:
+            await me.set_attributes({k: "1" if v else "" for k, v in attrs.items()})
+        except Exception:  # noqa: BLE001 — an older server: the 20 s rule below still holds
+            pass
+
+    await _mark(**{WAITING_ATTR: True})
     for i in range(80):  # ~20s at 250ms — drain tail is commit grace + 4s
-        if not any(p.identity != human_identity for p in ctx.room.remote_participants.values()):
+        others = [p for p in ctx.room.remote_participants.values() if p.identity != human_identity]
+        attr = lambda p, k: (p.attributes or {}).get(k) == "1"  # noqa: E731
+        verdict = sibling_verdict(
+            me.identity, [(p.identity, attr(p, WAITING_ATTR), attr(p, SERVING_ATTR), attr(p, DRAINING_ATTR)) for p in others]
+        )
+        if verdict == "take":
             break
+        if verdict == "leave":
+            logger.info("room '%s' has its agent — leaving", ctx.room.name)
+            ctx.shutdown("duplicate agent")
+            return
         if i == 0:
             logger.info(
                 "previous agent draining in room '%s' — waiting for it to leave", ctx.room.name
@@ -523,6 +653,7 @@ async def entrypoint(ctx: JobContext) -> None:
         logger.warning("another agent still in room '%s' after 20s — shutting down", ctx.room.name)
         ctx.shutdown("duplicate agent")
         return
+    # (it says it SERVES further down, once it can answer the phone's calls)
 
     # ---- mode awareness (req 10-02) ----
     # The phone publishes its interaction mode ('text' | 'free') as its
@@ -555,34 +686,68 @@ async def entrypoint(ctx: JobContext) -> None:
     # With close_on_disconnect=False the session survives; this task ends the
     # job once the last commit has settled — and stays alive through
     # back-to-back holds that race the tail.
-    async def _human_left_grace() -> None:
-        def _human_present() -> bool:
-            return human_identity in {p.identity for p in ctx.room.remote_participants.values()}
+    # Who is here, by CONNECTION (sid), not by name: the phone keeps one identity, and when it
+    # moves from one page to the next the new connection can arrive before the old one's goodbye —
+    # the room's by-name list then drops the person who is here (11-20 22:16: the job serving a
+    # room left in the middle of a hold; it logged the words and threw them away).
+    presence = Presence({p.sid for p in ctx.room.remote_participants.values() if p.identity == human_identity})
+    grace_running = False
 
-        while True:
-            # a fast re-hold rejoins the same room while this tail is
-            # running — the job stays theirs until they leave for good
-            if _human_present():
-                await asyncio.sleep(0.5)
-                continue
-            waited = 0.0
-            while commit_in_flight and waited < 15.0:  # bounded: never pin the job
-                await asyncio.sleep(0.2)
-                waited += 0.2
-            await asyncio.sleep(4.0)  # tail: let the opencode POST land
-            if _human_present() or commit_in_flight:  # new hold raced in
-                continue
-            break
+    async def _human_left_grace() -> None:
+        nonlocal grace_running
+        if grace_running:
+            return
+        grace_running = True
+
+        def _human_present() -> bool:
+            by_name = human_identity in {p.identity for p in ctx.room.remote_participants.values()}
+            return presence.here(by_name)
+
+        away = False
+        try:
+            while True:
+                # a fast re-hold rejoins the same room while this tail is
+                # running — the job stays theirs until they leave for good
+                if _human_present():
+                    if away:
+                        away = False
+                        await _mark(**{DRAINING_ATTR: False})
+                    await asyncio.sleep(0.5)
+                    continue
+                if not away:  # a job dispatched now waits for this one to leave, or to stay
+                    away = True
+                    await _mark(**{DRAINING_ATTR: True})
+                waited = 0.0
+                while commit_in_flight and waited < 15.0:  # bounded: never pin the job
+                    await asyncio.sleep(0.2)
+                    waited += 0.2
+                await asyncio.sleep(4.0)  # tail: let the opencode POST land
+                if _human_present() or commit_in_flight:  # new hold raced in
+                    continue
+                break
+        finally:
+            grace_running = False
         ctx.shutdown("session closed")
+
+    def _on_participant_connected(participant) -> None:
+        if participant.identity == human_identity:
+            presence.joined(participant.sid)
 
     def _on_participant_disconnected(participant) -> None:
         if participant.identity != human_identity:
             return
+        presence.left(participant.sid)
         asyncio.ensure_future(_human_left_grace())
 
+    ctx.room.on("participant_connected", _on_participant_connected)
     ctx.room.on("participant_disconnected", _on_participant_disconnected)
+    # the person left while this job still waited for the room (their goodbye came before this
+    # line): leave after the tail too — a job that never heard it stayed in its room for hours
+    if not presence.here(human_identity in {p.identity for p in ctx.room.remote_participants.values()}):
+        asyncio.ensure_future(_human_left_grace())
 
     async def _ptt_begin_rpc(data) -> str:
+        presence.touch()
         # a PTT hold must be ONE message: VAD endpointing would auto-commit
         # on every mid-sentence pause, flushing partial transcripts as
         # separate opencode messages — switch to manual turns for the hold
@@ -622,6 +787,7 @@ async def entrypoint(ctx: JobContext) -> None:
             commit_in_flight = False
 
     async def _commit_turn_rpc(data) -> str:
+        presence.touch()
         # the phone can call this while the session is already closing (stale
         # room, participant disconnect race) — raising here surfaces as a raw
         # RPC error/timeout on the phone; a "not-running" answer lets it
@@ -642,6 +808,7 @@ async def entrypoint(ctx: JobContext) -> None:
         return "ok"
 
     async def _ptt_abort_rpc(data) -> str:
+        presence.touch()
         # Discord-style slide-to-cancel: drop the buffered turn, keep keyword
         # turn-taking, commit nothing
         try:
@@ -659,6 +826,7 @@ async def entrypoint(ctx: JobContext) -> None:
     deck = {"text": "", "stopped": 0.0, "seg_over": False}
 
     async def _deck_state_rpc(data) -> str:
+        presence.touch()
         # the phone says when its deck speaks a reply (keywords-only window) and when it stops —
         # and, speaking, the text it speaks (its echo is dropped from what the mic heard)
         try:
@@ -697,6 +865,7 @@ async def entrypoint(ctx: JobContext) -> None:
             await client.aclose()
 
     async def _tts_stream_rpc(data) -> str:
+        presence.touch()
         if not APP_URL:
             return json.dumps({"status": 0, "why": "off"})
         try:
@@ -725,6 +894,9 @@ async def entrypoint(ctx: JobContext) -> None:
     ctx.room.local_participant.register_rpc_method("ptt_begin", _ptt_begin_rpc)
     ctx.room.local_participant.register_rpc_method("ptt_abort", _ptt_abort_rpc)
     ctx.room.local_participant.register_rpc_method("commit_turn", _commit_turn_rpc)
+    # it can answer the phone now: it says so (the app sends its calls to the job that serves;
+    # a job dispatched later leaves at once)
+    await _mark(**{SERVING_ATTR: True, WAITING_ATTR: False})
 
     # ---- keyword turn-taking (radio protocol) ----
     # Speech buffers as ONE turn no matter how long the user thinks; "over"
@@ -828,6 +1000,7 @@ async def entrypoint(ctx: JobContext) -> None:
         phrase = "over and out" if out else "over"
         keyword_busy = True
         oc_llm.curated = turn_text  # the words this turn is made of — never the dropped echo
+        oc_llm.written_reply = out  # "over and out": the answer comes in writing (see _run)
         turn_text = ""
         # keyword turn-taking only exists in hands-free — authoritative mode
         # even if the metadata update has not landed yet. "over and out" is

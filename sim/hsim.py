@@ -187,7 +187,10 @@ def run_checks(sc, work, tree, main_id, visible, brain=None):
             elif kind == "main_says":
                 said = "\n".join(m["text"] for m in visible if m["role"] == "assistant")
                 hit = re.search(c["regex"], said, re.I | re.S)
-                res.append({"name": name, "ok": bool(hit), "detail": hit.group(0)[:200] if hit else "not said"})
+                if c.get("absent"):  # MAIN must never say it
+                    res.append({"name": name, "ok": not hit, "detail": f"said: {hit.group(0)[:200]}" if hit else "never said"})
+                else:
+                    res.append({"name": name, "ok": bool(hit), "detail": hit.group(0)[:200] if hit else "not said"})
             elif kind == "proxy_on":
                 hit = [r for r in tree if re.search(c["title"], r["title"], re.I) and (r.get("card") or {}).get("root") == c["root"]]
                 res.append({"name": name, "ok": bool(hit), "detail": ", ".join(f"{r['title']} → {r['card'].get('root')} ({r['card'].get('status')})" for r in hit) or "no proxy on that root"})

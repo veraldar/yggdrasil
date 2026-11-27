@@ -30,6 +30,7 @@
  */
 import { createHash, randomBytes } from 'crypto';
 import { chmod, readFile, rename, writeFile } from 'fs/promises';
+import { event as obsEvent } from '@/lib/obs';
 
 const DEVICES_FILE = process.env.BIFROST_DEVICES_FILE || '.devices.json';
 const secs = (v: string | undefined, d: number) => (Number(v) > 0 ? Number(v) : d) * 1000;
@@ -206,6 +207,8 @@ function revokeIn(d: Device, why: string) {
   d.revoked = true;
   d.revokedAt = new Date().toISOString();
   d.revokedWhy = why;
+  // the meter: revoke → cut is timed from this revokedAt by the bridge and the wg node
+  obsEvent('revoke', { device: d.id, why });
 }
 
 /** Admin direct mint (CLI / headless devices): returns the credentials ONCE. */
@@ -225,34 +228,76 @@ export async function mintPairCode(name = 'phone'): Promise<{ code: string; exp:
       created: new Date().toISOString(),
     });
   });
+  obsEvent('pair.code', { ttl_s: Math.round(PAIR_TTL_MS / 1000) });
   return { code, exp };
 }
+
+/** Re-pair: point everything `from` approved at `to` (lib/roots.ts handOverRoots — passed in,
+ *  so this module never loads the roots registry). */
+export type HandOver = (from: string, to: string) => Promise<unknown>;
+
+const union = (a?: string[], b?: string[]) => [...new Set([...(a ?? []), ...(b ?? [])])];
 
 /**
  * Phone: redeem a pairing code. Single use (replay → 'used'), expiring
  * ('expired'). `prevRefresh` = the phone's old refresh credential, if it still
  * holds one: revoke-on-repair retires the device it belonged to.
+ *
+ * A re-pair is the same phone, so the old device's trust passes to the new one
+ * before it is retired: its `roots` allowlist, and (`handOver`) the roots it
+ * approved — the hub pins a joined root only while its approving device is
+ * live (trunk/src/wg.rs). Order, so the hub never sees a root without a live
+ * approver: the new device is written live, then roots.json names it, then the
+ * old device is revoked (the wg node reads roots.json, then devices.json). A
+ * device already revoked (device list, theft signal) hands nothing over.
  */
-export function claimPairCode(
+export async function claimPairCode(
   code: string,
   name: string,
   region: string,
-  prevRefresh?: string
+  prevRefresh?: string,
+  handOver?: HandOver
 ): Promise<({ ok: true } & Issued) | { ok: false; why: Deny }> {
-  return mutate((reg) => {
+  let heir: { from: string; to: string } | undefined;
+  const out = await mutate((reg) => {
+    const no = (why: Deny) => {
+      obsEvent('pair.claim', { ok: false, why, region });
+      return { ok: false as const, why };
+    };
     const c = reg.codes.find((x) => x.hash === hashToken(code || ''));
-    if (!c || (code || '').length < 16) return { ok: false as const, why: 'invalid' as Deny };
-    if (c.used) return { ok: false as const, why: 'used' as Deny };
-    if (c.exp < Date.now()) return { ok: false as const, why: 'expired' as Deny };
-    if (prevRefresh) {
-      const h = hashToken(prevRefresh);
-      const old = reg.devices.find((d) => d.refreshHash === h);
-      if (old) revokeIn(old, 're-paired');
-    }
+    if (!c || (code || '').length < 16) return no('invalid');
+    if (c.used) return no('used');
+    if (c.exp < Date.now()) return no('expired');
+    const old = prevRefresh
+      ? reg.devices.find((d) => d.refreshHash === hashToken(prevRefresh))
+      : undefined;
     const d = newDevice(reg, name || c.name, region);
     c.used = d.id;
+    if (old && !old.revoked) {
+      if (old.roots) d.roots = [...old.roots];
+      heir = { from: old.id, to: d.id };
+    }
+    // `from`: the phone's previous device — this claim was a QR reconnect, not a first pairing
+    obsEvent('pair.claim', { ok: true, device: d.id, from: old?.id, region });
     return { ok: true as const, ...issue(d, region) };
   });
+  if (!heir) return out;
+  const { from, to } = heir;
+  try {
+    await handOver?.(from, to);
+  } catch (e) {
+    // the old device is retired all the same: revoke-on-repair never waits on the roots registry
+    console.error(`re-pair ${from} → ${to}: roots not handed over: ${(e as Error).message}`);
+  }
+  await mutate((reg) => {
+    const o = reg.devices.find((x) => x.id === from);
+    const n = reg.devices.find((x) => x.id === to);
+    if (!o) return;
+    // a join the old device approved meanwhile rides along too
+    if (n && !n.revoked && o.roots?.length) n.roots = union(n.roots, o.roots);
+    revokeIn(o, 're-paired');
+  });
+  return out;
 }
 
 /** Rotate: old refresh dies, new access is bound to the CURRENT region. */
@@ -261,7 +306,11 @@ export function refreshDevice(
   region: string
 ): Promise<({ ok: true; regionChanged: boolean } & Issued) | { ok: false; why: Deny }> {
   return mutate((reg) => {
-    const deny = (why: Deny) => ({ ok: false as const, why });
+    let device: string | undefined;
+    const deny = (why: Deny) => {
+      obsEvent('refresh', { src: 'app', ok: false, why, device, region });
+      return { ok: false as const, why };
+    };
     if (!raw || raw.length < 16) return deny('missing');
     const h = hashToken(raw);
     const now = Date.now();
@@ -269,18 +318,27 @@ export function refreshDevice(
     if (!d) {
       const stale = reg.devices.find((x) => x.prevRefresh.some((p) => p.hash === h));
       if (!stale) return deny('invalid');
+      device = stale.id;
       if (stale.revoked) return deny('revoked');
       const at = stale.prevRefresh.find((p) => p.hash === h)!.at;
       if (now - at > ROTATE_GRACE_MS) {
+        // the theft signal: a replaced refresh token presented again, past the grace
+        obsEvent('reuse', { device: stale.id, theft: true, after_s: Math.round((now - at) / 1000) });
         revokeIn(stale, 'refresh token replayed (theft signal)');
         return deny('reuse');
       }
+      obsEvent('reuse', { device: stale.id, theft: false, after_s: Math.round((now - at) / 1000) });
       d = stale; // benign race: rotate again, the newest cookie wins
     }
+    device = d.id;
     if (d.revoked) return deny('revoked');
     if (d.refreshExp < now) return deny('expired');
     if (REGION_POLICY === 'repair' && region !== d.region) return deny('region');
     const regionChanged = region !== d.lastRegion;
+    // how early: what the newest access token still had (negative = after it expired)
+    const prevExp = d.access.reduce((m, a) => Math.max(m, a.exp), 0);
+    const lead_s = prevExp > 0 ? Math.round((prevExp - now) / 1000) : undefined;
+    obsEvent('refresh', { src: 'app', ok: true, device: d.id, lead_s, region_changed: regionChanged, region });
     return { ok: true as const, regionChanged, ...issue(d, region) };
   });
 }
@@ -289,16 +347,17 @@ export function refreshDevice(
 export async function checkAccess(
   raw: string,
   region: string
-): Promise<{ ok: true; device: Device } | { ok: false; why: Deny }> {
+): Promise<{ ok: true; device: Device } | { ok: false; why: Deny; device?: string }> {
   if (!raw || raw.length < 16) return { ok: false, why: 'missing' };
   const reg = await readRegistry();
   const h = hashToken(raw);
   for (const d of reg.devices) {
     const a = d.access.find((x) => x.hash === h);
     if (!a) continue;
-    if (d.revoked) return { ok: false, why: 'revoked' };
-    if (a.exp < Date.now()) return { ok: false, why: 'expired' };
-    if (a.region !== region) return { ok: false, why: 'region' };
+    // `device` on a refusal: the meter follows a roam from its refusal to how it ended
+    if (d.revoked) return { ok: false, why: 'revoked', device: d.id };
+    if (a.exp < Date.now()) return { ok: false, why: 'expired', device: d.id };
+    if (a.region !== region) return { ok: false, why: 'region', device: d.id };
     return { ok: true, device: d };
   }
   return { ok: false, why: 'invalid' };
@@ -354,6 +413,7 @@ export function killSwitch(): Promise<{ epoch: number; severed: number }> {
     reg.codes = [];
     reg.killEpoch += 1;
     reg.killedAt = new Date().toISOString();
+    obsEvent('kill', { epoch: reg.killEpoch, severed });
     return { epoch: reg.killEpoch, severed };
   });
 }

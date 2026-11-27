@@ -112,34 +112,37 @@ test('fix this on MAIN: a fix-agent session tagged [FIX], runs a tool, then answ
   }
 });
 
-test('settings: one agent section — MAIN shows coordinator, a tap explains, MAIN never switches', async ({
+test('settings: one role section — MAIN shows coordinator, locked on the root, never switches', async ({
   page,
   request,
 }) => {
   const main = await mainOf(request);
-  const agents = (await (await request.get('/api/agents')).json()) as {
-    name: string;
-    description: string;
-  }[];
-  const lead = agents.find((a) => a.name === 'lead');
-  test.skip(!lead, 'this brain has no lead profile');
   await page.goto(`/session/main?id=${main.id}`);
   await page.getByRole('link', { name: 'session settings' }).tap();
   await page.waitForURL(/\/session\/main\/settings/);
   const blk = (h: string) =>
     page.locator('.oz-blk', { has: page.getByRole('heading', { name: h, exact: true }) });
-  await expect(blk('agent')).toHaveCount(1);
+  await expect(blk('role')).toHaveCount(1);
+  await expect(blk('agent')).toHaveCount(0); // the word on screen is "role"
   await expect(blk('profile')).toHaveCount(0); // the separate profile card is gone
   await expect(page.getByTestId('profile-card')).toHaveCount(0);
-  const chip = (n: string) => blk('agent').getByRole('button', { name: n, exact: true });
+  const chip = (n: string) => blk('role').getByRole('button', { name: n, exact: true });
   await expect(chip('coordinator')).toHaveAttribute('aria-pressed', 'true');
-  await chip('lead').tap();
-  await expect(page.getByTestId('agent-about')).toContainText(lead!.description);
-  await expect(chip('coordinator')).toHaveAttribute('aria-pressed', 'true');
-  await page.waitForTimeout(1500); // a write would have landed by now
-  expect(((await (await request.get(`${OC}/session/${main.id}`)).json()) as Info).agent).toBe(
-    'coordinator'
+  await expect(chip('lead')).toHaveCount(0); // MAIN is offered no other role
+  await chip('coordinator').tap();
+  await expect(page.getByTestId('role-desc')).toBeVisible(); // a tap explains
+  // and it runs on the root, locked
+  const runsOn = blk('runs on');
+  await expect(runsOn.getByRole('button', { name: 'root', exact: true })).toHaveAttribute(
+    'aria-pressed',
+    'true'
   );
+  await expect(runsOn.getByRole('button', { name: 'Claude Code', exact: true })).toBeDisabled();
+  await page.waitForTimeout(1500); // a write would have landed by now
+  const info = (await (await request.get(`${OC}/session/${main.id}`)).json()) as Info & {
+    engine?: string;
+  };
+  expect([info.agent, info.engine ?? 'root']).toEqual(['coordinator', 'root']);
 });
 
 test('settings: another session switches (after what changes), never to the coordinator', async ({
@@ -159,13 +162,12 @@ test('settings: another session switches (after what changes), never to the coor
     await page.goto(`/session/${s.title}?id=${s.id}`);
     await page.getByRole('link', { name: 'session settings' }).tap();
     const blk = page.locator('.oz-blk', {
-      has: page.getByRole('heading', { name: 'agent', exact: true }),
+      has: page.getByRole('heading', { name: 'role', exact: true }),
     });
     await expect(blk.getByRole('button', { name: 'research', exact: true })).toBeVisible();
     await expect(blk.getByRole('button', { name: 'coordinator', exact: true })).toHaveCount(0);
     await blk.getByRole('button', { name: 'research', exact: true }).tap();
-    await expect(page.getByTestId('agent-about')).toContainText(research!.description);
-    await page.getByTestId('agent-diff').getByRole('button', { name: 'switch' }).tap();
+    await page.getByTestId('role-diff').getByRole('button', { name: 'switch' }).tap();
     await expect(blk.getByRole('button', { name: 'research', exact: true })).toHaveAttribute(
       'aria-pressed',
       'true'
@@ -244,7 +246,7 @@ test('full log on MAIN: internal turns + tool calls behind the header key', asyn
   await expect(started).toHaveCount(0);
 });
 
-test('agents: from MAIN settings — claude on Claude Code & agy on Antigravity, make tester, a session takes it (diff first), delete', async ({
+test('roles: from MAIN settings — no claude/agy roles, the engines, make tester, a session takes it and moves engine (what changes first), delete', async ({
   page,
   request,
 }) => {
@@ -257,46 +259,32 @@ test('agents: from MAIN settings — claude on Claude Code & agy on Antigravity,
   ).json()) as Info;
   const brainSession = async () =>
     (await (await request.get(`${OC}/session/${s.id}`)).json()) as Info & {
-      model?: { id?: string };
+      engine?: string;
+      model?: { id?: string; providerID?: string };
     };
   try {
-    // MAIN's settings → agents
+    // MAIN's settings → roles
     await page.goto(`/session/main?id=${main.id}`);
     await page.getByRole('link', { name: 'session settings' }).tap();
-    await page.getByRole('link', { name: 'agents ›' }).tap();
+    await page.getByRole('link', { name: 'roles ›' }).tap();
     await page.waitForURL(/\/agents$/);
-    // agy runs on Antigravity, using its own default pick
-    await page.locator('[data-testid="agent-row"][href="/agents/agy"]').tap();
-    await page.waitForURL(/\/agents\/agy$/);
-    await expect(page.getByRole('button', { name: 'Antigravity', exact: true })).toHaveAttribute(
-      'aria-pressed',
-      'true'
-    );
-    await expect(page.getByRole('button', { name: 'default', exact: true })).toHaveAttribute(
-      'aria-pressed',
-      'true'
-    );
-    await page.getByRole('button', { name: 'back' }).tap();
-    // claude runs on Claude Code, on opus
-    await page.locator('[data-testid="agent-row"][href="/agents/claude"]').tap();
-    await page.waitForURL(/\/agents\/claude$/);
-    await expect(page.getByRole('button', { name: 'Claude Code', exact: true })).toHaveAttribute(
-      'aria-pressed',
-      'true'
-    );
-    // a picker, never free text: Claude Code's own models, each with what it is for
-    await expect(page.getByRole('button', { name: 'opus', exact: true })).toHaveAttribute(
-      'aria-pressed',
-      'true'
-    );
-    await expect(page.getByRole('button', { name: 'haiku', exact: true })).toBeVisible();
-    await expect(page.getByText(/strongest/)).toBeVisible();
-    await expect(page.getByRole('heading', { name: 'extra instructions' })).toBeVisible();
-    await expect(page.getByRole('heading', { name: 'tools' })).toHaveCount(0); // the harness's own
-    // a new root agent: read + bash only, glm-5.3-flash
-    await page.getByRole('button', { name: 'back' }).tap();
-    await page.getByRole('button', { name: 'new agent' }).tap();
-    await page.getByLabel('new agent name').fill(NAME);
+    // claude and agy are engines now, not roles — and engines live in /settings, not /agents
+    await expect(page.getByTestId('agent-row').first()).toBeVisible();
+    await expect(page.getByTestId('engines-block')).toHaveCount(0);
+    await expect(page.locator('[data-testid="agent-row"][href="/agents/claude"]')).toHaveCount(0);
+    await expect(page.locator('[data-testid="agent-row"][href="/agents/agy"]')).toHaveCount(0);
+    // the engines block lives on /settings: Claude Code's own models, each with what it is for
+    await page.goto('/settings');
+    const cc = page.locator('[data-testid="engine-row"][data-engine="claude"]');
+    await cc.getByRole('button', { name: /Claude Code/ }).tap();
+    await expect(cc.getByRole('button', { name: 'haiku', exact: true })).toBeVisible();
+    await expect(cc.getByText(/strong/).first()).toBeVisible();
+    await cc.getByRole('button', { name: /Claude Code/ }).tap(); // closed, nothing saved
+    await page.getByTestId('agents-link').tap();
+    await page.waitForURL(/\/agents$/);
+    // a new root role: read + bash only, glm-5.3-flash
+    await page.getByRole('button', { name: 'new role' }).tap();
+    await page.getByLabel('new role name').fill(NAME);
     await page.getByRole('button', { name: 'create', exact: true }).tap();
     await page.waitForURL(new RegExp(`/agents/${NAME}`));
     await page.getByLabel('description').fill('e2e: reads and runs, nothing else');
@@ -306,7 +294,7 @@ test('agents: from MAIN settings — claude on Claude Code & agy on Antigravity,
       'true'
     );
     await page.getByRole('button', { name: 'bash', exact: true }).tap();
-    await page.getByRole('button', { name: 'create agent' }).tap();
+    await page.getByRole('button', { name: 'create role' }).tap();
     await expect(page.getByText('saved', { exact: true })).toBeVisible();
     const made = await (await request.get(`${OC}/agent/${NAME}`)).json();
     expect(
@@ -319,7 +307,7 @@ test('agents: from MAIN settings — claude on Claude Code & agy on Antigravity,
     await page.getByRole('button', { name: 'back' }).tap();
     await expect(page.getByTestId('agent-row').filter({ hasText: NAME })).toBeVisible();
 
-    // a throwaway session: on glm-5.2 first, then it takes tester — the diff comes first
+    // a throwaway session: on glm-5.2 first, then it takes tester — what changes comes first
     await page.goto(`/session/${s.title}?id=${s.id}`);
     await page.getByRole('link', { name: 'session settings' }).tap();
     await page.waitForURL(/\/settings$/);
@@ -327,13 +315,15 @@ test('agents: from MAIN settings — claude on Claude Code & agy on Antigravity,
     await modelPick.tap();
     await page.getByRole('button', { name: 'yggdrasil/glm-5.2', exact: true }).tap();
     await expect(modelPick).toContainText('glm-5.2');
-    const agentBlk = page.locator('.oz-blk', {
-      has: page.getByRole('heading', { name: 'agent', exact: true }),
+    const roleBlk = page.locator('.oz-blk', {
+      has: page.getByRole('heading', { name: 'role', exact: true }),
     });
-    await agentBlk.getByRole('button', { name: NAME, exact: true }).tap();
-    const diff = page.getByTestId('agent-diff');
+    await roleBlk.getByRole('button', { name: NAME, exact: true }).tap();
+    const diff = page.getByTestId('role-diff');
     await expect(diff).toBeVisible();
-    await expect(diff).toContainText('model');
+    await expect(diff).toContainText(`build → ${NAME}`);
+    await expect(diff).toContainText('root (unchanged)');
+    // it runs on tester's default engine (the root) and tester names a model: it takes it
     await expect(diff).toContainText('glm-5.2 → glm-5.3-flash');
     await expect(diff).toContainText('tools');
     await expect(diff).toContainText('−write'); // build (the brain's default it ran) wrote; tester doesn't
@@ -341,7 +331,7 @@ test('agents: from MAIN settings — claude on Claude Code & agy on Antigravity,
     await diff.getByRole('button', { name: 'switch' }).tap();
     await expect(diff).toHaveCount(0);
     await expect.poll(async () => (await brainSession()).agent).toBe(NAME);
-    expect((await brainSession()).model?.id).toBe('glm-5.3-flash');
+    expect((await brainSession()).engine).toBe('root');
     await expect(modelPick).toContainText('glm-5.3-flash');
     // the model stays the user's to change
     await modelPick.tap();
@@ -351,14 +341,19 @@ test('agents: from MAIN settings — claude on Claude Code & agy on Antigravity,
       .poll(async () => (await brainSession()).model?.id)
       .toMatch(/^glm-5\.3(-think-\w+)?$/);
     expect((await brainSession()).agent).toBe(NAME);
-    // claude: the diff says it moves to Claude Code
-    await agentBlk.getByRole('button', { name: 'claude', exact: true }).tap();
-    await expect(diff).toContainText('runs on');
-    await expect(diff).toContainText('root → Claude Code');
-    await diff.getByRole('button', { name: 'switch' }).tap();
-    await expect.poll(async () => (await brainSession()).agent).toBe('claude');
+    // runs on Claude Code: what changes says the engine moves, the role stays, it starts fresh
+    const runsOn = page.locator('.oz-blk', {
+      has: page.getByRole('heading', { name: 'runs on', exact: true }),
+    });
+    await runsOn.getByRole('button', { name: 'Claude Code', exact: true }).tap();
+    const ediff = page.getByTestId('engine-diff');
+    await expect(ediff).toContainText(`${NAME} (unchanged)`);
+    await expect(ediff).toContainText('root → Claude Code');
+    await expect(ediff).toContainText('the new engine starts fresh');
+    await ediff.getByRole('button', { name: 'switch' }).tap();
+    await expect.poll(async () => (await brainSession()).engine).toBe('claude');
+    expect((await brainSession()).agent).toBe(NAME);
     // on Claude Code the session picks from Claude's models, not the root's
-    await expect(modelPick).toContainText('opus');
     await modelPick.tap();
     await expect(page.getByRole('button', { name: /claude\/haiku/ })).toBeVisible();
     await expect(page.getByRole('button', { name: /yggdrasil\// })).toHaveCount(0);
@@ -366,16 +361,16 @@ test('agents: from MAIN settings — claude on Claude Code & agy on Antigravity,
     await expect
       .poll(async () => (await brainSession()).model)
       .toEqual({ id: 'sonnet', providerID: 'claude' });
-    // customize ‹agent› › opens its editor
-    await expect(page.getByRole('link', { name: 'customize claude ›' })).toBeVisible();
+    // customize ‹role› › opens its editor
+    await expect(page.getByRole('link', { name: `customize ${NAME} ›` })).toBeVisible();
 
-    // a new agent on opencode: its own models, grouped by provider, picked from a list
+    // a new role on opencode: its own models, grouped by provider, picked from a list
     const OC_NAME = `${NAME}-oc`;
     const ocList: string[] = (await (await request.get(`${OC}/agent/build`)).json())
       .models_by_harness.opencode;
     await page.goto('/agents');
-    await page.getByRole('button', { name: 'new agent' }).tap();
-    await page.getByLabel('new agent name').fill(OC_NAME);
+    await page.getByRole('button', { name: 'new role' }).tap();
+    await page.getByLabel('new role name').fill(OC_NAME);
     await page.getByRole('button', { name: 'create', exact: true }).tap();
     await page.waitForURL(new RegExp(`/agents/${OC_NAME}`));
     await page.getByRole('button', { name: 'opencode', exact: true }).tap();
@@ -386,18 +381,18 @@ test('agents: from MAIN settings — claude on Claude Code & agy on Antigravity,
     } else {
       await page.getByRole('button', { name: pick, exact: true }).tap();
     }
-    await page.getByRole('button', { name: 'create agent' }).tap();
+    await page.getByRole('button', { name: 'create role' }).tap();
     await expect(page.getByText('saved', { exact: true })).toBeVisible();
     const oc = await (await request.get(`${OC}/agent/${OC_NAME}`)).json();
     expect([oc.harness, oc.model]).toEqual(['opencode', pick === 'default' ? null : pick]);
-    await page.getByRole('button', { name: 'delete agent' }).tap();
+    await page.getByRole('button', { name: 'delete role' }).tap();
     await page.getByRole('button', { name: 'tap again to delete' }).tap();
     await page.waitForURL(/\/agents$/);
     await page.goto(`/session/${s.title}/settings?id=${s.id}`);
 
     // delete tester: two taps, back on the list without it
     await page.goto(`/agents/${NAME}`);
-    await page.getByRole('button', { name: 'delete agent' }).tap();
+    await page.getByRole('button', { name: 'delete role' }).tap();
     await page.getByRole('button', { name: 'tap again to delete' }).tap();
     await page.waitForURL(/\/agents$/);
     await expect(page.getByTestId('agent-row').first()).toBeVisible();
@@ -406,10 +401,11 @@ test('agents: from MAIN settings — claude on Claude Code & agy on Antigravity,
   } finally {
     await request.delete(`/api/session/${s.id}`).catch(() => {});
     await request.delete(`${OC}/agent/${NAME}`).catch(() => {});
+    await request.delete(`${OC}/agent/${NAME}-oc`).catch(() => {});
   }
 });
 
-test('agents: one shared prompt, stored once — edit it on the agents page, every agent reads it once; [TAG]s in the session list', async ({
+test('roles: one shared prompt, stored once — edit it on the roles page, every role reads it once; [TAG]s in the session list', async ({
   page,
   request,
 }) => {
@@ -425,10 +421,10 @@ test('agents: one shared prompt, stored once — edit it on the agents page, eve
   const original = was.prompt;
   const marker = `e2e marker ${Date.now().toString(36)}`;
   try {
-    // MAIN's settings → agents: the shared prompt, once, with the intent section
+    // MAIN's settings → roles: the shared prompt, once, with the intent section
     await page.goto(`/session/main?id=${main.id}`);
     await page.getByRole('link', { name: 'session settings' }).tap();
-    await page.getByRole('link', { name: 'agents ›' }).tap();
+    await page.getByRole('link', { name: 'roles ›' }).tap();
     await page.waitForURL(/\/agents$/);
     const shared = page.getByLabel('shared prompt');
     await expect(shared).toHaveValue(
@@ -437,13 +433,9 @@ test('agents: one shared prompt, stored once — edit it on the agents page, eve
     // edit it here, once
     await shared.fill(`${original}\n\n${marker}`);
     await page.getByRole('button', { name: 'save', exact: true }).tap();
-    await expect(page.getByText(/saved — every agent reads it/)).toBeVisible();
+    await expect(page.getByText(/saved — every role reads it/)).toBeVisible();
     // build: one prompt of its own, no per-model choice; the shared text arrives once
-    await page
-      .getByTestId('agent-row')
-      .filter({ hasText: /^\s*build/ })
-      .first()
-      .tap();
+    await page.locator('[data-testid="agent-row"][data-role="build"]').tap();
     await page.waitForURL(/\/agents\/build$/);
     await expect(page.getByRole('group', { name: 'model tier' })).toHaveCount(0);
     await expect(page.getByLabel('system prompt')).not.toHaveValue(/Re-interpret/);
@@ -454,10 +446,19 @@ test('agents: one shared prompt, stored once — edit it on the agents page, eve
     await expect(full).toContainText('that is how the tree brings your question to them.');
     const text = (await full.textContent()) || '';
     expect(text.split("Re-interpret the user's intent").length - 1, 'the shared text once').toBe(1);
-    // claude (Claude Code) gets the same shared prompt with its instructions
-    await page.goto('/agents/claude');
-    await page.getByText(/everything the model reads/).tap();
-    await expect(page.getByTestId('system-full')).toContainText(marker);
+    // a role on Claude Code gets the same shared prompt with its instructions
+    const cc = `e2e-cc-${Date.now().toString(36)}`;
+    const put = await request.put(`${OC}/agent/${cc}`, {
+      data: { harness: 'claude', description: 'e2e: shared prompt on Claude Code' },
+    });
+    expect(put.ok(), await put.text()).toBe(true);
+    try {
+      await page.goto(`/agents/${cc}`);
+      await page.getByText(/everything the model reads/).tap();
+      await expect(page.getByTestId('system-full')).toContainText(marker);
+    } finally {
+      await request.delete(`${OC}/agent/${cc}`).catch(() => {});
+    }
     // the session list: the agent in three capitals before the title; MAIN keeps its own
     await page.goto('/');
     await expect(page.getByText(new RegExp(`^\\[BUI\\]\\s*${s.title}$`))).toBeVisible({

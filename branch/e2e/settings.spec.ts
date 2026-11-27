@@ -40,7 +40,9 @@ test.beforeAll(async ({ request }) => {
     providerID: prov.id,
     modelID: model.id,
     variants: model.variants || [],
-    other: other ? { providerID: prov.id, modelID: other.id, variants: other.variants || [] } : undefined,
+    other: other
+      ? { providerID: prov.id, modelID: other.id, variants: other.variants || [] }
+      : undefined,
     agents: agents.map((a) => a.name || '').filter(Boolean),
   };
 
@@ -73,27 +75,32 @@ test.afterAll(async ({ request }) => {
   if (pickerSessionId) await request.delete(`/api/session/${pickerSessionId}`);
 });
 
-test('header slug opens settings — NAME/MODEL/THINK/AGENT tiles render', async ({ page }) => {
+test('header slug opens settings — NAME/ROLE/RUNS ON/MODEL/THINK tiles render', async ({
+  page,
+}) => {
   await page.goto(`/session/${BASE_NAME}?id=${sessionId}`);
   await page.getByLabel('session settings').click();
   await expect(page).toHaveURL(new RegExp(`/session/${BASE_NAME}/settings`));
-  for (const tile of ['name', 'model', 'think', 'agent']) {
+  for (const tile of ['name', 'role', 'runs on', 'model']) {
     await expect(page.getByRole('heading', { name: tile, exact: true })).toBeVisible();
   }
   // model tile shows the catalogued id (provider/model); think shows the
-  // configured levels — or the honest empty state when the model has none
+  // configured levels — no think block when the model has none (no help text)
   await expect(page.getByText(`${cat.providerID}/${cat.modelID}`)).toBeVisible();
   if (cat.variants.length) {
     for (const level of cat.variants) {
       await expect(page.getByRole('button', { name: level, exact: true })).toBeVisible();
     }
-    await expect(page.getByText(`current — ${cat.variants[0]}`)).toBeVisible();
+    await expect(page.getByRole('button', { name: cat.variants[0], exact: true })).toHaveAttribute(
+      'aria-pressed',
+      'true'
+    );
   } else {
-    await expect(page.getByText('no think levels configured for this model')).toBeVisible();
+    await expect(page.getByTestId('think-block')).toHaveCount(0);
   }
-  // agent tile lists the CATALOG's primary agents — utility prompts and
-  // subagents must NOT appear
-  for (const a of cat.agents) {
+  // role tile lists the CATALOG's roles — utility prompts and subagents must NOT appear, nor the
+  // coordinator (MAIN's alone)
+  for (const a of cat.agents.filter((n) => n !== 'coordinator')) {
     await expect(page.getByRole('button', { name: a, exact: true })).toBeVisible();
   }
   await expect(page.getByRole('button', { name: 'title', exact: true })).toHaveCount(0);
@@ -109,13 +116,19 @@ test('think: tap switches the derived model server-side, tap reverts', async ({
   await page.goto(`/session/${BASE_NAME}/settings`);
   // active level shown from the server → tap it → back to model default
   await page.getByRole('button', { name: active, exact: true }).click();
-  await expect(page.getByText(/current — model default/)).toBeVisible();
+  await expect(page.getByRole('button', { name: active, exact: true })).toHaveAttribute(
+    'aria-pressed',
+    'false'
+  );
   const afterRevert = await (await request.get(`/api/session/${sessionId}`)).json();
   expect(afterRevert.model?.variant).toBeNull();
   expect(afterRevert.model?.modelID).toBe(cat.modelID);
   // set a different level → caption + server (derived modelID) agree
   await page.getByRole('button', { name: next, exact: true }).click();
-  await expect(page.getByText(`current — ${next}`)).toBeVisible();
+  await expect(page.getByRole('button', { name: next, exact: true })).toHaveAttribute(
+    'aria-pressed',
+    'true'
+  );
   const afterSet = await (await request.get(`/api/session/${sessionId}`)).json();
   expect(afterSet.model?.variant).toBe(next);
   expect(afterSet.model?.modelID).toBe(cat.modelID);
@@ -131,7 +144,7 @@ test('rename: PATCH + URL follows the new slug (typed fast, mid-fetch)', async (
   expect(list.some((s: { title: string }) => s.title === RENAMED)).toBeTruthy();
 });
 
-test('model picker: filter + apply persists; models without think levels say so', async ({
+test('model picker: filter + apply persists; models without think levels show no think block', async ({
   page,
   request,
 }) => {
@@ -152,9 +165,8 @@ test('model picker: filter + apply persists; models without think levels say so'
   await expect(page.getByText(`${target.providerID}/${target.modelID}`).first()).toBeVisible();
   const s = await (await request.get(`/api/session/${pickerSessionId}`)).json();
   expect(s.model?.modelID).toBe(target.modelID);
-  // honest empty state — only when this model truly has no derived levels
   if (!target.variants.length) {
-    await expect(page.getByText('no think levels configured for this model')).toBeVisible();
+    await expect(page.getByTestId('think-block')).toHaveCount(0);
   }
 });
 

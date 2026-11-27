@@ -26,7 +26,7 @@
   {
    "name": "typed into the tmux Claude Code session",
    "cmd": "grep -c 'SIM-TYPED-OK' /home/dweeb_xyz/.claude/projects/*cc-live-scratch/070d6b89-df88-495a-b061-1a0a80cfbea0.jsonl",
-   "expect": "^[2-9]"
+   "expect": "^([2-9]|[1-9][0-9])"
   },
   {
    "name": "the Antigravity conversation went on",

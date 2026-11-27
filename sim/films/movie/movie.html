@@ -1,0 +1,301 @@
+<!doctype html>
+<!-- movie.html — "what yggdrasil is": the site's main film, drawn by script. 1080 × 1920; the picture only (sound.py adds the voice).
+     Nothing here runs on its own clock: window.renderAt(t) draws the whole picture for second t, so
+     render.mjs can shoot it frame by frame and the film is the same every time. The phone in it shows
+     REAL footage: the frames sim/films/films.mjs recorded from the real app (footage/<name>/NNNNN.jpg,
+     cut by make.sh). The words follow the site's first screen and the brand's voice: lowercase, plain,
+     every claim one the product backs (the scenes name their proof in the SCRIPT below). -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<style>
+@font-face{font-family:"Commit Mono";src:url(font.woff) format("woff");font-weight:400}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{width:1080px;height:1920px;overflow:hidden;background:#080810}
+body{font-family:"Commit Mono",monospace;color:#e8e8f0;position:relative}
+#stage{position:absolute;inset:0}
+.h{position:absolute;left:72px;top:104px;width:936px;font-size:54px;line-height:72px;letter-spacing:-.01em;white-space:pre-wrap}
+.sub{position:absolute;left:72px;top:1646px;width:960px;font-size:38px;line-height:54px;color:#a4a4bc;white-space:pre-wrap}
+.sub b{font-weight:400;color:#e8e8f0}
+.cur{display:inline-block;width:.55em;height:.86em;background:currentColor;vertical-align:-.08em;margin-left:.06em}
+#map,#over{position:absolute;inset:0;width:1080px;height:1920px}
+#mini svg{display:block;width:100%;height:100%}
+.lbl{font-size:30px;fill:#e8e8f0}
+.dim{font-size:24px;fill:#8a8aa6}
+#phone{position:absolute;border:3px solid #3a3a4e;background:#05050a;overflow:hidden}
+#foot{position:absolute;left:0;top:0;width:100%;height:100%;display:block}
+#mini{position:absolute;inset:0}
+#end{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:34px;text-align:center}
+#end .w{font-size:132px;font-weight:600;letter-spacing:-.02em;line-height:1}
+#end .a{font-size:40px;color:#e8e8f0}
+#end .b{font-size:30px;color:#8a8aa6}
+#end .c{font-size:34px;color:#4ade80;margin-top:26px}
+</style>
+</head>
+<body>
+<div id="stage">
+  <svg id="map" viewBox="0 0 1080 1920" xmlns="http://www.w3.org/2000/svg"></svg>
+  <div id="phone"><div id="mini"></div><img id="foot" alt=""></div>
+  <svg id="over" viewBox="0 0 1080 1920" xmlns="http://www.w3.org/2000/svg"></svg>
+  <div class="h" id="h"></div>
+  <div class="sub" id="sub"></div>
+  <div id="end"><div class="w">veraldar<span class="cur"></span></div><div class="a">yggdrasil · your own AI</div><div class="b">AGPL-3.0 · free for everyone</div><div class="c">veraldar.org</div></div>
+</div>
+<script>
+/* ---------------------------------------------------------------- the script (seconds) */
+const C = { bg: '#080810', ink: '#e8e8f0', dim: '#8a8aa6', line: '#3a3a4e', faint: '#22222e', ok: '#4ade80', amber: '#fbbf24', sky: '#38bdf8' };
+const FPS = 30;
+// footage: name, the film's seconds it plays in, how fast (the recordings' dead time goes), frames from make.sh
+const FOOT = window.FOOT || { talk: { n: 475 }, tree: { n: 511 }, file: { n: 468 } };
+const S = {
+  A: 0, B: 6.0, C: 17.8, D: 28.2, ZOOM: 29.9, E: 31.1, F: 45.1, G: 56.7, OUT: 67.3, H: 68.3, CARD: 75.6, END: 80.2,
+};
+const PLAY = { talk: [S.E, S.F], tree: [S.F, S.G], file: [S.G, S.OUT] };
+/* headlines: [from, text]; the newest one whose time has come is typed. '' clears.
+   proof — A/B: the product itself (a root = a brain on each computer: root/, S10) · C: docs/own-trunk.md "What
+   the server can see", sim/trunk-rtc-e2e.sh · E: S12/S15 (voice over the trunk; this footage) · F: S10, S16 ·
+   G: S17, S8 · H: AGPL-3.0, the repository */
+const HEAD = [
+  [0.5, 'you own computers.'],
+  [3.3, 'you own computers.\nmost of the day, they wait.'],
+  [S.B, ''], [S.B + 0.3, 'yggdrasil is your own AI,\nliving on them.'],
+  [S.C, ''], [S.C + 0.3, 'one private line\njoins them to your phone.'],
+  [S.D, ''], [S.D + 0.2, 'and one app, in your hand.'],
+  [S.E, ''], [S.E + 0.2, 'hold. speak.'], [S.E + 6.6, 'let go.'], [S.E + 7.5, 'it answers out loud.'],
+  [S.F, ''], [S.F + 0.2, 'every computer, one list.'], [S.F + 3.4, 'each has its own\nmain session.'], [S.F + 8.6, 'it answers from there, live.'],
+  [S.G, ''], [S.G + 0.2, 'send it a file.'], [S.G + 6.2, 'it answers,\nand makes one.'],
+  [S.OUT, ''], [S.H + 0.4, 'one tree,\nacross all your computers.'],
+  [S.CARD - 0.3, ''],
+];
+const SUB = [
+  [S.B + 3.4, 'not an app. not a service in someone\nelse\'s cloud.'],
+  [S.B + 6.8, '<b>root</b>: a brain on each computer.\nit thinks, remembers, does the work.'],
+  [S.C, ''],
+  [S.C + 3.8, '<b>trunk</b>: one small server you rent.'],
+  [S.C + 6.2, '<b>trunk</b>: one small server you rent.\nit carries everything. it holds no key\nto read any of it.'],
+  [S.D, ''], [S.D + 0.5, '<b>branch</b>: bifrost, on your phone.'],
+  [S.ZOOM, ''],
+  [S.E + 3.6, '“How did the backup go last night?”'],
+  [S.E + 6.6, ''],
+  [S.E + 8.8, '“It finished at ten past three.\nEverything was copied, and there were\nno errors.”'],
+  [S.F, ''],
+  [S.F + 5.3, '<b>end to end</b>: your phone and your\ncomputers hold the keys.'],
+  [S.G, ''], [S.G + 1.6, 'any file, to any session.'], [S.G + 6.0, ''], [S.G + 8.1, 'the file opens right there.'],
+  [S.OUT, ''],
+  [S.H + 3.0, 'your phone. one private line.\nall your computers, by voice.'],
+  [S.CARD - 0.3, ''],
+];
+/* the voice: [second, who, words]. narrator = the storyteller · you = the person who asks · app = the voice a
+   home computer really answers with. sound.py says them (and fails the film if one runs into the next: then
+   the seconds above make room). The spoken words follow the written ones. */
+window.VO = [
+  [0.5, 'narrator', 'You own computers.'],
+  [3.3, 'narrator', 'Most of the day, they wait.'],
+  [S.B + 0.4, 'narrator', 'Yggdrasil is your own AI, living on them.'],
+  [S.B + 3.5, 'narrator', "Not an app. Not a service in someone else's cloud."],
+  [S.B + 6.9, 'narrator', 'A root is a brain on each computer. It thinks, remembers, and does the work.'],
+  [S.C + 0.4, 'narrator', 'One private line joins them to your phone.'],
+  [S.C + 3.8, 'narrator', 'The trunk: one small server you rent. It carries everything, and holds no key to read any of it.'],
+  [S.D + 0.3, 'narrator', 'And one app, in your hand.'],
+  [S.E + 0.3, 'narrator', 'Hold, and speak.'],
+  [S.E + 3.7, 'you', 'How did the backup go last night?'],
+  [S.E + 6.7, 'narrator', 'Let go. It answers out loud.'],
+  [S.E + 8.8, 'app', 'It finished at ten past three. Everything was copied, and there were no errors.'],
+  [S.F + 1.2, 'narrator', 'Every computer, in one list.'],
+  [S.F + 3.5, 'narrator', 'Each has its own main session.'],
+  [S.F + 5.4, 'narrator', 'End to end: your phone and your computers hold the keys.'],
+  [S.F + 8.8, 'narrator', 'It answers from there, live.'],
+  [S.G + 0.3, 'narrator', 'Send it a file. Any file, to any session.'],
+  [S.G + 6.3, 'narrator', 'It answers, and makes one.'],
+  [S.G + 8.2, 'narrator', 'The file opens right there.'],
+  [S.H + 0.4, 'narrator', 'One tree, across all your computers.'],
+  [S.H + 3.1, 'narrator', 'Your phone. One private line. All your computers, by voice.'],
+  [S.CARD + 0.5, 'narrator', 'Yggdrasil. Your own AI. Free for everyone.'],
+].map(([t, voice, text]) => ({ t: Math.round(t * 100) / 100, voice, text }));
+
+/* ---------------------------------------------------------------- helpers */
+const $ = (s) => document.querySelector(s);
+const clamp = (x, a = 0, b = 1) => Math.max(a, Math.min(b, x));
+const prog = (t, a, d) => clamp((t - a) / d);
+const ease = (x) => 1 - Math.pow(1 - clamp(x), 3);
+const lerp = (a, b, x) => a + (b - a) * x;
+const el = (tag, attrs = {}, parent) => { const e = document.createElementNS('http://www.w3.org/2000/svg', tag); for (const k in attrs) e.setAttribute(k, attrs[k]); if (parent) parent.appendChild(e); return e; };
+const rnd = (i) => { const x = Math.sin(i * 127.1 + 311.7) * 43758.5453; return x - Math.floor(x); };
+function pick(list, t) { let cur = -1; list.forEach((it, i) => { if (t >= it[0]) cur = i; }); return cur; }
+const plainOf = (x) => x.replace(/<\/?b>/g, '');
+/** typed text: the letters that have had time; a line that only adds to the one before keeps what is there.
+ *  A cursor while it types and a moment after. `html`: the text may hold <b>…</b>. */
+function typed(node, list, t, cps, html) {
+  const i = pick(list, t);
+  if (i < 0 || !list[i][1]) { node.innerHTML = ''; return; }
+  const [t0, text] = list[i];
+  const before = i > 0 ? list[i - 1][1] : '';
+  const plain = html ? plainOf(text) : text;
+  const keep = before && text.startsWith(before) ? (html ? plainOf(before) : before).length : 0;
+  const n = Math.min(plain.length, keep + Math.floor((t - t0) * cps));
+  const done = n >= plain.length;
+  const since = t - (t0 + (plain.length - keep) / cps);
+  const blink = Math.floor(t * 2.4) % 2 === 0;
+  const cursor = !done ? '<span class="cur"></span>' : since < 1.1 ? `<span class="cur" style="opacity:${blink ? 1 : 0}"></span>` : '';
+  const esc = (c) => (c === '<' ? '&lt;' : c === '&' ? '&amp;' : c);
+  let out = '', shown = 0, open = false;
+  for (let k = 0; k < text.length && shown < n; ) {
+    if (html && text.startsWith('<b>', k)) { out += '<b>'; open = true; k += 3; continue; }
+    if (html && text.startsWith('</b>', k)) { out += '</b>'; open = false; k += 4; continue; }
+    out += esc(text[k]); k++; shown++;
+  }
+  node.innerHTML = out + (open ? '</b>' : '') + cursor;
+}
+
+/* ---------------------------------------------------------------- the map */
+const map = $('#map'), over = $('#over');
+const PCS = [{ x: 210, name: 'home' }, { x: 540, name: 'studio' }, { x: 870, name: 'workshop' }];
+const PY = 1300, PW = 250, PH = 190;                       // a computer: its box
+const JX = 540, JY = 1060;                                 // where the roots meet
+const SV = { x: 390, y: 770, w: 300, h: 120 };             // the server
+const SP = { x: 440, y: 300, w: 200, h: 330 };             // the phone, small (on the map)
+const BP = { x: 210, y: 272, w: 660, h: 1344 };            // the phone, large (the footage)
+const pathsRoot = [
+  `M210 ${PY} V1180 L330 ${JY} H${JX}`,
+  `M540 ${PY} V${JY}`,
+  `M870 ${PY} V1180 L750 ${JY} H${JX}`,
+];
+const polyRoot = [
+  [[210, PY], [210, 1180], [330, JY], [JX, JY]],
+  [[540, PY], [540, JY]],
+  [[870, PY], [870, 1180], [750, JY], [JX, JY]],
+];
+const polyTrunk = [[JX, JY], [JX, SV.y + SV.h], [JX, SV.y], [JX, SP.y + SP.h]];
+const len = (p) => p.slice(1).reduce((s, q, i) => s + Math.hypot(q[0] - p[i][0], q[1] - p[i][1]), 0);
+function at(p, u) { let d = u * len(p); for (let i = 1; i < p.length; i++) { const L = Math.hypot(p[i][0] - p[i - 1][0], p[i][1] - p[i - 1][1]); if (d <= L || i === p.length - 1) { const k = L ? clamp(d / L) : 0; return [lerp(p[i - 1][0], p[i][0], k), lerp(p[i - 1][1], p[i][1], k)]; } d -= L; } }
+
+const gPcs = PCS.map((pc) => {
+  const g = el('g', {}, map);
+  const box = el('rect', { x: pc.x - PW / 2, y: PY, width: PW, height: PH, fill: '#0b0b14', stroke: C.line, 'stroke-width': 3 }, g);
+  const bars = [0, 1, 2].map((i) => el('rect', { x: pc.x - PW / 2 + 26, y: PY + 34 + i * 36, width: 60, height: 12, fill: C.faint }, g));
+  const cur = el('rect', { x: pc.x - PW / 2 + 26, y: PY + 34 + 3 * 36, width: 16, height: 20, fill: C.dim }, g);
+  const dot = el('rect', { x: pc.x - PW / 2 + 2, y: PY + PH + 30, width: 16, height: 16, fill: C.dim }, g);
+  const name = el('text', { x: pc.x - PW / 2 + 30, y: PY + PH + 46, class: 'lbl' }, g); name.textContent = pc.name;
+  const st = el('text', { x: pc.x - PW / 2 + 2, y: PY + PH + 86, class: 'dim' }, g);
+  return { g, box, bars, cur, dot, name, st };
+});
+const roots = pathsRoot.map((d) => el('path', { d, fill: 'none', stroke: C.ok, 'stroke-width': 10, 'stroke-linecap': 'square', pathLength: 1, 'stroke-dasharray': 1, 'stroke-dashoffset': 1 }, map));
+const trunkA = el('path', { d: `M${JX} ${JY} V${SV.y + SV.h}`, fill: 'none', stroke: C.ok, 'stroke-width': 10, pathLength: 1, 'stroke-dasharray': 1, 'stroke-dashoffset': 1 }, map);
+const trunkB = el('path', { d: `M${JX} ${SV.y} V${SP.y + SP.h}`, fill: 'none', stroke: C.ok, 'stroke-width': 10, pathLength: 1, 'stroke-dasharray': 1, 'stroke-dashoffset': 1 }, map);
+const gSv = el('g', {}, map);
+el('rect', { x: SV.x, y: SV.y, width: SV.w, height: SV.h, fill: '#0b0b14', stroke: C.line, 'stroke-width': 3 }, gSv);
+const svName = el('text', { x: SV.x + 26, y: SV.y + 50, class: 'lbl' }, gSv); svName.textContent = 'trunk';
+const svSees = el('text', { x: SV.x + 26, y: SV.y + 92, class: 'dim' }, gSv);
+const svNote = el('text', { x: SV.x + SV.w + 30, y: SV.y + 52, class: 'dim' }, gSv); svNote.textContent = 'a small server';
+const svNote2 = el('text', { x: SV.x + SV.w + 30, y: SV.y + 86, class: 'dim' }, gSv); svNote2.textContent = 'you rent';
+const gPh = el('g', {}, map);
+const phName = el('text', { x: SP.x + SP.w + 34, y: SP.y + 150, class: 'lbl' }, gPh); phName.textContent = 'branch';
+const phNote = el('text', { x: SP.x + SP.w + 34, y: SP.y + 186, class: 'dim' }, gPh); phNote.textContent = 'your phone';
+const packets = Array.from({ length: 9 }, () => el('rect', { width: 16, height: 16, fill: C.ok, opacity: 0 }, over));
+const call = el('g', { opacity: 0 }, over);
+el('rect', { x: BP.x + 8, y: BP.y + BP.h - 42, width: 130, height: 36, fill: 'none', stroke: C.sky, 'stroke-width': 3 }, call);
+el('path', { d: `M${BP.x + 60} ${BP.y + BP.h - 6} V${BP.y + BP.h + 22}`, fill: 'none', stroke: C.sky, 'stroke-width': 3 }, call);
+
+/* the small phone's own picture (before the footage): a list, and the tree bar */
+const mini = $('#mini');
+mini.innerHTML = '<svg viewBox="0 0 200 330" width="100%" height="100%" xmlns="http://www.w3.org/2000/svg">' +
+  '<rect x="16" y="18" width="70" height="10" fill="#e8e8f0"/>' +
+  [0, 1, 2, 3].map((i) => `<rect x="16" y="${48 + i * 44}" width="168" height="32" fill="#14141f" stroke="#3a3a4e" stroke-width="2"/><rect x="26" y="${59 + i * 44}" width="${[92, 70, 104, 58][i]}" height="9" fill="#8a8aa6"/>`).join('') +
+  '<rect x="0" y="252" width="200" height="78" fill="#0d0d18"/><path d="M100 322 V282 M100 304 L66 276 H30 M100 304 L134 276 H170" fill="none" stroke="#4ade80" stroke-width="8"/></svg>';
+
+const phone = $('#phone'), foot = $('#foot'), hEl = $('#h'), subEl = $('#sub'), endEl = $('#end');
+let wantSrc = '';
+foot.style.visibility = 'hidden';
+function setFoot(src) {
+  if (src === wantSrc) return Promise.resolve();
+  wantSrc = src;
+  if (!src) { foot.style.visibility = 'hidden'; return Promise.resolve(); }
+  return new Promise((ok) => { foot.onload = foot.onerror = () => { foot.style.visibility = 'visible'; ok(); }; foot.src = src; });
+}
+
+/* ---------------------------------------------------------------- one frame */
+window.DURATION = S.END;
+window.renderAt = async function (t) {
+  // --- words
+  typed(hEl, HEAD, t, 26, false);
+  typed(subEl, SUB, t, 46, true);
+  subEl.style.color = t >= S.E + 3.6 && t < S.E + 6.6 ? C.amber : t >= S.E + 8.8 && t < S.F ? C.ok : '#a4a4bc';
+
+  // --- the map: how much of it shows
+  const zoomIn = ease(prog(t, S.ZOOM, 1.1)), zoomOut = ease(prog(t, S.OUT, 1.0));
+  const big = t < S.OUT ? zoomIn : 1 - zoomOut;                 // 0 = the map, 1 = the footage
+  const card = ease(prog(t, S.CARD, 0.8));
+  const fadeOut = prog(t, S.END - 0.5, 0.5);
+  const mapA = (1 - big) * (1 - card * 0.86);
+  map.style.opacity = mapA; over.style.opacity = t < S.OUT ? 1 : 1;
+  PCS.forEach((pc, i) => {
+    const g = gPcs[i];
+    const on = t >= 1.7 + i * 0.45 ? 1 : 0;
+    const lit = t >= S.B + 1.9 + i * 0.45;
+    g.g.setAttribute('opacity', on);
+    g.box.setAttribute('stroke', lit ? C.ok : C.line);
+    g.dot.setAttribute('fill', lit ? C.ok : C.dim);
+    g.st.textContent = lit ? 'root' : 'idle';
+    g.st.setAttribute('fill', lit ? C.ok : C.dim);
+    g.cur.setAttribute('opacity', lit ? 0 : Math.floor(t * 1.6 + i * 0.4) % 2);
+    g.bars.forEach((b, k) => { // a root that works: its lines keep changing
+      const w = lit ? 40 + Math.floor(rnd(Math.floor(t * 5) * 7 + i * 13 + k) * 150) : 60 + k * 26;
+      b.setAttribute('width', w); b.setAttribute('fill', lit ? '#1f5a3a' : C.faint);
+    });
+    roots[i].setAttribute('stroke-dashoffset', 1 - ease(prog(t, S.B + 3.4 + i * 0.25, 1.2)));
+  });
+  trunkA.setAttribute('stroke-dashoffset', 1 - ease(prog(t, S.C + 1.3, 0.7)));
+  const sv = t >= S.C + 1.9;
+  gSv.setAttribute('opacity', sv ? 1 : 0);
+  trunkB.setAttribute('stroke-dashoffset', 1 - ease(prog(t, S.C + 2.2, 0.7)));
+  const ph = t >= S.C + 2.9;
+  gPh.setAttribute('opacity', ph ? 1 : 0);
+  // what the server sees: blocks that change, never words
+  const flowing = (t >= S.C + 3.4 && t < S.ZOOM + 0.4) || t >= S.OUT + 0.6;
+  svSees.textContent = t >= S.C + 6.1 || t >= S.OUT ? 'sees ' + Array.from({ length: 9 }, (_, k) => '░▒▓'[Math.floor(rnd(Math.floor(t * 7) * 3 + k) * 3)]).join('') : '';
+
+  // --- the phone: small on the map, then the whole picture
+  const r = { x: lerp(SP.x, BP.x, big), y: lerp(SP.y, BP.y, big), w: lerp(SP.w, BP.w, big), h: lerp(SP.h, BP.h, big) };
+  phone.style.left = r.x + 'px'; phone.style.top = r.y + 'px'; phone.style.width = r.w + 'px'; phone.style.height = r.h + 'px';
+  phone.style.opacity = (ph ? 1 : 0) * (1 - card * 0.86);
+  phone.style.borderColor = t >= S.D && t < S.ZOOM ? C.ok : '#3a3a4e';
+  mini.style.opacity = 1 - clamp(big * 2.2);
+  let src = '';
+  for (const name in PLAY) {
+    const [a, b] = PLAY[name];
+    if (t >= a - 1.2 && t < b + (name === 'file' ? 1.0 : 0)) {
+      const u = clamp((t - a) / (b - a));
+      if (t >= a || name === 'talk') src = `footage/${name}/${String(1 + Math.round(u * (FOOT[name].n - 1))).padStart(5, '0')}.jpg`;
+    }
+  }
+  if (big < 0.35) src = '';
+  await setFoot(src);
+  foot.style.opacity = clamp((big - 0.35) / 0.4);
+
+  // --- what travels the line (both ways), in step with the picture
+  packets.forEach((p, k) => {
+    let o = 0, pos = [0, 0];
+    if (flowing && mapA > 0.05) {
+      const up = k % 2 === 0, lane = k % 3;
+      const whole = [...polyRoot[lane].map((q) => q.slice()), ...polyTrunk.slice(1)];
+      const u0 = ((t * 0.34 + k * 0.137) % 1);
+      const u = up ? u0 : 1 - u0;
+      pos = at(whole, u); o = 1;
+      // inside the server nothing of it shows: it goes in on one side and comes out on the other
+      if (pos[1] <= SV.y + SV.h + 6 && pos[1] >= SV.y - 6) o = 0;
+      if (pos[1] <= SP.y + SP.h + 4) o = 0;
+      p.setAttribute('fill', up ? C.ok : C.amber);
+    }
+    p.setAttribute('x', pos[0] - 8); p.setAttribute('y', pos[1] - 8); p.setAttribute('opacity', o * mapA);
+  });
+  call.setAttribute('opacity', t >= S.F + 5.2 && t < S.G ? 1 : 0);
+
+  // --- the last card
+  endEl.style.opacity = card;
+  endEl.querySelector('.cur').style.opacity = Math.floor(t * 1.9) % 2;
+  document.getElementById('stage').style.opacity = 1 - fadeOut;
+  hEl.style.opacity = t < 0.35 ? 0 : 1;
+};
+</script>
+</body>
+</html>

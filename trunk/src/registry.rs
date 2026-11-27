@@ -255,6 +255,15 @@ impl Registry {
         }
     }
 
+    /// Cuts a root's conn whatever its generation (the root was removed). Returns true if one was linked.
+    pub fn unlink(&self, root: &str, why: &str) -> bool {
+        let Some(conn) = self.inner.lock().unwrap().remove(root) else { return false };
+        conn.kill.store(true, Ordering::SeqCst);
+        let _ = conn.kick.shutdown(std::net::Shutdown::Both);
+        eprintln!("root-link: root '{root}' unlinked — {why}");
+        true
+    }
+
     /// The generation of the conn currently registered for a root.
     pub fn gen_of(&self, root: &str) -> Option<u64> {
         self.inner.lock().unwrap().get(root).map(|c| c.gen_no)

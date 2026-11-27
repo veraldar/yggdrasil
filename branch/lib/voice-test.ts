@@ -33,7 +33,7 @@ export async function ensureVoiceTestRoom(): Promise<void> {
   const r = await fetch('/api/session', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ name: VOICE_TEST_SLUG }),
+    body: JSON.stringify({ name: VOICE_TEST_SLUG, test: true }), // G7.2: brain-marked, off MAIN's [tree]
   });
   if (!r.ok) throw new Error(`could not create ${VOICE_TEST_SLUG} (${r.status})`);
 }

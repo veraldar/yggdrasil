@@ -4,6 +4,7 @@
 import { readFile, writeFile } from 'fs/promises';
 import path from 'path';
 import webpush from 'web-push';
+import { noticeFor } from './notice';
 import { notifyOn } from './notify-sessions';
 
 const SUBS_FILE = path.join(process.cwd(), '.push-subs.json');
@@ -50,17 +51,15 @@ export async function removeSub(endpoint: string): Promise<void> {
   await saveSubs((await loadSubs()).filter((s) => s.endpoint !== endpoint));
 }
 
-/** Best-effort broadcast to every device; dead subscriptions are pruned. */
-export async function pushRunDone(slug: string): Promise<void> {
+/** Best-effort broadcast to every device; dead subscriptions are pruned. The words are the
+ *  session's digest of the reply (lib/notice.ts); one per session on the phone (its tag). */
+export async function pushRunDone(slug: string, sid?: string): Promise<void> {
   if (!ensureConfigured()) return;
   if (!(await notifyOn(slug))) return; // this session's switch (off by default; MAIN on)
   const subs = await loadSubs();
   if (!subs.length) return;
-  const payload = JSON.stringify({
-    slug,
-    body: `reply ready — ${slug}`,
-    tag: `oz-${slug}`,
-  });
+  const { title, body } = await noticeFor(slug, sid);
+  const payload = JSON.stringify({ slug, title, body, tag: `oz-${slug}` });
   const alive: Sub[] = [];
   await Promise.all(
     subs.map(async (s) => {

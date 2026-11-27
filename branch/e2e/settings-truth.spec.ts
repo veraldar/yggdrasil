@@ -1,4 +1,4 @@
-import { expect, test, type Page } from '@playwright/test';
+import { type Page, expect, test } from '@playwright/test';
 
 /** Settings tell the truth (ONBOARD-UX, user phone test 10-19): a refused
  *  write is said where the user tapped, never swallowed. Brain-agnostic —
@@ -10,6 +10,9 @@ const NAME = `e2e-truth-${Date.now().toString(36)}`;
 const blk = (page: Page, h: string) =>
   page.locator('.oz-blk', { has: page.getByRole('heading', { name: h, exact: true }) });
 let sessionId = '';
+// the app's service worker relays /api/* once it controls the page: page.route never sees a write
+// made after that — the refusals below are mocked, so no service worker here
+test.use({ serviceWorkers: 'block' });
 
 test.beforeAll(async ({ request }) => {
   const r = await request.post('/api/session', { data: { name: NAME } });
@@ -69,19 +72,24 @@ test('a brain refusal keeps its status + reason through the proxy', async ({ req
   expect(d.error).not.toMatch(/^Error: opencode \d+/);
 });
 
-test('agent write: 4xx lands inline under AGENT, 5xx in the error box', async ({ page }) => {
+test('role write: 4xx lands inline under ROLE, 5xx in the error box', async ({ page }) => {
   await page.goto(`/session/${NAME}/settings`);
-  const agentBlk = blk(page, 'agent');
-  const chip = agentBlk.getByRole('button').first();
+  const roleBlk = blk(page, 'role');
+  // another role than the session's own: a tap says what changes, 'switch' writes
+  const chip = roleBlk.locator('button[aria-pressed="false"]').first();
   await expect(chip).toBeVisible();
+  const swap = async () => {
+    await chip.click();
+    await page.getByTestId('role-diff').getByRole('button', { name: 'switch' }).click();
+  };
 
   await page.route(`**/api/session/${NAME}`, (route) =>
     route.request().method() === 'PATCH'
-      ? route.fulfill({ status: 400, json: { error: 'unknown agent e2e' } })
+      ? route.fulfill({ status: 400, json: { error: 'unknown role e2e' } })
       : route.fallback()
   );
-  await chip.click();
-  await expect(agentBlk.getByRole('alert')).toHaveText('unknown agent e2e');
+  await swap();
+  await expect(roleBlk.getByRole('alert')).toHaveText('unknown role e2e');
   await expect(page.getByRole('button', { name: 'fix this' })).toHaveCount(0);
 
   await page.unroute(`**/api/session/${NAME}`);
@@ -90,10 +98,28 @@ test('agent write: 4xx lands inline under AGENT, 5xx in the error box', async ({
       ? route.fulfill({ status: 502, json: { error: 'brain down (e2e)' } })
       : route.fallback()
   );
-  await chip.click();
+  await swap();
   await expect(page.getByText('brain down (e2e)')).toBeVisible();
   await expect(page.getByRole('button', { name: 'fix this' })).toBeVisible();
-  await expect(agentBlk.getByRole('alert')).toHaveCount(0);
+  await expect(roleBlk.getByRole('alert')).toHaveCount(0);
+});
+
+test("engine write: the brain's 4xx reason lands inline under RUNS ON", async ({ page }) => {
+  await page.goto(`/session/${NAME}/settings`);
+  const runsOn = blk(page, 'runs on');
+  const chip = runsOn.locator('button[aria-pressed="false"]').first();
+  await expect(chip).toBeEnabled();
+  await page.route(`**/api/session/${NAME}`, (route) =>
+    route.request().method() === 'PATCH'
+      ? route.fulfill({ status: 400, json: { error: 'no such engine (e2e)' } })
+      : route.fallback()
+  );
+  await chip.click();
+  const diff = page.getByTestId('engine-diff');
+  await expect(diff).toContainText('the new engine starts fresh');
+  await diff.getByRole('button', { name: 'switch' }).click();
+  await expect(runsOn.getByRole('alert')).toHaveText('no such engine (e2e)');
+  await expect(page.getByRole('button', { name: 'fix this' })).toHaveCount(0);
 });
 
 test('no model set: MODEL shows the brain default, labeled default — never "tap to choose"', async ({
@@ -121,10 +147,12 @@ test('no model set: MODEL shows the brain default, labeled default — never "ta
   await expect(blk(page, 'model')).toContainText('set on the box');
   // the picker marks the same row as the default
   await pick.click();
-  await expect(blk(page, 'model').locator('ul button', { hasText: `${key} · default` })).toBeVisible();
+  await expect(
+    blk(page, 'model').locator('ul button', { hasText: `${key} · default` })
+  ).toBeVisible();
 });
 
-test('load failures are said per block and heal on retry — no blank, no invented agents', async ({
+test('load failures are said per block and heal on retry — no blank, no invented roles', async ({
   page,
 }) => {
   const down = { status: 502, json: { error: 'brain down (e2e)' } };
@@ -140,17 +168,17 @@ test('load failures are said per block and heal on retry — no blank, no invent
   await expect(blk(page, 'model')).toContainText(
     "couldn't load models — brain down (e2e) · retrying"
   );
-  await expect(blk(page, 'agent')).toContainText(
-    "couldn't load agents — brain down (e2e) · retrying"
+  await expect(blk(page, 'role')).toContainText(
+    "couldn't load roles — brain down (e2e) · retrying"
   );
-  // the old fallback chips (build/plan) are gone: no stand-in agent names
-  await expect(blk(page, 'agent').getByRole('button')).toHaveCount(0);
+  // the old fallback chips (build/plan) are gone: no stand-in role names
+  await expect(blk(page, 'role').getByRole('button')).toHaveCount(0);
 
   await page.unrouteAll();
   // the 2s retry lands the real data in every block
   await expect(pick).not.toContainText("couldn't load", { timeout: 10_000 });
   await expect(blk(page, 'model').locator('ul button').first()).toBeVisible({ timeout: 10_000 });
-  await expect(blk(page, 'agent').getByRole('button').first()).toBeVisible({ timeout: 10_000 });
+  await expect(blk(page, 'role').getByRole('button').first()).toBeVisible({ timeout: 10_000 });
 });
 
 test('model picker: a filter miss says so, it is not an empty brain', async ({ page }) => {

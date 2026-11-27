@@ -2,17 +2,70 @@
 
 use std::time::Duration;
 
+use tracing_subscriber::layer::{Context, SubscriberExt};
+use tracing_subscriber::util::SubscriberInitExt;
+use tracing_subscriber::Layer;
+
 use crate::bridge::{self, BridgeConfig};
 use crate::config;
+use crate::meter;
+
+/// Warnings and errors from str0m/dimpl, counted per target (the meter); the DTLS engine's
+/// "Receive queue full" — packets thrown away inside the bridge — gets its own counter.
+pub(crate) struct CountWarnings;
+
+impl<S: tracing::Subscriber> Layer<S> for CountWarnings {
+    fn on_event(&self, ev: &tracing::Event<'_>, _: Context<'_, S>) {
+        let m = ev.metadata();
+        if *m.level() > tracing::Level::WARN {
+            return;
+        }
+        let error = *m.level() == tracing::Level::ERROR;
+        meter::inc(if error { &meter::C.log_error } else { &meter::C.log_warn });
+        meter::inc_named(&format!("log.{}.{}", if error { "error" } else { "warn" }, m.target()));
+        struct Msg(bool);
+        impl tracing::field::Visit for Msg {
+            fn record_debug(&mut self, f: &tracing::field::Field, v: &dyn std::fmt::Debug) {
+                if f.name() == "message" && format!("{v:?}").starts_with("Receive queue full") {
+                    self.0 = true;
+                }
+            }
+        }
+        let mut msg = Msg(false);
+        ev.record(&mut msg);
+        if msg.0 {
+            meter::inc(&meter::C.dtls_rxq_full);
+        }
+    }
+}
+
+/// The log keeps the first warning of a kind each minute, then one "N more" line: 1,406
+/// copies of one DTLS warning in a day (11-22) said nothing the counter does not.
+struct OncePerMinute;
+
+impl<S> tracing_subscriber::layer::Filter<S> for OncePerMinute {
+    fn enabled(&self, m: &tracing::Metadata<'_>, _: &Context<'_, S>) -> bool {
+        if !m.is_event() || *m.level() > tracing::Level::WARN {
+            return true;
+        }
+        meter::logrl::allow(&format!("{}:{}", m.target(), m.line().unwrap_or(0)), m.target())
+    }
+
+    fn callsite_enabled(&self, _: &'static tracing::Metadata<'static>) -> tracing::subscriber::Interest {
+        tracing::subscriber::Interest::sometimes()
+    }
+}
 
 pub fn run(path: &str) -> Result<(), String> {
-    // str0m speaks tracing; surface ICE/DTLS state changes in the log
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(
+    // str0m speaks tracing; surface ICE/DTLS state changes in the log (with a time on each
+    // line), count the warnings, and print a repeating warning once a minute
+    let _ = tracing_subscriber::registry()
+        .with(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("str0m=info,is=info,warn")),
         )
-        .with_writer(std::io::stderr)
+        .with(CountWarnings)
+        .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr).with_filter(OncePerMinute))
         .try_init();
     let loaded = config::load(path)?;
     println!("bifrost-net bridge '{}' (config: {})", loaded.config.node.name, loaded.path);
@@ -22,6 +75,9 @@ pub fn run(path: &str) -> Result<(), String> {
         .as_ref()
         .ok_or("config has no [bridge] section")?
         .clone();
+    // the meter: on by default, its files beside the device registry's folder
+    // (hub: ~/.local/share/yggdrasil/hub/obs); BIFROST_OBS=off / BIFROST_OBS_DIR (meter.rs)
+    meter::init("bridge", meter::dir_from_env(meter::dir_beside(std::path::Path::new(&cfg.tokens_file))));
 
     let candidates: Vec<_> = cfg.candidates.iter().filter_map(|c| c.parse().ok()).collect();
     let http: std::net::SocketAddr = cfg.http.parse().map_err(|e| format!("bridge.http: {e}"))?;

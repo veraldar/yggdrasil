@@ -9,7 +9,8 @@
 #
 # The join.sh you download is small: it fetches the release it belongs to and checks it — SHA256SUMS must be
 # signed by the yggdrasil release key embedded below (YGG_SIGNER, never fetched), the archive must match it —
-# then runs that release's join.sh, with prebuilt binaries: no git, Rust or compiler needed (Linux/WSL x86_64).
+# then runs that release's join.sh, with prebuilt binaries: no git, Rust or compiler needed (Linux/WSL x86_64,
+# Apple-silicon Macs).
 #
 # This machine only DIALS OUT: its brain listens on loopback, root-dial.py carries it to the trunk through
 # the hub's public access point (wss). Nothing here needs an open port, a public IP or a certificate.
@@ -19,14 +20,19 @@
 #   --hub URL             the hub your phone is paired with (needed for the first join only)
 #   --name NAME           this root's name in the tree (default: the hostname)
 #   --dir DIR             everything this root keeps (default ~/.local/share/yggdrasil-root)
-#   --upstream-env FILE   the model: YGG_UPSTREAM_BASE_URL / _API_KEY / _MODEL / _STYLE lines. Default: the
-#                         same variables from the environment; asked for when run in a terminal. Kept on re-runs.
+#   --model-provider P    the model this root thinks with: same (as the home root: handed over inside the tunnel
+#                         once you approve — the default when joining) | zai | openrouter | anthropic | openai
+#                         (the provider's address is filled in; its key comes from YGG_UPSTREAM_API_KEY in the
+#                         environment, never the command line) | other (with --upstream-env). In a terminal
+#                         join.sh asks instead. --model M: another model than the provider's default.
+#   --upstream-env FILE   the model as YGG_UPSTREAM_BASE_URL / _API_KEY / _MODEL / _STYLE lines (or the same
+#                         variables from the environment). Kept on re-runs.
 #   --qr-png FILE         where the QR picture goes (default DIR/join-qr.png)   --open-qr   show it on screen
 #   --brain-bin FILE      use this yggdrasil binary (default: DIR/bin, the release's, the repo's build, ~/.local/bin,
 #                         PATH, else the signed release on Linux/WSL x86_64)
 #   --net-bin FILE        use this bifrost-net binary (the tunnel's node; default: DIR/bin, the release's root build,
 #                         the repo's build, ~/.local/bin, PATH, else the signed release's — checked like the rest)
-#   --build               developers, in a git checkout (macOS, other CPUs: there is no release for them yet):
+#   --build               developers, in a git checkout (Intel Macs, other CPUs: there is no release for them):
 #                         build the brain and the node with cargo (the node's root build: no cmake, no libopus)
 #   --brain-port P / --peer-port P   loopback ports (first join: 4180/4181, or the next free pair); the peer
 #                         port is the node's door (tcp) and its udp, the brain port the dialer's udp too
@@ -37,7 +43,8 @@
 #   --cacert FILE         trust this CA for the hub (tests with a self-signed hub ONLY)
 #   --version vX.Y.Z      another release than this script's own
 #
-# Exit: 0 joined and running · 3 refused on the phone · 4 the request expired · 64 usage · 1 anything else.
+# Exit: 0 joined and running · 3 refused on the phone · 4 the request expired · 6 joined, but no model came from
+# the home root (run join.sh again and pick a provider) · 64 usage · 1 anything else.
 set -euo pipefail
 umask 077
 
@@ -61,10 +68,11 @@ REPO=$(cd "$HERE/../.." && pwd)
 say()  { printf '\033[1m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m!!\033[0m  %s\n' "$*" >&2; }
 die()  { printf '\033[1;31mxx\033[0m  %s\n' "$1" >&2; exit "${2:-1}"; }
-usage() { sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,47p' "$0" | sed 's/^# \{0,1\}//'; }
 
 HUB='' NAME='' DIR='' UPSTREAM_FILE='' QR_PNG='' OPEN_QR='' BRAIN_BIN=${YGG_BINARY:-} BUILD=0 BRAIN_PORT='' PEER_PORT='' NET_BIN=''
 PROJECT_DIR='' SUPERVISOR=auto START=1 CACERT='' REJOIN=0 STOP=0 UNINSTALL=0 YES=0 WANT_VERSION=''
+MODEL_PROVIDER_ARG='' MODEL_ARG=''
 need() { [ $# -ge 2 ] && [ -n "$2" ] || die "$1 needs a value" 64; }
 while [ $# -gt 0 ]; do
   case $1 in
@@ -72,6 +80,8 @@ while [ $# -gt 0 ]; do
     --name) need "$@"; NAME=$2; shift ;;
     --dir) need "$@"; DIR=$2; shift ;;
     --upstream-env) need "$@"; UPSTREAM_FILE=$2; shift ;;
+    --model-provider) need "$@"; MODEL_PROVIDER_ARG=$2; shift ;;
+    --model) need "$@"; MODEL_ARG=$2; shift ;;
     --qr-png) need "$@"; QR_PNG=$2; shift ;;
     --open-qr) OPEN_QR=1 ;;
     --brain-bin) need "$@"; BRAIN_BIN=$2; shift ;;
@@ -113,6 +123,14 @@ if [ -z "$PY" ] || ! "$PY" -c 'import ssl, json, urllib.request, zlib, fcntl' 2>
   die "python3 (with ssl) is needed — $(pkg_hint python3 ca-certificates)"
 fi
 ARCH=$(uname -m); case $ARCH in amd64) ARCH=x86_64 ;; arm64) ARCH=aarch64 ;; esac
+# a shell under Rosetta on an Apple-silicon Mac says x86_64: the machine itself is arm64
+[ $OS = macos ] && [ "$(sysctl -n hw.optional.arm64 2>/dev/null)" = 1 ] && ARCH=aarch64
+case $OS/$ARCH in   # the release archive for this machine ('' = none: build from a checkout)
+  linux/x86_64|wsl/x86_64) PLAT=linux-x86_64 ;;
+  macos/aarch64) PLAT=macos-aarch64 ;;
+  *) PLAT='' ;;
+esac
+sha256() { if command -v sha256sum >/dev/null; then sha256sum | cut -c1-64; else shasum -a 256 | cut -c1-64; fi; }   # stdin
 RELEASES=${YGG_RELEASES:-${JOIN_RELEASES:-https://github.com/veraldar/yggdrasil/releases}}
 REL_HOME=${XDG_DATA_HOME:-$HOME/.local/share}/yggdrasil/release   # unpacked releases (shared with install.sh)
 MIN_GLIBC=2.31   # the release's binaries are built on Debian 11 (bullseye): Debian 11+, Ubuntu 20.04+
@@ -153,18 +171,20 @@ unpacked() { local d; for d in "$REL_HOME"/*/.verified; do if [ -f "$d" ]; then 
 bootstrap() { # WHY — the signed release (--version, else max(this script's, the newest unpacked)), unpacked, then
   #             ITS join.sh runs with our arguments: prebuilt brain + node, nothing to compile here
   local want base tgz newest
-  [ "$OS" != macos ] && [ "$ARCH" = x86_64 ] || die "$1, and there is no prebuilt release for $OS $ARCH yet:
+  [ -n "$PLAT" ] || die "$1, and there is no prebuilt release for $OS $ARCH:
     install Rust (your package manager, or https://rustup.rs) and a C compiler ($(pkg_hint build-essential)),
     then run join.sh from a git checkout with --build" 1
   # what this computer needs, all checked before anything is downloaded
   local g need=() d free_mb
-  g=$(ldd --version 2>&1 | head -1 | grep -o '[0-9][0-9]*\.[0-9][0-9]*$' || true)
-  [ -n "$g" ] || die "$1, and this Linux has no glibc (musl? Alpine?): the release needs glibc $MIN_GLIBC or newer (Debian 11+, Ubuntu 20.04+)"
-  [ "$(printf '%s\n%s\n' "$MIN_GLIBC" "$g" | sort -V | head -1)" = "$MIN_GLIBC" ] ||
-    die "$1, and this Linux's C library is glibc $g: the release needs $MIN_GLIBC or newer (Debian 11+, Ubuntu 20.04+). Nothing was downloaded."
+  if [ $OS != macos ]; then
+    g=$(ldd --version 2>&1 | head -1 | grep -o '[0-9][0-9]*\.[0-9][0-9]*$' || true)
+    [ -n "$g" ] || die "$1, and this Linux has no glibc (musl? Alpine?): the release needs glibc $MIN_GLIBC or newer (Debian 11+, Ubuntu 20.04+)"
+    [ "$(printf '%s\n%s\n' "$MIN_GLIBC" "$g" | sort -V | head -1)" = "$MIN_GLIBC" ] ||
+      die "$1, and this Linux's C library is glibc $g: the release needs $MIN_GLIBC or newer (Debian 11+, Ubuntu 20.04+). Nothing was downloaded."
+  fi
   command -v curl >/dev/null || need+=(curl ca-certificates)
   command -v ssh-keygen >/dev/null || need+=(openssh-client)
-  command -v sha256sum >/dev/null && command -v tar >/dev/null || need+=(coreutils tar)
+  { command -v sha256sum || command -v shasum; } >/dev/null && command -v tar >/dev/null || need+=(coreutils tar)
   [ ${#need[@]} = 0 ] || die "$1; fetching and checking the release needs: ${need[*]} — first: $(pkg_hint "${need[@]}"). Nothing was downloaded."
   d=${XDG_DATA_HOME:-$HOME/.local/share}; while [ ! -d "$d" ]; do d=$(dirname "$d"); done
   free_mb=$(( $(df -Pk "$d" | awk 'NR==2 {print $4}') / 1024 ))
@@ -175,19 +195,20 @@ bootstrap() { # WHY — the signed release (--version, else max(this script's, t
   if [ -z "$want" ] || [ ! -f "$REL_HOME/$want/.verified" ]; then
     base=$(release_base "$want")
     release_sums "$base"
-    [ -n "$want" ] || want=$(sed -n 's/^[0-9a-f]\{64\}  yggdrasil-\([0-9][0-9A-Za-z.+-]*\)-linux-x86_64\.tar\.gz$/\1/p' "$REL_DIR/SHA256SUMS" | head -1)
-    tgz=yggdrasil-$want-linux-x86_64.tar.gz
-    [ -n "$want" ] && [ -n "$(sum_of "$tgz")" ] || die "the release${want:+ v$want} has no $tgz (signed SHA256SUMS)"
+    [ -n "$want" ] || want=$(sed -n "s/^[0-9a-f]\{64\}  yggdrasil-\([0-9][0-9A-Za-z.+-]*\)-$PLAT\.tar\.gz\$/\1/p" "$REL_DIR/SHA256SUMS" | head -1)
+    tgz=yggdrasil-$want-$PLAT.tar.gz
+    [ -n "$want" ] && [ -n "$(sum_of "$tgz")" ] || die "the release${want:+ v$want} has no build for $OS $ARCH ($tgz) —
+    from a git checkout, with Rust and a C compiler: bash root/install/join.sh --build …"
     # this very script, when it belongs to that release: the one the release signed, or stop here
     if [ -n "$YGG_RELEASE" ] && [ "$want" = "$YGG_RELEASE" ] && [ -f "$0" ] && [ -n "$(sum_of join.sh)" ] &&
-       [ "$(sha256sum <"$0" | cut -c1-64)" != "$(sum_of join.sh)" ]; then
+       [ "$(sha256 <"$0")" != "$(sum_of join.sh)" ]; then
       die "this join.sh is not the one release v$YGG_RELEASE signed (its sha256 is not in SHA256SUMS) — download it again: $base/join.sh"
     fi
   fi
   if [ ! -f "$REL_HOME/$want/.verified" ]; then
     say "$1: the signed release $want ($base/$tgz)"
     fetch "$base/$tgz" "$REL_DIR/$tgz" || die "cannot download $base/$tgz"
-    [ "$(sha256sum <"$REL_DIR/$tgz" | cut -c1-64)" = "$(sum_of "$tgz")" ] || die "$tgz does not match SHA256SUMS — refusing to install it"
+    [ "$(sha256 <"$REL_DIR/$tgz")" = "$(sum_of "$tgz")" ] || die "$tgz does not match SHA256SUMS — refusing to install it"
     mkdir -p "$REL_HOME"; rm -rf "$REL_HOME/.$want.new"; mkdir -p "$REL_HOME/.$want.new"
     tar -xzf "$REL_DIR/$tgz" -C "$REL_HOME/.$want.new" --strip-components=1 --no-same-owner || die "could not unpack $tgz"
     grep -qx "yggdrasil $want" "$REL_HOME/.$want.new/RELEASE" 2>/dev/null || die "$tgz holds another release than $want — refusing it"
@@ -226,6 +247,7 @@ copy() { # copy SRC DEST MODE
   cp "$1" "$2.new.$$"; chmod "$3" "$2.new.$$"; mv -f "$2.new.$$" "$2"; CHANGED=1
 }
 pid_alive() { [ -n "${1:-}" ] && kill -0 "$1" 2>/dev/null; }
+hold_alive() { pid_alive "${1:-}" && proc_args "$1" | grep -q -e 'sleep infinity' -e 'start --hold'; }   # not a stale number
 proc_args() { if [ -r "/proc/$1/cmdline" ]; then tr '\0' ' ' <"/proc/$1/cmdline"; else ps -p "$1" -o args= 2>/dev/null; fi; }
 
 # ------------------------------------------------------------------------------- supervisors
@@ -266,7 +288,7 @@ stop_services() { # stop whatever supervisor this dir used
 if [ $STOP = 1 ]; then
   [ -f "$CONF" ] || die "nothing here to stop: $CONF missing"
   stop_services
-  h=$(cat "$RUN/hold.pid" 2>/dev/null || true); if pid_alive "$h"; then kill "$h"; fi; rm -f "$RUN/hold.pid"
+  h=$(cat "$RUN/hold.pid" 2>/dev/null || true); if hold_alive "$h"; then kill "$h"; fi; rm -f "$RUN/hold.pid"
   exit 0
 fi
 if [ $UNINSTALL = 1 ]; then
@@ -287,7 +309,7 @@ if [ $UNINSTALL = 1 ]; then
     case $a in y|Y|yes|YES) ;; *) die "nothing removed" ;; esac
   fi
   [ -f "$CONF" ] && stop_services
-  h=$(cat "$RUN/hold.pid" 2>/dev/null || true); if pid_alive "$h"; then kill "$h"; fi
+  h=$(cat "$RUN/hold.pid" 2>/dev/null || true); if hold_alive "$h"; then kill "$h"; fi
   for u in "${UNITS[@]}" yggdrasil-root-wg.service yggdrasil-root-refill.service yggdrasil-root-refill.timer; do rm -f "$UNIT_DIR/$u"; done
   systemd_sees && systemctl --user daemon-reload
   for s in brain dial refill wg; do rm -f "$AGENT_DIR/$LABEL.$s.plist"; done
@@ -340,11 +362,13 @@ fi
 case $BRAIN_PORT$PEER_PORT in *[!0-9]*) die "ports must be numbers" 64 ;; esac
 
 # --------------------------------------------------------------------------- 1. brain binary
+REL_BIN=/nonexistent; [ -f "$REPO/RELEASE" ] && [ -d "$REPO/bin" ] && REL_BIN=$REPO/bin   # an unpacked release
 find_brain() {
   local c
   if [ -n "$BRAIN_BIN" ]; then echo "$BRAIN_BIN"; return; fi
   [ $BUILD = 1 ] && return 0
-  for c in "$BIN/yggdrasil" "$REPO/bin/yggdrasil" "$REPO/root/target/release/yggdrasil" "$HOME/.local/bin/yggdrasil" "$(command -v yggdrasil || true)"; do
+  # run from a release: ITS brain (a re-run of a newer release's join.sh is the update); else the one installed
+  for c in "$REL_BIN/yggdrasil" "$BIN/yggdrasil" "$REPO/root/target/release/yggdrasil" "$HOME/.local/bin/yggdrasil" "$(command -v yggdrasil || true)"; do
     [ -n "$c" ] && [ -x "$c" ] && { echo "$c"; return; }
   done
   return 0   # none found: the caller builds one (a failing $(…) would end the script under set -e)
@@ -379,7 +403,7 @@ copy "$DIAL_SRC" "$BIN/root-dial.py" 755
 find_net() {
   local c
   if [ -n "$NET_BIN" ]; then echo "$NET_BIN"; return; fi
-  for c in "$BIN/bifrost-net" "$REPO/bin/bifrost-net-root" "$REPO/bin/bifrost-net" \
+  for c in "$REL_BIN/bifrost-net-root" "$REL_BIN/bifrost-net" "$BIN/bifrost-net" \
     "$REPO/trunk/target/release/bifrost-net" "$REPO/trunk/target/root/release/bifrost-net" \
     "$HOME/.local/bin/bifrost-net" "$(command -v bifrost-net || true)"; do
     [ -n "$c" ] && [ -x "$c" ] && { echo "$c"; return; }
@@ -417,42 +441,72 @@ case $NET_OUT in # the Linux build links libopus
   *'error while loading shared libraries'*) die "bifrost-net cannot start: ${NET_OUT%%$'\n'*} — $(pkg_hint libopus0)" ;;
 esac
 
-# ------------------------------------------------------------------------------ 2. upstream
-UP_ARGS=() UP_TMP=
+# ------------------------------------------------------------------------------ 2. the model
+# The model step (model-step.sh: the same choices and words as install.sh and the Windows installer). What is
+# given wins (--upstream-env, --model-provider, YGG_UPSTREAM_* in the environment, a model this root already
+# has); else a terminal is asked; else — no terminal, nothing given — "Same as the home root": MODEL_SRC=home,
+# the join request says so, and the settings come over the root link (inside WireGuard) once you approve.
+# shellcheck source=root/install/model-step.sh
+. "$HERE/model-step.sh"
+UP_ARGS=() UP_TMP='' MODEL_SRC=''
 cleanup() { [ -n "$UP_TMP" ] && rm -f "$UP_TMP"; return 0; }
 trap cleanup EXIT
+up_tmp() { # the model's lines into a file of ours (600), handed to rootjoin.py
+  UP_TMP=$(mktemp "$DIR/.upstream.XXXXXX")
+  { printf 'YGG_UPSTREAM_BASE_URL=%s\n' "${YGG_UPSTREAM_BASE_URL:-}"
+    [ -z "${YGG_UPSTREAM_STYLE:-}" ] || printf 'YGG_UPSTREAM_STYLE=%s\n' "$YGG_UPSTREAM_STYLE"
+    [ -z "${YGG_UPSTREAM_MODEL:-}" ] || printf 'YGG_UPSTREAM_MODEL=%s\n' "$YGG_UPSTREAM_MODEL"
+    printf 'YGG_UPSTREAM_API_KEY=%s\n' "${YGG_UPSTREAM_API_KEY:-}"   # (empty: a model on your own network — and no old key kept)
+  } >"$UP_TMP"
+  UP_ARGS=(--upstream "$UP_TMP")
+}
+HAD_MODEL=0; grep -q '^YGG_UPSTREAM_BASE_URL=.' "$DIR/brain.env" 2>/dev/null && HAD_MODEL=1
+[ -z "$MODEL_ARG" ] || [ -n "$MODEL_PROVIDER_ARG" ] || die "--model goes with --model-provider" 64
 if [ -n "$UPSTREAM_FILE" ]; then
   [ -r "$UPSTREAM_FILE" ] || die "--upstream-env $UPSTREAM_FILE: not readable"
-  UP_ARGS=(--upstream "$UPSTREAM_FILE")
-elif [ -z "${YGG_UPSTREAM_BASE_URL:-}" ] && ! grep -q '^YGG_UPSTREAM_BASE_URL=.' "$DIR/brain.env" 2>/dev/null; then
-  if [ -t 0 ]; then # interactive: ask once; the key is read without echo and only ever written to brain.env
-    echo "This root needs a model to think with (any OpenAI- or Anthropic-compatible API)."
-    read -r -p "  Base URL [https://api.openai.com/v1]: " u; u=${u:-https://api.openai.com/v1}
-    s=openai; case $u in *anthropic*) s=anthropic ;; esac
-    read -r -p "  Dialect openai|anthropic [$s]: " a; s=${a:-$s}
-    read -r -p "  Model [gpt-4o-mini]: " m; m=${m:-gpt-4o-mini}
-    read -r -s -p "  API key (not shown; empty for a local server): " k; echo
-    UP_TMP=$(mktemp "$DIR/.upstream.XXXXXX")
-    printf 'YGG_UPSTREAM_BASE_URL=%s\nYGG_UPSTREAM_STYLE=%s\nYGG_UPSTREAM_MODEL=%s\nYGG_UPSTREAM_API_KEY=%s\n' "$u" "$s" "$m" "$k" >"$UP_TMP"
-    unset k
-    UP_ARGS=(--upstream "$UP_TMP")
-  else
-    die "no model upstream. Pass --upstream-env FILE with lines like
-      YGG_UPSTREAM_BASE_URL=https://api.openai.com/v1
-      YGG_UPSTREAM_API_KEY=sk-...
-      YGG_UPSTREAM_MODEL=gpt-4o-mini
-    (YGG_UPSTREAM_STYLE=anthropic for an Anthropic-shaped API), or export those variables." 64
+  [ "$MODEL_PROVIDER_ARG" != same ] || die "--model-provider same takes the home root's model: not with --upstream-env" 64
+  if [ -n "$MODEL_PROVIDER_ARG" ]; then # a provider by name, its key (and anything else) from the file
+    while IFS= read -r l || [ -n "$l" ]; do
+      l=${l%$'\r'}; l=${l#export }
+      case $l in YGG_UPSTREAM_*=*) ;; *) continue ;; esac
+      k=${l%%=*} v=${l#*=}
+      case $v in \"*\") v=${v#\"}; v=${v%\"} ;; \'*\') v=${v#\'}; v=${v%\'} ;; esac
+      printf -v "$k" '%s' "$v"
+    done <"$UPSTREAM_FILE"
   fi
 fi
+if [ "$MODEL_PROVIDER_ARG" = same ]; then
+  MODEL_SRC=home
+elif [ -n "$MODEL_PROVIDER_ARG" ]; then
+  model_from_provider "$MODEL_PROVIDER_ARG" "$MODEL_ARG" || die "$MODEL_ERR" 64
+  up_tmp
+elif [ -n "$UPSTREAM_FILE" ]; then
+  UP_ARGS=(--upstream "$UPSTREAM_FILE")   # your file as it is (any other YGG_* line in it is kept too)
+elif [ -n "${YGG_UPSTREAM_BASE_URL:-}" ]; then
+  up_tmp                                  # given in the environment
+elif [ $HAD_MODEL = 1 ]; then
+  :                                       # this root already has its model: kept
+elif [ -t 0 ]; then
+  model_step join || die "no model chosen" 64
+  if [ "$MODEL_PROVIDER" = same ]; then MODEL_SRC=home; else up_tmp; fi
+else
+  MODEL_SRC=home
+fi
+# from here on the key lives in a file only: nothing this script starts (the helper, the node, the services)
+# inherits it from the environment
+unset YGG_UPSTREAM_API_KEY YGG_UPSTREAM_BASE_URL YGG_UPSTREAM_STYLE YGG_UPSTREAM_MODEL
 brain_env() { # write DIR/brain.env: the upstream now; plus the join's lines once joined
   local rc=0 out
+  local home=(); [ "$MODEL_SRC" = home ] && home=(--no-upstream-ok)   # the model comes after the approval
   out=$("$PY" "$HELPER" brain-env --state "$DIR" --out "$DIR/brain.env" --listen "127.0.0.1:$BRAIN_PORT" \
-    --data "$DIR/data" --project "$PROJECT_DIR" --peer-port "$PEER_PORT" ${UP_ARGS[@]+"${UP_ARGS[@]}"}) || rc=$?
+    --data "$DIR/data" --project "$PROJECT_DIR" --peer-port "$PEER_PORT" ${UP_ARGS[@]+"${UP_ARGS[@]}"} \
+    ${home[@]+"${home[@]}"}) || rc=$?
   [ $rc = 5 ] && die "no model upstream: pass --upstream-env FILE (see --help)" 64
   [ $rc = 0 ] || die "could not write $DIR/brain.env"
   if [ "$out" = changed ]; then CHANGED=1; fi
 }
 brain_env   # before the join: a bad upstream fails here, and a resumed join remembers it
+if [ -n "$UP_TMP" ]; then rm -f "$UP_TMP"; UP_TMP=''; UP_ARGS=(); fi   # brain.env (600) holds it now: kept from there
 write_conf() { # write_conf HUB SUPERVISOR — the settings re-runs read (no secrets)
   {
     echo "# yggdrasil-root — written by join.sh; re-runs read it (pass an option to change a value)"
@@ -484,8 +538,10 @@ if [ $JOINED = 1 ] && [ $REJOIN = 0 ]; then
 else
   [ $REJOIN = 1 ] && [ $JOINED = 1 ] && say "rejoin: asking $HUB for a new join (the current one stays until this is approved)"
   rc=0 NEW_FLAG=; [ $REJOIN = 1 ] && NEW_FLAG=--new
+  MODEL_FLAG=; [ "$MODEL_SRC" = home ] && MODEL_FLAG='--model home'
+  # shellcheck disable=SC2086  # the two flags are words on purpose
   "$PY" "$HELPER" join --state "$DIR" --hub "$HUB" --name "$NAME" --os "$OS" --host "$HOSTN" --wg-pub "$WG_PUB" \
-    --qr-png "$QR_PNG" ${OPEN_QR:+--open-qr} ${CACERT:+--cacert "$CACERT"} $NEW_FLAG || rc=$?
+    --qr-png "$QR_PNG" ${OPEN_QR:+--open-qr} ${CACERT:+--cacert "$CACERT"} $NEW_FLAG $MODEL_FLAG || rc=$?
   case $rc in
     0) CHANGED=1
        if [ "$KEYFILE" != "$DIR/wg.key" ]; then mv -f "$KEYFILE" "$DIR/wg.key"; mv -f "$KEYFILE.pub" "$DIR/wg.key.pub"; fi ;;
@@ -530,6 +586,12 @@ if [ "$TUNNEL" = 1 ]; then PEER_FLAGS="--wg-udp 127.0.0.1:$BRAIN_PORT --wg-node 
 put "$BIN/run-brain" 755 <<EOF
 #!/bin/sh
 # yggdrasil-root: the brain, with $DIR/brain.env (generated by join.sh)
+# no model yet ("Same as the home root": it comes over the root link once the join is approved): wait for it
+n=0
+while ! grep -q '^YGG_UPSTREAM_BASE_URL=.' '$DIR/brain.env' 2>/dev/null; do
+  [ \$((n % 150)) = 0 ] && echo "\$(date '+%F %T') no model yet: waiting for it (join.sh asks the home root; or run join.sh again and pick a provider)"
+  n=\$((n + 1)); sleep 2
+done
 while IFS= read -r l || [ -n "\$l" ]; do   # KEY=value lines, taken literally (no expansion)
   # shellcheck disable=SC2163
   case \$l in ''|'#'*) ;; *=*) export "\$l" ;; esac
@@ -583,17 +645,20 @@ case $SUP in
            STOP_CMD="systemctl --user stop ${UNITS[*]} yggdrasil-root-refill.timer" ;;
   launchd) START_CMD="for s in brain dial refill$WG_AGENT; do launchctl kickstart gui/\$(id -u)/$LABEL.\$s; done"
            STOP_CMD="for s in brain dial refill$WG_AGENT; do launchctl bootout gui/\$(id -u)/$LABEL.\$s; done" ;;
-  nohup)   START_CMD="p=\$(cat '$RUN/supervise.pid' 2>/dev/null); if [ -z \"\$p\" ] || ! kill -0 \"\$p\" 2>/dev/null; then nohup $SETSID '$BIN/supervise' >/dev/null 2>&1 </dev/null & fi"
-           STOP_CMD="p=\$(cat '$RUN/supervise.pid' 2>/dev/null); [ -n \"\$p\" ] && kill \"\$p\"" ;;
+  nohup)   START_CMD="p=\$(cat '$RUN/supervise.pid' 2>/dev/null); ours \"\$p\" '$BIN/supervise' || { nohup $SETSID '$BIN/supervise' >/dev/null 2>&1 </dev/null & }"
+           STOP_CMD="p=\$(cat '$RUN/supervise.pid' 2>/dev/null); ours \"\$p\" '$BIN/supervise' && kill \"\$p\"" ;;
 esac
 put "$BIN/start" 755 <<EOF
 #!/bin/sh
 # yggdrasil-root: start the services if they are not running ($SUP). --hold: then stay alive
 # (the Windows keepalive runs this inside WSL so WSL does not shut the root down). Generated by join.sh.
+# a pid file can outlive a reboot or a WSL restart: its number then belongs to some other process — only ours counts
+ours() { [ -n "\$1" ] && [ "\$1" != "\$\$" ] && kill -0 "\$1" 2>/dev/null || return 1
+  { tr '\\0' ' ' <"/proc/\$1/cmdline" 2>/dev/null || ps -p "\$1" -o args= 2>/dev/null; } | grep -q -e "\$2" -e "\${3:-\$2}"; }
 $START_CMD
 [ "\${1:-}" = --hold ] || exit 0
 h=\$(cat '$RUN/hold.pid' 2>/dev/null)
-if [ -n "\$h" ] && kill -0 "\$h" 2>/dev/null; then exit 0; fi
+if ours "\$h" 'sleep infinity' 'start --hold'; then exit 0; fi
 echo \$\$ > '$RUN/hold.pid'
 [ "\$(uname -s)" = Linux ] && exec sleep infinity
 while :; do sleep 3600; done
@@ -601,8 +666,11 @@ EOF
 put "$BIN/stop" 755 <<EOF
 #!/bin/sh
 # yggdrasil-root: stop the services ($SUP) and the WSL keepalive hold, if any. Generated by join.sh.
+# a pid file can outlive a reboot or a WSL restart: its number then belongs to some other process — only ours counts
+ours() { [ -n "\$1" ] && [ "\$1" != "\$\$" ] && kill -0 "\$1" 2>/dev/null || return 1
+  { tr '\\0' ' ' <"/proc/\$1/cmdline" 2>/dev/null || ps -p "\$1" -o args= 2>/dev/null; } | grep -q -e "\$2" -e "\${3:-\$2}"; }
 $STOP_CMD
-h=\$(cat '$RUN/hold.pid' 2>/dev/null); [ -n "\$h" ] && kill "\$h" 2>/dev/null; rm -f '$RUN/hold.pid'
+h=\$(cat '$RUN/hold.pid' 2>/dev/null); ours "\$h" 'sleep infinity' 'start --hold' && kill "\$h" 2>/dev/null; rm -f '$RUN/hold.pid'
 exit 0
 EOF
 
@@ -742,7 +810,37 @@ case $SUP in
 esac
 
 # ---------------------------------------------------------------------------- 7. the result
-if [ $START = 1 ]; then
+# "Same as the home root": the services are up (the dialer links, the WireGuard node shakes hands) — ask the home
+# brain for its model INSIDE the tunnel, write it to brain.env, and the waiting brain starts. Never over the
+# plaintext peer path: without a tunnel there is no "same".
+NO_MODEL=''
+if [ "$MODEL_SRC" = home ]; then
+  if [ "$TUNNEL" != 1 ]; then
+    NO_MODEL="the home root runs no WireGuard node, and its model is only ever sent inside one"
+  elif [ $START = 0 ]; then
+    NO_MODEL="--no-start: the home root is asked for its model when the services run"
+  else
+    say "model: asking the home root for its own (over the root link, inside WireGuard)"
+    UP_TMP=$(mktemp "$DIR/.upstream.XXXXXX"); rc=0
+    "$PY" "$HELPER" model-fetch --state "$DIR" --peer-port "$PEER_PORT" --out "$UP_TMP" --wait "${JOIN_MODEL_WAIT:-90}" || rc=$?
+    case $rc in
+      0) UP_ARGS=(--upstream "$UP_TMP"); MODEL_SRC=''; brain_env; rm -f "$UP_TMP"; UP_TMP=''; UP_ARGS=()
+         if [ $HAD_MODEL = 1 ]; then # it was running on its old model: restart it on the new one
+           case $SUP in
+             systemd) systemctl --user restart yggdrasil-root-brain.service ;;
+             launchd) launchctl kickstart -k "gui/$(id -u)/$LABEL.brain" ;;
+             nohup) CHANGED=1; start_nohup ;;
+           esac
+         fi ;;
+      130) exit 130 ;;
+      7) NO_MODEL="the home root is an older version: it cannot hand its model over" ;;
+      8) NO_MODEL="the home root refused to hand its model to this computer" ;;
+      9) NO_MODEL="the home root's model runs on the home computer itself, so this computer cannot use it" ;;
+      *) NO_MODEL="the home root did not answer inside the tunnel" ;;
+    esac
+  fi
+fi
+if [ $START = 1 ] && [ -z "$NO_MODEL" ]; then
   up=0
   for _ in $(seq 1 "${JOIN_BRAIN_WAIT:-30}"); do "$PY" "$HELPER" probe "$BRAIN_URL/root" 2>/dev/null && { up=1; break; }; sleep 0.5; done
   if [ $up = 1 ]; then say "brain up on $BRAIN_URL"; else warn "the brain is not answering on $BRAIN_URL yet — see the log ($SUP)"; fi
@@ -757,3 +855,8 @@ cat <<EOF
   logs      $(case $SUP in systemd) echo "journalctl --user -u yggdrasil-root-brain -u yggdrasil-root-dial -f" ;; *) echo "$LOG/" ;; esac)
   stop      $0 --stop     re-run: $0 (keeps this join)     remove: $0 --uninstall
 EOF
+if [ -n "$NO_MODEL" ]; then
+  warn "joined, but this root has no model yet: $NO_MODEL."
+  warn "Run join.sh again and pick a provider (the join is kept; the brain starts as soon as it has a model)."
+  exit 6
+fi

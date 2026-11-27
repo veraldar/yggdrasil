@@ -3,7 +3,17 @@
  * POST /api/session/[id]/prompt   → send text/images/files to the session
  */
 import { NextResponse } from 'next/server';
+import {
+  FILES_PER_MESSAGE,
+  HASH_RE,
+  cleanRefs,
+  fileUrl,
+  isImageMime,
+  refViews,
+  urlHash,
+} from '@/lib/file-ref';
 import { ocFetch, PIN_HEADER, resolveId, sessionGone } from '@/lib/oc';
+import { hideNarration, stripStationLine, stripUserMachinery } from '@/lib/station-hide';
 import { bustCache } from '@/lib/oc-cache';
 import { buildParts, forward, runEnded } from '@/lib/oc-forward';
 import { isRunLive, liveSince, runEndedAt } from '@/lib/oc-live';
@@ -14,11 +24,34 @@ import { PENDING_TTL_MS } from '@/lib/pending-ttl';
 
 export const dynamic = 'force-dynamic';
 
-type SendBody = {
-  text?: string;
-  images?: string[];
-  files?: { name: string; content: string }[];
-};
+/** a stored file part's hash: the REF's own, or the one its `/file/<hash>` url names */
+function partHash(p: any): string {
+  return typeof p.hash === 'string' && HASH_RE.test(p.hash) ? p.hash : urlHash(String(p.url || ''));
+}
+
+/** what the phone shows for a message's file parts: images (a data URL as stored, a stored file
+ *  as its /api/file url) and the other files the brain keeps, as chips that open them */
+function fileViews(parts: any[]) {
+  const images: (string | null)[] = [];
+  const files: { name: string; mime: string; size: number; url: string }[] = [];
+  for (const p of parts) {
+    const hash = p.type === 'file' || p.type === 'image' ? partHash(p) : '';
+    const root = typeof p.root === 'string' ? p.root : undefined;
+    if (p.type === 'image' || isImageMime(p.mime)) {
+      images.push(hash ? fileUrl({ hash, root, mime: p.mime }) : p.url || p.data || null);
+    } else if (hash) {
+      const name = String(p.filename || 'file');
+      const mime = String(p.mime || 'application/octet-stream');
+      files.push({
+        name,
+        mime,
+        size: Number(p.size) || 0,
+        url: fileUrl({ hash, root, mime, name }, true),
+      });
+    }
+  }
+  return { images, files };
+}
 
 /** full log: one tool call as a line — its name, the input's telling field,
  *  the agent it started (session_start), a status unless it completed:
@@ -36,6 +69,26 @@ function toolLine(p: any): string {
   );
 }
 
+/** The sender of a user message that the owner did not write: `{ from }` (a session — its id,
+ *  title, and root when another root's), `{ auto: true }` (the brain itself), else nothing. */
+function senderOf(meta: any): {
+  from?: { session: string; title: string; root?: string };
+  auto?: true;
+} {
+  const f = meta?.from;
+  if (f && typeof f.session === 'string')
+    return {
+      from: {
+        session: f.session,
+        title: typeof f.title === 'string' ? f.title : '',
+        ...(typeof f.root === 'string' && { root: f.root }),
+      },
+    };
+  if (typeof meta?.origin === 'string') return { from: { session: meta.origin, title: '' } };
+  if (meta?.auto === true) return { auto: true };
+  return {};
+}
+
 export async function GET(req: Request, ctx: { params: Promise<{ id: string }> }) {
   try {
     ensureWatchdog(); // the event stream must be up for X-Run-Last-Event to mean anything
@@ -49,21 +102,27 @@ export async function GET(req: Request, ctx: { params: Promise<{ id: string }> }
     const errors = new URL(req.url).searchParams.get('errors') === '1';
     const msgs = await ocFetch(`/session/${sid}/message${log ? '?internal=1' : ''}`);
     const out = msgs.map((m: any) => {
-      const text = stripCtx(
+      const role = m.info?.role || m.role;
+      const sender = role === 'user' ? senderOf(m.info?.meta) : {};
+      const shown = stripStationLine(stripCtx(
         (m.parts || [])
           .filter((p: any) => p.type === 'text')
           .map((p: any) => p.text || '')
           .join('\n')
           .trim()
-      );
+      ));
+      // a turn shown in the owner's voice "(you)": injected reports and brain blocks never read
+      // as the owner's words — pure machinery renders as nothing, the owner's own words stay
+      const text = role === 'user' && !sender.from && !sender.auto ? stripUserMachinery(shown) : shown;
       // tool-only steps stay invisible on the phone: the busy indicator
       // already shows activity, ⚙ lines were just clutter (user req)
       return {
-        role: m.info?.role || m.role,
+        id: m.info?.id,
+        // a reply: the message it answers (with messages waiting, not the one just before it)
+        parent: m.info?.parentID || undefined,
+        role,
         text,
-        images: (m.parts || [])
-          .filter((p: any) => p.type === 'image' || p.mime?.startsWith('image/'))
-          .map((p: any) => p.url || p.data || null),
+        ...fileViews(m.parts || []),
         time: m.info?.time?.created || 0,
         modality: m.info?.modality === 'voice' ? 'voice' : undefined,
         firstDelta: m.info?.time?.first_delta,
@@ -73,6 +132,12 @@ export async function GET(req: Request, ctx: { params: Promise<{ id: string }> }
         done:
           (m.info?.role || m.role) === 'assistant' ? !!m.info?.time?.completed : undefined,
         autoReply: m.info?.meta?.autoReply === true ? true : undefined,
+        // a run that was stopped or failed: its text is what was there when it ended (L16: a
+        // held turn's partial answer is never said aloud)
+        stopped: (m.info?.role || m.role) === 'assistant' && m.info?.error ? true : undefined,
+        // who wrote it when not the owner: another session (here or on another root), or the
+        // brain itself (a report, a wake-up). Older messages carry only the sender's id (origin)
+        ...sender,
         ...(errors && m.info?.error && { error: String(m.info.error?.data?.message || m.info.error?.name || 'error') }),
         ...(log && {
           internal: m.info?.meta?.internal === true ? true : undefined,
@@ -80,7 +145,17 @@ export async function GET(req: Request, ctx: { params: Promise<{ id: string }> }
         }),
       };
     });
-    const all = out.filter((m: any) => m.text || m.images.length || m.log?.length || m.error);
+    // older messages name the sender by id only: its title, from the session list (one call)
+    if (out.some((m: any) => m.from && !m.from.title)) {
+      const list: any[] = await ocFetch('/session').catch(() => []);
+      const titles = new Map(list.map((x: any) => [x.id, x.title || '']));
+      for (const m of out) if (m.from && !m.from.title) m.from.title = titles.get(m.from.session) || '';
+    }
+    const all = out.filter(
+      (m: any) =>
+        !((m.role || m.info?.role) === 'assistant' && hideNarration(m.text)) &&
+        (m.text || m.images.length || m.files.length || m.log?.length || m.error)
+    );
     // run state for the busy indicator: opencode emits one assistant message
     // per step, so "an assistant message landed" ≠ "the run is done". The run
     // is done only when the last relevant message is an assistant message with
@@ -129,13 +204,17 @@ export async function GET(req: Request, ctx: { params: Promise<{ id: string }> }
     const body = limit > 0 ? all.slice(-limit) : all;
     // messages waiting in the proxy queue render like the transcript (with
     // queued: true) — refresh-proof, no client-side echo needed
-    const queued = queuedItems(sid).map((q) => ({
-      role: 'user',
-      text: q.text,
-      images: q.images,
-      time: q.at,
-      queued: true,
-    }));
+    const queued = queuedItems(sid).map((q) => {
+      const v = refViews(q.refs || []);
+      return {
+        role: 'user',
+        text: q.text,
+        images: [...(q.images || []), ...v.images],
+        files: v.files,
+        time: q.at,
+        queued: true,
+      };
+    });
     return NextResponse.json([...body, ...queued], {
       headers: {
         'X-Total-Count': String(all.length),
@@ -170,6 +249,20 @@ export async function POST(req: Request, ctx: { params: Promise<{ id: string }> 
     const sid = await resolveId(id, req.headers.get(PIN_HEADER));
     const body = await req.json();
     const async = body.async === true;
+    // files the brain keeps ride as REFs (uploaded first, /api/file/upload)
+    const refs = cleanRefs(body.refs);
+    if (!refs) {
+      const many = Array.isArray(body.refs) && body.refs.length > FILES_PER_MESSAGE;
+      return NextResponse.json(
+        {
+          error: many
+            ? `at most ${FILES_PER_MESSAGE} files in one message`
+            : 'a file in this message is broken',
+        },
+        { status: 400 }
+      );
+    }
+    body.refs = refs;
     const parts = buildParts(body);
     if (!parts.length) return NextResponse.json({ error: 'empty' }, { status: 400 });
 
@@ -182,6 +275,7 @@ export async function POST(req: Request, ctx: { params: Promise<{ id: string }> 
           text: String(body.text || ''),
           images: body.images || [],
           files: body.files || [],
+          ...(refs.length && { refs }),
         });
         console.log(`[queue] enqueue ${sid} (depth ${queuedItems(sid).length})`);
         bustCache();

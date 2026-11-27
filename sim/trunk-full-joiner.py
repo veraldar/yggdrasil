@@ -19,6 +19,8 @@ own address (--from):
      An approval without `wg` (a hub without a node) falls back to the old peer port.
 
 Then it stays up, supervising both, until SIGTERM. Every file lands in --state.
+--brain-env KEY=VAL (repeatable) adds to the brain's environment (S17: its Claude Code harness
+points at sim/reach/cc_model.py — the namespace has no model upstream).
 
     trunk-full-joiner.py --state DIR --hub https://ap.tree.test --cafile cert.pem --from 203.0.113.9
         --name mac --brain-bin yggdrasil --mock-url http://127.0.0.1:P --brain-port P --peer-port P
@@ -78,6 +80,11 @@ def main():
     ap.add_argument("--wg-port", type=int, required=True, help="the node's front door")
     ap.add_argument("--wg-udp", type=int, required=True, help="the node's udp")
     ap.add_argument("--wg-pipe", type=int, required=True, help="the dialer's udp for the node")
+    ap.add_argument("--brain-env", action="append", default=[], help="KEY=VAL for the brain (repeatable)")
+    ap.add_argument("--model", default="", choices=["", "home"],
+                    help='home = "Same as the home root": say so at the join; after the approval fetch the home '
+                         "root's model settings through this root's tunnel and start the brain on THOSE alone "
+                         "(--mock-url is then not given to the brain)")
     o = ap.parse_args()
     os.makedirs(o.state, exist_ok=True)
     kids = []
@@ -103,7 +110,8 @@ def main():
 
     # 1. ask to join
     st, ans = call(o, "POST", o.hub.rstrip("/") + "/api/roots/join",
-                   {"name": o.name, "os": o.os, "host": o.host, "wg_pub": wg_pub})
+                   {"name": o.name, "os": o.os, "host": o.host, "wg_pub": wg_pub,
+                    **({"model": "home"} if o.model == "home" else {})})
     if st != 201:
         write(os.path.join(o.state, "error"), f"join answered {st}: {ans}\n")
         log("join refused", st, ans)
@@ -133,7 +141,7 @@ def main():
         return 1
     toks = got.get("link_tokens") or []
     write(os.path.join(o.state, "link.tokens"), "".join(t + "\n" for t in toks), 0o600)
-    root = {k: got.get(k) for k in ("root_id", "rootlink_url", "hub", "peer_token", "wg")}
+    root = {k: got.get(k) for k in ("root_id", "rootlink_url", "hub", "peer_token", "wg", "model")}
     root["tokens"] = len(toks)
     root["root_secret_len"] = len(got.get("root_secret") or "")
     write(os.path.join(o.state, "root.json"), json.dumps(root), 0o600)
@@ -160,15 +168,58 @@ def main():
            "YGG_PROVIDERS": os.path.join(data, "no-providers.json"), "YGG_ARTIFACTS_DIR": os.path.join(data, "artifacts"),
            "YGG_LISTEN": f"127.0.0.1:{o.brain_port}", "YGG_DATA_DIR": os.path.join(data, "data"),
            "YGG_PROFILES": os.path.join(data, "agents.json"), "YGG_PROJECT_DIR": os.path.join(data, "work"),
-           "YGG_ROOT_NAME": root["root_id"],
+           "YGG_ROOT_NAME": root["root_id"], "YGG_ROOT_MAIN": "1", "YGG_HOME_ROOT": root["hub"] or "hub",
            # the hub brain by the name the join answered (reports go to that name), via `local`
            "YGG_PEERS": f"{root['hub'] or 'hub'}={hub_peer}",
            # the other roots of the tree, from this root's node (the hub's directory)
            **({"YGG_PEERS_FROM": f"http://127.0.0.1:{o.wg_port}/_wg/_roots",
                "YGG_PEERS_VIA": f"http://127.0.0.1:{o.wg_port}/_wg/{{id}}"} if g else {}),
-           "YGG_PEER_TOKEN": root["peer_token"] or ""}
-    kids.append(subprocess.Popen([o.brain_bin], env=env, stdout=open(os.path.join(o.state, "brain.log"), "w"),
-                                 stderr=subprocess.STDOUT, cwd=data))
+           "YGG_PEER_TOKEN": root["peer_token"] or "",
+           **dict(kv.split("=", 1) for kv in o.brain_env)}
+    def start_brain():
+        kids.append(subprocess.Popen([o.brain_bin], env=env, stdout=open(os.path.join(o.state, "brain.log"), "w"),
+                                     stderr=subprocess.STDOUT, cwd=data))
+
+    def fetch_model():
+        """'Same as the home root' (docs: artifacts/p3-model-share-contract.md): GET /root/model on the home
+        brain, through THIS root's WireGuard node, with the peer token. The key is never printed or logged:
+        model.json keeps what was fetched WITHOUT it."""
+        import urllib.error, urllib.request
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        req = urllib.request.Request(f"http://127.0.0.1:{o.wg_port}/_wg/local/root/model",
+                                     headers={"x-ygg-peer": root["peer_token"] or ""})
+        last = "no answer"
+        for _ in range(40):
+            try:
+                with opener.open(req, timeout=10) as r:
+                    m = json.loads(r.read().decode())
+                    for k, e in (("base_url", "YGG_UPSTREAM_BASE_URL"), ("style", "YGG_UPSTREAM_STYLE"),
+                                 ("model", "YGG_UPSTREAM_MODEL"), ("models", "YGG_MODELS"),
+                                 ("vision", "YGG_VISION_MODELS"), ("api_key", "YGG_UPSTREAM_API_KEY")):
+                        if m.get(k):
+                            env[e] = m[k]
+                    write(os.path.join(o.state, "model.json"), json.dumps(
+                        {"base_url": m.get("base_url"), "style": m.get("style"), "model": m.get("model"),
+                         "has_key": bool(m.get("api_key")), "key_len": len(m.get("api_key") or "")}))
+                    log(f"model: {m.get('model')} ({m.get('style')}) — the home root's, fetched inside the tunnel")
+                    return True
+            except urllib.error.HTTPError as e:
+                last = f"HTTP {e.code}"
+                if e.code in (401, 403, 404):
+                    break
+            except (urllib.error.URLError, OSError) as e:
+                last = str(getattr(e, "reason", e))
+            time.sleep(1)
+        write(os.path.join(o.state, "error"), f"the home root's model was not handed over: {last}\n")
+        log("model fetch failed", last)
+        return False
+
+    if o.model == "home":
+        # nothing of the rig's own upstream reaches this brain: it runs on what the home root hands it
+        for k in ("YGG_UPSTREAM_BASE_URL", "YGG_UPSTREAM_STYLE", "YGG_UPSTREAM_API_KEY", "YGG_UPSTREAM_MODEL"):
+            env.pop(k, None)
+    else:
+        start_brain()
     u = urllib.parse.urlsplit(root["rootlink_url"])
     dial = [sys.executable, DIAL, "--host", u.hostname, "--port", str(u.port or (443 if u.scheme == "wss" else 80)),
             "--path", u.path or "/", "--token-file", os.path.join(o.state, "link.tokens"),
@@ -187,6 +238,10 @@ def main():
                 stop()
         if not linked and f"linked: {root['root_id']}" in open(dlog).read():
             linked = True
+            if o.model == "home":
+                if not fetch_model():
+                    stop()
+                start_brain()
             write(os.path.join(o.state, "linked"), root["root_id"] + "\n")
             log(f"root {root['root_id']!r} linked through {o.hub}")
         time.sleep(0.3)

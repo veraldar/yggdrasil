@@ -20,7 +20,7 @@
  *              the words say so. Speaking: the rail breathes green. No sound
  *              at all: said in words, never a silent wait.
  *  Afterwards the front page carries the tree as crown + roots: the roots
- *  are the way to MAIN (components/roots.tsx, MAINFRAME-C 10-26). */
+ *  are the way to MAIN (components/main-bar.tsx, MAINFRAME-C 10-26). */
 import { useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { YggTree } from '@/components/ygg';
@@ -64,7 +64,6 @@ const FILM_LINES = [...NAMES, 'name_try', 'name_done'];
 const UI = {
   en: {
     hold: 'hold the tree to begin',
-    holdSub: 'the tree stands for your own computer · sound on',
     heard: 'heard',
     short: 'short',
     shortSub: 'just the point',
@@ -97,7 +96,6 @@ const UI = {
   },
   fr: {
     hold: "maintenez l'arbre pour commencer",
-    holdSub: "l'arbre, c'est votre propre ordinateur · son activé",
     heard: 'entendu',
     short: 'court',
     shortSub: "juste l'essentiel",
@@ -511,7 +509,6 @@ export function Door() {
         <p className="oz-invite" aria-hidden="true">
           <span className="hold">{ui.hold}</span>
           <span className="held">{ui.heard}</span>
-          <span className="sub">{ui.holdSub}</span>
         </p>
       )}
 

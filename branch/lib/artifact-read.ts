@@ -2,7 +2,8 @@
  *  time you opened it. Phone-local, like chat read receipts. A rewrite
  *  moves mtime, so an agent updating a design rings the bell again —
  *  "they updated the mockup" is worth a notification too. */
-import type { ArtifactEntry } from '@/lib/artifacts';
+/** what the watermarks need of a file (an ArtifactEntry, or another computer's row) */
+type Seen = { name: string; mtime: number; source?: string };
 
 const KEY = 'oz-artifact-seen';
 const INIT = 'oz-artifact-init';
@@ -33,7 +34,7 @@ export function markSeen(name: string, mtime: number): void {
   }
 }
 
-export function countUnseen(files: ArtifactEntry[]): number {
+export function countUnseen(files: Seen[]): number {
   const all = readAll();
   let n = 0;
   for (const f of files) if (f.mtime > (all[f.name] || 0)) n++;
@@ -45,7 +46,7 @@ export function countUnseen(files: ArtifactEntry[]): number {
  *  first meets a new source (the main tree's dir joined the sandbox gallery
  *  10-26, ~500 files), that source's backlog is seen too; only what lands
  *  after rings. The bare INIT key is the local dir's (pre-sources phones). */
-export function seenInit(files: ArtifactEntry[]): void {
+export function seenInit(files: Seen[]): void {
   const key = (src: string) => (src === 'local' ? INIT : `${INIT}:${src}`);
   // local always inits on the first load, even empty — its first file rings
   const srcs = ['local', ...files.map((f) => f.source || 'local')];
@@ -59,6 +60,15 @@ export function seenInit(files: ArtifactEntry[]): void {
   }
 }
 
-export function markAllSeen(files: ArtifactEntry[]): void {
+export function markAllSeen(files: Seen[]): void {
   for (const f of files) markSeen(f.name, f.mtime);
+}
+
+/** The same watermarks for another computer's files: each is kept under that computer's name
+ *  (`<root>/<file>`), so a file there never counts as the home file of the same name — and the
+ *  first time this phone meets that computer, what is already there counts as seen (seenInit).
+ *  `root` null = the home root's own files, as they are. */
+export function forRoot<T extends Seen>(root: string | null, files: T[]): T[] {
+  if (!root) return files;
+  return files.map((f) => ({ ...f, name: `${root}/${f.name}`, source: `root:${root}` }));
 }

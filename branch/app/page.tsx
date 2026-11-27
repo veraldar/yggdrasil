@@ -1,23 +1,25 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import Link from 'next/link';
+import { useTheme } from 'next-themes';
 import { useRouter } from 'next/navigation';
-import { LineIcon } from '@/components/line-icon';
-import { BAND_VIEWBOX, YggTree } from '@/components/ygg';
-import { Door } from '@/components/tree-door';
-import { Roots } from '@/components/roots';
-import { Marked } from '@/components/marked';
 import { ContinueTerminal } from '@/components/app/continue-claude';
-import { sessionTag } from '@/lib/agents';
-import { askedSessions, clearAsked, notifyReply } from '@/lib/notify';
-import type { ArtifactEntry } from '@/lib/artifacts';
+import { HomeBand, HomeHead } from '@/components/app/home-parts';
+import { LineIcon } from '@/components/line-icon';
+import { MainBar } from '@/components/main-bar';
+import { Marked } from '@/components/marked';
+import { HOME_ROOT_KEY, RootsSheet, type Tree } from '@/components/roots-sheet';
+import { Door } from '@/components/tree-door';
+import { engineWord, roleOf, sessionTag } from '@/lib/agents';
 import { countUnseen, seenInit } from '@/lib/artifact-read';
+import type { ArtifactEntry } from '@/lib/artifacts';
 import { CARD_ST, type Card } from '@/lib/card';
+import { askedSessions, clearAsked, notifyReply } from '@/lib/notify';
 import { lastRead, markRead } from '@/lib/read';
 import { slugify } from '@/lib/slug';
 import { DOOR_KEY, MAIN_SLUG, isMainSlug, isOnboardPrompt } from '@/lib/tree-first';
 import { VOICE_TEST_SLUG, voiceTestOn } from '@/lib/voice-test';
+import { cacheTreeThemes, cachedRootTheme, chosenWorld } from '@/lib/worlds';
 
 // open-question circles go stale after this long
 const OPEN_QUESTION_TTL_MS = 48 * 60 * 60 * 1000;
@@ -36,11 +38,16 @@ type Sess = {
   updated: number;
   lastRole?: string;
   lastAt?: number;
+  /** when the owner last wrote in it (their own newest message orders the list) */
+  userAt?: number;
   lastHasQ?: boolean;
   msgs?: number;
   pending?: boolean;
+  /** its role (the badge) — the brain's `agent` field */
   agent?: string | null;
-  /** a terminal's conversation continued here: its harness (claude · antigravity · opencode) */
+  /** what runs it (the small grey word; none on the root): root · claude · antigravity · … */
+  engine?: string | null;
+  /** the owner's own terminal conversation continued here: its kind (badge [TRM]), else null */
   harness?: string | null;
   card?: Card | null;
   archived?: boolean; // closed by its parent — hidden behind "N closed"
@@ -167,8 +174,18 @@ function fmtListTime(t?: number): string {
     : d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
 }
 
+/** the list's order (owner 11-17): when the owner last wrote in it — never a reply's time */
+const byOwner = (s: { userAt?: number; updated?: number }) => s.userAt || s.updated || 0;
+
+/** working = a run in flight (pending) or the brain's card says so — a card can be
+ *  working with no run this proxy sees (a voice run, a run on another root). The one
+ *  truth for the rows' green dot, the band chip's count and the working filter, so
+ *  the chip's number is exactly what the rows show */
+const isWorking = (s: Sess) => !!s.pending || s.card?.status === 'working';
+
 export default function SessionsPage() {
   const router = useRouter();
+  const { setTheme } = useTheme();
   // the door, per device (never the server store): not walked yet → the
   // tree alone. Unknown until the first client render — so the server HTML
   // IS the door (it paints before any script), and the layout's boot script
@@ -198,10 +215,21 @@ export default function SessionsPage() {
   // artifacts the agents left unseen — drives the header bell badge;
   // counted on the same load/poll cycle as the session list
   const [unseenArts, setUnseenArts] = useState(0);
+  // the band chip ("N working") taps to a working-only list; tap again clears
+  // it — and it clears itself when nothing works any more (never a zero list)
+  const [onlyWorking, setOnlyWorking] = useState(false);
   const [creating, setCreating] = useState(false);
   const [name, setName] = useState('');
   // the terminal's sessions (Claude Code, Antigravity, opencode): watch live, continue here
   const [continuing, setContinuing] = useState(false);
+  // the roots sheet (every computer of the tree) and this computer's name — a row of another
+  // computer carries its name as a tag; unknown ('') = every row with a computer carries it
+  const [rootsOpen, setRootsOpen] = useState(false);
+  const [homeRoot, setHomeRoot] = useState('');
+  const [pendingJoins, setPendingJoins] = useState(0);
+  // how many roots run another build than home: a mark on the roots key
+  const [rootsBehind, setRootsBehind] = useState(0);
+  const [rootThemes, setRootThemes] = useState<Record<string, string | null>>({});
   const [loading, setLoading] = useState(true);
   const loadInFlightRef = useRef(false);
   // undo window: row (and its sub-tree) vanishes instantly, but the DELETE
@@ -232,8 +260,7 @@ export default function SessionsPage() {
       if (arr) arr.push(s);
       else m.set(s.parentId, [s]);
     }
-    for (const arr of m.values())
-      arr.sort((a, b) => (b.lastAt || b.updated || 0) - (a.lastAt || a.updated || 0));
+    for (const arr of m.values()) arr.sort((a, b) => byOwner(b) - byOwner(a));
     return m;
   }, [sessions]);
   const byId = useMemo(() => new Map(sessions.map((s) => [s.id, s])), [sessions]);
@@ -246,7 +273,7 @@ export default function SessionsPage() {
     for (const s of sessions) {
       if (s.archived) continue;
       const st = s.card?.status;
-      const w = !!s.pending || st === 'working';
+      const w = isWorking(s);
       if (!w && st !== 'blocked') continue;
       const seen = new Set<string>();
       for (let p = s.parentId; p && !seen.has(p); p = byId.get(p)?.parentId) {
@@ -363,7 +390,10 @@ export default function SessionsPage() {
       // whole family until the toast expires
       const p = pendingRef.current;
       const hideIds = p ? new Set([p.s.id, ...p.fam.map((x) => x.id)]) : null;
-      const visible = list.filter((x) => !hideIds || !hideIds.has(x.id));
+      // another computer's MAIN lives in the roots sheet, not on the list
+      const visible = list.filter(
+        (x) => (!hideIds || !hideIds.has(x.id)) && x.card?.kind !== 'root-main'
+      );
       setSessions(visible);
       try {
         sessionStorage.setItem('oz-sessions', JSON.stringify(visible));
@@ -402,6 +432,50 @@ export default function SessionsPage() {
       setUnseenArts(countUnseen(arts));
     }
   }, []);
+
+  const onTree = useCallback(
+    (t: Tree) => {
+      setPendingJoins(t.joins?.length ?? 0);
+      setRootsBehind((t.roots ?? []).filter((r) => r.behind).length);
+      cacheTreeThemes(t);
+      // only worlds someone picked (theme_rev > 0): an unpicked one is the brain's name-hashed
+      // default, and adopting it flipped the owner's light app to dark aether (11-23 22:17)
+      const map: Record<string, string | null> = {};
+      for (const r of t.roots ?? []) {
+        if (r.id) map[r.id] = chosenWorld(r.theme, r.theme_rev);
+      }
+      setRootThemes((prev) => ({ ...prev, ...map }));
+      const homeWorld = chosenWorld(t.home?.theme, t.home?.theme_rev);
+      if (homeWorld) setTheme(homeWorld);
+      const n = t.home?.name || '';
+      if (!n) return;
+      setHomeRoot(n);
+      try {
+        localStorage.setItem(HOME_ROOT_KEY, n);
+      } catch {
+        /* private mode — known for this visit */
+      }
+    },
+    [setTheme]
+  );
+  useEffect(() => {
+    try {
+      setHomeRoot(localStorage.getItem(HOME_ROOT_KEY) || '');
+      const sp = new URLSearchParams(window.location.search);
+      if (sp.get('roots') === '1') {
+        setRootsOpen(true);
+        sp.delete('roots');
+        const next = `${window.location.pathname}${sp.toString() ? `?${sp.toString()}` : ''}${window.location.hash}`;
+        window.history.replaceState(null, '', next);
+      }
+    } catch {
+      /* private mode */
+    }
+    fetch('/api/roots', { cache: 'no-store', signal: AbortSignal.timeout(10_000) })
+      .then((r) => (r.ok ? (r.json() as Promise<Tree>) : null))
+      .then((t) => t && onTree(t))
+      .catch(() => {});
+  }, [onTree]);
 
   useEffect(() => {
     load();
@@ -468,9 +542,8 @@ export default function SessionsPage() {
     }
     const famIds = new Set(fam.map((x) => x.id));
     setSessions((list) => list.filter((x) => x.id !== s.id && !famIds.has(x.id))); // optimistic
-    const win = (s.msgs || 0) + fam.reduce((n, x) => n + (x.msgs || 0), 0) >= 10
-      ? UNDO_MS_HEAVY
-      : UNDO_MS;
+    const win =
+      (s.msgs || 0) + fam.reduce((n, x) => n + (x.msgs || 0), 0) >= 10 ? UNDO_MS_HEAVY : UNDO_MS;
     pendingRef.current = { s, fam, timer: setTimeout(commitPending, win) };
     setToast({ s, famCount: fam.length, win, key: Date.now() });
   }
@@ -502,13 +575,32 @@ export default function SessionsPage() {
 
   // the caption counts every run on the box (MAIN's too); the crown walks
   // for the branches only — MAIN's run walks the roots
-  const working = sessions.filter((s) => s.pending).length;
+  const working = sessions.filter(isWorking).length;
   const branchWorking = sessions.some((s) => s.pending && !inRoots(s));
+  // the filter never lies about the live list: nothing working → the filter
+  // lifts itself (the chip reads "all quiet", there is nothing to show)
+  useEffect(() => {
+    if (onlyWorking && working === 0) setOnlyWorking(false);
+  }, [onlyWorking, working]);
+
+  /** working-only view: every working session (closed ones included — the
+   *  closed key still gates them, the filter does not swallow rows) with the
+   *  ancestors it hangs from, so a nested child stays visible under its
+   *  parent. Nothing else changes: order law, closed/hidden handling. */
+  const shownTops = useMemo(() => {
+    if (!onlyWorking) return tops;
+    const keep = new Set<string>();
+    for (const s of sessions) {
+      if (!isWorking(s)) continue;
+      keep.add(s.id);
+      for (let p = s.parentId; p && !keep.has(p); p = byId.get(p)?.parentId) keep.add(p);
+    }
+    return tops.filter((s) => keep.has(s.id));
+  }, [onlyWorking, tops, sessions, byId]);
 
   // the list's order law (owner 11-17): the session with the newest message first — a running
   // or unread one shows its dot, it does not jump the order
-  const sortTop = (list: Sess[]) =>
-    [...list].sort((a, b) => (b.lastAt || b.updated || 0) - (a.lastAt || a.updated || 0));
+  const sortTop = (list: Sess[]) => [...list].sort((a, b) => byOwner(b) - byOwner(a));
 
   /** One level of the tree: its open sessions, then — behind a small
    *  "N closed" key (`key` remembers it) — the closed ones. Top level rows
@@ -557,7 +649,7 @@ export default function SessionsPage() {
       !!s.lastHasQ &&
       Date.now() - (s.lastAt || 0) < OPEN_QUESTION_TTL_MS;
     const st = CARD_ST[s.archived ? 'archived' : s.card?.status || ''];
-    const working = !!s.pending || s.card?.status === 'working';
+    const working = isWorking(s);
     const needs = (s.card?.needs || '').trim();
     const sub = needs ? (
       <>
@@ -565,13 +657,17 @@ export default function SessionsPage() {
       </>
     ) : (
       s.card?.headline ||
-      (s.pending
-        ? 'awaiting answer…'
-        : isOnboardPrompt(s.preview || '') // the brain's setup brief, never for eyes
-          ? 'setup'
-          : s.preview)
+      (isOnboardPrompt(s.preview || '') // the brain's setup brief, never for eyes
+        ? 'setup'
+        : s.preview)
     );
     const dot = depth ? 'text-[10px]' : '';
+    const onRoot = s.card?.root && s.card.root !== homeRoot ? s.card.root : null;
+    const rootWorld = !onRoot
+      ? null
+      : onRoot in rootThemes
+        ? rootThemes[onRoot]
+        : cachedRootTheme(onRoot);
     return (
       <>
         <SwipeRow
@@ -601,10 +697,37 @@ export default function SessionsPage() {
               </span>
             ) : null}
             <span className={`t ${depth ? 'opacity-85' : ''}`}>
-              {/* every session at a glance: [MAI] [CLA] [AGY] [OPE] [BUI] [FIX]… */}
-              <span className="mr-1 opacity-60" aria-hidden="true" title={s.harness || s.agent || ''}>
+              {/* the badge is the role (roles rework 11-22): [MAI] [LEA] [BUI] [FIX] [REV] [RES],
+                  [TRM] for the owner's own terminal conversation — never the engine */}
+              <span
+                className="mr-1 opacity-60"
+                aria-hidden="true"
+                title={s.harness ? 'your terminal conversation' : roleOf(s.agent)}
+              >
                 [{sessionTag(s, isMainSlug(slugify(s.title || '')))}]
               </span>
+              {/* it runs on another computer: that computer's name, + its world's swatch when
+                  a world was picked for it (rows only render client-side: the server pass is
+                  the door, so reading the paint cache here cannot split hydration) */}
+              {onRoot && (
+                <>
+                  <span className="mr-1 opacity-60" data-testid="root-tag">
+                    [{onRoot}]
+                  </span>
+                  {rootWorld && (
+                    <span
+                      className="oz-swt mr-1"
+                      data-theme={rootWorld}
+                      data-testid="root-tag-swatch"
+                      aria-hidden="true"
+                    >
+                      <i style={{ background: 'var(--oz-bg)' }} />
+                      <i style={{ background: 'var(--oz-success)' }} />
+                      <i style={{ background: 'var(--oz-info)' }} />
+                    </span>
+                  )}
+                </>
+              )}
               {s.title || s.id}
             </span>
             {kids.length > 0 && (
@@ -629,12 +752,20 @@ export default function SessionsPage() {
                 {kidLive && !open ? ' ●' : ''}
               </span>
             )}
-            {!working && st?.w && (
-              <span className="oz-st" style={{ color: st.c }}>
-                {st.w}
+            {/* one status word, nothing longer (owner 11-17): "working" while it works — the
+                rest is the dot's color ([TRM] says a terminal's conversation already) */}
+            {working && (
+              <span className="oz-st" style={{ color: 'var(--oz-success)' }}>
+                working
               </span>
             )}
-            <time>{fmtListTime(s.lastAt || s.updated)}</time>
+            {/* the engine, one small grey word (none on the root): claude · agy · opencode · codex */}
+            {engineWord(s.engine) && (
+              <span className="oz-eng" data-testid="engine-word">
+                {engineWord(s.engine)}
+              </span>
+            )}
+            <time>{fmtListTime(byOwner(s))}</time>
           </div>
           {(sub || !depth) && <div className="oz-r2">{sub || '\u00a0'}</div>}
         </SwipeRow>
@@ -654,48 +785,28 @@ export default function SessionsPage() {
         className="relative mx-auto flex min-h-dvh max-w-md flex-col px-3"
         style={{ paddingBottom: 'calc(var(--oz-roots-h) + 16px + env(safe-area-inset-bottom))' }}
       >
-        {/* the wordmark alone, full caps, no sign before it — it is the way
-            into settings; the artifact runestone counts what you haven't seen */}
-        <header className="oz-head">
-          <Link href="/settings" className="oz-brand" aria-label="BIFROST — settings">
-            <h1 className="oz-brand">BIFROST</h1>
-          </Link>
-          <div className="flex items-center gap-1.5">
-            <Link
-              href="/artifacts"
-              aria-label={`artifacts — ${unseenArts} unseen`}
-              className={`oz-k sm ${unseenArts > 0 ? 'text-[var(--oz-text)]' : ''}`}
-            >
-              <LineIcon name="artifact" size={15} />
-              {unseenArts > 0 && (
-                <span data-testid="artifact-badge" className="oz-badge">
-                  {unseenArts}
-                </span>
-              )}
-            </Link>
-            <button
-              onClick={load}
-              aria-label="refresh sessions"
-              className={`oz-k sm ${loading ? 'ok' : ''}`}
-            >
-              {loading ? '…' : 'refresh'}
-            </button>
-          </div>
-        </header>
-
-        {/* the tree, once, as a quiet band — one thought walks it at a time
-            while something works; it falls still when nothing does */}
-        <figure
-          className={`oz-band oz-ygg -mx-3 mb-2.5 ${working ? 'live' : ''} ${branchWorking ? 'walk' : ''}`}
-          data-shared={branchWorking && rootsWorking ? '' : undefined}
-          aria-label={working ? `your box — ${working} working` : 'your box — nothing working'}
-        >
-          <YggTree viewBox={BAND_VIEWBOX} slice />
-          <figcaption className="oz-cap">
-            <i />
-            {working ? `${working} working` : 'all quiet'}
-          </figcaption>
-        </figure>
+        {/* the wordmark (the way into settings), the roots, the artifact runestone (it counts
+            what you haven't seen), refresh — then the tree as a quiet band. Both are the home
+            screen's parts every computer's own page is built from (components/app/home-parts) */}
+        <HomeHead
+          title="BIFROST"
+          settingsHref="/settings"
+          artifactsHref="/artifacts"
+          unseen={unseenArts}
+          joins={pendingJoins}
+          behind={rootsBehind}
+          loading={loading}
+          onRoots={() => setRootsOpen(true)}
+          onRefresh={load}
+        />
+        <HomeBand
+          name="your box"
+          working={working}
+          walk={branchWorking}
+          shared={branchWorking && rootsWorking}
+          only={onlyWorking}
+          onToggle={() => setOnlyWorking((v) => !v)}
+        />
 
         <div className="mb-2 flex items-stretch gap-1.5">
           <button
@@ -804,7 +915,9 @@ export default function SessionsPage() {
                     </div>
                     {h.snippets.map((sn, i) => (
                       <div key={i} className={`oz-r2 ${i === 0 ? '' : 'opacity-70'}`}>
-                        <span className="text-[10px]">({sn.role === 'assistant' ? 'agent' : sn.role}) </span>
+                        <span className="text-[10px]">
+                          ({sn.role === 'assistant' ? 'agent' : sn.role}){' '}
+                        </span>
                         <Marked text={sn.text} q={gq} />
                       </div>
                     ))}
@@ -818,25 +931,25 @@ export default function SessionsPage() {
           )
         ) : (
           <ul className="flex flex-col gap-1">
-            {/* MAIN's own sub-tree first (MAIN itself is the roots), then
-                the other top-level sessions — each nests to any depth */}
-            {group(
-              sortTop(tops.filter((s) => !!s.parentId && byId.has(s.parentId))),
-              'closed:main'
-            )}
-            {group(sortTop(tops.filter((s) => !s.parentId || !byId.has(s.parentId))), 'closed:top')}
+            {/* one list, the owner's own newest message first (11-17) — MAIN's sub-tree no
+                longer sits above the rest (MAIN itself is the roots); each nests to any depth.
+                The band chip's filter ("N working") narrows it to the working and their
+                ancestors — the closed key still gates its rows behind their parent */}
+            {group(sortTop(shownTops), 'closed:top')}
           </ul>
         )}
       </main>
 
       {/* the tree's roots, the ground of the page: MAIN — tap to open it,
           hold to talk to it from here */}
-      <Roots
+      <MainBar
         main={mainRow}
         branchWorking={branchWorking}
         onSettled={load}
         onWorking={setRootsWorking}
       />
+
+      {rootsOpen && <RootsSheet onClose={() => setRootsOpen(false)} onTree={onTree} />}
 
       {/* undo toast — the bar is the mercy window; tap undo to restore the row */}
       {toast && (
@@ -851,8 +964,7 @@ export default function SessionsPage() {
           <div className="msg">
             deleted “{toast.s.title || toast.s.id}”
             {(toast.s.msgs || 0) > 0 && ` · ${toast.s.msgs} msgs`}
-            {toast.famCount > 0 &&
-              ` + ${toast.famCount} sub${toast.famCount === 1 ? '' : 's'}`}
+            {toast.famCount > 0 && ` + ${toast.famCount} sub${toast.famCount === 1 ? '' : 's'}`}
           </div>
           <button onClick={undo} className="oz-k sm ok">
             undo

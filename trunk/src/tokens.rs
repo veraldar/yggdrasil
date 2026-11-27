@@ -82,10 +82,14 @@ pub struct Grant {
 #[derive(Default)]
 struct Snapshot {
     epoch: u64,
+    /// when the kill switch last moved the epoch (unix ms; the app's `killedAt`)
+    killed_at: Option<u64>,
     /// device id → revoked
     revoked: HashMap<String, bool>,
     /// device id → v4 root allowlist claim
     roots: HashMap<String, Vec<String>>,
+    /// device id → when it was revoked (unix ms; the app's `revokedAt`)
+    revoked_at: HashMap<String, u64>,
     /// v2 access hash → (device, exp ms, region)
     access: HashMap<String, (String, u64, String)>,
     /// v1 tokenHash → device
@@ -104,6 +108,15 @@ impl TokenStore {
         TokenStore {
             path: path.into(),
             cache: std::sync::Mutex::new((Instant::now() - Duration::from_secs(3600), Snapshot::default())),
+        }
+    }
+
+    /// The tree's roots registry the app keeps beside the devices file (BIFROST_ROOTS_FILE wins,
+    /// as in the app's lib/roots.ts).
+    pub fn roots_file(&self) -> PathBuf {
+        match std::env::var("BIFROST_ROOTS_FILE") {
+            Ok(f) if !f.trim().is_empty() => PathBuf::from(f.trim()),
+            _ => self.path.with_file_name("roots.json"),
         }
     }
 
@@ -189,6 +202,27 @@ impl TokenStore {
     pub fn kill_epoch(&self) -> u64 {
         self.with(|s| s.epoch)
     }
+
+    /// When the kill switch last fired (unix ms) — the meter's kill → cut time.
+    pub fn killed_at(&self) -> Option<u64> {
+        self.with(|s| s.killed_at)
+    }
+
+    /// When the app revoked this device (unix ms), if it did — the meter's revoke → cut time.
+    pub fn revoked_at(&self, id: &str) -> Option<u64> {
+        self.with(|s| s.revoked_at.get(id).copied())
+    }
+
+    /// The device a raw credential belongs to, whatever its state (a refused token's device,
+    /// for the meter: which device a region refusal or an expiry hit). Never the token itself.
+    pub fn device_of(&self, raw: &str) -> Option<String> {
+        let raw = raw.trim();
+        if raw.len() < 16 {
+            return None;
+        }
+        let hash = hash_token(raw);
+        self.with(|s| s.access.get(&hash).map(|(d, _, _)| d.clone()).or_else(|| s.v1.get(&hash).cloned()))
+    }
 }
 
 #[derive(serde::Deserialize)]
@@ -196,6 +230,8 @@ impl TokenStore {
 struct RegFile {
     #[serde(default)]
     kill_epoch: u64,
+    #[serde(default)]
+    killed_at: Option<String>,
     #[serde(default)]
     devices: Vec<DeviceEntry>,
 }
@@ -218,6 +254,9 @@ struct DeviceEntry {
     /// v4 TOKEN LAW: roots this device may name. Missing = local root only.
     #[serde(default)]
     roots: Vec<String>,
+    /// ISO time the app revoked it (devices.ts revokeIn)
+    #[serde(default)]
+    revoked_at: Option<String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -230,12 +269,19 @@ struct AccessEntry {
 
 impl RegFile {
     fn snapshot(self) -> Snapshot {
-        let mut s = Snapshot { epoch: self.kill_epoch, ..Default::default() };
+        let mut s = Snapshot {
+            epoch: self.kill_epoch,
+            killed_at: self.killed_at.as_deref().and_then(parse_iso_ms),
+            ..Default::default()
+        };
         for d in self.devices {
             let Some(id) = d.id.or_else(|| d.token_hash.as_ref().map(|h| format!("v1:{h}"))) else {
                 continue;
             };
             s.revoked.insert(id.clone(), d.revoked);
+            if let Some(ms) = d.revoked_at.as_deref().and_then(parse_iso_ms) {
+                s.revoked_at.insert(id.clone(), ms);
+            }
             s.roots.insert(id.clone(), d.roots);
             if let Some(h) = d.token_hash {
                 s.v1.insert(h.to_ascii_lowercase(), id.clone());
@@ -246,6 +292,28 @@ impl RegFile {
         }
         s
     }
+}
+
+/// `2026-11-23T11:41:17.123Z` (JS toISOString) → unix ms. UTC only (what the app writes).
+pub fn parse_iso_ms(t: &str) -> Option<u64> {
+    let b = t.as_bytes();
+    if !t.is_ascii() || b.len() < 20 || b[4] != b'-' || b[7] != b'-' || b[10] != b'T' || !t.ends_with('Z') {
+        return None;
+    }
+    let n = |r: std::ops::Range<usize>| t.get(r)?.parse::<i64>().ok();
+    let (y, m, d) = (n(0..4)?, n(5..7)?, n(8..10)?);
+    let (hh, mm, ss) = (n(11..13)?, n(14..16)?, n(17..19)?);
+    let frac = t[19..t.len() - 1].strip_prefix('.').unwrap_or("");
+    let ms = if frac.is_empty() { 0 } else { format!("{:0<3}", &frac[..frac.len().min(3)]).parse::<i64>().ok()? };
+    // days from civil (Howard Hinnant)
+    let y2 = if m <= 2 { y - 1 } else { y };
+    let era = y2.div_euclid(400);
+    let yoe = y2 - era * 400;
+    let mp = (m + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    u64::try_from(((days * 86_400 + hh * 3600 + mm * 60 + ss) * 1000) + ms).ok()
 }
 
 /// Extract bearer credentials from an Authorization header value.
@@ -260,6 +328,15 @@ pub fn bearer(header_value: &str) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn iso_times_parse() {
+        assert_eq!(parse_iso_ms("1970-01-01T00:00:00.000Z"), Some(0));
+        assert_eq!(parse_iso_ms("2026-11-22T19:08:52.596Z"), Some(1_795_374_532_596));
+        assert_eq!(parse_iso_ms("2000-02-29T00:00:00Z"), Some(951_782_400_000));
+        assert_eq!(parse_iso_ms("yesterday"), None);
+        assert_eq!(parse_iso_ms("2026-11-22T19:08:52.5ééZ"), None); // never a panic on a split char
+    }
 
     fn store(json: serde_json::Value) -> (TokenStore, PathBuf) {
         let p = std::env::temp_dir().join(format!(

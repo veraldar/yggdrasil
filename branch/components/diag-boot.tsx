@@ -9,9 +9,11 @@ export function DiagBoot() {
   useEffect(() => {
     initDiag();
     if ('serviceWorker' in navigator) {
-      navigator.serviceWorker.register('/sw.js').catch(() => {
-        /* SW is optional */
-      });
+      navigator.serviceWorker
+        .register('/sw.js', { updateViaCache: 'none' })
+        .catch(() => {
+          /* SW is optional */
+        });
     }
   }, []);
   return null;

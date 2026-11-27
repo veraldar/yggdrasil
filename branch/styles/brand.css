@@ -62,6 +62,10 @@
   .oz-k.heard::before { content: ''; position: absolute; inset: -6px; border: 1px solid color-mix(in srgb, var(--oz-active) 45%, transparent); animation: oz-ring 1.6s ease-out infinite; pointer-events: none; }
   .oz-k.heard.drop { color: var(--oz-danger); border-color: var(--oz-danger); box-shadow: none; }
   .oz-k.heard.drop::before { display: none; }
+  /* a mark on a key (the roots key: a computer is not up to date), under a badge when both show */
+  .oz-k.mark { color: var(--oz-text); }
+  .oz-k.mark::after { content: ''; position: absolute; top: -3px; right: -3px; width: 7px; height: 7px; background: var(--oz-active); }
+  .oz-k.mark .oz-badge { z-index: 1; }
   .oz-badge {
     position: absolute; top: -7px; right: -7px; min-width: 17px; height: 17px; padding: 0 4px;
     background: var(--oz-text); color: var(--oz-bg); font-size: 10px; line-height: 17px; text-align: center; font-weight: 700;
@@ -124,8 +128,40 @@
     position: absolute; right: 10px; bottom: 8px; font-size: 11px; line-height: 1.6; padding: 2px 6px;
     background: var(--oz-surface); border: 1px solid var(--oz-border); color: var(--oz-text);
   }
+  /* a tap target too, not just a caption (11-23): the working filter — text, box
+     and square reset to what the span painted, then tint like the .oz-chips keys */
+  button.oz-cap { cursor: pointer; }
+  button.oz-cap:disabled { opacity: .55; cursor: default; }
+  .oz-band .oz-cap[aria-pressed='true'] {
+    color: var(--oz-active);
+    border-color: color-mix(in srgb, var(--oz-active) 45%, transparent);
+    background: color-mix(in srgb, var(--oz-active) 12%, var(--oz-surface));
+  }
   .oz-cap i { display: inline-block; width: 7px; height: 7px; margin-right: 6px; background: var(--oz-dim); }
   .oz-band.live .oz-cap i { background: var(--oz-success); }
+
+  /* § pin — the pinned channel's word (components/pin-state.tsx), a caption like the band's:
+     square hairline, opaque, one line that ends in … rather than spill (the reason is its title).
+     Fixed over every page, so it sits where no chrome is: bottom-left by default (in the session
+     footer that is the empty words line), and on the front page the roots' top-right corner —
+     the bottom-left there is MAIN's name (11-23: "end to end" sat across its box at 360 px). */
+  .oz-pin {
+    position: fixed; z-index: 60; left: 12px; bottom: calc(5px + env(safe-area-inset-bottom));
+    max-width: calc(100vw - 24px); height: 18px; padding: 0 6px; pointer-events: none;
+    overflow: hidden; white-space: nowrap; text-overflow: ellipsis;
+    font-size: 10px; line-height: 16px; letter-spacing: .04em; color: var(--oz-dim);
+    background: var(--oz-surface); border: 1px solid var(--oz-border);
+  }
+  .oz-pin i { display: inline-block; width: 6px; height: 6px; margin-right: 6px; vertical-align: 1px; background: var(--oz-dim); }
+  .oz-pin[data-state='pinned'] i { background: var(--oz-success); }
+  .oz-pin:is([data-state='connecting'], [data-state='reconnecting']) i { animation: oz-breathe 1.6s ease-in-out infinite; }
+  .oz-pin[data-state='fallback'] { color: var(--oz-active); border-color: color-mix(in srgb, var(--oz-active) 50%, transparent); }
+  .oz-pin[data-state='refused'] { color: var(--oz-danger); border-color: color-mix(in srgb, var(--oz-danger) 60%, transparent); }
+  .oz-pin:is([data-state='fallback'], [data-state='refused']) i { background: currentColor; }
+  body:has(.oz-roots) .oz-pin {
+    left: auto; right: max(12px, calc(50% - 14rem + 12px)); max-width: calc(min(100vw, 28rem) - 24px);
+    bottom: calc(var(--oz-roots-h) - 26px + env(safe-area-inset-bottom));
+  }
 
   /* tree-first — the whole tree, alone, on a device's first open; afterwards
      the front page carries it as crown (band) and roots (§ roots) */
@@ -238,6 +274,12 @@
   }
   .oz-film .wait .oz-rail { width: 140px; }
   .oz-film[data-up] .wait { display: none; }
+  /* the context sheet (G1): the film as a column — header, tabs, one
+     scrolling pane, two actions; 412px-wide phone, no horizontal scroll */
+  .ctx-sheet { display: flex; flex-direction: column; overflow: hidden; }
+  .ctx-sheet .ctx-block, .ctx-sheet .ctx-pre {
+    font-family: var(--oz-mono, ui-monospace, monospace); font-size: 10.5px; line-height: 1.5; min-width: 0;
+  }
   .oz-film .skip {
     position: absolute; top: calc(10px + env(safe-area-inset-top)); right: 10px; min-height: 36px; padding: 0 12px;
     font-size: 11px; letter-spacing: .12em; color: var(--oz-dim); border: 1px solid var(--oz-border); background: var(--oz-bg);
@@ -407,6 +449,9 @@
   /* root-coord cards: the status word sits before the time, the question leads the subtitle */
   .oz-r1 .oz-st { flex: none; margin-left: auto; font-size: 10px; letter-spacing: .02em; }
   .oz-r1 .oz-st + time { margin-left: 0; }
+  /* the engine: one small grey word before the time (none on the root) */
+  .oz-r1 .oz-eng { flex: none; margin-left: auto; font-size: 10px; color: var(--oz-dim); opacity: .8; }
+  .oz-r1 .oz-st + .oz-eng, .oz-r1 .oz-eng + time { margin-left: 0; }
   .oz-asks { color: var(--oz-active); }
   .oz-closed { font-size: 10px; line-height: 16px; padding: 0 7px; border: 1px dashed var(--oz-border); color: var(--oz-dim); }
   .oz-closed.open { color: var(--oz-text); }
@@ -436,6 +481,10 @@
   .oz-mark { background: color-mix(in srgb, var(--oz-info) 22%, transparent); color: var(--oz-info); padding: 0 2px; }
   /* the full log: internal turns and tool calls read muted, beside the conversation */
   .oz-internal { opacity: .6; font-size: 12px; }
+  /* a message another session wrote (not the owner): its sender's ink and a rule on the left */
+  .oz-from { border-left: 2px solid var(--oz-info); padding-left: 8px; }
+  .oz-from .oz-who a { color: var(--oz-info); }
+  .oz-auto { border-left: 2px solid var(--oz-border); padding-left: 8px; color: var(--oz-dim); }
   .oz-log { margin-top: 2px; font-size: 11px; line-height: 1.5; color: var(--oz-dim); overflow-wrap: anywhere; }
   /* a route tag (→ <session>) the coordinator named: the way into that session */
   .oz-route { color: var(--oz-info); text-decoration: underline; text-underline-offset: 2px; text-decoration-thickness: 1px; }
@@ -591,6 +640,8 @@
     background: color-mix(in srgb, var(--oz-success) 12%, var(--oz-surface));
   }
   .oz-chips button:disabled, .oz-field:disabled { opacity: .55; }
+  /* a role chip's badge before its name: [LEA] lead */
+  .oz-chips button .b { display: inline; height: auto; padding: 0; border: 0; color: inherit; opacity: .6; margin-right: 5px; }
   /* agents list: name · where it runs · model, then what it is for */
   .oz-alist a { display: block; padding: 8px 2px; border-bottom: 1px var(--oz-rule) var(--oz-border); font-size: 12px; }
   .oz-alist li:last-child a { border-bottom: 0; }
@@ -598,6 +649,10 @@
   .oz-alist .tag { flex: none; padding: 0 6px; font-size: 10px; line-height: 16px; border: 1px solid var(--oz-border); color: var(--oz-dim); }
   .oz-alist .m { flex: none; margin-left: auto; font-size: 11px; color: var(--oz-dim); }
   .oz-alist .r2 { display: block; margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 10.5px; color: var(--oz-dim); }
+  /* the settings page's engines: a row that opens its model choices in place */
+  .oz-alist li.eng { border-bottom: 1px var(--oz-rule) var(--oz-border); }
+  .oz-alist li.eng:last-child { border-bottom: 0; }
+  .oz-alist li.eng > button { display: block; width: 100%; min-width: 0; padding: 8px 2px; text-align: left; font-size: 12px; }
   /* what changes when a session takes another agent */
   .oz-diff li { grid-template-columns: 7em 1fr; }
   .oz-del { width: 100%; height: 38px; border: 1px solid var(--oz-border); color: var(--oz-dim); font-size: 13px; }
@@ -608,6 +663,11 @@
   .oz-tabs { display: flex; border: 1px solid var(--oz-border); width: fit-content; }
   .oz-tabs button { padding: 4px 10px; font-size: 11px; color: var(--oz-dim); }
   .oz-tabs button[aria-pressed='true'] { background: var(--oz-surface-hover); color: var(--oz-text); }
+
+  /* ── a computer's world swatch (roots sheet, [root] tag) & an offline computer ── */
+  .oz-swt { display: inline-flex; gap: 2px; flex: none; vertical-align: middle; }
+  .oz-swt i { display: block; width: 7px; height: 9px; border: 1px solid var(--oz-border); }
+  .oz-gone { opacity: .5; }
 }
 
 /* under reduced motion everything holds still — the words still differ,

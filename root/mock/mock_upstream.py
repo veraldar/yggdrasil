@@ -321,7 +321,10 @@ class H(BaseHTTPRequestHandler):
         body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
         key = self.headers.get("x-api-key") or (self.headers.get("Authorization") or "").removeprefix("Bearer ").strip()
         KEYS[key] = KEYS.get(key, 0) + 1
-        LAST["body"] = body
+        # snapshot BEFORE the handlers run: plan() mutates the body (it strips the
+        # awareness/clock/inbox framing of the newest turn to find its script markers), and
+        # /last must answer with the bytes that actually arrived (G1 byte-equality proof)
+        LAST["body"] = json.loads(json.dumps(body))
         if key == "mock-1310":
             return self.json(*key_error(key))
         if self.path.endswith("/v1/messages"):

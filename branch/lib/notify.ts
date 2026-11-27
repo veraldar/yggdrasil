@@ -87,26 +87,26 @@ async function subscribePush(): Promise<void> {
   }
 }
 
-/** Fire-and-forget reply notification (no-ops without granted permission). */
+/** Fire-and-forget reply notification (no-ops without granted permission): the session's digest
+ *  of the reply (lib/notice.ts), when this session's switch is on (off by default; MAIN on). */
 export async function notifyReply(slug: string): Promise<void> {
   if (typeof window === 'undefined' || !('Notification' in window)) return;
   if (Notification.permission !== 'granted') return;
-  // this session's switch (off by default; MAIN on) — asked of the app each time, it is cheap
-  const on = await fetch(`/api/notify?slug=${encodeURIComponent(slug)}`, { cache: 'no-store' })
+  const d = (await fetch(`/api/notify?slug=${encodeURIComponent(slug)}&notice=1`, { cache: 'no-store' })
     .then((r) => r.json())
-    .then((d) => d?.on === true)
-    .catch(() => false);
-  if (!on) return;
+    .catch(() => null)) as { on?: boolean; notice?: { title: string; body: string } } | null;
+  if (d?.on !== true) return;
+  const title = d.notice?.title || slug;
   const options: NotificationOptions & { data: { slug: string } } = {
-    body: `reply ready — ${slug}`,
+    body: d.notice?.body || 'replied',
     tag: `oz-${slug}`,
     icon: '/favicon.ico',
     data: { slug },
   };
   try {
     const reg = await navigator.serviceWorker?.getRegistration();
-    if (reg) await reg.showNotification('opencode', options);
-    else new Notification('opencode', options);
+    if (reg) await reg.showNotification(title, options);
+    else new Notification(title, options);
   } catch {
     /* notifications unavailable */
   }

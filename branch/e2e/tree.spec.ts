@@ -1,5 +1,5 @@
-import { OC } from './brain';
 import { type APIRequestContext, type Locator, type Page, expect, test } from '@playwright/test';
+import { OC } from './brain';
 
 /** ROOT-COORD (11-12): the home list is the brain's real tree — sessions nest
  *  to any depth under their parent, each row speaks its card (status dot/word,
@@ -27,7 +27,9 @@ async function bustListCache(request: APIRequestContext) {
 
 /** the row (the swipe button) titled exactly `title` */
 const row = (page: Page, title: string): Locator =>
-  page.locator('.oz-row').filter({ has: page.locator('.t', { hasText: new RegExp(`^${title}$`) }) });
+  page
+    .locator('.oz-row')
+    .filter({ has: page.locator('.t', { hasText: new RegExp(`(^|\\])${title}$`) }) }); // after its [TAG]
 
 /** how many sub-tree levels (.oz-kids) hold this row */
 const depthOf = (r: Locator) =>
@@ -70,30 +72,47 @@ test('home: the tree nests 3 deep under MAIN, cards speak, closed sessions wait'
   const branch = page.locator('li').filter({ has: site });
   await expect(branch.locator('.oz-row')).toHaveCount(4); // site, pages, photos, search box
 
-  // cards: status word, "asks: …" before the headline, the headline otherwise
-  await expect(photos.locator('.oz-st')).toHaveText('needs you');
+  // one status word, nothing longer (owner 11-17): "working" — a card's state is
+  // its dot's color; "asks: …" before the headline, the headline otherwise
+  await expect(photos.locator('.oz-st')).toHaveCount(0);
   await expect(photos.locator('.oz-r2')).toHaveText(
     'asks: Which photo licence is OK — CC-BY or only CC0?'
   );
   await expect(site.locator('.oz-r2')).toHaveText(
     'index + 3 recipe pages drafted; search box in progress'
   );
-  await expect(site.getByLabel('working')).toBeVisible(); // the green breath, no word
-  await expect(site.locator('.oz-st')).toHaveCount(0);
-  await expect(row(page, 'Wordfreq CLI').locator('.oz-st')).toHaveText('failed');
-  await expect(row(page, 'Habit tracker CLI').locator('.oz-st')).toHaveText('done');
+  await expect(site.getByLabel('working')).toBeVisible(); // the green breath…
+  await expect(site.locator('.oz-st')).toHaveText('working'); // …and the one word
+  await expect(row(page, 'Wordfreq CLI').locator('.oz-st')).toHaveCount(0);
+  await expect(row(page, 'Habit tracker CLI').locator('.oz-st')).toHaveCount(0);
   await expect(pages.locator('.oz-r2')).toHaveText('3 recipe pages + shared stylesheet written');
 
-  // MAIN's subtree comes before the other top-level sessions
-  const order = await page.locator('ul > li .oz-row .t').allTextContents();
-  expect(order.indexOf('Static recipe site')).toBeLessThan(order.indexOf('garden plan'));
+  // one list, the owner's own newest message first (11-17): MAIN's sub-tree is not pinned above
+  // the rest — the top-level rows follow the list's userAt
+  const order = await page.locator('.oz-row').evaluateAll((rows) =>
+    rows
+      .filter((el) => !el.closest('.oz-kids')) // the top-level rows only
+      .map((el) => (el.querySelector('.t')?.textContent || '').replace(/^\[[A-Z]{3}\]\s*/, ''))
+  );
+  const listed = (await (await request.get('/api/session')).json()) as {
+    title: string;
+    userAt?: number;
+  }[];
+  const once = (t: string) => listed.filter((r) => r.title === t).length === 1; // two sessions may share a title
+  const at = new Map(listed.filter((r) => once(r.title)).map((r) => [r.title, r.userAt || 0]));
+  const tops = order.filter((t) => at.has(t));
+  expect(tops.length).toBeGreaterThan(1);
+  for (let i = 1; i < tops.length; i++)
+    expect(at.get(tops[i - 1])!, `${tops[i - 1]} before ${tops[i]}`).toBeGreaterThanOrEqual(
+      at.get(tops[i])!
+    );
 
   // closed sessions: hidden behind "N closed", per parent
   await expect(row(page, 'Old layout draft')).toHaveCount(0);
   await expect(row(page, 'Notes API stdlib')).toHaveCount(0);
   await branch.getByRole('button', { name: '1 closed' }).tap();
   await expect(row(page, 'Old layout draft')).toBeVisible();
-  await expect(row(page, 'Old layout draft').locator('.oz-st')).toHaveText('closed');
+  await expect(row(page, 'Old layout draft').locator('.oz-st')).toHaveCount(0);
   expect(await depthOf(row(page, 'Old layout draft'))).toBe(1);
   const mainClosed = page.locator('ul > li > button.oz-closed').first();
   await expect(mainClosed).toHaveText('1 closed');
@@ -127,9 +146,9 @@ test('home: API-made nesting (no cards) renders, swipe deletes the whole family'
     created.push(s.id);
     return s.id;
   };
-  const main = ((await (await request.get(`${OC}/tree`)).json()) as { id: string; title: string }[]).find(
-    (r) => r.title === '[MAIN]'
-  )!.id;
+  const main = (
+    (await (await request.get(`${OC}/tree`)).json()) as { id: string; title: string }[]
+  ).find((r) => r.title === '[MAIN]')!.id;
   const l1 = await mk(`${TAG}-l1`, main);
   const l2 = await mk(`${TAG}-l2`, l1);
   const l3 = await mk(`${TAG}-l3`, l2);
@@ -177,7 +196,9 @@ test('MAIN: a route tag links to its session; the child shows its card line', as
   await expect(page.locator('a[data-route]', { hasText: 'Recipe photos' })).toBeVisible();
   await expect(page.locator('a[data-route]')).toHaveCount(3);
   await expect(page.getByText('New build session for the notes')).toBeVisible(); // unmatched: text
-  await expect(page.locator('[data-streamdown="inline-code"]', { hasText: '→ Static recipe site' })).toBeVisible();
+  await expect(
+    page.locator('[data-streamdown="inline-code"]', { hasText: '→ Static recipe site' })
+  ).toBeVisible();
   await expect(page.getByTestId('session-card')).toHaveCount(0); // MAIN: nothing new
 
   await link.tap();
@@ -205,7 +226,10 @@ test('unit: route tags link known titles only, never inside code', async () => {
     { id: 'ses_c', title: 'Todo' },
   ];
   expect(
-    linkRouteTags('Both are off: → Unit converter CLI (folder `units`) and → todo count script, ok', t)
+    linkRouteTags(
+      'Both are off: → Unit converter CLI (folder `units`) and → todo count script, ok',
+      t
+    )
   ).toBe(
     'Both are off: → [Unit converter CLI](/session/unit-converter-cli?id=ses_a) (folder `units`) and → [todo count script](/session/todo-count-script?id=ses_b), ok'
   );
@@ -230,9 +254,24 @@ test('unit: the roots never speak an autoReply (quiet-assess, as the session pag
     line.subscribe(() => phases.push(line.get().phase));
     line.giveBack = () => phases.push('mic-back');
     line.snap = { phase: 'working', free: true, slug: 'main', reply: '', note: '' };
-    const cycle = { base: { total: 0, lastTime: 0 }, speak: true, idle: true, landed: true, stable: '', replyTime: 0, speaking: false };
+    const cycle = {
+      base: { total: 0, lastTime: 0 },
+      speak: true,
+      idle: true,
+      landed: true,
+      stable: '',
+      replyTime: 0,
+      speaking: false,
+    };
     try {
-      line.reply(cycle, { role: 'assistant', text, images: [], time: Date.now(), done: true, autoReply });
+      line.reply(cycle, {
+        role: 'assistant',
+        text,
+        images: [],
+        time: Date.now(),
+        done: true,
+        autoReply,
+      });
     } catch {
       /* node has no Audio: the deck can't start here — the phase already said it */
     }

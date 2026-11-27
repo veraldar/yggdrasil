@@ -26,8 +26,15 @@
  *
  * At rest: hashes only (join secret, root secret). Raw link tokens and the
  * raw root secret exist only in memory between approval and the one
- * collection, then are dropped. Pending joins are memory-only too: a hub
- * restart forgets them and the machine runs join again.
+ * collection, then are dropped. Pending joins are also written to
+ * joins-pending.json beside roots.json (mode 600, atomic, without the raw
+ * result): an app restart keeps a pending join approvable for 10 minutes; an
+ * approval made before the restart and not yet collected is over (its raw
+ * result never touched the disk) and the machine runs join again.
+ *
+ * Removing a root (the roots sheet's hold): roots.json marks it `revoked`
+ * (the trunk's WireGuard node drops it, refill refuses it, its id is never
+ * handed out again) and the hub brain forgets it (DELETE /root/peers/<id>).
  *
  * Env: BIFROST_ROOTS_FILE (default: roots.json beside BIFROST_DEVICES_FILE),
  * BIFROST_NET_BIN (default `bifrost-net` on PATH), BIFROST_ROOTLINK_SECRET_FILE
@@ -39,6 +46,7 @@
  */
 import { execFile } from 'child_process';
 import { createHash, randomBytes, randomInt, timingSafeEqual } from 'crypto';
+import { readFileSync, statSync } from 'fs';
 import { chmod, readFile, rename, writeFile } from 'fs/promises';
 import { dirname, join } from 'path';
 import { fetch as undiciFetch } from 'undici';
@@ -95,6 +103,8 @@ export type Approved = {
   /** the hub brain's root name: the joined root's peer for it (YGG_PEERS <hub>=…/local) */
   hub: string;
   wg?: WgGrant;
+  /** 'home': the home brain will hand this root its model settings (GET /_wg/local/root/model) */
+  model?: 'home';
 };
 
 type JoinReq = {
@@ -107,6 +117,10 @@ type JoinReq = {
   peer: string;
   /** the machine's WireGuard public key (base64), pinned by the approval */
   wgPub?: string;
+  /** "Same as the home root": the machine asks for the home root's model settings (L15) */
+  model?: 'home';
+  /** public approve link (no secrets) so a second origin (e.g. :8447 tailnet) can hand off to the paired door */
+  approveUrl?: string;
   created: number;
   exp: number;
   status: 'pending' | 'approved' | 'refused' | 'delivered';
@@ -122,6 +136,9 @@ type State = {
   joins: Map<string, JoinReq>;
   windows: Map<string, number[]>;
   chain: Promise<unknown>;
+  /** joins-pending.json was read (and its last seen mtime, so a sibling process sees writes) */
+  loaded?: boolean;
+  loadedMtime?: number;
 };
 
 // globalThis: every route bundle in this one server process sees ONE store
@@ -161,17 +178,147 @@ function serialize<T>(fn: () => Promise<T>): Promise<T> {
   return out;
 }
 
+/* ---------------- pending joins on disk (joins-pending.json, mode 600) ---------------- */
+
+export const JOINS_FILE = join(dirname(ROOTS_FILE), 'joins-pending.json');
+/** how long a join lingers after exp/holdUntil (for honest 410s and in-place renewal across restarts) */
+const JOIN_LINGER_MS = 3600_000;
+const JOIN_STATES = new Set(['pending', 'approved', 'refused', 'delivered']);
+
+const str = (v: unknown) => (typeof v === 'string' ? v : '');
+const httpUrl = (v: unknown) => {
+  const s = str(v);
+  return /^https?:\/\/\S+$/.test(s) ? s : '';
+};
+const joinLiveOnDisk = (j: JoinReq, now: number) =>
+  Math.max(j.exp, j.holdUntil ?? 0) >= now - JOIN_LINGER_MS;
+
+/** one record off the disk, or null when it is not one this module wrote */
+function joinOf(v: unknown): JoinReq | null {
+  const o = (v && typeof v === 'object' ? v : {}) as Record<string, unknown>;
+  const req = str(o.req);
+  const secretHash = str(o.secretHash);
+  const created = Number(o.created);
+  const exp = Number(o.exp);
+  if (
+    !/^[A-Za-z0-9_-]{16,64}$/.test(req) ||
+    !/^[0-9a-f]{64}$/.test(secretHash) ||
+    !JOIN_STATES.has(str(o.status)) ||
+    !(created > 0) ||
+    !(exp > 0)
+  ) {
+    return null;
+  }
+  const holdUntil = Number(o.holdUntil);
+  const approveUrl = httpUrl(o.approveUrl);
+  return {
+    req,
+    secretHash,
+    code: str(o.code),
+    name: str(o.name),
+    os: str(o.os),
+    host: str(o.host),
+    peer: str(o.peer),
+    ...(wgKey(o.wgPub) ? { wgPub: wgKey(o.wgPub) } : {}),
+    ...(o.model === 'home' ? { model: 'home' as const } : {}),
+    ...(approveUrl ? { approveUrl } : {}),
+    created,
+    exp,
+    status: o.status as JoinReq['status'],
+    ...(str(o.by) ? { by: str(o.by) } : {}),
+    ...(str(o.root_id) ? { root_id: str(o.root_id) } : {}),
+    ...(holdUntil > 0 ? { holdUntil } : {}),
+    ...(str(o.why) ? { why: str(o.why) } : {}),
+  };
+}
+
+/** Sync from joins-pending.json at startup and whenever another process updates it (e.g. hub-app
+ *  writing joins that hub-app-tailnet lists). Never clobbers live in-memory approval secrets. */
+function loadJoins() {
+  let mtime = 0;
+  try {
+    mtime = statSync(JOINS_FILE).mtimeMs;
+  } catch {
+    S.loaded = true;
+    return; // none yet, or unreadable
+  }
+  if (S.loaded && S.loadedMtime === mtime) return;
+  const firstLoad = !S.loaded;
+  let list: unknown;
+  try {
+    list = (JSON.parse(readFileSync(JOINS_FILE, 'utf8')) as { joins?: unknown })?.joins;
+  } catch {
+    return;
+  }
+  S.loaded = true;
+  S.loadedMtime = mtime;
+  if (!Array.isArray(list)) return;
+  const now = Date.now();
+  const seen = new Set<string>();
+  for (const v of list) {
+    const j = joinOf(v);
+    if (!j || !joinLiveOnDisk(j, now)) continue;
+    seen.add(j.req);
+    const cur = S.joins.get(j.req);
+    if (!cur) {
+      // approved before a restart, not collected: the raw result was memory only
+      if (firstLoad && j.status === 'approved') j.why = 'undelivered';
+      S.joins.set(j.req, j);
+    } else if (
+      !cur.result &&
+      (j.created > cur.created ||
+        j.exp > cur.exp ||
+        j.status !== cur.status ||
+        j.secretHash !== cur.secretHash)
+    ) {
+      S.joins.set(j.req, j);
+    }
+  }
+  if (!firstLoad) {
+    for (const [k, cur] of S.joins) {
+      if (!seen.has(k) && !cur.result && cur.created < mtime - 2000) S.joins.delete(k);
+    }
+  }
+}
+
+/** Write the joins (never `result`) — atomic, mode 600. Call directly inside `serialize(...)`
+ *  so mutations hit disk before HTTP 200 returns; outside `serialize`, use `saveJoins()`. */
+async function writeJoins() {
+  try {
+    const now = Date.now();
+    const joins = [...S.joins.values()]
+      .filter((j) => joinLiveOnDisk(j, now))
+      .map((j) => ({ ...j, result: undefined })); // the raw secrets: memory only
+    const tmp = `${JOINS_FILE}.${process.pid}.tmp`;
+    await writeFile(tmp, JSON.stringify({ version: 1, joins }, null, 2) + '\n', { mode: 0o600 });
+    await chmod(tmp, 0o600).catch(() => {});
+    await rename(tmp, JOINS_FILE);
+    try {
+      S.loadedMtime = statSync(JOINS_FILE).mtimeMs;
+    } catch {
+      /* ignore */
+    }
+  } catch (e) {
+    console.warn(`join: ${JOINS_FILE} not written: ${(e as Error).message}`);
+  }
+}
+
+function saveJoins() {
+  void serialize(writeJoins);
+}
+
 function prune() {
+  loadJoins();
   const now = Date.now();
   for (const [k, j] of S.joins) {
     // an undelivered approval is dropped after its hold window (raw secrets
     // never outlive it); every record lingers an hour so a late poll gets an
-    // honest 410 instead of a 404
+    // honest 410 instead of a 404 (and a renewing rig keeps the same req id)
     if (j.result && j.holdUntil && j.holdUntil < now) {
       j.result = undefined;
       j.why = 'undelivered';
     }
-    if (Math.max(j.exp, j.holdUntil ?? 0) < now - 3600_000) S.joins.delete(k);
+    if (Math.max(j.exp, j.holdUntil ?? 0) < now - JOIN_LINGER_MS) S.joins.delete(k);
   }
 }
 
@@ -191,6 +338,12 @@ export type RootRecord = {
   /** its pinned WireGuard public key and tunnel address (roots that joined with one) */
   wg_pub?: string;
   wg_ip?: string;
+  /** approved with "Same as the home root": the home brain hands it its model settings, inside
+   *  the tunnel only (the brain's GET /root/model) */
+  share_model?: boolean;
+  /** removed from the tree (the roots sheet): the trunk drops it, refill refuses it, its id stays taken */
+  revoked?: boolean;
+  revoked_at?: string;
 };
 
 /** `wg.net`: this tree's tunnel range, chosen once (the hub's node takes .1) */
@@ -259,17 +412,38 @@ async function writeRoots(f: RootsFile): Promise<void> {
   await rename(tmp, ROOTS_FILE);
 }
 
+/**
+ * A phone re-paired (lib/devices.ts claimPairCode): every root the retiring device `from`
+ * approved, and that is still in the tree, now names the new device `to` as its approver. The
+ * hub's WireGuard node pins a root only while that device is live, refill mints link tokens with
+ * its dev claim, and the bridge refuses a dial whose dev is revoked — so without this a re-pair
+ * cut every root the phone had approved (mac-studio, 2026-11-23). Returns the moved ids.
+ */
+export function handOverRoots(from: string, to: string): Promise<string[]> {
+  return serialize(async () => {
+    const f = await readRoots();
+    const moved = f.roots.filter((r) => r.dev === from && !r.revoked);
+    if (!moved.length) return [];
+    for (const r of moved) r.dev = to;
+    await writeRoots(f);
+    return moved.map((r) => r.id);
+  });
+}
+
+/** The joined roots, removed ones left out. */
 export async function listRoots() {
   const f = await readRoots();
-  return f.roots.map(({ id, name, os, host, joined_at, delivered_at, wg_pub }) => ({
-    id,
-    name,
-    os,
-    host,
-    joined_at,
-    delivered_at: delivered_at ?? null,
-    wg_fp: wg_pub ? wgFingerprint(wg_pub) : null,
-  }));
+  return f.roots
+    .filter((r) => !r.revoked)
+    .map(({ id, name, os, host, joined_at, delivered_at, wg_pub }) => ({
+      id,
+      name,
+      os,
+      host,
+      joined_at,
+      delivered_at: delivered_at ?? null,
+      wg_fp: wg_pub ? wgFingerprint(wg_pub) : null,
+    }));
 }
 
 export function rootIdFor(name: string, taken: Set<string>): string {
@@ -287,7 +461,7 @@ export function rootIdFor(name: string, taken: Set<string>): string {
 }
 
 /** a root name a joined root can put in its YGG_PEERS (the joiner checks the same shape) */
-const ROOT_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+export const ROOT_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 
 /**
  * The hub brain's root NAME, handed to the joiner as `hub`. The joined root
@@ -296,6 +470,26 @@ const ROOT_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
  * be the brain's own: asked of the brain (GET <OPENCODE_URL>/root → name), else
  * this app's YGG_ROOT_NAME, else "hub".
  */
+/** Tells the home brain the owner approved `root` with "Same as the home root" (its
+ *  POST /root/peers/<id>/model, this computer only). false: the brain did not take it. */
+async function brainShareModel(root: string): Promise<boolean> {
+  try {
+    const r = await undiciFetch(`${OC}/root/peers/${encodeURIComponent(root)}/model`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ share: true }),
+      signal: AbortSignal.timeout(5000),
+    });
+    if (r.ok) return true;
+    console.warn(`join: the brain did not take the model sharing for ${root}: ${r.status}`);
+  } catch (e) {
+    console.warn(
+      `join: the brain did not take the model sharing for ${root}: ${(e as Error).message}`
+    );
+  }
+  return false;
+}
+
 export async function hubBrainName(): Promise<string> {
   try {
     const r = await undiciFetch(`${OC}/root`, { signal: AbortSignal.timeout(3000) });
@@ -394,17 +588,59 @@ export function clean(v: unknown, max: number): string {
 }
 
 export function createJoin(
-  input: { name: string; os: string; host: string; wgPub?: string },
+  input: {
+    name: string;
+    os: string;
+    host: string;
+    wgPub?: string;
+    model?: 'home';
+    approveBase?: string;
+  },
   peer: string
 ) {
   prune();
   const now0 = Date.now();
+  // In-place renewal: when the same rig re-asks (same WireGuard public key, or an expired
+  // request from the same peer/name/host/os), refresh the existing pending record in place so
+  // its req id, /join?r=<id> link, and comparison code stay stable across renewal cycles.
+  let existing: JoinReq | undefined;
+  for (const j of S.joins.values()) {
+    if (j.status !== 'pending') continue;
+    const sameRig = input.wgPub
+      ? j.wgPub === input.wgPub
+      : !j.wgPub &&
+        j.peer === peer &&
+        j.name === input.name &&
+        j.host === input.host &&
+        j.os === input.os &&
+        j.exp <= now0;
+    if (sameRig && (!existing || j.created > existing.created)) existing = j;
+  }
+
   let pending = 0;
-  for (const j of S.joins.values()) if (j.status === 'pending' && j.exp > now0) pending += 1;
+  for (const j of S.joins.values()) {
+    if (j !== existing && j.status === 'pending' && j.exp > now0) pending += 1;
+  }
   if (pending >= JOIN_MAX_PENDING) return null;
-  const req = randomBytes(18).toString('base64url');
+
   const secret = randomBytes(16).toString('hex');
   const now = Date.now();
+  if (existing) {
+    existing.secretHash = sha256(secret);
+    existing.name = input.name;
+    existing.os = input.os;
+    existing.host = input.host;
+    existing.peer = peer;
+    if (input.model === 'home') existing.model = 'home';
+    else delete existing.model;
+    if (input.approveBase) existing.approveUrl = `${input.approveBase}/join?r=${existing.req}`;
+    existing.created = now;
+    existing.exp = now + JOIN_TTL_S * 1000;
+    saveJoins();
+    return { req: existing.req, secret, code: existing.code, expires_in: JOIN_TTL_S };
+  }
+
+  const req = randomBytes(18).toString('base64url');
   const j: JoinReq = {
     req,
     secretHash: sha256(secret),
@@ -414,11 +650,14 @@ export function createJoin(
     host: input.host,
     peer,
     ...(input.wgPub ? { wgPub: input.wgPub } : {}),
+    ...(input.model === 'home' ? { model: 'home' as const } : {}),
+    ...(input.approveBase ? { approveUrl: `${input.approveBase}/join?r=${req}` } : {}),
     created: now,
     exp: now + JOIN_TTL_S * 1000,
     status: 'pending',
   };
   S.joins.set(req, j);
+  saveJoins();
   return { req, secret, code: j.code, expires_in: JOIN_TTL_S };
 }
 
@@ -441,10 +680,31 @@ export function viewJoin(req: string) {
     code: j.code,
     /** the fingerprint of the WireGuard key this approval pins (null: an older joiner) */
     wg_fp: j.wgPub ? wgFingerprint(j.wgPub) : null,
+    /** 'home': approving it shares the home root's model, key included, with this machine */
+    model: j.model ?? null,
     status: statusOf(j),
     expires_at: new Date(j.exp).toISOString(),
     root_id: j.root_id ?? null,
+    ...(j.approveUrl ? { approve_url: j.approveUrl } : {}),
   };
+}
+
+/** The newest still-pending join per machine (by WireGuard key when present, else name) — what
+ *  the roots sheet lists on both origins. No secrets. */
+export function listPendingJoins(): NonNullable<ReturnType<typeof viewJoin>>[] {
+  prune();
+  const newest = new Map<string, JoinReq>();
+  const now = Date.now();
+  for (const j of S.joins.values()) {
+    if (j.status !== 'pending' || j.exp < now) continue;
+    const key = j.wgPub ? `wg:${j.wgPub}` : `name:${j.name}`;
+    const old = newest.get(key);
+    if (!old || j.created > old.created) newest.set(key, j);
+  }
+  return [...newest.values()]
+    .sort((a, b) => b.created - a.created)
+    .map((j) => viewJoin(j.req))
+    .filter((v): v is NonNullable<ReturnType<typeof viewJoin>> => !!v);
 }
 
 export type PollOut =
@@ -472,6 +732,7 @@ export function pollJoin(req: string, secret: string): Promise<PollOut> {
     const result = j.result;
     j.result = undefined; // ONCE: the raw secrets leave memory with this response
     j.status = 'delivered';
+    await writeJoins();
     const f = await readRoots();
     const rec = f.roots.find((r) => r.id === result.root_id);
     if (rec) {
@@ -496,6 +757,7 @@ export function refuseJoin(req: string, device: string): Promise<Decision> {
     if (st !== 'pending') return { http: 409, body: { error: `already ${st}`, status: st } };
     j.status = 'refused';
     j.by = device;
+    await writeJoins();
     return { http: 200, body: { status: 'refused' } };
   });
 }
@@ -530,6 +792,8 @@ export async function approveJoin(req: string, device: string): Promise<Decision
       };
     }
     const addr = j.wgPub ? wgAddress(f) : null;
+    // the settings travel inside WireGuard only: a machine with no tunnel key cannot be handed them
+    const shareModel = j.model === 'home' && !!j.wgPub && !!addr;
     if (j.wgPub && !addr) {
       return { http: 503, body: { error: "the tree's tunnel range is full" } };
     }
@@ -557,6 +821,7 @@ export async function approveJoin(req: string, device: string): Promise<Decision
       secretHash: sha256(root_secret),
       delivered_at: null,
       ...(j.wgPub && addr ? { wg_pub: j.wgPub, wg_ip: addr.ip } : {}),
+      ...(shareModel ? { share_model: true } : {}),
     });
     await writeRoots(f);
     if (!(await addDeviceRoot(device, root_id))) {
@@ -565,6 +830,10 @@ export async function approveJoin(req: string, device: string): Promise<Decision
       await writeRoots(f);
       return { http: 409, body: { error: 'approving device is no longer live' } };
     }
+
+    // "Same as the home root": the owner approved it, so the home brain may hand this root its
+    // model settings when it asks inside its tunnel. A brain that cannot be told shares nothing.
+    const shared = shareModel && (await brainShareModel(root_id));
 
     j.status = 'approved';
     j.by = device;
@@ -580,7 +849,9 @@ export async function approveJoin(req: string, device: string): Promise<Decision
       ...(addr && hubKey
         ? { wg: { public_key: hubKey, hub_ip: `${addr.base}.1`, ip: addr.ip, net: addr.net } }
         : {}),
+      ...(shared ? { model: 'home' as const } : {}),
     };
+    await writeJoins();
     return {
       http: 200,
       body: { status: 'approved', root_id, name: j.name, os: j.os, host: j.host },
@@ -600,6 +871,9 @@ export async function refillTokens(
   const rec = f.roots.find((r) => r.id === root);
   if (!rec || !/^[0-9a-f]{32}$/.test(secret) || !sameHash(sha256(secret), rec.secretHash)) {
     return { http: 401, body: { error: 'unknown root or bad root secret' } };
+  }
+  if (rec.revoked) {
+    return { http: 401, body: { error: 'this root was removed from the tree', why: 'revoked' } };
   }
   // the bridge refuses a link token whose dev claim is revoked: say so here
   // instead of handing out 20 tokens that can never open
@@ -627,4 +901,230 @@ export async function refillTokens(
     console.error(`refill ${root}: ${msg}`);
     return { http: 503, body: { error: msg } };
   }
+}
+
+/* ---------------- the whole tree: what the hub brain knows of every root ---------------- */
+
+/** this root (the hub brain itself), as GET <brain>/root describes it */
+export type HomeRoot = {
+  name: string;
+  os: string | null;
+  arch?: string | null;
+  cpus: number | null;
+  mem_gb: number | null;
+  running: number;
+  models?: string[];
+  theme?: string | null;
+  theme_rev?: number;
+  /** its own [MAIN] id (null: none yet) */
+  main: string | null;
+};
+
+/** the brain's word on one other root (GET /root → roots[]) */
+export type RootLive = {
+  reachable: boolean;
+  /** when it last answered (ms since epoch; null: never) */
+  seen: number | null;
+  running: number;
+  models: string[];
+  theme?: string | null;
+  theme_rev?: number;
+  /** its MAIN's id there, and the local proxy of it */
+  main: string | null;
+  main_proxy: string | null;
+  arch?: string | null;
+  cpus?: number | null;
+  mem_gb?: number | null;
+  /** the build it runs, as its last answer said (null: an older brain, or it never answered) */
+  build?: RootBuild | null;
+  /** it runs another build than the hub brain (no build = an older brain = true; null: never answered) */
+  behind?: boolean | null;
+};
+
+/** a brain's build stamp (GET /root `build`, root/src/build_id.rs) */
+export type RootBuild = {
+  id: string;
+  commit: string;
+  epoch: number;
+  describe: string;
+  plat: string;
+};
+
+type BrainRoot = RootLive & { name: string; os: string | null };
+
+function rootBuild(v: unknown): RootBuild | null {
+  const o = (v && typeof v === 'object' ? v : null) as Record<string, unknown> | null;
+  if (!o || !str(o.id)) return null;
+  return {
+    id: str(o.id),
+    commit: str(o.commit),
+    epoch: num0(o.epoch) ?? 0,
+    describe: str(o.describe),
+    plat: str(o.plat),
+  };
+}
+
+const num0 = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
+const strN = (v: unknown) => (typeof v === 'string' && v ? v : null);
+/** seconds or milliseconds → milliseconds */
+const ms = (v: unknown) => {
+  const n = num0(v);
+  return n && n > 0 ? (n < 1e12 ? n * 1000 : n) : null;
+};
+
+function brainRoot(v: unknown): BrainRoot | null {
+  const o = (v && typeof v === 'object' ? v : {}) as Record<string, unknown>;
+  const name = str(o.name);
+  if (!ROOT_NAME.test(name)) return null;
+  return {
+    name,
+    os: strN(o.os),
+    arch: strN(o.arch),
+    cpus: num0(o.cpus),
+    mem_gb: num0(o.mem_gb),
+    reachable: o.reachable === true,
+    seen: ms(o.seen),
+    running: num0(o.running) ?? 0,
+    models: (Array.isArray(o.models) ? o.models : [])
+      .map((m) => (typeof m === 'string' ? m : str((m as { id?: unknown } | null)?.id)))
+      .filter(Boolean),
+    theme: strN(o.theme),
+    theme_rev: num0(o.theme_rev) ?? 0,
+    main: strN(o.main),
+    main_proxy: strN(o.main_proxy),
+    build: rootBuild(o.build),
+    behind: typeof o.behind === 'boolean' ? o.behind : null,
+  };
+}
+
+/** GET <brain>/root: this root and the brain's word on the others (empty when it does not answer) */
+export async function brainTree(): Promise<{ home: HomeRoot | null; roots: BrainRoot[] }> {
+  try {
+    const r = await undiciFetch(`${OC}/root`, { signal: AbortSignal.timeout(4000) });
+    if (!r.ok) return { home: null, roots: [] };
+    const d = ((await r.json()) ?? {}) as Record<string, unknown>;
+    const hw = (d.hardware ?? {}) as Record<string, unknown>;
+    const load = (d.load ?? {}) as Record<string, unknown>;
+    return {
+      home: {
+        name: str(d.name),
+        os: strN(hw.os),
+        arch: strN(hw.arch),
+        cpus: num0(hw.cpus),
+        mem_gb: num0(hw.mem_gb),
+        running: num0(load.running) ?? 0,
+        models: (Array.isArray(d.models) ? d.models : [])
+          .map((m) => (typeof m === 'string' ? m : str((m as { id?: unknown } | null)?.id)))
+          .filter(Boolean),
+        theme: strN(d.theme),
+        theme_rev: num0(d.theme_rev) ?? 0,
+        main: strN(d.main),
+      },
+      roots: (Array.isArray(d.roots) ? d.roots : [])
+        .map(brainRoot)
+        .filter((x): x is BrainRoot => !!x),
+    };
+  } catch {
+    return { home: null, roots: [] };
+  }
+}
+
+const OFF_LINE: RootLive = {
+  reachable: false,
+  seen: null,
+  running: 0,
+  models: [],
+  theme: null,
+  theme_rev: 0,
+  main: null,
+  main_proxy: null,
+};
+
+/** Registry metadata for one joined root (`joined_at`, `host`, etc.), or null. */
+export async function rootRecord(id: string) {
+  const f = await readRoots();
+  return f.roots.find((r) => !r.revoked && r.id === id) ?? null;
+}
+
+/**
+ * GET /api/roots: every root of this tree. The joined ones (roots.json, removed ones left out)
+ * with the brain's word on each merged in by id (= the root's name on the brain), then the roots
+ * the brain knows that roots.json does not (static peers), as the brain describes them.
+ */
+export async function rootsOverview() {
+  const [f, tree] = await Promise.all([readRoots(), brainTree()]);
+  const gone = new Set(f.roots.filter((r) => r.revoked).map((r) => r.id));
+  const byName = new Map(tree.roots.map((b) => [b.name, b]));
+  const used = new Set<string>();
+  const live = (b: BrainRoot): RootLive => ({
+    reachable: b.reachable,
+    seen: b.seen,
+    running: b.running,
+    models: b.models,
+    theme: b.theme,
+    theme_rev: b.theme_rev,
+    main: b.main,
+    main_proxy: b.main_proxy,
+    arch: b.arch,
+    cpus: b.cpus,
+    mem_gb: b.mem_gb,
+    build: b.build,
+    behind: b.behind,
+  });
+  const roots: Array<Record<string, unknown> & { id: string; name: string }> = (
+    await listRoots()
+  ).map((r) => {
+    const b = byName.get(r.id) ?? byName.get(r.name);
+    if (b) used.add(b.name);
+    return { ...r, ...(b ? live(b) : OFF_LINE), os: b?.os || r.os };
+  });
+  for (const b of tree.roots) {
+    if (used.has(b.name) || gone.has(b.name) || b.name === tree.home?.name) continue;
+    roots.push({
+      id: b.name,
+      name: b.name,
+      os: b.os || '',
+      host: '',
+      joined_at: null,
+      delivered_at: null,
+      wg_fp: null,
+      ...live(b),
+    });
+  }
+  return { home: tree.home, roots };
+}
+
+/**
+ * Remove a root from the tree (the roots sheet's hold → Remove): roots.json marks it `revoked`
+ * (the existing atomic write, on the registry chain), then the hub brain forgets it
+ * (DELETE /root/peers/<id>: loopback, its proxies say "root removed"). A static peer (not in
+ * roots.json) is only forgotten by the brain.
+ */
+export async function removeRoot(
+  id: string
+): Promise<{ http: 200 | 404 | 502; body: Record<string, unknown> }> {
+  const known = await serialize(async () => {
+    const f = await readRoots();
+    const rec = f.roots.find((r) => r.id === id);
+    if (!rec) return false;
+    if (!rec.revoked) {
+      rec.revoked = true;
+      rec.revoked_at = new Date().toISOString();
+      await writeRoots(f);
+    }
+    return true;
+  });
+  let brain = 0;
+  try {
+    const r = await undiciFetch(`${OC}/root/peers/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+      signal: AbortSignal.timeout(8000),
+    });
+    brain = r.status;
+  } catch (e) {
+    console.warn(`roots: the brain did not forget ${id}: ${(e as Error).message}`);
+  }
+  if (known || (brain >= 200 && brain < 300)) return { http: 200, body: { ok: true } };
+  if (brain === 404) return { http: 404, body: { error: `no root ${id}` } };
+  return { http: 502, body: { error: 'the brain did not answer' } };
 }

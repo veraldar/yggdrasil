@@ -710,6 +710,7 @@ impl Engine {
                 let ip = p.spec.ip;
                 let n = self.reset_streams(ip, "the peer was revoked");
                 eprintln!("wg: peer '{id}' REVOKED — {n} stream(s) reset; it is told, then cut (≤ {} s)", LEAVE_GRACE.as_secs());
+                self.note_revoked(&id);
             }
         }
         self.finish_leaving();
@@ -1089,6 +1090,30 @@ impl Engine {
         Some(json!({ "net": format!("{net}/{len}"), "roots": roots }))
     }
 
+    /// The meter: a root cut because it was revoked (or its approving device was) — counted,
+    /// and timed from the app's `revokedAt` when the approving device is the reason.
+    fn note_revoked(&self, id: &str) {
+        crate::meter::inc(&crate::meter::C.wg_cut_revoked);
+        let dev = self
+            .source
+            .roots_file
+            .as_ref()
+            .and_then(|f| std::fs::read_to_string(f).ok())
+            .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+            .and_then(|v| v["roots"].as_array()?.iter().find(|r| r["id"] == id).and_then(|r| r["dev"].as_str().map(str::to_string)));
+        let mut ev = json!({ "src": "wg", "root": id, "why": "revoked", "device": dev });
+        if let (Some(d), Some(store)) = (dev.as_deref(), self.source.devices.as_ref()) {
+            if let Some(at) = store.revoked_at(d) {
+                let ms = now_ms().saturating_sub(at);
+                if ms < 86_400_000 {
+                    crate::meter::H.revoke_cut.us(ms * 1000);
+                    ev["revoke_ms"] = ms.into();
+                }
+            }
+        }
+        crate::meter::event("cut", ev);
+    }
+
     fn stats(&self) -> (Value, Value) {
         let mut peers: Vec<Value> = self
             .peers
@@ -1232,7 +1257,7 @@ impl Engine {
         let dir = (self.source.follows_hub && peer == "local").then(|| (self.source.directory.clone(), self.source.me));
         let _ = std::thread::Builder::new()
             .name("wg-in".into())
-            .spawn(move || serve_inbound(id, rx, ctl, brain, agent, dir));
+            .spawn(move || serve_inbound(id, rx, ctl, brain, agent, dir, peer));
     }
 
     fn pump(&mut self) {
@@ -1429,7 +1454,9 @@ fn encode_request(peer: &str, req: &HttpReq) -> Vec<u8> {
 }
 
 /// The in-tunnel door: one exchange from a peer, performed against this root's brain.
-fn serve_inbound(id: u64, rx: mpsc::Receiver<Ev>, ctl: Ctl, brain: Option<String>, agent: ureq::Agent, dir: Option<(Dir, [u8; 32])>) {
+/// `peer`: whose tunnel the exchange arrived in (its pinned key, its own tunnel address) — handed
+/// to the brain as `x-ygg-from`, with `x-ygg-via: wg`.
+fn serve_inbound(id: u64, rx: mpsc::Receiver<Ev>, ctl: Ctl, brain: Option<String>, agent: ureq::Agent, dir: Option<(Dir, [u8; 32])>, peer: String) {
     let deadline = Instant::now() + Duration::from_secs(30);
     let got = read_request(|buf| loop {
         let left = deadline.saturating_duration_since(Instant::now());
@@ -1474,7 +1501,7 @@ fn serve_inbound(id: u64, rx: mpsc::Receiver<Ev>, ctl: Ctl, brain: Option<String
         Ok(r) => match (HttpReq::new(&r.method, &r.target, r.headers, r.body), &brain) {
             (Err(e), _) => HttpReply::error(400, &e),
             (Ok(_), None) => HttpReply::error(501, "this root runs no brain behind its tunnel"),
-            (Ok(req), Some(b)) => switch::perform(&agent, b, &req),
+            (Ok(req), Some(b)) => switch::perform(&agent, b, &req, ("wg", &peer)),
         },
     };
     ctl.send(Cmd::Write { id, data: encode_reply(&reply) });
@@ -1862,8 +1889,29 @@ pub fn run(path: &str) -> Result<(), String> {
     let text = std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?;
     let f: NodeFile = toml::from_str(&text).map_err(|e| format!("{path}: {e}"))?;
     let cfg = f.wg;
+    // the meter: beside the devices file (the hub) or the key (a joined root); BIFROST_OBS…
+    let beside = cfg.devices_file.as_deref().unwrap_or(&cfg.key_file).to_string();
+    crate::meter::init("wg", crate::meter::dir_from_env(crate::meter::dir_beside(std::path::Path::new(&beside))));
     let h = start(cfg.clone())?;
     println!("bifrost-net wg (config: {path})");
+    // its own counters (frames, drops by kind, peers up) go into the minute line as they are
+    // (cumulative since start; the report takes the differences)
+    let front = h.http;
+    crate::meter::add_source("wg", move || {
+        let get = |p: &str| ureq::get(&format!("http://{front}{p}")).timeout(Duration::from_secs(2)).call().ok()?.into_json::<Value>().ok();
+        let mut node = get("/_wg/_node")?;
+        node.as_object_mut()?.remove("public_key");
+        let peers = get("/_wg").unwrap_or(Value::Null);
+        node["peer_list"] = Value::Array(
+            peers
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|p| json!({ "id": p["id"], "up": p["up"], "tx": p["tx"], "rx": p["rx"], "handshakes": p["handshakes"] }))
+                .collect(),
+        );
+        Some(node)
+    });
     println!("  key {} (fp {}) — the private half stays in {}", B64.encode(h.public), fingerprint(&h.public), cfg.key_file);
     println!("  relay udp {} → {} (WireGuard datagrams in relay frames)", h.udp, cfg.relay);
     println!("  front door http://{}/_wg/<root>/<path> (loopback) · GET /_wg lists the peers", h.http);
@@ -1931,9 +1979,11 @@ mod tests {
                 let mut body = vec![];
                 let _ = rq.as_reader().read_to_end(&mut body);
                 let peer_hdr = rq.headers().iter().find(|h| h.field.equiv("x-ygg-peer")).map(|h| h.value.to_string());
+                let via = rq.headers().iter().find(|h| h.field.equiv("x-ygg-via")).map(|h| h.value.to_string());
+                let from = rq.headers().iter().find(|h| h.field.equiv("x-ygg-from")).map(|h| h.value.to_string());
                 let leaked = rq.headers().iter().any(|h| h.field.equiv("authorization") || h.field.equiv("x-evil"));
                 let out = match rq.url() {
-                    "/root" => json!({ "name": name, "peer": peer_hdr, "leaked": leaked }).to_string().into_bytes(),
+                    "/root" => json!({ "name": name, "peer": peer_hdr, "via": via, "from": from, "leaked": leaked }).to_string().into_bytes(),
                     "/echo" => body,
                     _ => b"{\"error\":\"no route\"}".to_vec(),
                 };
@@ -2066,11 +2116,15 @@ mod tests {
         let relay = fake_relay(a.udp, vec![("b", rb, b.udp), ("c", rc, c.udp), ("d", rd, d.udp)], ra);
 
         // B -> the hub's brain, and the hub -> B's brain, inside the tunnel
-        let (st, body) = http(b.http, "GET", "/_wg/local/root", b"", "x-ygg-peer: tok\r\nauthorization: Bearer no\r\nx-evil: 1\r\n");
+        let (st, body) = http(b.http, "GET", "/_wg/local/root", b"", "x-ygg-peer: tok\r\nauthorization: Bearer no\r\nx-evil: 1\r\nx-ygg-via: forged\r\nx-ygg-from: local\r\n");
         let v: Value = serde_json::from_slice(&body).unwrap();
         assert_eq!((st, v["name"].as_str(), v["peer"].as_str(), v["leaked"].as_bool()), (200, Some("A"), Some("tok"), Some(false)), "{v}");
+        // the door marks every call it performs as another root's (L8): by which door, and whose
+        // tunnel it came in — the pinned peer, never what the caller claimed
+        assert_eq!((v["via"].as_str(), v["from"].as_str()), (Some("wg"), Some("b")), "{v}");
         let (st, body) = http(a.http, "GET", "/_wg/b/root", b"", "");
-        assert_eq!((st, serde_json::from_slice::<Value>(&body).unwrap()["name"].as_str()), (200, Some("B")));
+        let v: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!((st, v["name"].as_str(), v["via"].as_str(), v["from"].as_str()), (200, Some("B"), Some("wg"), Some("local")), "{v}");
         let big: Vec<u8> = (0..300_000u32).map(|i| b"0123456789abcdef"[(i % 16) as usize]).collect();
         let (st, body) = http(a.http, "POST", "/_wg/b/echo", &big, "");
         assert!(st == 200 && body == big, "300 KB echo through the tunnel: {st} {}", body.len());

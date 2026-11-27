@@ -2,6 +2,7 @@
  *  forget one message at opencode, track it in the live registry, pick up the
  *  next queued message when the run ends (abort included — the proxy owns
  *  queue pickup because opencode's own queue stalls forever after an abort). */
+import { type FileRef, cleanRefs, refPart } from './file-ref';
 import { ocFetch } from './oc';
 import { bustCache } from './oc-cache';
 import { abortedAt, markRunEnd, markRunStart } from './oc-live';
@@ -13,6 +14,8 @@ export type SendBody = {
   text?: string;
   images?: string[];
   files?: { name: string; content: string }[];
+  /** files the brain keeps (uploaded through /api/file/upload): REF each */
+  refs?: FileRef[];
   modality?: string;
 };
 
@@ -26,6 +29,8 @@ export function buildParts(body: SendBody): any[] {
     const mime = /^data:([^;,]+)/.exec(String(dataUrl))?.[1] || 'image/png';
     parts.push({ type: 'file', mime, url: dataUrl });
   }
+  // a file the brain keeps travels as its REF: the stored part names it by hash (contract B)
+  for (const r of cleanRefs(body.refs) || []) parts.push(refPart(r));
   for (const f of body.files || []) {
     // md/txt/html arrive as fenced content so the model sees them verbatim
     parts.push({
@@ -52,9 +57,11 @@ async function runVerified(sid: string, sentText: string): Promise<boolean> {
           .trim(),
       }))
       .filter((m: any) => m.text);
-    const lastUser = parsed.map((m: any) => m.role).lastIndexOf('user');
-    if (lastUser === -1 || !parsed[lastUser].text.includes(sentText)) return false;
-    return parsed.slice(lastUser + 1).some((m: any) => m.role === 'assistant');
+    // the sent message wherever it is: one stored after it (waiting its turn, or sent here by
+    // another session) is no swallow (11-17: that made this re-send a message that had run)
+    const mine = parsed.map((m: any) => m.role === 'user' && m.text.includes(sentText)).lastIndexOf(true);
+    if (mine === -1) return false;
+    return parsed.slice(mine + 1).some((m: any) => m.role === 'assistant');
   } catch {
     return true; // can't verify → assume fine, a retry could double-send
   }
@@ -106,7 +113,7 @@ export function forward(sid: string, slug: string, body: SendBody, isRetry = fal
     // messages at opencode at once, and its own queue stalls after aborts
     if (!markRunEnd(sid)) return;
     bustCache(); // list drops the "awaiting answer" state
-    void pushRunDone(slug);
+    void pushRunDone(slug, sid);
     // queue pickup: an abort also lands here, so stop advances to the
     // next queued message instead of stalling the session
     const next = dequeue(sid);

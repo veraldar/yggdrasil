@@ -16,6 +16,8 @@ type View = {
   code: string;
   /** the fingerprint of the WireGuard key approving pins (null: an older machine) */
   wg_fp: string | null;
+  /** 'home': approving shares the home root's model, key included, with this machine */
+  model?: 'home' | null;
   status: 'pending' | 'approved' | 'refused' | 'expired' | 'delivered';
   expires_at: string;
   root_id: string | null;
@@ -71,6 +73,17 @@ export default function JoinPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Poll while pending or expired: an in-place renewal revives this same req id automatically.
+  const viewStatus = view?.status;
+  useEffect(() => {
+    if (!req || busy || (viewStatus !== 'pending' && viewStatus !== 'expired')) return;
+    const t = setInterval(() => {
+      if (!document.hidden) void load(req);
+    }, 5000);
+    return () => clearInterval(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [req, busy, viewStatus]);
+
   async function decide(what: 'approve' | 'refuse') {
     setBusy(true);
     setStatus(what === 'approve' ? 'adding…' : 'refusing…');
@@ -118,6 +131,13 @@ export default function JoinPage() {
               </span>
               <span />
             </li>
+            {view.model === 'home' && (
+              <li>
+                <span>model</span>
+                <span data-testid="join-model">{"the home root's model and key"}</span>
+                <span />
+              </li>
+            )}
           </ul>
           <p
             data-testid="join-code"
@@ -137,11 +157,7 @@ export default function JoinPage() {
           {pending && (
             <>
               <p className="note">
-                the machine shows a code too. add it only if both codes match — otherwise refuse.
-                {view.wg_fp
-                  ? ' adding it trusts its tunnel key: the machine prints the same key line.'
-                  : ''}{' '}
-                expires {new Date(view.expires_at).toLocaleTimeString()}.
+                same code on the machine? · expires {new Date(view.expires_at).toLocaleTimeString()}
               </p>
               <div className="mt-3 flex gap-2">
                 <button

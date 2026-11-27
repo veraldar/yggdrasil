@@ -1,15 +1,24 @@
-/** GET → the machines joined to this hub's tree: id, name, os, host, joined_at. A live device only. */
+/**
+ * GET → the whole tree: `home` (this hub's own root: name, os, cpus, mem_gb, running, main — the
+ * brain's GET /root) and `roots`, the others: the machines joined to this hub (id, name, os, host,
+ * joined_at, delivered_at, wg_fp; removed ones left out) with the brain's word on each merged in
+ * (reachable, seen, running, models, main, main_proxy, build, behind: it runs another build than
+ * the hub brain), then the roots only the brain knows
+ * (static peers). The gate: lib/admin.ts rootsGate.
+ */
 import { NextResponse } from 'next/server';
-import { deviceOf } from '@/lib/admin';
 import { NO_STORE } from '@/lib/pairing';
-import { listRoots } from '@/lib/roots';
+import { listPendingJoins, rootsOverview } from '@/lib/roots';
+import { gate } from '@/lib/roots-route';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
 
 export async function GET(req: Request) {
-  if (!(await deviceOf(req))) {
-    return NextResponse.json({ error: 'device token required', reauth: 'pair' }, { status: 401 });
-  }
-  return NextResponse.json({ roots: await listRoots() }, { headers: NO_STORE });
+  const no = await gate(req);
+  if (no) return no;
+  return NextResponse.json(
+    { ...(await rootsOverview()), joins: listPendingJoins() },
+    { headers: NO_STORE }
+  );
 }

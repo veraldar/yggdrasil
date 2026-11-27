@@ -1,6 +1,6 @@
 import { readFile } from 'fs/promises';
 import path from 'path';
-import { type APIRequestContext, expect, type Page, test } from '@playwright/test';
+import { type APIRequestContext, type Page, expect, test } from '@playwright/test';
 import { runState } from '../lib/run-state';
 
 /** Herdr folds (10-24, docs/research/herdr-takeaways.md §1.1 + §1.2 + §1.4):
@@ -208,5 +208,5 @@ test('identity pin: a queued turn dies with its session', async ({ request }) =>
 test('voice-test room switch defaults OFF on a fresh device', async ({ page }) => {
   await page.goto('/settings');
   await expect(page.getByTestId('voice-test-toggle')).toHaveAttribute('aria-checked', 'false');
-  await expect(page.getByTestId('voice-test-state')).toContainText('off');
+  await expect(page.getByTestId('voice-test-toggle')).toHaveText('off');
 });

@@ -23,28 +23,26 @@ const SAY: Record<PinState, string> = {
 
 export function PinStateLine() {
   const [s, setS] = useState(pinState());
+  // /pair found this visitor is not paired (a phone that was, once, still holds its old pin): no road to name
+  const [unpaired, setUnpaired] = useState(false);
   useEffect(() => onPinState((state, why) => setS({ state, why })), []);
+  useEffect(() => {
+    const on = () => setUnpaired(true);
+    if (document.documentElement.dataset.unpaired) on();
+    window.addEventListener('bifrost:unpaired', on);
+    return () => window.removeEventListener('bifrost:unpaired', on);
+  }, []);
   return (
+    // the look and the place are styles/brand.css § pin (a caption like the band's, and a spot
+    // no page's chrome uses — on the front page, the roots' top-right corner)
     <div
+      className="oz-pin"
       data-testid="pin-state"
       data-state={s.state}
       title={s.why}
-      hidden={s.state === 'off'}
-      style={{
-        position: 'fixed',
-        left: 8,
-        bottom: 'calc(6px + env(safe-area-inset-bottom))',
-        zIndex: 60,
-        font: '10px/1.4 var(--font-commit-mono, monospace)',
-        padding: '1px 6px',
-        borderRadius: 8,
-        pointerEvents: 'none',
-        opacity: s.state === 'pinned' ? 0.55 : 0.9,
-        color:
-          s.state === 'refused' ? '#ff6b6b' : s.state === 'fallback' ? '#e0b44c' : 'currentColor',
-        border: '1px solid currentColor',
-      }}
+      hidden={s.state === 'off' || unpaired}
     >
+      <i aria-hidden="true" />
       {SAY[s.state]}
     </div>
   );

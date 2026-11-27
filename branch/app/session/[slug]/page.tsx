@@ -4,6 +4,7 @@ import {
   type RefObject,
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -13,9 +14,11 @@ import { useRouter } from 'next/navigation';
 import { Room, RoomEvent, Track, createAudioAnalyser } from 'livekit-client';
 import Link from 'next/link';
 import { LineIcon, StopSquare } from '@/components/line-icon';
-import { type Msg, SessionMessage, userProse } from '@/components/session-message';
+import { ContextSheet } from '@/components/context-sheet';
+import { type Msg, SessionMessage, senderName, userProse } from '@/components/session-message';
 import { MessageHistory } from '@/components/message-history';
 import { useSwipeX } from '@/lib/use-swipe-x';
+import { type Anchor, anchorShift, atBottom, lastKey, msgKey, pickAnchor } from '@/lib/scroll-follow';
 import { ErrorBox } from '@/components/app/error-box';
 import {
   getSpeech,
@@ -33,14 +36,25 @@ import {
   applyVoiceCommand,
 } from '@/lib/speech';
 import { shouldAutoSpeak } from '@/lib/auto-speak';
+import { engineWord } from '@/lib/agents';
 import { CARD_ST, type TreeRow } from '@/lib/card';
 import { slugify } from '@/lib/slug';
 import { diagEvent } from '@/lib/diag';
+import {
+  FILES_PER_MESSAGE,
+  type FileChip,
+  type FileRef,
+  isImageMime,
+  refViews,
+  urlHash,
+} from '@/lib/file-ref';
+import { uploadFile } from '@/lib/file-upload';
 import '@/lib/labmic';
 import { clearAsked, ensureNotifyPermission, markAsked, notifyReply } from '@/lib/notify';
 import { PENDING_TTL_MS } from '@/lib/pending-ttl';
 import { markRead } from '@/lib/read';
 import { lastHeard, markHeard } from '@/lib/heard';
+import { type Held, heldReply } from '@/lib/held-reply';
 import {
   DOOR_KEY,
   FIRST_TURN_KEY,
@@ -48,19 +62,14 @@ import {
   TEACH_KEY,
   TF_PREFS_KEY,
   isMainSlug,
+  MAIN_SLUG,
   isOnboardPrompt,
   isOnboardingSlug,
   line,
   stripMarkers,
 } from '@/lib/tree-first';
 import { say, stopLine, unlockLines, useVoiceState, warmLines } from '@/lib/onboard-voice';
-import {
-  ECHO_TAIL_MS,
-  agentInRoom,
-  releaseMicDevice,
-  tellDeckState,
-  withTimeout,
-} from '@/lib/voice-room';
+import { ECHO_TAIL_MS, agentInRoom, releaseMicDevice, tellDeckState, withTimeout, servingAgent } from '@/lib/voice-room';
 import {
   VOICE_TEST_SLUG,
   setVoiceTest,
@@ -75,6 +84,14 @@ import {
   voiceToken,
 } from '@/lib/voice-token';
 import { voiceRoom } from '@/lib/voice-tts';
+import { HOME_ROOT_KEY, type Tree as RootsTree } from '@/components/roots-sheet';
+import {
+  type WorldId,
+  cacheTreeThemes,
+  cachedRootTheme,
+  chosenWorld,
+  useScopedTheme,
+} from '@/lib/worlds';
 
 type Mode = 'text' | 'free';
 /** the door's last step, in MAIN — the walk-through (UX-CALM 10-27: the
@@ -153,9 +170,16 @@ const FT = {
     ok: 'ok',
   },
 } as const;
-type Attach =
-  | { kind: 'image'; name: string; dataUrl: string }
-  | { kind: 'file'; name: string; content: string };
+/** a picked file: uploading until the brain gives its REF */
+type Attach = {
+  key: number;
+  name: string;
+  mime: string;
+  preview?: string; // an image's thumbnail (object URL)
+  ref?: FileRef;
+};
+
+const ATTACH_ONLY = '(📎 attachment)';
 
 const PTT_BARS = 9;
 
@@ -163,14 +187,6 @@ const PTT_BARS = 9;
 // its name may already belong to a new session, which the pin never reaches
 const GONE = 'this session is gone — it was deleted. Open it again from the list.';
 
-function fileToDataUrl(f: File): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const r = new FileReader();
-    r.onload = () => resolve(String(r.result));
-    r.onerror = () => reject(r.error);
-    r.readAsDataURL(f);
-  });
-}
 
 /** An agent-less room that still looks connected: the dispatch dies with
  *  the first agent job, and a network flap makes the SDK self-reconnect
@@ -250,15 +266,16 @@ function useMicLevels(active: boolean, roomRef: RefObject<Room | null>) {
   return levels;
 }
 
-/** Downscale to max 1568px and re-encode JPEG unless it's already small. */
-async function downscaleImage(f: File): Promise<string> {
+/** Downscale to max 1568px and re-encode JPEG unless it's already small (what the model is
+ *  shown); null = keep the file as it is. */
+async function downscaleImage(f: File): Promise<Blob | null> {
   const MAX = 1568;
   try {
     const bmp = await createImageBitmap(f, { imageOrientation: 'from-image' });
     const scale = Math.min(1, MAX / Math.max(bmp.width, bmp.height));
     if (scale === 1 && f.size < 300_000) {
       bmp.close?.();
-      return await fileToDataUrl(f);
+      return null;
     }
     const w = Math.max(1, Math.round(bmp.width * scale));
     const h = Math.max(1, Math.round(bmp.height * scale));
@@ -267,10 +284,23 @@ async function downscaleImage(f: File): Promise<string> {
     c.height = h;
     c.getContext('2d')!.drawImage(bmp, 0, 0, w, h);
     bmp.close?.();
-    return c.toDataURL('image/jpeg', 0.85);
+    return await new Promise<Blob | null>((ok) => c.toBlob(ok, 'image/jpeg', 0.85));
   } catch {
-    return await fileToDataUrl(f);
+    return null;
   }
+}
+
+/** A user message in the transcript is the one an echo stands for: same words — or, for a
+ *  message of files only, one carrying the same file (by its hash). */
+function echoLanded(e: Msg, m: Msg): boolean {
+  if (m.role !== 'user') return false;
+  if (e.text !== ATTACH_ONLY) return m.text === e.text || userProse(m.text) === e.text;
+  const key = urlHash(e.images[0] || e.files?.[0]?.url || '');
+  return (
+    !!key &&
+    !userProse(m.text) &&
+    [...m.images, ...(m.files || []).map((f) => f.url)].some((u) => !!u && urlHash(u) === key)
+  );
 }
 
 export default function SessionView({
@@ -289,6 +319,26 @@ export default function SessionView({
   const [msgs, setMsgs] = useState<Msg[]>([]);
   const msgsRef = useRef<Msg[]>([]);
   msgsRef.current = msgs;
+  // who wrote what: 'you', a session's id, or 'auto' (the brain) — a reply belongs to the message
+  // it answers. The filter shows one writer's messages and the replies to them ('all' = no filter)
+  const [who, setWho] = useState('all');
+  const writers = useMemo(() => {
+    const keyOf = (m: Msg) => (m.from ? m.from.session : m.auto ? 'auto' : 'you');
+    const byId = new Map<string, string>();
+    const keys: string[] = [];
+    const names = new Map<string, string>();
+    let cur = 'you';
+    for (const m of msgs) {
+      if (m.role === 'user') {
+        cur = keyOf(m);
+        if (m.id) byId.set(m.id, cur);
+        if (!names.has(cur)) names.set(cur, m.from ? senderName(m.from) : cur);
+        keys.push(cur);
+      } else keys.push((m.parent && byId.get(m.parent)) || cur);
+    }
+    return { keys, names: [...names.entries()] };
+  }, [msgs]);
+  const whoOn = who !== 'all' && writers.names.some(([k]) => k === who) ? who : 'all';
   // this view IS the voice-test room (lib/voice-test.ts) — said in the header
   const [voiceTest, setVoiceTest_] = useState(false);
   // the door's last step (lib/tree-first.ts): MAIN opens with the first-turn
@@ -341,6 +391,9 @@ export default function SessionView({
   const [voiceNaNote, setVoiceNaNote] = useState(false);
   const [error, setError] = useState('');
   const [attachments, setAttachments] = useState<Attach[]>([]);
+  // the same list, current between renders (picks and uploads finish out of step)
+  const attachmentsRef = useRef<Attach[]>([]);
+  const attachKeyRef = useRef(0);
   const [total, setTotal] = useState(0);
   const [limit, setLimit] = useState(60);
   // root-coord: the brain's tree (GET /api/tree) — this session's card (the
@@ -359,6 +412,7 @@ export default function SessionView({
   // transcript search — an overlay, NOT a mode: text/hands-free keep running
   // underneath; the bar filters nothing, it rings matches and jumps between them
   const [searchOpen, setSearchOpen] = useState(false);
+  const [ctxOpen, setCtxOpen] = useState(false);
   const [query, setQuery] = useState('');
   const [matchIdx, setMatchIdx] = useState(0);
   const matches = useMemo(() => {
@@ -509,14 +563,12 @@ export default function SessionView({
   const busyStartRef = useRef(Date.now());
 
   /** Show the user's own message instantly; the poll reconciles later. */
-  function addEcho(text: string, images: string[] = [], before = 0) {
-    const m: Msg = { role: 'user', text: text || '(📎 attachment)', images, time: Date.now() };
+  function addEcho(text: string, images: string[] = [], before = 0, files: FileChip[] = []) {
+    const m: Msg = { role: 'user', text: text || ATTACH_ONLY, images, files, time: Date.now() };
     stickRef.current = true;
     // a poll that raced the POST may already hold the server's copy — an echo
     // on top of it is the doubled bubble (the echo filter only runs per poll)
-    const has = (list: Msg[]) =>
-      list.filter((x) => x.role === 'user' && (x.text === m.text || userProse(x.text) === m.text))
-        .length;
+    const has = (list: Msg[]) => list.filter((x) => echoLanded(m, x)).length;
     if (has(msgsRef.current) > before) return;
     echoesRef.current = [...echoesRef.current, m];
     setMsgs((prev) => (has(prev) > before ? prev : [...prev, m]));
@@ -539,7 +591,7 @@ export default function SessionView({
       msgs
         .filter((m) => m.role === 'user')
         .map((m) => userProse(m.text))
-        .filter((t) => t.trim() && t !== '(📎 attachment)'),
+        .filter((t) => t.trim() && t !== ATTACH_ONLY),
     [msgs]
   );
   // null = live draft; 0..n-1 = index into sentHistory (0 = oldest)
@@ -613,6 +665,36 @@ export default function SessionView({
   // auto-scroll only while the user is parked at (or near) the bottom;
   // scrolling up to read history must not be fought by the poller
   const stickRef = useRef(true);
+  // scrolled up (owner 11-24): the reader's place, taken just before a poll swaps the list in and
+  // put back before paint — the text being read never moves, even as the 60-message window slides
+  const anchorRef = useRef<Anchor | null>(null);
+  // the newest message's key: a change while scrolled up shows the "new messages ↓" pill
+  const lastKeyRef = useRef('');
+  const [newBelow, setNewBelow] = useState(false);
+  // the transcript height at the last follow-snap: a poll that changed nothing (every poll hands
+  // over a new list) must not pull a reader a few px up back down
+  const snapHRef = useRef(0);
+  const keepPlace = () => {
+    const sc = scrollRef.current;
+    anchorRef.current = null;
+    if (!sc || stickRef.current) return;
+    const els = sc.querySelectorAll<HTMLElement>('[data-mid]');
+    anchorRef.current = pickAnchor(
+      (function* () {
+        for (const el of els) {
+          const r = el.getBoundingClientRect();
+          yield { id: el.dataset.mid || '', top: r.top, bottom: r.bottom };
+        }
+      })(),
+      sc.getBoundingClientRect().top
+    );
+  };
+  const jumpToNewest = () => {
+    const sc = scrollRef.current;
+    stickRef.current = true;
+    setNewBelow(false);
+    if (sc) sc.scrollTop = sc.scrollHeight;
+  };
 
   useEffect(() => {
     Promise.all([params, searchParams]).then(([p, sp]) => {
@@ -628,6 +710,11 @@ export default function SessionView({
       setSlug(p.slug);
       echoesRef.current = [];
       seenRef.current = 0;
+      stickRef.current = true;
+      anchorRef.current = null;
+      lastKeyRef.current = '';
+      snapHRef.current = 0;
+      setNewBelow(false);
       setLimit(60);
       // composer recall resets with the session: no history position, no
       // parked draft leaking across sessions
@@ -712,6 +799,44 @@ export default function SessionView({
         pinRef.current ? r.id === pinRef.current : slugify(r.title || '') === slug
       );
   const card = me?.card?.status ? me.card : null;
+  // Decision 3: a session that lives on another computer names it, and wears its world when one
+  // was picked for it (none picked: the app's own world, like every page — lib/worlds.ts)
+  const [homeRoot, setHomeRoot] = useState('');
+  const [remoteWorld, setRemoteWorld] = useState<WorldId | null>(null);
+  useEffect(() => {
+    try {
+      setHomeRoot(localStorage.getItem(HOME_ROOT_KEY) || '');
+    } catch {
+      /* private mode */
+    }
+  }, []);
+  const sessionRoot = me?.card?.root && me.card.root !== homeRoot ? me.card.root : null;
+  useEffect(() => {
+    if (!sessionRoot) {
+      setRemoteWorld(null);
+      return;
+    }
+    setRemoteWorld(cachedRootTheme(sessionRoot));
+    let live = true;
+    fetch('/api/roots', { cache: 'no-store' })
+      .then((r) => (r.ok ? (r.json() as Promise<RootsTree>) : null))
+      .then((t) => {
+        if (!live || !t) return;
+        cacheTreeThemes(t);
+        if (t.home?.name) setHomeRoot(t.home.name);
+        if (t.home?.name === sessionRoot) {
+          setRemoteWorld(null);
+          return;
+        }
+        const r = t.roots.find((x) => x.id === sessionRoot);
+        setRemoteWorld(chosenWorld(r?.theme, r?.theme_rev));
+      })
+      .catch(() => {});
+    return () => {
+      live = false;
+    };
+  }, [sessionRoot]);
+  useScopedTheme(remoteWorld);
   const routes = useMemo(
     () => (isMainSlug(slug) ? tree.map((r) => ({ id: r.id, title: r.title || '' })) : undefined),
     [slug, tree]
@@ -866,9 +991,8 @@ export default function SessionView({
             void notifyReply(slug);
           }
           // keep optimistic echoes until the server transcript catches up
-          const echoes = echoesRef.current.filter(
-            (e) => !fresh.some((m) => m.role === 'user' && (m.text === e.text || userProse(m.text) === e.text))
-          );
+          const echoes = echoesRef.current.filter((e) => !fresh.some((m) => echoLanded(e, m)));
+          keepPlace();
           setMsgs([...fresh, ...echoes]);
           try {
             if (JSON.stringify(fresh).length < 300_000) {
@@ -922,16 +1046,39 @@ export default function SessionView({
     // everything on screen counts as read — the list drops its unread badge
     const lastT = msgs.length ? msgs[msgs.length - 1].time : 0;
     if (slug && lastT) markRead(slug, lastT);
-    if (!stickRef.current) return;
-    // hard snap (scrollIntoView races late layout from images/fonts)
-    const snap = () => {
+    const last = lastKey(msgs);
+    const arrived = !!lastKeyRef.current && !!last && last !== lastKeyRef.current;
+    lastKeyRef.current = last;
+    if (!stickRef.current) {
+      if (arrived) setNewBelow(true);
+      return;
+    }
+    // hard snap (scrollIntoView races late layout from images/fonts). Each one asks again: the
+    // reader may have scrolled up since this list landed (a late snap yanked them back down).
+    // Only for something new — a message arrived, or the transcript grew (a reply streaming in,
+    // an image laid out): a poll that changed nothing leaves the reader where they are
+    const snap = (force = false) => {
       const el = scrollRef.current;
-      if (el) el.scrollTop = el.scrollHeight;
+      if (!el || !stickRef.current) return;
+      if (!force && el.scrollHeight === snapHRef.current) return;
+      el.scrollTop = el.scrollHeight;
+      snapHRef.current = el.scrollHeight;
     };
-    snap();
-    requestAnimationFrame(snap);
-    const t = setTimeout(snap, 300);
+    snap(arrived || !snapHRef.current);
+    requestAnimationFrame(() => snap());
+    const t = setTimeout(() => snap(), 300);
     return () => clearTimeout(t);
+  }, [msgs]);
+  // scrolled up: the message the reader was on goes back to the exact spot, before paint
+  useLayoutEffect(() => {
+    const a = anchorRef.current;
+    anchorRef.current = null;
+    const sc = scrollRef.current;
+    if (!a || !sc || stickRef.current) return;
+    const el = sc.querySelector<HTMLElement>(`[data-mid="${CSS.escape(a.id)}"]`);
+    if (!el) return;
+    const shift = anchorShift(a, el.getBoundingClientRect().top - sc.getBoundingClientRect().top);
+    if (Math.abs(shift) >= 1) sc.scrollTop += shift;
   }, [msgs]);
   // the full log follows the bottom the same way while you sit there
   useEffect(() => {
@@ -1528,6 +1675,15 @@ export default function SessionView({
     // the turn (opencode serializes per session); stop is the only cancel
     pttWantRef.current = true;
     holdBeforeRef.current = lastUserTime(); // the walk: a hold's turn is newer than its press
+    // L16: the same for the held reply — server times only (a typed turn's quick local copy
+    // carries the phone's clock), from the list as it is NOW (this runs 250 ms after the press)
+    heldPressRef.current = {
+      before:
+        [...msgsRef.current]
+          .reverse()
+          .find((m) => m.role === 'user' && !m.queued && !echoesRef.current.includes(m))?.time || 0,
+      at: Date.now(),
+    };
     pttCancelArmRef.current = false;
     setPttCancelArm(false);
     setMicLive(false);
@@ -1557,7 +1713,7 @@ export default function SessionView({
       }
       // agent holds turns manual until release — a mid-sentence pause while
       // the button is down must not flush a partial message (fire & forget)
-      const agent = Array.from(room.remoteParticipants.values())[0];
+      const agent = servingAgent(room);
       if (agent) {
         void room.localParticipant
           .performRpc({
@@ -1625,7 +1781,7 @@ export default function SessionView({
 
   function pttDiscardRpc() {
     const room = roomRef.current;
-    const agent = room && Array.from(room.remoteParticipants.values())[0];
+    const agent = room && servingAgent(room);
     if (room && agent) {
       void room.localParticipant
         .performRpc({
@@ -1702,6 +1858,11 @@ export default function SessionView({
       return;
     }
     if (modeRef.current !== 'free') await mic(false); // hands-free keeps listening
+    // L16: the reply to this held turn is spoken (hands-free speaks its own)
+    if (modeRef.current !== 'free') {
+      heldRef.current = [...heldRef.current, { ...heldPressRef.current }];
+      setHeldTick((t) => t + 1);
+    }
     firstSent('hold');
     stickRef.current = true;
     setBusy(true); // cleared when the run state settles (see poller)
@@ -1922,6 +2083,8 @@ export default function SessionView({
       freeMicGiveBack();
       return;
     }
+    // L16: hands-free is the exception — while it is on, every answer is spoken, a typed turn's
+    // too (you switched it on to listen; lead-review L16, decided again 11-23)
     try {
       if (!shouldAutoSpeak(a, isMainSlug(slug))) {
         // quiet-assess: silent verdict reply — give the mic back, no voice
@@ -2320,6 +2483,50 @@ export default function SessionView({
   // the release then commits nothing — so a hold counts from its press
   const holdBeforeRef = useRef(0);
 
+  // L16 (owner rule 11-20): a turn you speak is answered aloud, a turn you type in writing.
+  // Hands-free speaks its own replies (the free cycle). A HELD turn in text mode is spoken
+  // here, once: the completed reply to the spoken user message that landed after the press
+  // (lib/held-reply.ts: the brain marks it `voice`; a typed message never is, so it is never
+  // spoken for a hold that caught nothing). The written reply stays on screen as always.
+  // A list: two holds in a row each get their own answer.
+  const heldRef = useRef<Held[]>([]);
+  const heldPressRef = useRef({ before: 0, at: 0 });
+  const [heldTick, setHeldTick] = useState(0); // a hold was armed: look now, not at the next poll
+  useEffect(() => {
+    heldRef.current = []; // another session: its holds are its own
+  }, [slug]);
+  useEffect(() => {
+    const list = heldRef.current;
+    if (!list.length) return;
+    const now = Date.now();
+    const keep: Held[] = [];
+    let say: Msg | undefined;
+    for (const h of list) {
+      const others = list.filter((x) => x !== h && x.user).map((x) => x.user as string);
+      const r = heldReply(msgs, h, others);
+      if (r.user) h.user = r.user;
+      if (r.over) continue; // stopped or failed: what is left of it is not said
+      if (!r.reply) {
+        // still coming — but a hold that caught nothing (no turn 45 s after the release) is over,
+        // so no later spoken turn is ever taken for it
+        if (h.user ? now - h.at < 30 * 60_000 : now - h.at < 45_000) keep.push(h);
+        continue;
+      }
+      if (modeRef.current === 'free') continue; // hands-free came on: its cycle says it
+      if (r.reply.time > lastHeard(slug)) say = r.reply;
+    }
+    heldRef.current = keep;
+    if (!say) return;
+    diagEvent('voice', 'held turn: its reply is spoken');
+    markHeard(slug, say.time);
+    try {
+      startSpeech(say.text, slug);
+    } catch {
+      /* the deck could not start: the reply is on screen */
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [msgs, slug, mode, heldTick]);
+
   /** pttUp, a typed send, or a hands-free commit ("over" / the bars): the
    *  turn is going out, from here a message must land. A typed turn may start
    *  before the mic was ever asked for — or after it was refused: typing never
@@ -2451,8 +2658,11 @@ export default function SessionView({
       // a held turn: it talks back here. Typed: it writes back (the deck can
       // still speak it). Hands-free speaks its own replies (the free cycle)
       if (f.kind === 'hold' && modeRef.current !== 'free') {
-        markHeard(slug, a.time);
-        startSpeech(a.text, slug);
+        // (the held-reply path above may already have said it: once is enough)
+        if (a.time > lastHeard(slug)) {
+          markHeard(slug, a.time);
+          startSpeech(a.text, slug);
+        }
       } else if (f.kind === 'type') {
         markHeard(slug, a.time);
       }
@@ -2517,6 +2727,7 @@ export default function SessionView({
       'busy',
       `abort ${slug} after ${Math.max(0, Math.round((Date.now() - busyStartRef.current) / 1000))}s (stop btn)`
     );
+    heldRef.current = []; // stopped by hand: what is left of the reply is not said aloud
     try {
       await fetch(`/api/session/${slug}/abort`, { method: 'POST', headers: pinHeaders() });
     } catch {
@@ -2536,30 +2747,59 @@ export default function SessionView({
     if (busyRef.current) void abortGeneration();
   }
 
-  async function addAttachments(files: FileList | null) {
+  /** Picked (or pasted) files: each goes to the brain at once, in pieces; the chip breathes
+   *  until the brain has all of it. A file the brain refuses (over the limit) is dropped with
+   *  the brain's own words. */
+  async function addAttachments(files: FileList | File[] | null) {
     if (!files?.length) return;
-    const picked = Array.from(files).slice(0, 4);
-    const next: Attach[] = [];
-    for (const f of picked) {
-      try {
-        if (f.type.startsWith('image/')) {
-          next.push({ kind: 'image', name: f.name, dataUrl: await downscaleImage(f) });
-        } else {
-          next.push({ kind: 'file', name: f.name, content: (await f.text()).slice(0, 200_000) });
+    const all = Array.from(files);
+    const room = FILES_PER_MESSAGE - attachmentsRef.current.length;
+    if (all.length > room) setError(`at most ${FILES_PER_MESSAGE} files in one message`);
+    for (const f of all.slice(0, Math.max(0, room))) {
+      let blob: Blob = f;
+      let name = f.name || 'file';
+      let mime = f.type || 'application/octet-stream';
+      if (isImageMime(mime) && mime !== 'image/gif' && mime !== 'image/svg+xml') {
+        const small = await downscaleImage(f);
+        if (small) {
+          blob = small;
+          mime = 'image/jpeg';
+          name = name.replace(/\.[^.]*$/, '') + '.jpg';
         }
-      } catch (e) {
-        setError(`could not read ${f.name}: ${e}`);
       }
+      const key = ++attachKeyRef.current;
+      const preview = isImageMime(mime) ? URL.createObjectURL(blob) : undefined;
+      attachmentsRef.current = [...attachmentsRef.current, { key, name, mime, preview }];
+      setAttachments(attachmentsRef.current);
+      void uploadFile(blob, name, mime).then((res) => {
+        if ('error' in res) {
+          setError(res.error);
+          dropAttachment(key);
+          return;
+        }
+        attachmentsRef.current = attachmentsRef.current.map((a) =>
+          a.key === key ? { ...a, ref: res.ref } : a
+        );
+        setAttachments(attachmentsRef.current);
+      });
     }
-    if (next.length) setAttachments((a) => [...a, ...next].slice(0, 8));
+  }
+
+  function dropAttachment(key: number) {
+    const gone = attachmentsRef.current.find((a) => a.key === key);
+    if (gone?.preview) URL.revokeObjectURL(gone.preview);
+    attachmentsRef.current = attachmentsRef.current.filter((a) => a.key !== key);
+    setAttachments(attachmentsRef.current);
   }
 
   function sendText() {
     const text = input.trim();
     if (!text && attachments.length === 0) return;
+    // every file must be with the brain before the message goes (its REF rides the message)
+    if (attachmentsRef.current.some((a) => !a.ref)) return;
     // idempotency (owner 11-11 "turn committed twice"): Enter + button tap or a
     // double tap fire in one tick, before setInput('') re-renders the closure
-    const sig = text + '|' + attachments.length;
+    const sig = text + '|' + attachments.map((a) => a.ref?.hash).join(',');
     if (lastSendRef.current.sig === sig && Date.now() - lastSendRef.current.at < 1500) return;
     lastSendRef.current = { sig, at: Date.now() };
     setInput('');
@@ -2573,23 +2813,17 @@ export default function SessionView({
       /* private mode */
     }
     if (inputRef.current) inputRef.current.style.height = 'auto';
-    const images = attachments
-      .filter((a): a is Extract<Attach, { kind: 'image' }> => a.kind === 'image')
-      .map((a) => a.dataUrl);
-    const files = attachments
-      .filter((a): a is Extract<Attach, { kind: 'file' }> => a.kind === 'file')
-      .map((a) => ({ name: a.name, content: a.content }));
+    const sent = attachmentsRef.current;
+    attachmentsRef.current = [];
     setAttachments([]);
     stickRef.current = true;
     if (first !== 'off') firstSent('type'); // the walk-through's typed turn
-    void sendTextAsync(text, images, files);
+    void sendTextAsync(text, sent);
   }
 
-  async function sendTextAsync(
-    text: string,
-    images: string[],
-    files: { name: string; content: string }[]
-  ) {
+  async function sendTextAsync(text: string, sent: Attach[]) {
+    const refs = sent.map((a) => a.ref!);
+    const { images, files } = refViews(refs);
     markAsked(slug);
     void ensureNotifyPermission();
     // sending while busy = queue behind the current run (opencode serializes
@@ -2604,17 +2838,15 @@ export default function SessionView({
     // reply in the transcript AND arms the proxy run tracker (list dot,
     // live flag, wedge guard, busy clear).
     const willQueue = busyRef.current; // server will hold it in the proxy queue
-    const echoKey = text || '(📎 attachment)';
-    const before = msgsRef.current.filter(
-      (x) => x.role === 'user' && (x.text === echoKey || userProse(x.text) === echoKey)
-    ).length;
+    const echo: Msg = { role: 'user', text: text || ATTACH_ONLY, images, files, time: 0 };
+    const before = msgsRef.current.filter((x) => echoLanded(echo, x)).length;
     setBusy(true);
     armRunWatch();
     try {
       const r = await fetch(`/api/session/${slug}/messages`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', ...pinHeaders() },
-        body: JSON.stringify({ text, images, files, async: true }),
+        body: JSON.stringify({ text, refs, async: true }),
         // a hung radio/socket must surface as an error, not a silent stuck send
         signal: AbortSignal.timeout(30_000),
       });
@@ -2622,16 +2854,26 @@ export default function SessionView({
         const d = await r.json().catch(() => ({}));
         setError(d.code === 'session_gone' ? GONE : d.error || `send failed (${r.status})`);
         setInput((prev) => (prev.trim() ? prev : text)); // draft back, no clobber
+        restoreAttachments(sent);
         setBusy(false);
-      } else if (!willQueue) {
-        addEcho(text, images, before); // queued sends come back via the poll instead
+      } else {
+        for (const a of sent) if (a.preview) URL.revokeObjectURL(a.preview);
+        if (!willQueue) addEcho(text, images, before, files); // queued sends come back via the poll
       }
       await loadMsgs();
     } catch {
       setError('send failed');
       setInput((prev) => (prev.trim() ? prev : text)); // draft back, no clobber
+      restoreAttachments(sent);
       setBusy(false);
     }
+  }
+
+  /** a send that failed: its files back in the composer (they are with the brain already) */
+  function restoreAttachments(sent: Attach[]) {
+    if (!sent.length || attachmentsRef.current.length) return;
+    attachmentsRef.current = sent;
+    setAttachments(sent);
   }
 
   /** The voice toggle (req 09-30): a TAP on the composer mic. Enters
@@ -2867,6 +3109,15 @@ export default function SessionView({
             </span>
           )}
         </Link>
+        {sessionRoot && (
+          <Link
+            href={`/roots/${encodeURIComponent(sessionRoot)}`}
+            className="oz-subs"
+            data-testid="session-root-tag"
+          >
+            {sessionRoot}
+          </Link>
+        )}
         {voiceTest && (
           <button
             type="button"
@@ -2895,6 +3146,18 @@ export default function SessionView({
         >
           <LineIcon name="log" size={14} />
         </button>
+        {/* what this session's model was actually sent (G1): captured body,
+            MAIN's view of it, the memory, the harness — on every session,
+            MAIN included */}
+        <button
+          aria-label="what this session knows"
+          aria-pressed={ctxOpen}
+          data-testid="ctx-key"
+          onClick={() => setCtxOpen(true)}
+          className="oz-k sm"
+        >
+          <LineIcon name="context" size={14} />
+        </button>
         {/* search is not a mode — hands-free lives on the composer mic: tap
             to toggle, hold to talk (req 09-30) */}
         <button
@@ -2912,29 +3175,38 @@ export default function SessionView({
 
       {/* a managed session's card: who works it, on what, how it stands —
           its question for you, then the summary (tap: the whole of it) */}
-      {me && card && (
-        <button
-          type="button"
-          data-testid="session-card"
-          aria-expanded={cardOpen}
-          onClick={() => setCardOpen((o) => !o)}
-          className="oz-card"
-        >
-          <span>
-            {[me.agent, me.model?.id].filter(Boolean).join(' · ')}
-            {(me.agent || me.model?.id) && ' · '}
-            <b style={{ color: CARD_ST[card.status || '']?.c }}>{card.status}</b>
-          </span>
-          {card.needs?.trim() && (
+      {me && card && (() => {
+        const engText = engineWord(card.engine || me.engine || '');
+        return (
+          <button
+            type="button"
+            data-testid="session-card"
+            aria-expanded={cardOpen}
+            onClick={() => setCardOpen((o) => !o)}
+            className="oz-card"
+          >
             <span>
-              <i className="oz-asks">asks:</i> {card.needs.trim()}
+              {[me.agent, me.model?.id].filter(Boolean).join(' · ')}
+              {(me.agent || me.model?.id) && ' · '}
+              <b style={{ color: CARD_ST[card.status || '']?.c }}>{card.status}</b>
+              {engText && (
+                <span data-testid="card-engine" className="opacity-70">
+                  {' · '}
+                  {engText}
+                </span>
+              )}
             </span>
-          )}
-          {(card.summary || card.headline) && (
-            <span className="s">{card.summary || card.headline}</span>
-          )}
-        </button>
-      )}
+            {card.needs?.trim() && (
+              <span>
+                <i className="oz-asks">asks:</i> {card.needs.trim()}
+              </span>
+            )}
+            {(card.summary || card.headline) && (
+              <span className="s">{card.summary || card.headline}</span>
+            )}
+          </button>
+        );
+      })()}
 
       {searchOpen && (
         <div className="oz-box mt-2 flex items-center gap-2 px-2 py-1.5">
@@ -3005,12 +3277,25 @@ export default function SessionView({
         </p>
       )}
 
+      {/* who wrote it: one writer's messages and the replies to them (only when there are several;
+          not on MAIN — there the filter has nothing to separate, owner 11-20) */}
+      {writers.names.length > 1 && !isMainSlug(slug) && !(logOn && logMsgs) && (
+        <div className="oz-chips pt-2" data-testid="who-filter">
+          {[['all', 'all'] as [string, string], ...writers.names].map(([k, n]) => (
+            <button key={k} aria-pressed={whoOn === k} data-who={k} onClick={() => setWho(k)}>
+              {n}
+            </button>
+          ))}
+        </div>
+      )}
+
       {/* transcript */}
       <div
         ref={scrollRef}
         onScroll={(e) => {
           const el = e.currentTarget;
-          stickRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 120;
+          stickRef.current = atBottom(el);
+          if (stickRef.current && newBelow) setNewBelow(false);
           if (el.scrollTop <= 2) void loadOlder();
         }}
         className="min-h-0 flex-1 space-y-3.5 overflow-x-hidden overflow-y-auto overscroll-contain pt-3.5 pb-2"
@@ -3027,9 +3312,9 @@ export default function SessionView({
         )}
         {logOn &&
           logMsgs?.map((m, i) => <SessionMessage key={`log${i}`} m={m} routes={routes} />)}
-        {!(logOn && logMsgs) && msgs.map((m, i) => (
+        {!(logOn && logMsgs) && msgs.map((m, i) => whoOn !== 'all' && writers.keys[i] !== whoOn ? null : (
           <SessionMessage
-            key={i}
+            key={msgKey(m, i)}
             m={m}
             mi={i}
             hit={searchOpen && !!query.trim() && hitSet.has(i)}
@@ -3089,6 +3374,19 @@ export default function SessionView({
               <LineIcon name="volume" size={13} /> listen
             </button>
           )}
+        {/* scrolled up and something arrived: a quiet pill at the bottom edge, tap = the newest
+            (sticky in a zero-height row: it adds nothing to the transcript's own height) */}
+        {newBelow && (
+          <div className="pointer-events-none sticky bottom-2 z-10 mt-0! flex h-0 justify-center">
+            <button
+              onClick={jumpToNewest}
+              data-testid="new-below"
+              className="oz-chip pointer-events-auto -translate-y-full bg-[var(--oz-bg)] text-[var(--oz-text)]"
+            >
+              new messages ↓
+            </button>
+          </div>
+        )}
       </div>
 
       {/* swipe-history browser — fixed overlay, one message at a time */}
@@ -3103,16 +3401,21 @@ export default function SessionView({
 
       {attachments.length > 0 && (
         <div className="flex flex-wrap gap-1 pb-1">
-          {attachments.map((a, i) => (
-            <span key={i} className="oz-box flex items-center gap-1.5 px-2 py-1 text-xs">
-              {a.kind === 'image' && (
+          {attachments.map((a) => (
+            <span
+              key={a.key}
+              data-testid="attachment"
+              data-state={a.ref ? 'ready' : 'sending'}
+              className={`oz-box flex items-center gap-1.5 px-2 py-1 text-xs ${a.ref ? '' : 'oz-breathe'}`}
+            >
+              {a.preview && (
                 // eslint-disable-next-line @next/next/no-img-element
-                <img src={a.dataUrl} alt="" className="h-6 w-6 object-cover" />
+                <img src={a.preview} alt="" className="h-6 w-6 object-cover" />
               )}
               <span className="max-w-28 truncate text-[var(--oz-dim)]">{a.name}</span>
               <button
                 aria-label={`remove ${a.name}`}
-                onClick={() => setAttachments((arr) => arr.filter((_, j) => j !== i))}
+                onClick={() => dropAttachment(a.key)}
                 className="text-[var(--oz-dim)] hover:text-[var(--oz-text)]"
               >
                 <LineIcon name="close" size={10} />
@@ -3412,8 +3715,8 @@ export default function SessionView({
             </div>
           )}
           <div className="oz-dock -mx-3 px-3">
-            {/* single paper-clip key — opens the phone's photo/camera picker
-                (accept=image/*); files ride along when picked from there */}
+            {/* single paper-clip key — opens the phone's picker: any file, a photo,
+                the camera (package 2: files are files) */}
             <button
               aria-label="attach"
               onClick={() => photoInputRef.current?.click()}
@@ -3424,7 +3727,6 @@ export default function SessionView({
             <input
               ref={photoInputRef}
               type="file"
-              accept="image/*"
               multiple
               hidden
               onChange={(e) => {
@@ -3502,6 +3804,13 @@ export default function SessionView({
                     }
                   }
                 }}
+                onPaste={(e) => {
+                  // a pasted picture (or file) goes the picked files' way
+                  const pasted = Array.from(e.clipboardData?.files || []);
+                  if (!pasted.length) return;
+                  e.preventDefault();
+                  void addAttachments(pasted);
+                }}
                 placeholder="message…"
                 aria-label="message"
                 className="oz-ta"
@@ -3511,7 +3820,12 @@ export default function SessionView({
             {/* discord-style rightmost key: mic (hold to talk) when empty,
                 send as soon as there's something to send */}
             {input.trim() || attachments.length > 0 ? (
-              <button onClick={sendText} aria-label="send" className="oz-k ok">
+              <button
+                onClick={sendText}
+                aria-label="send"
+                disabled={attachments.some((a) => !a.ref)}
+                className={`oz-k ok ${attachments.some((a) => !a.ref) ? 'opacity-50' : ''}`}
+              >
                 <LineIcon name="send" size={16} />
               </button>
             ) : (
@@ -3531,6 +3845,38 @@ export default function SessionView({
             )}
           </div>
         </>
+      )}
+
+      {/* what this session knows (G1) — read-only; the two actions land their
+          texts in the composer (this session, or MAIN's) */}
+      {ctxOpen && (
+        <ContextSheet
+          slug={slug}
+          onClose={() => setCtxOpen(false)}
+          onTellSession={() => {
+            setCtxOpen(false);
+            try {
+              localStorage.setItem('oz-draft:' + slug, '[missing context] ');
+            } catch {
+              /* private mode */
+            }
+            setInput('[missing context] ');
+            if (inputRef.current) inputRef.current.focus();
+          }}
+          onAskMain={() => {
+            setCtxOpen(false);
+            const to = MAIN_SLUG;
+            void (async () => {
+              const note = `[missing context] In "${slug}": I opened its context sheet and could not find what it needs — ask it for the missing piece.`;
+              try {
+                localStorage.setItem('oz-draft:' + to, note);
+              } catch {
+                /* private mode */
+              }
+              router.push(`/session/${to}`);
+            })();
+          }}
+        />
       )}
 
       {/* the exact-words line — glyph + sentence for every voice state. The
