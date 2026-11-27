@@ -201,7 +201,9 @@ export default function SessionsPage() {
       setTf(walked ? 'done' : 'first');
       // the bare `/` is the door's address; a device that walked it goes on to the roots list
       // (the layout's boot script does the same before first paint on a full load)
-      if (walked && window.location.pathname === '/') router.replace(ROOTS_PATH);
+      if (walked && window.location.pathname === '/') {
+        router.replace(ROOTS_PATH + window.location.search + window.location.hash);
+      }
     } catch {
       setTf('done'); // private mode can't keep the flag — never trap it on the tree
     }

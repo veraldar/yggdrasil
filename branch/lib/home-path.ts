@@ -5,26 +5,13 @@
  *  The bare `/` is the door's address (first contact — S8) and, once the door was walked,
  *  forwards to the roots list. */
 import { useEffect, useState } from 'react';
+import { ROOTS_PATH, homePathOf } from './home-path-of';
+
+// the pure half (no React, no browser) lives in home-path-of.ts so e2e specs import the same function
+export { ROOTS_PATH, homePathOf };
 
 /** localStorage: the home root's name (the list's computer tag leaves it out) */
 export const HOME_ROOT_KEY = 'oz-home-root';
-
-export const ROOTS_PATH = '/roots/';
-
-/** top-level routes of the app: a home root named like one keeps `/roots/<name>` as its page */
-const RESERVED = new Set([
-  'agents', 'api', 'artifacts', 'bridge', 'cc', 'devices', 'join', 'p2p', 'pair', 'providers',
-  'roots', 'session', 'settings', 'onboarding', 'favicon.ico',
-]);
-
-/** the home screen's path for a home root called `name` (null name → `/`, which forwards) */
-export function homePathOf(name?: string | null): string {
-  if (!name) return '/';
-  if (RESERVED.has(name.toLowerCase()) || name.startsWith('_') || name.includes('.')) {
-    return `/roots/${encodeURIComponent(name)}`;
-  }
-  return `/${encodeURIComponent(name)}`;
-}
 
 /** the home screen's path as this phone last heard the home root's name */
 export function cachedHomePath(): string {

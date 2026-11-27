@@ -5,6 +5,7 @@
  *  to the home screen, and the browser's back button lands here from a computer's page. */
 import { useRouter } from 'next/navigation';
 import { useCallback, useEffect } from 'react';
+import { DOOR_KEY } from '@/lib/tree-first';
 import { HOME_ROOT_KEY, RootsSheet, type Tree } from '@/components/roots-sheet';
 import { cachedHomePath } from '@/lib/home-path';
 import { cacheTreeThemes } from '@/lib/worlds';
@@ -20,6 +21,16 @@ export default function RootsPage() {
       const bg = getComputedStyle(document.documentElement).getPropertyValue('--oz-bg').trim();
       if (meta && (bg || prev)) meta.setAttribute('content', bg || prev || '');
     };
+  }, []);
+  // a fresh device gets the door wherever it first lands (`/`, `/<home>`, here): not walked → `/`
+  useEffect(() => {
+    try {
+      if (!localStorage.getItem(DOOR_KEY)) {
+        window.location.replace('/' + window.location.search + window.location.hash);
+      }
+    } catch {
+      /* private mode can't keep the flag — never trap it off the list */
+    }
   }, []);
   const onTree = useCallback((t: Tree) => {
     cacheTreeThemes(t);

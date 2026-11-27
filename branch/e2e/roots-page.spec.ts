@@ -1,5 +1,6 @@
 import { type Page, expect, test } from '@playwright/test';
 import { join } from 'path';
+import { homePathOf } from '../lib/home-path-of';
 
 /**
  * THE ROOTS PAGE (owner 11-26), at 360 px, on sim/roots-page-e2e.sh (never a live brain):
@@ -61,6 +62,28 @@ test('S8: a fresh device on / still gets the tree door — not the roots list, n
   expect(new URL(page.url()).pathname).toBe('/');
   await expect(page.getByTestId('tree-first')).toBeVisible();
   await shot(page, 'door');
+});
+
+test('a fresh device gets the door wherever it first lands: /, /<home>, /roots/', async ({ page }) => {
+  await setup(page, false);
+  for (const path of ['/', homePathOf(TREE.home.name), '/roots/']) {
+    await test.step(path, async () => {
+      await page.goto(path);
+      await expect(page.getByTestId('tree-first')).toBeVisible({ timeout: 20_000 });
+      await page.waitForTimeout(1000);
+      // /<home> shows the door where it stands; /roots/ is sent to `/`
+      expect(new URL(page.url()).pathname).toBe(path === '/roots/' ? '/' : path);
+      await expect(page.getByTestId('tree-first')).toBeVisible();
+    });
+  }
+});
+
+test('a walked device: / → /roots/ keeps the query string and the hash', async ({ page }) => {
+  await setup(page, true);
+  await page.goto('/?x=1#y');
+  await page.waitForURL(/\/roots\/?\?x=1#y$/, { timeout: 20_000 });
+  const u = new URL(page.url());
+  expect([u.pathname.replace(/\/$/, ''), u.search, u.hash]).toEqual(['/roots', '?x=1', '#y']); // next drops the trailing slash
 });
 
 test('a walked device: / → /roots/ (white page, rows tinted per root), /<home>, back', async ({ page }) => {

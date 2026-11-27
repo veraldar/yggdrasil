@@ -99,11 +99,20 @@ test('roots sheet → a computer\'s page: its settings, theme saved on lab, sess
     await expect(rows).toHaveCount(2);
     await expect(rows.nth(0)).toHaveAttribute('data-root', 'home');
     await expect(rows.nth(0)).toContainText('home');
-    await expect(rows.nth(0)).toHaveAttribute('data-theme', /^[a-z]+$/);
+    // the world the tree reports: home's own (the app's), lab's if one was picked for it, else home's
+    const tree = (await (await page.request.get('/api/roots')).json()) as {
+      home?: { theme?: string };
+      roots?: { id?: string; name?: string; theme?: string; theme_rev?: number }[];
+    };
+    const homeWorld = tree.home?.theme ?? '';
+    const labT = tree.roots?.find((x) => (x.id || x.name) === 'lab');
+    const labWorld = labT && (labT.theme_rev ?? 0) > 0 && labT.theme ? labT.theme : homeWorld;
+    expect(homeWorld).not.toBe('');
+    await expect(rows.nth(0)).toHaveAttribute('data-theme', homeWorld);
     await expect(rows.nth(0).getByTestId('root-swatch')).toHaveCount(0);
     await expect(rows.nth(0).getByTestId('root-state')).toHaveText('on');
     await expect(rows.nth(1)).toHaveAttribute('data-root', 'lab');
-    await expect(rows.nth(1)).toHaveAttribute('data-theme', /^[a-z]+$/);
+    await expect(rows.nth(1)).toHaveAttribute('data-theme', labWorld);
     await expect(rows.nth(1).getByTestId('root-state')).toHaveText('on');
     await expect(rows.nth(1)).toContainText('linux');
     await shot(page, 'sheet');
