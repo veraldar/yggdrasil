@@ -19,6 +19,7 @@ import {
   expect,
   test,
 } from '@playwright/test';
+import { gotoHomeOnDevice, rootsLanding } from './home';
 
 /**
  * VOICE OVER YOUR OWN TRUNK — run by sim/trunk-rtc-e2e.sh, which builds three machines in private
@@ -460,7 +461,10 @@ test('trunk rtc: phone ⇄ vps:443 ⇄ box — pair, talk, hear the reply, media
         // device, its token, MAIN's id — is still the pairing exchange, not "after pairing")
         await (await claimed).finished();
         pairedAt = Date.now();
-        await phone.waitForURL(`${AP}/`, { timeout: 30_000 });
+        // the landing walks the door → the roots list; then home (after the clocks, so E1 measures
+        // both page loads as they were)
+        await phone.waitForURL(rootsLanding(AP), { timeout: 30_000 });
+        await gotoHomeOnDevice(phone, AP);
         await expect(phone.getByTestId('roots')).toBeVisible({ timeout: 30_000 });
         const pin = await phone.evaluate(() =>
           JSON.parse(localStorage.getItem('bifrost.pin') || 'null')
@@ -918,7 +922,8 @@ test('trunk rtc: phone ⇄ vps:443 ⇄ box — pair, talk, hear the reply, media
           await p2.goto(qrUrl);
           await claimed;
           const t1 = Date.now();
-          await p2.waitForURL(`${AP}/`, { timeout: 30_000 });
+          await p2.waitForURL(rootsLanding(AP), { timeout: 30_000 });
+          // a refused device never learns the home name: the landing (the roots list) wears pin-state too
           await expect(p2.getByTestId('pin-state')).toHaveAttribute('data-state', 'refused', {
             timeout: 20_000,
           });

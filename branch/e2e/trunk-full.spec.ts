@@ -11,6 +11,8 @@ import {
   expect,
   test,
 } from '@playwright/test';
+import { homePathOf } from '../lib/home-path-of';
+import { gotoHomeOnDevice, rootsLanding } from './home';
 
 /**
  * THE WHOLE TREE, END TO END, WITH A SIMULATED PHONE — run by sim/trunk-full-e2e.sh, which
@@ -384,7 +386,8 @@ test('trunk full: phone ↔ ap ↔ hub ↔ joined root — pair, talk, join, del
         expect(frag.get('code')).toMatch(/^bfnp-/);
         await phone.goto(qrUrl);
         // home decides (11-14): this phone walked the door → the list, never straight into MAIN
-        await phone.waitForURL(`${AP}/`, { timeout: 30_000 });
+        await phone.waitForURL(rootsLanding(AP), { timeout: 30_000 });
+        await gotoHomeOnDevice(phone, AP);
         await onTheList(phone);
         mainId = String((await phoneFetch(phone, '/api/session/main')).body.id || '');
         expect(mainId).toMatch(/^ses_/);
@@ -461,7 +464,7 @@ test('trunk full: phone ↔ ap ↔ hub ↔ joined root — pair, talk, join, del
         expect(freshTokens.length, JSON.stringify(freshTokens)).toBe(1);
         // home now: the list; holding the roots (the mic never allowed here) says the line
         // without a mic prompt — asked first (GET, mints nothing), once for this page
-        await fresh.goto(`${AP}/`);
+        await gotoHomeOnDevice(fresh, AP);
         await onTheList(fresh);
         await hydrated(fresh, 'roots-hit');
         // the first visit after the door, the roots grow up from the bottom edge once
@@ -485,7 +488,9 @@ test('trunk full: phone ↔ ap ↔ hub ↔ joined root — pair, talk, join, del
       'voice over the trunk: roots hold, mic tap + hold → one calm line, no error box, no storm',
       async () => {
         expect(mainId, 'needs step 1').toMatch(/^ses_/);
-        if (!/\/$/.test(phone.url())) await phone.goto(`${AP}/`);
+        // already on the home path (step 1 landed there) → no reload
+        const homeNow = await phone.evaluate(() => localStorage.getItem('oz-home-root') || '');
+        if (new URL(phone.url()).pathname !== homePathOf(homeNow)) await gotoHomeOnDevice(phone, AP);
         await onTheList(phone);
         await hydrated(phone, 'roots-hit');
         const roots = phone.getByTestId('roots-hit');
@@ -787,7 +792,7 @@ test('trunk full: phone ↔ ap ↔ hub ↔ joined root — pair, talk, join, del
         // the phone: MAIN came back on its own (the report woke it) — on screen, no reload
         await expect(agentSays(phone, 'MAC-DONE').last()).toBeVisible({ timeout: 60_000 });
         // …and the tree on the phone: the session on root mac, done, with the mac brain's result
-        await phone.goto(`${AP}/`);
+        await gotoHomeOnDevice(phone, AP);
         const row = phone
           .locator('.oz-row')
           .filter({ has: phone.locator('.t', { hasText: /(^|\])on mac$/ }) });
@@ -1224,7 +1229,7 @@ test('trunk full: phone ↔ ap ↔ hub ↔ joined root — pair, talk, join, del
             { timeout: 60_000 }
           )
           .toBe('done');
-        await phone.goto(`${AP}/`);
+        await gotoHomeOnDevice(phone, AP);
         await expect(
           phone.locator('.oz-row').filter({ has: phone.locator('.t', { hasText: /on lab$/ }) })
         ).toBeVisible({ timeout: 30_000 });

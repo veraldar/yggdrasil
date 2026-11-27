@@ -1,4 +1,5 @@
 import { test, expect } from '@playwright/test';
+import { gotoHome } from './home';
 
 /** root-coord, real coordinator (no mock): the phone talks to MAIN, MAIN routes the work to a
  *  session, the route tag links to it, MAIN comes back unprompted when it is done, and the home
@@ -48,7 +49,7 @@ test('one door: ask MAIN, follow the route tag, MAIN comes back, the tree shows 
   if (SHOTS) await page.screenshot({ path: `${SHOTS}/root-coord-ui-child.png` });
 
   // home: the child sits in MAIN's tree with its status
-  await page.goto('/');
+  await gotoHome(page);
   await expect(page.getByText(/hello/i).first()).toBeVisible({ timeout: 20_000 });
   if (SHOTS) await page.screenshot({ path: `${SHOTS}/root-coord-ui-home.png` });
 });

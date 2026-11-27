@@ -14,6 +14,7 @@ import {
   users,
   vtMsgs,
 } from './mainframe-c-lib';
+import { homePath } from './home';
 
 /** MAINFRAME-C · hold the roots, for real: Chrome's capture path plays
  *  "what is two plus two?" as the mic → LiveKit → lk-agent-ygg → STT → the
@@ -75,7 +76,7 @@ test('hold → talk → let go = sent → the reply is spoken here → hands-fre
   // sent: the mic pauses, the roots walk — and the page is still the list
   await expect(roots).toHaveAttribute('data-phase', 'working', { timeout: 3_000 });
   await expect(page.getByTestId('roots-say')).toContainText('sent · awaiting answer');
-  expect(new URL(page.url()).pathname).toBe('/');
+  expect(new URL(page.url()).pathname).toBe(await homePath(page.request));
   await page.waitForTimeout(400); // the press's amber fades out (.12–.24 s transitions)
   await shot(page, '9-working');
 
@@ -96,7 +97,7 @@ test('hold → talk → let go = sent → the reply is spoken here → hands-fre
     `roots: reply speaking ${spokeMs}ms after release: ${await page.getByTestId('roots-say').textContent()}`
   );
   await shot(page, '10-speaking');
-  expect(new URL(page.url()).pathname).toBe('/');
+  expect(new URL(page.url()).pathname).toBe(await homePath(page.request));
 
   // the reply ends → the mic comes back: hands-free, still on the list
   await expect(roots).toHaveAttribute('data-phase', 'listening', { timeout: 90_000 });
@@ -163,7 +164,7 @@ test('slide off while talking = drop: red, nothing sent, the hold is undone', as
   await expect.poll(() => page.evaluate(() => localStorage.getItem('oz-mode'))).toBe('text');
   await page.waitForTimeout(8_000); // a commit would have landed by now
   expect(users(await vtMsgs(request)).length).toBe(before);
-  expect(new URL(page.url()).pathname).toBe('/');
+  expect(new URL(page.url()).pathname).toBe(await homePath(page.request));
 });
 
 test('keyboard parity: Space held = talk, Esc = drop; Space held + let go = sent; the stop key by keyboard', async ({
@@ -198,7 +199,7 @@ test('keyboard parity: Space held = talk, Esc = drop; Space held + let go = sent
     .poll(async () => users(await vtMsgs(request)).length, { timeout: 30_000 })
     .toBeGreaterThan(before);
   expect(users(await vtMsgs(request)).pop()!.text).toMatch(/two plus two/i);
-  expect(new URL(page.url()).pathname).toBe('/');
+  expect(new URL(page.url()).pathname).toBe(await homePath(page.request));
 
   // the stop key, reached by Tab, pressed with Enter: hands-free ends
   const stop = page.getByTestId('roots-stop');

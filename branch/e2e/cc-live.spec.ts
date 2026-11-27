@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { devices, expect, test } from '@playwright/test';
+import { gotoHome } from './home';
 
 /** Claude Code live (11-14), driven like a person on a Pixel 7 against the preview
  *  (PW_BASE_URL = :8447): the running sessions are listed (background: "you can type",
@@ -116,7 +117,7 @@ test('Claude Code live: watch + type into a background session from the phone; i
     const isid = agents().find((a) => a.name === watchName)!.sessionId;
 
     // the phone: the terminal key on the session list → open ones first
-    await page.goto('/');
+    await gotoHome(page);
     await page.getByTestId('terminal-key').tap();
     const sheet = page.getByTestId('continue-terminal');
     const row = sheet.locator(`[data-term="${sid}"]`);

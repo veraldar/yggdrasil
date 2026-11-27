@@ -1,4 +1,5 @@
 import { expect, test, type Page } from '@playwright/test';
+import { gotoHome } from './home';
 
 /** UX-BATCH #2 — "I write text but that message stays" (10-23, MAIN, keyboard).
  *  The truth, both places a typed turn can start:
@@ -10,7 +11,7 @@ import { expect, test, type Page } from '@playwright/test';
  *  Throwaway sessions only — MAIN is never touched. */
 
 const returning = async (page: Page, firstDone: boolean) => {
-  await page.goto('/');
+  await gotoHome(page);
   await page.evaluate((done) => {
     localStorage.setItem('bifrost-door', 'v2');
     localStorage.setItem('bifrost-onboard', JSON.stringify({ lang: 'en', style: 'short' }));

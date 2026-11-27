@@ -3,6 +3,7 @@ import { readFileSync, renameSync, statSync, writeFileSync } from 'fs';
 import http from 'node:http';
 import { join } from 'path';
 import { type BrowserContext, devices, expect, test } from '@playwright/test';
+import { gotoHome } from './home';
 
 /**
  * JOIN A NEW MACHINE (contract v1, docs/spec-join.md) — the hub side, end to end
@@ -507,7 +508,7 @@ test('join: QR approve → 20 link tokens once → bridge accepts → allowlist 
     expect((await phoneCtx.request.post(`${LAN}/api/pair/refresh`)).status()).toBe(200);
     // mark first-run door complete on this phone so `/` renders the home list with roots-key
     await phone.evaluate(() => localStorage.setItem('bifrost-door', 'v2'));
-    await phone.goto(`${LAN}/`);
+    await gotoHome(phone, LAN);
     await expect(phone.getByTestId('joins-badge')).toHaveText('2', { timeout: 15_000 });
     await phone.getByTestId('roots-key').click();
     const sheet = phone.getByTestId('roots-sheet');

@@ -87,7 +87,7 @@ async function holdRoots(page: Page) {
     localStorage.setItem('oz-mode', 'text');
     localStorage.setItem('bifrost-voice-test', '1');
   });
-  await page.goto('/');
+  await gotoHome(page);
   const roots = page.getByTestId('roots');
   await expect(roots).toBeVisible();
   const b = (await page.getByTestId('roots-hit').boundingBox())!;
@@ -100,6 +100,7 @@ async function holdRoots(page: Page) {
 }
 
 import { type APIRequestContext } from '@playwright/test';
+import { gotoHome } from './home';
 
 test.use({
   permissions: ['microphone'],

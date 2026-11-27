@@ -1,4 +1,5 @@
 import { expect, test, type APIRequestContext, type Page } from '@playwright/test';
+import { gotoHome } from './home';
 
 /** UX-BATCH #4 — THE REPLAY TEST: "my replies come back as user turns".
  *  The worst room there is: the phone's speaker wired straight into its own
@@ -95,7 +96,7 @@ async function wireSpeakerToMic(page: Page) {
 
 async function replay(page: Page, request: APIRequestContext, s: { name: string; id: string }, gate: boolean) {
   await wireSpeakerToMic(page);
-  await page.goto('/');
+  await gotoHome(page);
   await page.evaluate(() => {
     localStorage.setItem('bifrost-door', 'v2');
     localStorage.setItem('bifrost-first-turn', '1');

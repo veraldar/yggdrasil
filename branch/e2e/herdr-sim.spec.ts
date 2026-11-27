@@ -1,5 +1,6 @@
 import { execFileSync } from 'child_process';
 import { type APIRequestContext, expect, type Page, test } from '@playwright/test';
+import { gotoHome } from './home';
 
 /** Herdr §1.1 triad, the states only a SIMULATED brain can be driven into
  *  (scripts/sim-stack.sh: the sandbox build + the yggdrasil release binary
@@ -54,7 +55,7 @@ const turn = (request: APIRequestContext, sid: string, text: string) =>
   request.post(`/api/session/${sid}/messages`, { data: { text, async: true } });
 
 async function returning(page: Page) {
-  await page.goto('/');
+  await gotoHome(page);
   await page.evaluate(() => {
     localStorage.setItem('bifrost-door', 'v2');
     localStorage.setItem('bifrost-onboard', JSON.stringify({ lang: 'en', style: 'short' }));

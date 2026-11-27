@@ -21,6 +21,7 @@ import {
   expect,
   test,
 } from '@playwright/test';
+import { gotoHomeOnDevice, rootsLanding } from './home';
 
 /**
  * THE END DESIGN IN ONE WORLD — run by sim/trunk-e2e.sh: five machines in private network
@@ -578,7 +579,8 @@ test('trunk e2e: phone ⇄ vps:443 ⇄ hub ⇄ joined roots — pinned app data,
         await phone.goto(qrUrl);
         await claimed;
         pairedAt = Date.now();
-        await phone.waitForURL(`${AP}/`, { timeout: 30_000 });
+        await phone.waitForURL(rootsLanding(AP), { timeout: 30_000 });
+        await gotoHomeOnDevice(phone, AP);
         await expect(phone.getByTestId('roots')).toBeVisible({ timeout: 30_000 });
         const p = await phone.evaluate(() =>
           JSON.parse(localStorage.getItem('bifrost.pin') || 'null')
@@ -671,7 +673,7 @@ test('trunk e2e: phone ⇄ vps:443 ⇄ hub ⇄ joined roots — pinned app data,
       'MAIN delegates by VOICE: the WAV → LiveKit (ICE-TCP) → the agent STT → MAIN → session_start on mac',
       async () => {
         expect(mainId, 'needs W2').toMatch(/^ses_/);
-        await phone.goto(`${AP}/`);
+        await gotoHomeOnDevice(phone, AP);
         await pinned();
         await hydrated(phone, 'roots-hit');
         const roots = phone.getByTestId('roots');
@@ -1219,7 +1221,8 @@ test('trunk e2e: phone ⇄ vps:443 ⇄ hub ⇄ joined roots — pinned app data,
           await p2.goto(qrUrl);
           await claimed;
           const t1 = Date.now();
-          await p2.waitForURL(`${AP}/`, { timeout: 30_000 });
+          await p2.waitForURL(rootsLanding(AP), { timeout: 30_000 });
+          // a refused device never learns the home name: the landing (the roots list) wears pin-state too
           await expect(p2.getByTestId('pin-state')).toHaveAttribute('data-state', 'refused', {
             timeout: 20_000,
           });

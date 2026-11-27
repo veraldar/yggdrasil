@@ -1,4 +1,5 @@
 import { type Page, expect, test } from '@playwright/test';
+import { gotoHome } from './home';
 
 /** MAINFRAME-C · the roots on a phone: 360 / 412 / 430 wide × the three
  *  worlds × idle · pressed · working · replied — a fixed list (mocked), so
@@ -26,7 +27,7 @@ async function open(page: Page, theme: string, list: object[]) {
     localStorage.setItem('oz-read-init', '1');
     localStorage.setItem('oz-read', JSON.stringify({ main: Date.now() - 30_000 }));
   }, theme);
-  await page.goto('/');
+  await gotoHome(page);
   await expect(page.getByTestId('roots')).toBeVisible();
   await expect(page.locator('.oz-row').first()).toBeVisible();
 }

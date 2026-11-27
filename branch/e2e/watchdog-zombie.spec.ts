@@ -1,5 +1,6 @@
 import { OC } from './brain';
 import { expect, test } from '@playwright/test';
+import { gotoHome } from './home';
 
 /** Regression for the 2026-10-01 15:17 "no reply — the run seemed stuck,
  *  auto-stopped. Send again.": an AGENT/voice turn posts straight to
@@ -20,7 +21,7 @@ test('untracked (agent-style) stalled run must be aborted by the server watchdog
   page,
   request,
 }) => {
-  await page.goto('/');
+  await gotoHome(page);
   await page.getByRole('button', { name: 'new session', exact: true }).click();
   await page.getByPlaceholder('session name…').fill(NAME);
   await page.getByRole('button', { name: 'create & open' }).click();

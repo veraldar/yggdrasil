@@ -1,5 +1,7 @@
 import { join } from 'path';
 import { type Page, expect, test } from '@playwright/test';
+import { homePathOf } from '../lib/home-path-of';
+import { gotoHome, homePath } from './home';
 
 /**
  * A computer's own page E2E on a sim twin (sim/acceptance/twin-up.sh, :8250, tailnet mode)
@@ -58,7 +60,7 @@ test('a computer\'s page on sim twin at 360px: page, artifacts, settings, per-ro
     // 1. Roots sheet: home first, with its swatch and state. Its row is the home screen itself
     //    (the tree's home screen IS the home root's page), so its own scoped page is reached
     //    by address here.
-    await page.goto('/');
+    await gotoHome(page);
     await expect(page.getByTestId('roots-key')).toBeVisible({ timeout: 15_000 });
     await page.getByTestId('roots-key').click();
     await expect(page.getByTestId('roots-sheet')).toBeVisible();
@@ -70,7 +72,7 @@ test('a computer\'s page on sim twin at 360px: page, artifacts, settings, per-ro
 
     await homeRow.click();
     await expect(page.getByTestId('roots-sheet')).toHaveCount(0);
-    expect(new URL(page.url()).pathname).toBe('/');
+    expect(new URL(page.url()).pathname).toBe(await homePath(page.request));
 
     await page.goto(`/roots/${encodeURIComponent(home)}`);
     await expect(page.getByTestId('home-title')).toHaveText(home);
@@ -366,7 +368,7 @@ test.describe('same design as the home screen at 360px', () => {
       loc.evaluate((el, props) => props.map((p) => getComputedStyle(el).getPropertyValue(p)), KEY_CSS);
 
     // home: the tree answers (the sheet lists debian-box) and the app stays utopia
-    await page.goto('/');
+    await page.goto(homePathOf('omarchy'));
     await expect(page.getByTestId('roots-key')).toBeVisible({ timeout: 15_000 });
     const homeNew = page.getByRole('button', { name: 'new session' });
     const homeKey = await cssOf(homeNew);

@@ -1,6 +1,7 @@
 import { afterAll, expect, test } from '@playwright/test';
 import { unlink, writeFile } from 'fs/promises';
 import path from 'path';
+import { gotoHome } from './home';
 
 // the artifacts dir the pwa serves from (playwright cwd = branch/)
 const DIR = path.join(process.cwd(), '..', 'artifacts');
@@ -31,7 +32,7 @@ async function mercyDone(page: import('@playwright/test').Page): Promise<void> {
 
 test('bell: unseen artifact counts, gallery opens it, tap marks seen', async ({ page }) => {
   // first visit seeds the mercy watermark with whatever is already on disk
-  await page.goto('/');
+  await gotoHome(page);
   await mercyDone(page);
   // drop a fresh artifact AFTER the mercy run — the bell must catch it
   const name = `e2e-bell-${Date.now().toString(36)}.md`;
@@ -71,7 +72,7 @@ test('bell: unseen artifact counts, gallery opens it, tap marks seen', async ({ 
 });
 
 test('mark all read clears every unseen', async ({ page }) => {
-  await page.goto('/');
+  await gotoHome(page);
   await mercyDone(page);
   const name = `e2e-bell2-${Date.now().toString(36)}.md`;
   made.push(name);

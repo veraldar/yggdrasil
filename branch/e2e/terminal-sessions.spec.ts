@@ -1,6 +1,7 @@
 import { type ChildProcess, execFileSync, spawn } from 'node:child_process';
 import { devices, expect, type Page, test } from '@playwright/test';
 import { slugify } from '../lib/slug';
+import { gotoHome } from './home';
 
 /** The terminal's sessions, both ways (11-15), as the owner uses them on the stack they open
  *  (PW_BASE_URL = :8447), a Pixel 7 with taps:
@@ -87,7 +88,7 @@ const claudeTranscripts = () =>
 test('the session list shows what is open in a terminal; open, it is watch only', async ({
   page,
 }) => {
-  await page.goto('/');
+  await gotoHome(page);
   await page.getByTestId('terminal-key').tap();
   const strip = page.getByTestId('continue-terminal');
   await expect(strip).toBeVisible({ timeout: 20_000 });
@@ -121,7 +122,7 @@ for (const kind of ['claude', 'antigravity', 'opencode']) {
     test.skip(!id, `no scratch ${kind} conversation`);
     const before = kind === 'claude' ? claudeTranscripts() : '';
     // the owner finds it in the sheet: session list → all… → the conversation
-    await page.goto('/');
+    await gotoHome(page);
     await page.getByTestId('terminal-key').tap();
     const sheet = page.getByTestId('continue-terminal');
     await sheet.locator(`[data-term="${id}"]`).tap();

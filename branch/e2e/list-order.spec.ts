@@ -1,4 +1,5 @@
 import { type APIRequestContext, type Page, devices, expect, test } from '@playwright/test';
+import { gotoHome } from './home';
 
 /** The session list (owner 11-17), on the stack the owner uses (PW_BASE_URL = :8447), a Pixel 7:
  *   - ordered by the owner's OWN newest message: a reply, a report or another session's message
@@ -106,7 +107,7 @@ test("a reply never moves a session up; the owner's own message does", async ({
   expect(ids.indexOf(B.id), 'the brain + the app order it by the owner').toBeLessThan(
     ids.indexOf(A.id)
   );
-  await page.goto('/');
+  await gotoHome(page);
   await expect(page.locator('.oz-row .t', { hasText: A.name })).toBeVisible();
   let order = await titles(page);
   expect(order.indexOf(B.name), 'on the phone too').toBeLessThan(order.indexOf(A.name));
@@ -131,7 +132,7 @@ test("a reply never moves a session up; the owner's own message does", async ({
   await page.screenshot({ path: 'test-results/order-1-reply-stays.png' });
   // the owner writes in A: A goes up
   await say(request, A, 'Reply with exactly: a-3');
-  await page.goto('/');
+  await gotoHome(page);
   await expect(page.locator('.oz-row .t', { hasText: A.name })).toBeVisible();
   order = await titles(page);
   expect(order.indexOf(A.name)).toBeLessThan(order.indexOf(B.name));
@@ -148,7 +149,7 @@ test('one status word: "working" while it works, nothing else — a terminal\'s 
   await expect
     .poll(async () => (await rowOf(request, A.id))?.pending, { timeout: 20_000 })
     .toBe(true);
-  await page.goto('/');
+  await gotoHome(page);
   const rowA = page.locator('.oz-row').filter({ has: page.locator('.t', { hasText: A.name }) });
   await expect(rowA.locator('.oz-st')).toHaveText('working');
   await page.screenshot({ path: 'test-results/order-2-working.png' });
@@ -160,6 +161,6 @@ test('one status word: "working" while it works, nothing else — a terminal\'s 
   if (process.env.E2E_TERMINAL_ROW === '1')
     await expect(page.locator('.oz-row .t', { hasText: /^\[TRM\]/ }).first()).toBeVisible();
   await idle(request, A.id);
-  await page.goto('/');
+  await gotoHome(page);
   await expect(rowA.locator('.oz-st')).toHaveCount(0); // done: no word, nothing longer
 });

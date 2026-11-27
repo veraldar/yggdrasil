@@ -1,6 +1,7 @@
 import { readFileSync, writeFileSync, mkdirSync } from 'fs';
 import { join } from 'path';
 import { type Page, chromium, devices, expect, test } from '@playwright/test';
+import { gotoHomeOnDevice, rootsLanding } from './home';
 
 /**
  * LIVE DOOR PROOF (package 1, stage A) — the real https://ap.veraldar.org on a Pixel 7 screen, as a
@@ -115,7 +116,8 @@ test('ap.veraldar.org on a phone: pair, end to end, type, talk, hear, same turns
       expect(url.startsWith(`${AP}/pair#`)).toBe(true);
       const t0 = Date.now();
       await phone.goto(url);
-      await phone.waitForURL(`${AP}/`, { timeout: 60_000 });
+      await phone.waitForURL(rootsLanding(AP), { timeout: 60_000 });
+      await gotoHomeOnDevice(phone, AP);
       deviceId = await phone.evaluate(() => String(JSON.parse(localStorage.getItem('bifrost.pin') || 'null')?.deviceId || ''));
       expect(deviceId).toMatch(/^dev_/);
       await expect(phone.getByTestId('roots')).toBeVisible({ timeout: 30_000 });
@@ -168,7 +170,7 @@ test('ap.veraldar.org on a phone: pair, end to end, type, talk, hear, same turns
       await phone.setViewportSize(devices['Pixel 7'].viewport);
 
     } else {
-      await phone.goto(`${AP}/`);
+      await gotoHomeOnDevice(phone, AP);
       await expect(phone.getByTestId('roots')).toBeVisible({ timeout: 30_000 });
       const probe = await phone.evaluate(async () => (await fetch('/api/token')).status);
       expect(probe, 'voice is available on the tailnet door').toBe(200);
@@ -199,7 +201,7 @@ test('ap.veraldar.org on a phone: pair, end to end, type, talk, hear, same turns
     await shot(phone, '2-typed-turn');
 
     // ---- one spoken turn: hold the roots (they talk to voice-test on this device), say the WAV
-    await phone.goto(`${AP}/`);
+    await gotoHomeOnDevice(phone, AP);
     const roots = phone.getByTestId('roots');
     await phone.waitForFunction(() => {
       const el = document.querySelector('[data-testid="roots-hit"]');

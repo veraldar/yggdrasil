@@ -1,4 +1,5 @@
 import { type Page, type Request, expect, test } from '@playwright/test';
+import { gotoHome, homePath } from './home';
 
 /** MAINFRAME-C · the roots, every interaction that needs no voice turn:
  *  one tree on the page · press = amber this frame · tap = MAIN · slid off
@@ -25,7 +26,7 @@ async function home(page: Page, { vt = true, firstTurn = true } = {}) {
     },
     [vt, firstTurn]
   );
-  await page.goto('/');
+  await gotoHome(page);
   const roots = page.getByTestId('roots');
   await expect(roots).toBeVisible();
   return roots;
@@ -125,17 +126,17 @@ test('the one hold phrase: a device that never held reads it on its first 3 visi
     localStorage.removeItem('bifrost-roots-hint');
   });
   for (let visit = 1; visit <= 4; visit++) {
-    await page.goto('/');
+    await gotoHome(page);
     const say = page.getByTestId('roots-say');
     if (visit <= 3) await expect(say).toContainText('hold to talk · tap to open');
     else await expect(say).toContainText('you are in');
   }
   // a hold retires it at once (even inside the first visits)
   await page.evaluate(() => localStorage.setItem('bifrost-roots-hint', '0'));
-  await page.goto('/');
+  await gotoHome(page);
   await expect(page.getByTestId('roots-say')).toContainText('hold to talk · tap to open');
   await page.evaluate(() => localStorage.setItem('bifrost-roots-held', '1'));
-  await page.goto('/');
+  await gotoHome(page);
   await expect(page.getByTestId('roots-say')).toContainText('you are in');
 });
 
@@ -189,7 +190,7 @@ test('slid off inside the tap window = nothing happens', async ({ page }) => {
   await page.mouse.move(c.x, c.y - 220, { steps: 4 }); // up, off the roots, fast
   await page.mouse.up();
   await page.waitForTimeout(600);
-  expect(new URL(page.url()).pathname).toBe('/');
+  expect(new URL(page.url()).pathname).toBe(await homePath(page.request));
   await expect(page.getByTestId('roots')).not.toHaveClass(/heard/);
   await expect(page.getByTestId('roots')).toHaveAttribute('data-phase', 'off');
   expect(rooms).toEqual([]);
@@ -215,7 +216,7 @@ test('keyboard: the roots take focus; Enter = tap; a short Space = tap', async (
   await page.keyboard.press('Enter');
   await expect(page).toHaveURL(/\/session\/(main|voice-test)/);
 
-  await page.goto('/');
+  await gotoHome(page);
   await hit.focus();
   await page.keyboard.down(' ');
   expect(await page.getByTestId('roots').evaluate((el) => el.classList.contains('heard'))).toBe(
@@ -269,7 +270,7 @@ test('voice tests OFF: a hold talks to MAIN’s room (token room = main) — int
   });
   await page.mouse.up();
   expect(asked).toEqual(['main']);
-  expect(new URL(page.url()).pathname).toBe('/');
+  expect(new URL(page.url()).pathname).toBe(await homePath(page.request));
   // the failed hold handed hands-free back: the keyboard mode stands
   expect(await page.evaluate(() => localStorage.getItem('oz-mode'))).toBe('text');
   expect(await mainTotal()).toBe(before);

@@ -10,6 +10,7 @@ import { type Page, expect, test } from '@playwright/test';
  *  artifact) played through its try-it. The voice turn itself is
  *  first-turn-voice.spec.ts. */
 import script from '../lib/onboard-script.json';
+import { gotoHome } from './home';
 
 const SHOTS = process.env.TF_SHOTS || '../artifacts';
 const line = (id: string, lang: 'en' | 'fr' = 'en') =>
@@ -181,7 +182,7 @@ test('door: first paint → hold → greeting → language · style · brain →
   // 7 · home afterwards: the list + the roots at the bottom — they ARE MAIN
   // (MAINFRAME-C 10-26: the corner door is gone, MAIN is not a row); they
   // grow up from the bottom edge once, after the door
-  await page.goto('/');
+  await gotoHome(page);
   const roots = page.getByTestId('roots');
   await expect(roots).toBeVisible();
   await expect(page.getByTestId('tree-door')).toHaveCount(0);
@@ -197,6 +198,9 @@ test('door: first paint → hold → greeting → language · style · brain →
   await page.reload();
   await expect(page.getByTestId('tree-first')).toHaveCount(0);
   expect(await page.evaluate(() => document.documentElement.dataset.door)).toBe('done');
+  await page.goto('/');
+  await page.waitForURL(/\/roots\/?$/);
+  await expect(page.getByTestId('tree-first')).toHaveCount(0);
 });
 
 test.describe('phone', () => {

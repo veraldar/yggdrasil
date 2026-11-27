@@ -1,5 +1,6 @@
 import { join } from 'node:path';
 import { expect, test } from '@playwright/test';
+import { gotoHome } from './home';
 
 /** UX-BATCH #3 — "Bifrost" loses its attack at utterance start.
  *  The engine as served takes no bias term (Mac /v1/audio/transcriptions:
@@ -35,7 +36,7 @@ test('#3 · hold: "opening the mic…" until capture is live, then "heard" — a
   expect(made.ok()).toBe(true);
   const { id } = (await made.json()) as { id: string };
   try {
-    await page.goto('/');
+    await gotoHome(page);
     await page.evaluate(() => {
       localStorage.setItem('bifrost-door', 'v2');
       localStorage.setItem('bifrost-first-turn', '1');

@@ -1,5 +1,6 @@
 import { OC } from './brain';
 import { expect, test } from '@playwright/test';
+import { gotoHome } from './home';
 
 /**
  * Context injection: a fresh phone session must know where it is, what bifrost
@@ -7,7 +8,7 @@ import { expect, test } from '@playwright/test';
  * Guarded by the layered AGENTS.md (~/Work stub → ~/Work/bifrost full).
  */
 test('fresh session answers with bifrost context', async ({ page, request }) => {
-  await page.goto('/');
+  await gotoHome(page);
   await page.getByRole('button', { name: 'new session', exact: true }).click();
   await page.getByPlaceholder('session name…').fill('e2e-context');
   await page.getByRole('button', { name: 'create & open' }).click();

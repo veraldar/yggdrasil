@@ -1,5 +1,6 @@
 import { mkdirSync } from 'fs';
 import { type Page, devices, expect, test } from '@playwright/test';
+import { gotoHome } from './home';
 
 /** The band chip "N working" (11-23): it taps to a working-only list — every working
  *  session and the ancestors it hangs from — and taps again to clear. The count counts
@@ -56,7 +57,7 @@ test('the chip counts what the rows call working; tapping filters to the working
 }) => {
   const t = tag;
   await serve(page, rows(t));
-  await page.goto('/');
+  await gotoHome(page);
   await expect(chip(page)).toHaveText('2 working');
   await expect(chip(page)).toHaveAttribute('aria-pressed', 'false');
 
@@ -90,7 +91,7 @@ test('closed sessions keep their key under the filter — the filter does not sw
   const t = tag;
   const list = rows(t).map((s) => (s.title.includes('parent') ? { ...s, archived: true } : s));
   await serve(page, list);
-  await page.goto('/');
+  await gotoHome(page);
   // unfiltered: the closed parent sits behind the top key (closed handling untouched)
   await expect(page.locator('.oz-closed').first()).toBeVisible();
   await chip(page).click();
@@ -106,7 +107,7 @@ test('closed sessions keep their key under the filter — the filter does not sw
 test('the filter lifts itself when the work ends — never a zero list', async ({ page }) => {
   const t = tag;
   await serve(page, rows(t));
-  await page.goto('/');
+  await gotoHome(page);
   await chip(page).click();
   await expect(row(page, `e2e-wf-idle-${t}`)).toHaveCount(0);
   // the runs finish; the poll brings the settled list (no remount — the state
@@ -121,7 +122,7 @@ test('the filter lifts itself when the work ends — never a zero list', async (
 test('the idle chip does nothing on tap — all quiet is not a filter', async ({ page }) => {
   const t = tag;
   await serve(page, allDone(t));
-  await page.goto('/');
+  await gotoHome(page);
   await expect(chip(page)).toHaveText('all quiet');
   await chip(page).click();
   await expect(chip(page)).toHaveAttribute('aria-pressed', 'false');
@@ -157,7 +158,7 @@ test('a real run: counted, filtered, and quiet again when it ends', async ({ pag
     const bid = (await bust.json()).id;
     if (bid) await request.delete(`/api/session/${bid}`);
 
-    await page.goto('/');
+    await gotoHome(page);
     await expect(chip(page)).toHaveText(/^[1-9]\d* working$/);
     await chip(page).click();
     await expect(chip(page)).toHaveAttribute('aria-pressed', 'true');
@@ -179,7 +180,7 @@ test('a real run: counted, filtered, and quiet again when it ends', async ({ pag
     const bust2 = await request.post('/api/session', { data: { name: `e2e-wf-bust2-${tag}` } });
     const bid2 = (await bust2.json()).id;
     if (bid2) await request.delete(`/api/session/${bid2}`);
-    await page.goto('/');
+    await gotoHome(page);
     await expect(chip(page)).toHaveText('all quiet');
     await expect(row(page, A.name)).toBeVisible();
     await page.screenshot({ path: `${SHOTS}/quiet-360.png` });

@@ -1,5 +1,6 @@
 import { appendFileSync, mkdirSync } from 'node:fs';
 import { type Page, expect, test } from '@playwright/test';
+import { gotoHome } from './home';
 
 /** UX-SPACING (10-27): the chrome holds still. One header height on every
  *  page; the session footer (dock + phase line) reserves the same box in every
@@ -251,7 +252,7 @@ test('MAIN and a session share the footer; onboarding adds content, not chrome',
   expect.soft(o.phase, 'onboarding phase vs done phase').toEqual(m.phase);
 
   // the front page: header on top, the roots on the ground
-  await page.goto('/');
+  await gotoHome(page);
   await expect(page.getByTestId('roots')).toBeVisible();
   await page.waitForTimeout(400);
   const h = await record(page, 'home', 'done-device');

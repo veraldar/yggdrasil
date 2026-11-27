@@ -1,4 +1,5 @@
 import { type APIRequestContext, type Page, devices, expect, test } from '@playwright/test';
+import { gotoHome } from './home';
 
 /** ROOT-COORD UI fixes (11-13), driven like a person on a phone (Pixel 7, taps, no reloads)
  *  against a root-coord brain on a real upstream: E2E_OC_URL = that brain, PW_BASE_URL = this
@@ -104,7 +105,7 @@ test('fix this on MAIN: a fix-agent session tagged [FIX], runs a tool, then answ
     );
     await replyShows(page, token);
     // the session list says which agent runs it: [FIX] before the title
-    await page.goto('/');
+    await gotoHome(page);
     await expect(page.getByText(/^\[FIX\]\s*fix main/).first()).toBeVisible({ timeout: 20_000 });
   } finally {
     await request.post(`${OC}/session/${id}/abort`).catch(() => {});
@@ -460,7 +461,7 @@ test('roles: one shared prompt, stored once — edit it on the roles page, every
       await request.delete(`${OC}/agent/${cc}`).catch(() => {});
     }
     // the session list: the agent in three capitals before the title; MAIN keeps its own
-    await page.goto('/');
+    await gotoHome(page);
     await expect(page.getByText(new RegExp(`^\\[BUI\\]\\s*${s.title}$`))).toBeVisible({
       timeout: 20_000,
     });
