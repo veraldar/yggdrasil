@@ -2,13 +2,14 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTheme } from 'next-themes';
-import { useRouter } from 'next/navigation';
+import { usePathname, useRouter } from 'next/navigation';
 import { ContinueTerminal } from '@/components/app/continue-claude';
 import { HomeBand, HomeHead } from '@/components/app/home-parts';
 import { LineIcon } from '@/components/line-icon';
 import { MainBar } from '@/components/main-bar';
 import { Marked } from '@/components/marked';
-import { HOME_ROOT_KEY, RootsSheet, type Tree } from '@/components/roots-sheet';
+import { HOME_ROOT_KEY, type Tree } from '@/components/roots-sheet';
+import { ROOTS_PATH, homePathOf } from '@/lib/home-path';
 import { Door } from '@/components/tree-door';
 import { engineWord, roleOf, sessionTag } from '@/lib/agents';
 import { countUnseen, seenInit } from '@/lib/artifact-read';
@@ -185,6 +186,7 @@ const isWorking = (s: Sess) => !!s.pending || s.card?.status === 'working';
 
 export default function SessionsPage() {
   const router = useRouter();
+  const pathname = usePathname();
   const { setTheme } = useTheme();
   // the door, per device (never the server store): not walked yet → the
   // tree alone. Unknown until the first client render — so the server HTML
@@ -195,12 +197,18 @@ export default function SessionsPage() {
   const [vt, setVt] = useState(false);
   useEffect(() => {
     try {
-      setTf(localStorage.getItem(DOOR_KEY) ? 'done' : 'first');
+      const walked = !!localStorage.getItem(DOOR_KEY);
+      setTf(walked ? 'done' : 'first');
+      // the bare `/` is the door's address; a device that walked it goes on to the roots list
+      // (the layout's boot script does the same before first paint on a full load)
+      if (walked && window.location.pathname === '/') {
+        router.replace(ROOTS_PATH + window.location.search + window.location.hash);
+      }
     } catch {
       setTf('done'); // private mode can't keep the flag — never trap it on the tree
     }
     setVt(voiceTestOn());
-  }, []);
+  }, [router]);
   // instant paint on back-navigation: the last fetched list is cached in
   // sessionStorage (per-tab), so the rows are there before the first fetch
   // answers — the fresh fetch then updates/corrects underneath
@@ -224,8 +232,15 @@ export default function SessionsPage() {
   const [continuing, setContinuing] = useState(false);
   // the roots sheet (every computer of the tree) and this computer's name — a row of another
   // computer carries its name as a tag; unknown ('') = every row with a computer carries it
-  const [rootsOpen, setRootsOpen] = useState(false);
   const [homeRoot, setHomeRoot] = useState('');
+  // /<name> is the home root's screen: any other name (or an old bookmark of a renamed root) goes
+  // to the roots list once the home root's name is known
+  useEffect(() => {
+    if (!homeRoot || pathname === '/') return;
+    if (pathname !== homePathOf(homeRoot) && pathname !== `${homePathOf(homeRoot)}/`) {
+      router.replace(ROOTS_PATH);
+    }
+  }, [homeRoot, pathname, router]);
   const [pendingJoins, setPendingJoins] = useState(0);
   // how many roots run another build than home: a mark on the roots key
   const [rootsBehind, setRootsBehind] = useState(0);
@@ -462,12 +477,8 @@ export default function SessionsPage() {
     try {
       setHomeRoot(localStorage.getItem(HOME_ROOT_KEY) || '');
       const sp = new URLSearchParams(window.location.search);
-      if (sp.get('roots') === '1') {
-        setRootsOpen(true);
-        sp.delete('roots');
-        const next = `${window.location.pathname}${sp.toString() ? `?${sp.toString()}` : ''}${window.location.hash}`;
-        window.history.replaceState(null, '', next);
-      }
+      // an old link to the sheet (`/?roots=1`) is the roots page now
+      if (sp.get('roots') === '1') router.replace(ROOTS_PATH);
     } catch {
       /* private mode */
     }
@@ -475,7 +486,7 @@ export default function SessionsPage() {
       .then((r) => (r.ok ? (r.json() as Promise<Tree>) : null))
       .then((t) => t && onTree(t))
       .catch(() => {});
-  }, [onTree]);
+  }, [onTree, router]);
 
   useEffect(() => {
     load();
@@ -796,7 +807,7 @@ export default function SessionsPage() {
           joins={pendingJoins}
           behind={rootsBehind}
           loading={loading}
-          onRoots={() => setRootsOpen(true)}
+          onRoots={() => router.push(ROOTS_PATH)}
           onRefresh={load}
         />
         <HomeBand
@@ -949,7 +960,6 @@ export default function SessionsPage() {
         onWorking={setRootsWorking}
       />
 
-      {rootsOpen && <RootsSheet onClose={() => setRootsOpen(false)} onTree={onTree} />}
 
       {/* undo toast — the bar is the mercy window; tap undo to restore the row */}
       {toast && (

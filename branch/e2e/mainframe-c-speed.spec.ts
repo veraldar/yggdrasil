@@ -1,5 +1,6 @@
 import { writeFileSync } from 'node:fs';
 import { expect, test } from '@playwright/test';
+import { homePath } from './home';
 
 /** MAINFRAME-C speed budget: the front page must not get slower. A cold
  *  phone-class open of `/` (4× CPU, ~4 Mbps / 100 ms RTT, empty cache), five
@@ -42,8 +43,9 @@ test('speed: cold phone-class open of the front page', async ({ browser, baseURL
       downloadThroughput: (4 * 1024 * 1024) / 8,
       uploadThroughput: (1.5 * 1024 * 1024) / 8,
     });
+    const homeAt = await homePath(page.request); // the home screen's own address (`/` forwards to the roots list)
     const t0 = Date.now();
-    await page.goto('/', { waitUntil: 'commit' });
+    await page.goto(homeAt, { waitUntil: 'commit' });
     await expect(page.getByRole('heading', { name: 'BIFROST' })).toBeVisible({ timeout: 30_000 });
     await expect(page.locator('.oz-row').first()).toBeVisible({ timeout: 30_000 });
     const listMs = Date.now() - t0;

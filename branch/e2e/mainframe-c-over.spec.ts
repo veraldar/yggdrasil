@@ -11,6 +11,7 @@ import {
   users,
   vtMsgs,
 } from './mainframe-c-lib';
+import { homePath } from './home';
 
 /** MAINFRAME-C · hands-free after the hold, MAIN's mode rules: let go before
  *  the mic is even live — nothing was captured, hands-free stays on; then the
@@ -75,7 +76,7 @@ test('let go before the mic is live → hands-free stays; “over” sends; spok
   await expect(roots).toHaveAttribute('data-phase', 'speaking', { timeout: 120_000 });
   console.log(`over: speaking: ${await page.getByTestId('roots-say').textContent()}`);
   await expect(roots).toHaveAttribute('data-phase', 'listening', { timeout: 90_000 });
-  expect(new URL(page.url()).pathname).toBe('/');
+  expect(new URL(page.url()).pathname).toBe(await homePath(page.request));
 
   // ■ ends hands-free: the device goes dark, the keyboard mode stands
   await page.getByTestId('roots-stop').click();

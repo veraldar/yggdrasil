@@ -1,5 +1,6 @@
 import { OC } from './brain';
 import { expect, test } from '@playwright/test';
+import { gotoHome } from './home';
 
 /** Regression for the wedge guard killing a live session (req: "no reply —
  *  the run seemed stuck, auto-stopped"): a follow-up prompt lands on opencode
@@ -15,7 +16,7 @@ let sessionId = '';
 let corpseId = '';
 
 test('stacked prompt behind a live run must not wedge-abort', async ({ page, request }) => {
-  await page.goto('/');
+  await gotoHome(page);
   await page.getByRole('button', { name: 'new session', exact: true }).click();
   await page.getByPlaceholder('session name…').fill(NAME);
   await page.getByRole('button', { name: 'create & open' }).click();
@@ -67,7 +68,7 @@ test('dead run masked by an un-completed step must event-quiet wedge', async ({
   // stream (X-Run-Last-Event): busy + no live prompt + no stream events for
   // the stall window = corpse. ?stall=15 shrinks the 5-minute production
   // window for the test; sleep 25 keeps the step un-completed well past it.
-  await page.goto('/');
+  await gotoHome(page);
   await page.getByRole('button', { name: 'new session', exact: true }).click();
   await page.getByPlaceholder('session name…').fill(`${NAME}-corpse`);
   await page.getByRole('button', { name: 'create & open' }).click();

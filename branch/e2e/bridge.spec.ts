@@ -52,7 +52,7 @@ async function qrUrl(ctx: BrowserContext): Promise<string> {
 async function pair(page: Page, url: string) {
   await page.goto('about:blank'); // a fragment-only change is a same-document navigation
   await page.goto(url);
-  await page.waitForURL((u) => u.pathname === '/', { timeout: 30_000 }); // home: the door or the list
+  await page.waitForURL((u) => u.pathname === '/' || u.pathname.replace(/\/$/, '') === '/roots', { timeout: 30_000 }); // the door, or the roots list
 }
 
 async function connect(page: Page, origin: string, bridgeHost?: string) {

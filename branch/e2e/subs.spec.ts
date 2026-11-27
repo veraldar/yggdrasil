@@ -1,5 +1,6 @@
 import { OC } from './brain';
 import { type APIRequestContext, expect, test } from '@playwright/test';
+import { gotoHome } from './home';
 
 // Sub-sessions are created by opencode itself (agent task runs), never through
 // the phone — so this spec seeds a real parent+child pair directly on the
@@ -37,7 +38,7 @@ test('sub-sessions nest under their parent behind the subs pill', async ({ page,
   expect(childId).toBeTruthy();
 
   await bustListCache(request);
-  await page.goto('/');
+  await gotoHome(page);
 
   // parent row carries the pill (collapsed by default) — scoped to the
   // seeded row: other live sessions may have their own sub-sessions
@@ -89,7 +90,7 @@ test('sub-session swipes left to delete, with undo window', async ({ page, reque
   expect(childId).toBeTruthy();
 
   await bustListCache(request);
-  await page.goto('/');
+  await gotoHome(page);
   const row = page.locator('li', { hasText: `${TAG}-swipe-parent` });
   await row.getByRole('button', { name: '1 sub-session', exact: true }).click();
 

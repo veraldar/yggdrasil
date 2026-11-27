@@ -1,4 +1,5 @@
 import { expect, test } from '@playwright/test';
+import { gotoHome } from './home';
 
 /** T1 — the version string is the truth of the served build (v07-reflection
  *  §2.3 A, the 10-19 lesson: the sandbox said v0.5.0-74 while calling itself
@@ -14,7 +15,7 @@ test('T1: settings shows the frozen release version', async ({ page }) => {
   test.skip(!want, 'PW_EXPECT_VERSION unset — daily sandbox run, not a frozen-rc check');
 
   // the settings door is the BIFROST brand link in the header (app/page.tsx)
-  await page.goto('/');
+  await gotoHome(page);
   await page.locator('a.oz-brand[href="/settings"]').click();
   await expect(page.getByText(`${want} · a Veraldar product.`)).toBeVisible();
 });

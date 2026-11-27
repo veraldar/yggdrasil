@@ -1,5 +1,6 @@
 import { type APIRequestContext, type Locator, type Page, expect, test } from '@playwright/test';
 import { OC } from './brain';
+import { gotoHome } from './home';
 
 /** ROOT-COORD (11-12): the home list is the brain's real tree — sessions nest
  *  to any depth under their parent, each row speaks its card (status dot/word,
@@ -56,7 +57,7 @@ test('home: the tree nests 3 deep under MAIN, cards speak, closed sessions wait'
   request,
 }) => {
   await bustListCache(request);
-  await page.goto('/');
+  await gotoHome(page);
 
   // MAIN's sub-tree, 3 levels: hot branches (working/blocked below) open by default
   const site = row(page, 'Static recipe site');
@@ -154,7 +155,7 @@ test('home: API-made nesting (no cards) renders, swipe deletes the whole family'
   const l3 = await mk(`${TAG}-l3`, l2);
 
   await bustListCache(request);
-  await page.goto('/');
+  await gotoHome(page);
   const r1 = row(page, `${TAG}-l1`);
   await expect(r1).toBeVisible(); // MAIN's child: top level
   await expect(r1.locator('.oz-st')).toHaveCount(0); // no card, no word

@@ -1,5 +1,7 @@
 import { join } from 'path';
 import { type Page, expect, test } from '@playwright/test';
+import { homePathOf } from '../lib/home-path-of';
+import { gotoHome, homePath } from './home';
 
 /**
  * A computer's own page E2E on a sim twin (sim/acceptance/twin-up.sh, :8250, tailnet mode)
@@ -58,19 +60,23 @@ test('a computer\'s page on sim twin at 360px: page, artifacts, settings, per-ro
     // 1. Roots sheet: home first, with its swatch and state. Its row is the home screen itself
     //    (the tree's home screen IS the home root's page), so its own scoped page is reached
     //    by address here.
-    await page.goto('/');
+    await gotoHome(page);
     await expect(page.getByTestId('roots-key')).toBeVisible({ timeout: 15_000 });
     await page.getByTestId('roots-key').click();
     await expect(page.getByTestId('roots-sheet')).toBeVisible();
     const homeRow = page.locator(`[data-testid="root-row"][data-root="${home}"]`);
     await expect(homeRow).toBeVisible();
-    await expect(homeRow.getByTestId('root-swatch')).toBeVisible();
+    // the roots page is plain white: no swatch, each row wears its own root's world (roots-page.spec)
+    await expect(homeRow.getByTestId('root-swatch')).toHaveCount(0);
+    const appWorld = (await page.locator('html').getAttribute('data-theme')) ?? '';
+    expect(appWorld).not.toBe('');
+    await expect(homeRow).toHaveAttribute('data-theme', appWorld);
     await expect(homeRow.getByTestId('root-state')).toHaveText('on');
     await shot(page, '1-roots-sheet');
 
     await homeRow.click();
     await expect(page.getByTestId('roots-sheet')).toHaveCount(0);
-    expect(new URL(page.url()).pathname).toBe('/');
+    expect(new URL(page.url()).pathname).toBe(await homePath(page.request));
 
     await page.goto(`/roots/${encodeURIComponent(home)}`);
     await expect(page.getByTestId('home-title')).toHaveText(home);
@@ -366,7 +372,7 @@ test.describe('same design as the home screen at 360px', () => {
       loc.evaluate((el, props) => props.map((p) => getComputedStyle(el).getPropertyValue(p)), KEY_CSS);
 
     // home: the tree answers (the sheet lists debian-box) and the app stays utopia
-    await page.goto('/');
+    await page.goto(homePathOf('omarchy'));
     await expect(page.getByTestId('roots-key')).toBeVisible({ timeout: 15_000 });
     const homeNew = page.getByRole('button', { name: 'new session' });
     const homeKey = await cssOf(homeNew);
@@ -378,13 +384,13 @@ test.describe('same design as the home screen at 360px', () => {
       );
     };
     const homeKeys = await keyBoxes();
+    const homeBg = await bgOf('main'); // the home screen's, before the roots page replaces it
     await page.getByTestId('roots-key').click();
     const row = page.locator('[data-testid="root-row"][data-root="debian-box"]');
     await expect(row).toBeVisible();
     await expect(page.locator('html')).toHaveAttribute('data-theme', 'utopia');
-    // its swatch shows no world of its own (none picked)
-    expect(await row.getByTestId('root-swatch').getAttribute('data-theme')).toBeNull();
-    const homeBg = await bgOf('main');
+    // its row shows no world of its own (none picked): the app's
+    await expect(row).toHaveAttribute('data-theme', 'utopia');
     await shot(page, '7-home-utopia');
 
     // its page: the app's world, the home screen's parts

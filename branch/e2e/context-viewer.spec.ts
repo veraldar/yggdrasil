@@ -1,5 +1,6 @@
 import { OC } from './brain';
 import { type Page, devices, expect, test } from '@playwright/test';
+import { gotoHome } from './home';
 
 /** The context sheet (phase 1, plan G1) on the twin (e2e/GUARD.md: the brain is
  *  E2E_OC_URL): the 4 tabs render on a real session, Sent's totals.bytes equals
@@ -22,7 +23,7 @@ async function openSheet(page: Page) {
 }
 
 test('the context sheet: tabs, byte-truth, purity, no horizontal scroll', async ({ page }) => {
-  await page.goto('/');
+  await gotoHome(page);
   await page.getByRole('button', { name: 'new session', exact: true }).tap();
   await page.getByPlaceholder('session name…').fill(S);
   await page.getByRole('button', { name: 'create & open' }).tap();

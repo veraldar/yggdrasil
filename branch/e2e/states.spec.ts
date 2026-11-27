@@ -1,4 +1,5 @@
 import { expect, test } from '@playwright/test';
+import { gotoHome } from './home';
 
 /** App-state coverage + visual evidence: key states are screenshotted into
  *  artifacts/ so the phone can render them via /api/artifact/... Search
@@ -7,14 +8,14 @@ const NAME = `e2e-states-${Date.now().toString(36)}`;
 let sessionId = '';
 
 test('home: sessions list screenshot', async ({ page }) => {
-  await page.goto('/');
+  await gotoHome(page);
   await expect(page.getByRole('heading', { name: 'Bifrost' })).toBeVisible();
   await expect(page.locator('ul button').first()).toBeVisible();
   await page.screenshot({ path: '../artifacts/e2e-home.png' });
 });
 
 test('session states: empty → working… → replied, screenshots each', async ({ page }) => {
-  await page.goto('/');
+  await gotoHome(page);
   await page.getByRole('button', { name: 'new session', exact: true }).click();
   await page.getByPlaceholder('session name…').fill(NAME);
   await page.getByRole('button', { name: 'create & open' }).click();

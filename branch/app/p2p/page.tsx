@@ -7,6 +7,7 @@
  *  expired token) ends the link with its reason. The access token is renewed
  *  over the channel before it lapses (auth.refresh) — the bridge drops a peer
  *  whose credential runs out. */
+import { useHomeHref } from '@/lib/home-path';
 import { useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
 import { LineIcon } from '@/components/line-icon';
@@ -20,6 +21,7 @@ async function freshToken(): Promise<{ accessToken: string; expiresIn: number } 
 }
 
 export default function P2PPage() {
+  const homeHref = useHomeHref();
   const [pin, setPin] = useState<Pin | null>(null);
   const [phase, setPhase] = useState<Phase>('idle');
   const [why, setWhy] = useState('');
@@ -114,7 +116,7 @@ export default function P2PPage() {
   return (
     <main className="mx-auto flex min-h-dvh max-w-md flex-col px-3 pb-6">
       <header className="oz-head justify-start gap-2.5">
-        <Link href="/" className="oz-k sm">
+        <Link href={homeHref} className="oz-k sm">
           <LineIcon name="back" size={13} /> back
         </Link>
         <span className="text-[13px]">direct link</span>

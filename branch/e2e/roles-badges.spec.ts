@@ -2,6 +2,7 @@ import { mkdirSync } from 'fs';
 import { type APIRequestContext, type Page, devices, expect, test } from '@playwright/test';
 import { sessionTag } from '../lib/agents';
 import { OC } from './brain';
+import { gotoHome } from './home';
 
 /** Roles and badges (roles rework 11-22, ROLES-CONTRACT.md). The badge is the ROLE — [MAI] for
  *  MAIN, [LEA] [BUI] [FIX] [REV] [RES], [TRM] for the owner's own terminal conversation — never
@@ -84,7 +85,7 @@ test('the list: the badge is the role, the engine a grey word (none on the root)
   expect([lead.agent, lead.engine]).toEqual(['lead', 'antigravity']);
   expect([build.agent, build.engine]).toEqual(['build', 'root']);
   expect([rev.agent, rev.engine]).toEqual(['review', 'claude']);
-  await page.goto('/');
+  await gotoHome(page);
   const l = row(page, LEAD);
   await expect(l.locator('.t')).toHaveText(new RegExp(`^\\[LEA\\]\\s*${esc(LEAD)}$`));
   await expect(l.getByTestId('engine-word')).toHaveText('agy');
@@ -131,7 +132,7 @@ test('the list: a terminal conversation is [TRM] with its engine word; an old ro
       ],
     });
   });
-  await page.goto('/');
+  await gotoHome(page);
   const t = row(page, `e2e-rb-term-${tag}`);
   await expect(t.locator('.t')).toHaveText(/^\[TRM\]/);
   await expect(t.getByTestId('engine-word')).toHaveText('claude');
@@ -210,7 +211,7 @@ test('settings: "role" and "runs on" apart, the right chips pressed; an engine s
   await expect(chip('root')).toHaveAttribute('aria-pressed', 'true');
   await expect(pick).toContainText(`yggdrasil/${next}`);
   // the list follows: still [LEA], no grey word now
-  await page.goto('/');
+  await gotoHome(page);
   await expect(row(page, LEAD).locator('.t')).toHaveText(/^\[LEA\]/);
   await expect(row(page, LEAD).getByTestId('engine-word')).toHaveCount(0);
 });

@@ -2,6 +2,7 @@ import { type ChildProcess, execFileSync, spawn } from 'child_process';
 import { appendFileSync, existsSync, readFileSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { type BrowserContext, type Page, devices, expect, test } from '@playwright/test';
+import { gotoHomeOnDevice, rootsLanding } from './home';
 
 /**
  * YOUR OWN TRUNK, AS A LAY USER GETS IT — run by sim/own-trunk-e2e.sh, which builds the world in
@@ -197,7 +198,8 @@ test('own trunk: a lay user pairs a phone, talks to MAIN, joins a root, delegate
       expect(frag.get('code')).toMatch(/^bfnp-/);
       await phone.goto(qrUrl);
       // home decides (11-14): the door walked on this phone → the list, never straight into MAIN
-      await phone.waitForURL(`${AP}/`, { timeout: 30_000 });
+      await phone.waitForURL(rootsLanding(AP), { timeout: 30_000 });
+      await gotoHomeOnDevice(phone, AP);
       await expect(phone.getByRole('heading', { name: 'BIFROST' })).toBeVisible();
       await expect(phone.getByTestId('roots')).toBeVisible();
       await expect(phone.getByTestId('tree-first')).toHaveCount(0);

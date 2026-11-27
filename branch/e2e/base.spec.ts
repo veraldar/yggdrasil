@@ -1,10 +1,11 @@
 import { expect, test } from '@playwright/test';
+import { gotoHome } from './home';
 
 const NAME = `e2e-base-${Date.now().toString(36)}`;
 let sessionId = '';
 
 test('home: sessions list renders from live opencode', async ({ page }) => {
-  await page.goto('/');
+  await gotoHome(page);
   await expect(page.getByRole('heading', { name: 'Bifrost' })).toBeVisible();
   // exact: the key, never a row whose title starts with "New session"
   await expect(page.getByRole('button', { name: 'new session', exact: true })).toBeVisible();
@@ -14,7 +15,7 @@ test('home: sessions list renders from live opencode', async ({ page }) => {
 });
 
 test('create session → opens session view', async ({ page }) => {
-  await page.goto('/');
+  await gotoHome(page);
   await page.getByRole('button', { name: 'new session', exact: true }).click();
   await page.getByPlaceholder('session name…').fill(NAME);
   await page.getByRole('button', { name: 'create & open' }).click();

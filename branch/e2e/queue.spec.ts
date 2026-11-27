@@ -1,4 +1,5 @@
 import { expect, test } from '@playwright/test';
+import { gotoHome } from './home';
 
 /** Regression test for the proxy-managed queue: a message sent while a run
  *  is live shows ● queued; stop advances to it instead of stalling
@@ -8,7 +9,7 @@ const NAME = `e2e-queue-${Date.now().toString(36)}`;
 let sessionId = '';
 
 test('queue: mid-run send queues, stop advances to it', async ({ page }) => {
-  await page.goto('/');
+  await gotoHome(page);
   await page.getByRole('button', { name: 'new session', exact: true }).click();
   await page.getByPlaceholder('session name…').fill(NAME);
   await page.getByRole('button', { name: 'create & open' }).click();

@@ -11,6 +11,25 @@ import Link from 'next/link';
 import { LineIcon } from '@/components/line-icon';
 import { BAND_VIEWBOX, YggTree } from '@/components/ygg';
 
+/** The artifacts key (home header, MAIN's session header): the runestone and the unseen count */
+export function ArtifactsKey({ href, unseen }: { href: string; unseen: number }) {
+  return (
+    <Link
+      href={href}
+      aria-label={`artifacts — ${unseen} unseen`}
+      className={`oz-k sm ${unseen > 0 ? 'text-[var(--oz-text)]' : ''}`}
+      data-testid="artifacts-key"
+    >
+      <LineIcon name="artifact" size={15} />
+      {unseen > 0 && (
+        <span data-testid="artifact-badge" className="oz-badge">
+          {unseen}
+        </span>
+      )}
+    </Link>
+  );
+}
+
 export function HomeHead({
   title,
   settingsHref,
@@ -65,19 +84,7 @@ export function HomeHead({
             </span>
           )}
         </button>
-        <Link
-          href={artifactsHref}
-          aria-label={`artifacts — ${unseen} unseen`}
-          className={`oz-k sm ${unseen > 0 ? 'text-[var(--oz-text)]' : ''}`}
-          data-testid="artifacts-key"
-        >
-          <LineIcon name="artifact" size={15} />
-          {unseen > 0 && (
-            <span data-testid="artifact-badge" className="oz-badge">
-              {unseen}
-            </span>
-          )}
-        </Link>
+        <ArtifactsKey href={artifactsHref} unseen={unseen} />
         <button
           onClick={onRefresh}
           aria-label="refresh sessions"

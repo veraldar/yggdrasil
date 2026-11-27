@@ -1,5 +1,6 @@
 import { devices, expect, test } from '@playwright/test';
 import { slugify } from '../lib/slug';
+import { gotoHome } from './home';
 
 /** Notifications per session (owner 11-17): a session may wake the phone only when its own switch
  *  says so — off by default, on for MAIN; the switch is in the session's settings. Run against the
@@ -139,7 +140,7 @@ test('on the phone: a reply in a session you asked in shows its digest', async (
     localStorage.setItem('oz-asked', JSON.stringify({ [s]: Date.now() }));
   }, slug);
   const reply = turn(request, 'Reply in two short sentences: what is the capital of Iceland, and one thing it is known for.');
-  await page.goto('/');
+  await gotoHome(page);
   const text = await reply;
   const shown = () => page.evaluate(() => (window as unknown as { __shown: { title: string; body?: string }[] }).__shown);
   await expect.poll(async () => (await shown()).length, { timeout: 90_000 }).toBeGreaterThan(0);

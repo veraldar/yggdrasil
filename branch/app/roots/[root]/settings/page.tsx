@@ -29,6 +29,7 @@ import {
   engineLabel,
   roleTag,
 } from '@/lib/agents';
+import { ROOTS_PATH } from '@/lib/home-path';
 import { rootOfParam } from '@/lib/root-param';
 import {
   type WorldId,
@@ -258,7 +259,7 @@ function RootSettings({ rootId }: { rootId: string }) {
     try {
       const r = await fetch(`/api/roots/${enc}/remove`, { method: 'POST' });
       if (!r.ok) return setSaveErr(`${rootId} was not removed (${r.status})`);
-      router.push('/?roots=1');
+      router.push(ROOTS_PATH);
     } catch {
       setSaveErr(`${rootId} was not removed`);
     } finally {

@@ -173,7 +173,7 @@ test('a) the home screen and every computer: the same header, band and rows in t
   test.setTimeout(180_000);
   const roots = ['home', 'lab', ...(OLD ? ['old'] : [])];
 
-  await page.goto('/');
+  await page.goto('/home');
   await expect(page.getByTestId('home-title')).toHaveText('BIFROST', { timeout: 20_000 });
   const ref = await measure(page);
   expect(await htmlWorld(page)).toBe('utopia');
@@ -269,7 +269,7 @@ test('a) by touch: roots → a computer; its name → its settings; the artifact
   await page.goto('/artifacts');
   const artifactsBack = await backOf('header.oz-head .oz-k.sm');
 
-  await page.goto('/');
+  await page.goto('/home');
   await expect(page.getByTestId('roots-key')).toBeVisible({ timeout: 20_000 });
   await expect(async () => {
     await page.getByTestId('roots-key').tap();
@@ -331,7 +331,7 @@ test('a) by touch: roots → a computer; its name → its settings; the artifact
     await page.getByTestId('roots-key').tap();
   }
   await page.locator('[data-testid="root-row"][data-root="home"]').tap();
-  await page.waitForURL((u) => u.pathname === '/', { timeout: 20_000 });
+  await page.waitForURL((u) => u.pathname === '/home', { timeout: 20_000 });
   await expect(page.getByTestId('home-title')).toHaveText('BIFROST');
   await expect(page.getByTestId('roots-sheet')).toHaveCount(0);
 });
@@ -383,7 +383,7 @@ test('b) a world picked for lab is saved on lab, survives a reload, and is lab\'
   await expect(page.locator('html')).toHaveAttribute('data-theme', 'terminus', { timeout: 20_000 });
 
   // lab's only: home, the home screen and /settings keep the app's world; so does old
-  for (const path of ['/roots/home', '/', '/settings', ...(OLD ? ['/roots/old'] : [])]) {
+  for (const path of ['/roots/home', '/home', '/settings', ...(OLD ? ['/roots/old'] : [])]) {
     await page.goto(path);
     await expect(page.locator('main').first()).toBeVisible({ timeout: 20_000 });
     await page.waitForTimeout(1500); // a tree answer would have painted by now
@@ -412,7 +412,7 @@ test('b) a world picked for lab is saved on lab, survives a reload, and is lab\'
   await page.getByTestId('roots-new-name').fill(title);
   await page.getByTestId('roots-create').tap();
   await page.waitForURL(/\/session\/[^?]+\?id=/, { timeout: 30_000 });
-  await page.goto('/');
+  await page.goto('/home');
   const row = page.locator('.oz-row', { hasText: title });
   await expect(row).toBeVisible({ timeout: 20_000 });
   await expect(row.getByTestId('root-tag')).toHaveText('[lab]');
@@ -424,7 +424,7 @@ test('b) a world picked for lab is saved on lab, survives a reload, and is lab\'
   const other = await ctx.newPage();
   await other.goto('/roots/lab');
   await expect(other.locator('html')).toHaveAttribute('data-theme', 'terminus', { timeout: 20_000 });
-  await other.goto('/');
+  await other.goto('/home');
   await expect(other.getByTestId('home-title')).toHaveText('BIFROST', { timeout: 20_000 });
   await other.waitForTimeout(1500);
   expect(await htmlWorld(other)).toBe('utopia');

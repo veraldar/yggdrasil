@@ -2,6 +2,7 @@ import { RoomServiceClient } from 'livekit-server-sdk';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { type APIRequestContext, type Page, type Request, expect } from '@playwright/test';
+import { gotoHome } from './home';
 
 /** shared by the MAINFRAME-C voice specs: a returning phone with voice tests
  *  ON — every roots turn lands in the voice-test room, MAIN is never written */
@@ -51,7 +52,7 @@ export async function homeVt(page: Page) {
     localStorage.setItem('bifrost-first-turn', '1');
     localStorage.setItem('oz-mode', 'text');
   });
-  await page.goto('/');
+  await gotoHome(page);
   await expect(page.getByTestId('roots')).toBeVisible();
   await expect(page.getByTestId('roots-name')).toHaveText('voice-test');
 }

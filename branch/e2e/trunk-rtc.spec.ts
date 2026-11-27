@@ -19,6 +19,7 @@ import {
   expect,
   test,
 } from '@playwright/test';
+import { gotoHomeOnDevice, rootsLanding } from './home';
 
 /**
  * VOICE OVER YOUR OWN TRUNK — run by sim/trunk-rtc-e2e.sh, which builds three machines in private
@@ -428,6 +429,9 @@ test('trunk rtc: phone ⇄ vps:443 ⇄ box — pair, talk, hear the reply, media
 
   let mainId = '';
   let deviceId = '';
+  // E1's two clocks: `loadAt` = the phone starts loading the QR's page (first contact); `pairedAt` =
+  // the box answered the claim — the pin exists from here on, and "after pairing" means after it
+  let loadAt = 0;
   let pairedAt = 0;
   let released = 0;
   let voiceTurn: Msg | null = null;
@@ -445,9 +449,22 @@ test('trunk rtc: phone ⇄ vps:443 ⇄ box — pair, talk, hear the reply, media
         writeFileSync(png, await qr.screenshot());
         const qrUrl = execFileSync('zbarimg', ['--raw', '-q', png]).toString().trim();
         expect(qrUrl.startsWith(`${AP}/pair#`), qrUrl).toBe(true);
+        // E1's clocks (NOTES-P1.md:153 and the 11-26 baseline): the pinned signaling (POST /offer)
+        // leaves ~1.17 s after GET / and can fall before the door's load event, so "it crossed the
+        // VPS" is counted from loadAt, before the page loads; "no app data after pairing" is counted
+        // from the claim's answer, the moment a pin exists — the pairing page's own first-contact
+        // calls, sent before the claim (POST /api/diag, GET /api/build), are not "after pairing"
+        const claimed = phone.waitForResponse((r) => r.url().endsWith('/api/pair/claim'));
+        loadAt = Date.now();
         await phone.goto(qrUrl);
-        await phone.waitForURL(`${AP}/`, { timeout: 30_000 });
+        // the claim's WHOLE answer (a response event fires on its headers; its chunked body — the
+        // device, its token, MAIN's id — is still the pairing exchange, not "after pairing")
+        await (await claimed).finished();
         pairedAt = Date.now();
+        // the landing walks the door → the roots list; then home (after the clocks, so E1 measures
+        // both page loads as they were)
+        await phone.waitForURL(rootsLanding(AP), { timeout: 30_000 });
+        await gotoHomeOnDevice(phone, AP);
         await expect(phone.getByTestId('roots')).toBeVisible({ timeout: 30_000 });
         const pin = await phone.evaluate(() =>
           JSON.parse(localStorage.getItem('bifrost.pin') || 'null')
@@ -745,7 +762,7 @@ test('trunk rtc: phone ⇄ vps:443 ⇄ box — pair, talk, hear the reply, media
         const lines = eyeRequests(recs);
         expect(lines.filter(appCall), 'API calls through the VPS after pairing').toEqual([]);
         expect(
-          lines.some((l) => l.startsWith('POST /offer ')),
+          eyeRequests(eyeSince(loadAt + 1)).some((l) => l.startsWith('POST /offer ')),
           'the pinned signaling crossed it'
         ).toBe(true);
         const plain = Buffer.concat(recs.map((r) => Buffer.from(r.b64, 'base64'))).toString(
@@ -905,7 +922,8 @@ test('trunk rtc: phone ⇄ vps:443 ⇄ box — pair, talk, hear the reply, media
           await p2.goto(qrUrl);
           await claimed;
           const t1 = Date.now();
-          await p2.waitForURL(`${AP}/`, { timeout: 30_000 });
+          await p2.waitForURL(rootsLanding(AP), { timeout: 30_000 });
+          // a refused device never learns the home name: the landing (the roots list) wears pin-state too
           await expect(p2.getByTestId('pin-state')).toHaveAttribute('data-state', 'refused', {
             timeout: 20_000,
           });

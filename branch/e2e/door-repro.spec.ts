@@ -1,4 +1,5 @@
 import { test, expect, type Page } from '@playwright/test';
+import { gotoHome } from './home';
 
 /**
  * THE PHONE-CLASS REPRO — user law 10-19: no fix without a demonstrated repro.
@@ -324,7 +325,7 @@ test('phone-class repro: load → tap tree → greeting → talk', async ({ page
       said === null ? 'no spoken reply (or not within 50s)' : '');
     await page.screenshot({ path: 'artifacts/repro-in.png', fullPage: true });
     // the door afterwards: home is the list + the corner tree, not the tree
-    await page.goto('/');
+    await gotoHome(page);
     const corner = page.getByTestId('tree-door');
     const again = page.getByTestId('tree-first');
     const cornerOk = await corner

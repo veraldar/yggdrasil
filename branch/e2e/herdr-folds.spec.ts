@@ -2,6 +2,7 @@ import { readFile } from 'fs/promises';
 import path from 'path';
 import { type APIRequestContext, type Page, expect, test } from '@playwright/test';
 import { runState } from '../lib/run-state';
+import { gotoHome } from './home';
 
 /** Herdr folds (10-24, docs/research/herdr-takeaways.md §1.1 + §1.2 + §1.4):
  *  1. the working/blocked/idle TRIAD, harness-owned — the layering truth
@@ -29,7 +30,7 @@ async function mk(request: APIRequestContext, name: string): Promise<string> {
 
 /** a returning device in keyboard mode (no door, no first-turn card) */
 async function returning(page: Page) {
-  await page.goto('/');
+  await gotoHome(page);
   await page.evaluate(() => {
     localStorage.setItem('bifrost-door', 'v2');
     localStorage.setItem('bifrost-onboard', JSON.stringify({ lang: 'en', style: 'short' }));

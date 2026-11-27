@@ -1,4 +1,5 @@
 import { expect, test } from '@playwright/test';
+import { gotoHome } from './home';
 
 /** Worlds (themes) — the switch stays one attribute: next-themes writes
  *  data-theme on <html>, tokens.css re-scopes every --oz-* color. Settings
@@ -28,7 +29,7 @@ test('settings: tap a world → applies instantly, persists, tokens follow', asy
   await page.getByRole('button', { name: /^terminus —/ }).click();
   await page.reload();
   await expect.poll(() => htmlTheme(page)).toBe('terminus');
-  await page.goto('/');
+  await gotoHome(page);
   await expect.poll(() => htmlTheme(page)).toBe('terminus');
   expect(await htmlBg(page)).toBe(BG.terminus);
   // the band is the tree, still unless something works

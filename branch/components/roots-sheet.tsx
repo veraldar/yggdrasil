@@ -1,21 +1,24 @@
 'use client';
 
 /** The roots sheet (E2 · the whole tree): every computer of the tree, this one first.
- *    list   one row per computer: name, home tag, world swatch, state (on · last seen … · off),
+ *    list   one row per computer: name, home tag, state (on · last seen … · off),
  *           os, how many run, "not up to date" (it runs another build than home)
- *    tap    opens that computer's home screen: `/` for the home root (the tree's home screen
- *           IS its page), /roots/<id> for another — the sheet opens from every one of them
+ *    tap    opens that computer's home screen: `/<name>` for the home root (omarchy →
+ *           /omarchy), /roots/<id> for another
+ *    page   it is the page `/roots/` (plain white, wears no root's theme); each row wears its
+ *           own root's palette (the world picked for it, else the app's own) — no swatches
  *    hold   (not home) → "Remove <name>?" · Remove / Keep
  *  Labels and state only (the owner's rule: no help text). */
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
+import { useTheme } from 'next-themes';
 import { LineIcon } from '@/components/line-icon';
-import { cacheTreeThemes, chosenWorld } from '@/lib/worlds';
+import { HOME_ROOT_KEY, homePathOf } from '@/lib/home-path';
+import { cacheTreeThemes, chosenWorld, isWorld } from '@/lib/worlds';
 
 /** a press this long on a row (not home) asks to remove it */
 const HOLD_MS = 500;
-/** localStorage: the home root's name (the list's computer tag leaves it out) */
-export const HOME_ROOT_KEY = 'oz-home-root';
+export { HOME_ROOT_KEY };
 const POLL_MS = 5000;
 
 type Home = {
@@ -86,12 +89,17 @@ const NO_SELECT = {
 export function RootsSheet({
   onClose,
   onTree,
+  page = false,
 }: {
   onClose: () => void;
+  /** the page `/roots/`, not an overlay: plain white, the close key leaves for home */
+  page?: boolean;
   /** every fresh answer of GET /api/roots (the home list learns the home root's name + themes) */
   onTree?: (t: Tree) => void;
 }) {
   const router = useRouter();
+  const { theme: appTheme, resolvedTheme } = useTheme();
+  const appWorld = [resolvedTheme, appTheme].find(isWorld) ?? 'aether';
   const [tree, setTree] = useState<Tree | null>(null);
   const [ask, setAsk] = useState<string | null>(null); // "Remove <name>?"
   const [busy, setBusy] = useState(false);
@@ -261,7 +269,13 @@ export function RootsSheet({
   const grey = (on?: boolean) => (on ? undefined : { opacity: 0.5 });
 
   return (
-    <div className="oz-film ctx-sheet" role="dialog" aria-label="roots" data-testid="roots-sheet">
+    <div
+      className={`oz-film ctx-sheet ${page ? 'oz-white' : ''}`}
+      role={page ? 'main' : 'dialog'}
+      aria-label="roots"
+      data-testid="roots-sheet"
+      data-page={page ? '' : undefined}
+    >
       <header className="flex items-center gap-2 px-3 pt-[calc(10px+env(safe-area-inset-top))]">
         <button
           type="button"
@@ -270,7 +284,7 @@ export function RootsSheet({
           data-testid="roots-close"
           onClick={onClose}
         >
-          <LineIcon name="close" size={14} />
+          <LineIcon name={page ? 'back' : 'close'} size={14} />
         </button>
         <h2 className="min-w-0 flex-1 truncate text-[13px] font-medium" data-testid="roots-title">
           roots
@@ -365,8 +379,10 @@ export function RootsSheet({
           {rows.map((r) => {
             const on = !!r.reachable;
             // a computer's own world only if one was picked for it; else (and always for
-            // home, whose world IS the app's) the swatch shows the app's own colours
+            // home, whose world IS the app's) the app's own
             const theme = r.home ? null : chosenWorld(r.theme, r.theme_rev);
+            // the row's own palette: its picked world, else the app's own (home's IS the app's)
+            const rowWorld = theme ?? appWorld;
             return (
               <li key={r.id}>
                 <button
@@ -376,7 +392,8 @@ export function RootsSheet({
                   data-root={r.id}
                   data-state={on ? 'on' : 'off'}
                   data-root-theme={theme ?? undefined}
-                  style={{ ...NO_SELECT, ...grey(on) }}
+                  data-theme={page ? rowWorld : undefined}
+                  style={{ ...NO_SELECT, ...(page ? { color: 'var(--oz-text)' } : {}), ...grey(on) }}
                   onPointerDown={(e) => down(e, r)}
                   onPointerUp={up}
                   onPointerCancel={up}
@@ -389,7 +406,7 @@ export function RootsSheet({
                       return;
                     }
                     onClose();
-                    router.push(r.home ? '/' : `/roots/${encodeURIComponent(r.id)}`);
+                    router.push(r.home ? homePathOf(r.id) : `/roots/${encodeURIComponent(r.id)}`);
                   }}
                 >
                   <div className="oz-r1">
@@ -401,16 +418,6 @@ export function RootsSheet({
                     </span>
                     <span className="t">{r.id}</span>
                     {r.home && <span className="oz-subs">home</span>}
-                    <span
-                      className="oz-swt"
-                      data-theme={theme ?? undefined}
-                      data-testid="root-swatch"
-                      aria-hidden="true"
-                    >
-                      <i style={{ background: 'var(--oz-bg)' }} />
-                      <i style={{ background: 'var(--oz-success)' }} />
-                      <i style={{ background: 'var(--oz-info)' }} />
-                    </span>
                     <span
                       className="oz-st"
                       data-testid="root-state"

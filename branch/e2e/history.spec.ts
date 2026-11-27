@@ -1,4 +1,5 @@
 import { expect, test, type CDPSession, type Page } from '@playwright/test';
+import { gotoHome } from './home';
 
 /** Swipe message-history browser: swipe → on a message steps into the past,
  *  ← back toward the present, past the newest closes ("back to no message").
@@ -19,7 +20,7 @@ async function dragX(page: Page, selector: string, dx: number) {
 }
 
 test('history: swipe → opens the past, ← returns, past newest closes', async ({ page }) => {
-  await page.goto('/');
+  await gotoHome(page);
   await page.getByRole('button', { name: 'new session', exact: true }).click();
   await page.getByPlaceholder('session name…').fill(NAME);
   await page.getByRole('button', { name: 'create & open' }).click();

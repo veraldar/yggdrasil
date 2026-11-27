@@ -21,7 +21,8 @@ import { useRouter } from 'next/navigation';
 import { HomeBand, HomeHead } from '@/components/app/home-parts';
 import { LineIcon } from '@/components/line-icon';
 import { MainBar, type MainBarRow } from '@/components/main-bar';
-import { HOME_ROOT_KEY, RootsSheet, type Tree } from '@/components/roots-sheet';
+import { HOME_ROOT_KEY, type Tree } from '@/components/roots-sheet';
+import { ROOTS_PATH } from '@/lib/home-path';
 import { YggRoots } from '@/components/ygg';
 import { engineWord, roleOf, sessionTag } from '@/lib/agents';
 import { countUnseen, forRoot, seenInit } from '@/lib/artifact-read';
@@ -129,7 +130,6 @@ function RootHome({ rootId }: { rootId: string }) {
   const [homeSessions, setHomeSessions] = useState<RootSess[] | null>(null);
   // artifacts made there that this phone has not opened — the header key's badge, as on home
   const [unseenArts, setUnseenArts] = useState(0);
-  const [rootsOpen, setRootsOpen] = useState(false);
   // the refresh key reads "…" for the first load and a tap, never for the quiet poll
   const [loading, setLoading] = useState(true);
   const [creating, setCreating] = useState(false);
@@ -664,7 +664,7 @@ function RootHome({ rootId }: { rootId: string }) {
           behind={tree?.roots.filter((r) => r.behind).length ?? 0}
           loading={loading}
           gone={!!tree && !reachable}
-          onRoots={() => setRootsOpen(true)}
+          onRoots={() => router.push(ROOTS_PATH)}
           onRefresh={refresh}
         />
         <HomeBand
@@ -793,7 +793,6 @@ function RootHome({ rootId }: { rootId: string }) {
         </div>
       )}
 
-      {rootsOpen && <RootsSheet onClose={() => setRootsOpen(false)} onTree={onTree} />}
     </div>
   );
 }

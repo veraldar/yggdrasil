@@ -1,5 +1,6 @@
 import { join } from 'node:path';
 import { expect, test } from '@playwright/test';
+import { gotoHome } from './home';
 
 /** UX-BATCH #5 — voice tests get their own room. Settings → voice tests on →
  *  MAIN opens `voice-test` (room = slug) → a real PTT turn (Chrome capture
@@ -42,7 +43,7 @@ test('#5 · voice-test on → turns land in voice-test, MAIN untouched; off → 
     }
   });
 
-  await page.goto('/');
+  await gotoHome(page);
   await page.evaluate(() => {
     localStorage.setItem('bifrost-door', 'v2');
     localStorage.setItem('bifrost-first-turn', '1');
