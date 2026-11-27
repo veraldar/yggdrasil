@@ -2319,6 +2319,10 @@ fn set_engine(st: &AppState, id: &str, engine: &str, model: Option<&str>) -> Res
     let role = profile_of(st, &info);
     let model_id = engine_model(st, Some(&role), kind, model);
     with_session(st, id, |s| {
+        if let Some(o) = s.info.as_object_mut() {
+            // manual engine switch sets a new home engine — never let restore_home revert it
+            o.remove("home");
+        }
         s.info["engine"] = json!(name);
         match kind {
             None => {
@@ -3902,9 +3906,14 @@ enum Walk {
 /// The chain walk (v10): the first entry not yet tried this turn whose usage check clears (below
 /// 90%, no quota error seen — or no numbers at all) takes the turn.
 fn walk_chain(st: &AppState, prof: &profiles::Profile, from: &Target, tried: &[Target]) -> Walk {
+    walk_chain_opt(st, prof, from, tried, false)
+}
+
+fn walk_chain_opt(st: &AppState, prof: &profiles::Profile, from: &Target, tried: &[Target], allow_high: bool) -> Walk {
     let mut skipped = Vec::new();
     let mut said = Vec::new();
     let mut earliest: Option<u64> = None;
+    let mut high_fallback: Option<(Target, Vec<Value>)> = None;
     for t in effective_chain(st, prof, from) {
         if tried.contains(&t) {
             continue;
@@ -3913,9 +3922,15 @@ fn walk_chain(st: &AppState, prof: &profiles::Profile, from: &Target, tried: &[T
         if a.clears() {
             return Walk::Take(t, skipped);
         }
+        if allow_high && !a.out() && high_fallback.is_none() {
+            high_fallback = Some((t.clone(), skipped.clone()));
+        }
         earliest = earliest_of(earliest, a.resets_at());
         said.push(format!("{} ({})", t.show(), a.say()));
         skipped.push(json!({ "entry": t.show(), "skipped": a.say() }));
+    }
+    if let Some((t, sk)) = high_fallback {
+        return Walk::Take(t, sk);
     }
     if said.is_empty() {
         return Walk::Nothing;
@@ -3941,9 +3956,9 @@ fn earliest_reset(st: &AppState, prof: &profiles::Profile, home: &Target) -> Opt
 }
 
 /// How long an owner's turn may wait for an engine to come back (`YGG_FALLBACK_WAIT_MAX_MIN`,
-/// default 6 h; 0 = never wait, fail the turn with the reset time instead).
+/// default 6 h total across the whole turn; 0 = never wait, fail the turn with the reset time instead).
 fn fallback_wait_cap_ms() -> u64 {
-    std::env::var("YGG_FALLBACK_WAIT_MAX_MIN").ok().and_then(|v| v.trim().parse::<u64>().ok()).unwrap_or(360) * 60_000
+    std::env::var("YGG_FALLBACK_WAIT_MAX_MIN").ok().and_then(|v| v.trim().parse::<u64>().ok()).unwrap_or(360).saturating_mul(60_000)
 }
 
 /// A session keeps its HOME engine (the one it was started on, or the user picked): a fallback
@@ -3951,6 +3966,9 @@ fn fallback_wait_cap_ms() -> u64 {
 /// `info.home`; `restore_home` puts it back when the turn ends (and first thing in the next
 /// turn, should a restart have cut this one) — so every turn starts from the top of the list.
 fn stash_home(st: &AppState, id: &str) {
+    if st.sessions.lock().unwrap().get(id).is_some_and(|s| s.info["home"].is_object()) {
+        return;
+    }
     with_session(st, id, |s| {
         if !s.info["home"].is_object() {
             s.info["home"] = json!({ "engine": s.info["engine"].clone(), "model": s.info["model"].clone(), "harness": s.info["harness"].clone() });
@@ -3959,6 +3977,10 @@ fn stash_home(st: &AppState, id: &str) {
 }
 
 fn restore_home(st: &AppState, id: &str) {
+    // Fast path: avoid full session disk write on every normal turn when no home was stashed.
+    if !st.sessions.lock().unwrap().get(id).is_some_and(|s| s.info["home"].is_object()) {
+        return;
+    }
     let back = with_session(st, id, |s| {
         let home = s.info["home"].clone();
         if !home.is_object() {
@@ -3987,15 +4009,25 @@ fn move_line(from: &Target, to: &Target, resets: Option<u64>) -> String {
     format!("↪ {} is out{at} — this turn continues on {}", from.show(), to.show())
 }
 
-/// All engines are out. An owner's turn waits for the earliest reset (the run stays alive, the
-/// app sees it busy), then the caller starts again from the top of the list; a turn nobody is
-/// watching (a wake, a heartbeat) pauses the session until then and ends at once; with no reset
-/// time known, or one beyond the cap, the turn fails and says when.
-async fn wait_for_reset(st: &AppState, id: &str, auto: bool, line: &str, resets: Option<u64>, waits: &mut u32, run: &mut Run) -> Result<(), String> {
+/// All engines are out. A top-level owner turn waits for the earliest reset (up to the cumulative
+/// per-turn wait cap, keeping the run alive), then the caller resumes with done-state from the top
+/// of the list; a turn nobody is watching (auto/heartbeat) or a child sub-session pauses until
+/// then and ends at once so it never wedges a run slot; with no reset time known, or one beyond
+/// the cap, the turn fails and says when.
+async fn wait_for_reset(
+    st: &AppState,
+    id: &str,
+    no_wait: bool,
+    line: &str,
+    resets: Option<u64>,
+    waits: &mut u32,
+    waited_ms: &mut u64,
+    run: &mut Run,
+) -> Result<(), String> {
     let now = now_ms();
     let Some(t) = resets.filter(|t| *t > now) else { return Err(line.to_string()) };
     let when = usage::short_time(t);
-    if auto {
+    if no_wait {
         with_session(st, id, |s| {
             if s.info["paused"]["until"].as_u64() != Some(t) {
                 s.info["paused"] = json!({ "until": t, "told": false });
@@ -4003,8 +4035,9 @@ async fn wait_for_reset(st: &AppState, id: &str, auto: bool, line: &str, resets:
         });
         return Err(format!("{PAUSED_PREFIX} {when} — {line}"));
     }
-    // (a reset that keeps being wrong ends the turn after three waits)
-    if t - now > fallback_wait_cap_ms() || *waits >= 3 {
+    // Total wait cap across the whole turn (not per wait), plus at most 3 wait attempts.
+    let need = t.saturating_sub(now);
+    if waited_ms.saturating_add(need) > fallback_wait_cap_ms() || *waits >= 3 {
         return Err(format!("{line} — the earliest comes back at {when}"));
     }
     *waits += 1;
@@ -4012,11 +4045,11 @@ async fn wait_for_reset(st: &AppState, id: &str, auto: bool, line: &str, resets:
     let note = format!("↪ every engine is out — waiting until {when}, then this turn goes on");
     run.push_part(notice_part(&note));
     replace_message(st, id, &run.msg);
-    tree::note_parent(st, id, &note, false);
     while now_ms() < t {
         publish(st, "session.status", json!({ "sessionID": id, "status": { "type": "busy" } }));
-        tokio::time::sleep(Duration::from_millis((t - now_ms()).clamp(50, 60_000))).await;
+        tokio::time::sleep(Duration::from_millis(t.saturating_sub(now_ms()).clamp(50, 60_000))).await;
     }
+    *waited_ms = waited_ms.saturating_add(now_ms().saturating_sub(now));
     Ok(())
 }
 
@@ -4277,6 +4310,8 @@ async fn run_turn(st: &AppState, id: &str, tx: &mpsc::Sender<Event>, queue_ms: u
     // and starts again from the top. Only the coordinator (and a pinned role / session, a
     // terminal's conversation) never moves.
     let pinned = is_pinned_for_fallback(&info, &prof);
+    let is_child = info["parentID"].as_str().is_some_and(|p| !p.is_empty());
+    let no_wait = auto_class || is_child;
     let first = current_target(st, id, &info);
     let served_engine: Mutex<Option<harness::Kind>> = Mutex::new(first.engine);
     let mut fallback_used: Option<FallbackPlan> = None;
@@ -4285,7 +4320,6 @@ async fn run_turn(st: &AppState, id: &str, tx: &mpsc::Sender<Event>, queue_ms: u
         let fut = async {
             // moves the turn onto `to`: the home engine parked, the step on record, the streamed
             // error text gone (steps already done stay — they happened), one line to the owner
-            // and the manager
             let mut take_over = |run: &mut Run, cur: &Target, to: &Target, reason: String, skipped: Vec<Value>, steps: &mut Vec<Value>| {
                 eprintln!(
                     "FALLBACK session={id} role={} from={} to={} tools_done={} reason={}",
@@ -4309,7 +4343,6 @@ async fn run_turn(st: &AppState, id: &str, tx: &mpsc::Sender<Event>, queue_ms: u
                 if !auto_class {
                     run.push_part(notice_part(&line));
                 }
-                tree::note_parent(st, id, &line, false);
                 replace_message(st, id, &run.msg);
                 steps.extend(skipped);
                 steps.push(json!({ "from": cur.show(), "to": to.show(), "reason": reason, "tools_done": run.tool_count() }));
@@ -4325,21 +4358,33 @@ async fn run_turn(st: &AppState, id: &str, tx: &mpsc::Sender<Event>, queue_ms: u
                 plan.to_model = to.model.clone();
             };
             let mut waits = 0u32;
+            let mut waited_ms = 0u64;
+            let mut after_wait = false;
+            let mut last_engine = first.engine;
             'top: loop {
-                // (a second round after a wait starts on the home engine again)
+                // (a second round after a wait starts on the home engine again, carrying done-state)
                 *served_engine.lock().unwrap() = first.engine;
                 run.text.clear();
                 run.first_delta_ms = None;
                 run.first_token_seen = false;
                 let mut cur = first.clone();
                 let mut tried = vec![cur.clone()];
-                let mut note: Option<String> = None;
+                let mut note: Option<String> = if after_wait {
+                    let done = done_state(&run.msg);
+                    if done.0 > 0 {
+                        Some(fallback_takeover_note(last_engine, Why::Quota, &done))
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
                 let mut hops = 0usize;
                 let mut first_why = "quota";
                 if !pinned {
                     let a = target_avail(st, &cur);
                     if !a.clears() {
-                        match walk_chain(st, &prof, &cur, &tried) {
+                        match walk_chain_opt(st, &prof, &cur, &tried, false) {
                             Walk::Take(to, skipped) => {
                                 first_why = "usage";
                                 take_over(&mut run, &cur, &to, format!("usage: {}", a.say()), skipped, &mut fb_steps);
@@ -4348,13 +4393,35 @@ async fn run_turn(st: &AppState, id: &str, tx: &mpsc::Sender<Event>, queue_ms: u
                                 cur = to;
                                 hops += 1;
                             }
-                            // out for sure and nothing else clears: no doomed run — the turn
-                            // waits for the earliest reset (or pauses, or says when)
+                            // out for sure and nothing clears: before waiting hours for a reset,
+                            // serve on a still-usable (~90% High) fallback if one exists; otherwise wait/pause.
                             Walk::AllOut(line, _, resets) if a.out() => {
-                                let line = format!("{}: {} — {line}", cur.show(), a.say());
-                                wait_for_reset(st, id, auto_class, &line, earliest_of(resets, a.resets_at()), &mut waits, &mut run).await?;
-                                restore_home(st, id);
-                                continue 'top;
+                                let soon = earliest_of(resets, a.resets_at());
+                                let would_wait = !no_wait && fallback_wait_cap_ms() > 0 && soon.is_some_and(|t| t > now_ms());
+                                if would_wait {
+                                    if let Walk::Take(to, skipped) = walk_chain_opt(st, &prof, &cur, &tried, true) {
+                                        first_why = "usage";
+                                        take_over(&mut run, &cur, &to, format!("usage: {}", a.say()), skipped, &mut fb_steps);
+                                        note = Some(fallback_takeover_note(cur.engine, Why::Usage(&a), &done_state(&run.msg)));
+                                        tried.push(to.clone());
+                                        cur = to;
+                                        hops += 1;
+                                    } else {
+                                        let line = format!("{}: {} — {line}", cur.show(), a.say());
+                                        wait_for_reset(st, id, no_wait, &line, soon, &mut waits, &mut waited_ms, &mut run).await?;
+                                        last_engine = cur.engine;
+                                        after_wait = true;
+                                        restore_home(st, id);
+                                        continue 'top;
+                                    }
+                                } else {
+                                    let line = format!("{}: {} — {line}", cur.show(), a.say());
+                                    wait_for_reset(st, id, no_wait, &line, soon, &mut waits, &mut waited_ms, &mut run).await?;
+                                    last_engine = cur.engine;
+                                    after_wait = true;
+                                    restore_home(st, id);
+                                    continue 'top;
+                                }
                             }
                             // nearly used up and nothing better: it runs where it is — it may finish
                             _ => {}
@@ -4366,8 +4433,8 @@ async fn run_turn(st: &AppState, id: &str, tx: &mpsc::Sender<Event>, queue_ms: u
                     let r = match cur.engine {
                         Some(kind) => {
                             let mut prompt = harness_prompt(&history, turn_id, auto_class);
-                            if hops > 0 {
-                                // a new conversation on this harness: it gets the session's so far
+                            if hops > 0 || (after_wait && (run.tool_count() > 0 || cur.engine != last_engine)) {
+                                // a new conversation or post-wait resume: give it the session's transcript so far
                                 prompt = format!("{}{prompt}", takeover_transcript(&history, turn_id));
                             }
                             harness_loop(st, id, prompt, tx, &mut run, kind, note.as_deref()).await
@@ -4399,7 +4466,7 @@ async fn run_turn(st: &AppState, id: &str, tx: &mpsc::Sender<Event>, queue_ms: u
                     if pinned || hops >= profiles::FALLBACK_CAP || !(quota || failed_to_start) {
                         return Err(decorate(e, &cur));
                     }
-                    match walk_chain(st, &prof, &first, &tried) {
+                    match walk_chain_opt(st, &prof, &first, &tried, quota) {
                         Walk::Take(to, skipped) => {
                             let why = if quota { Why::Quota } else { Why::Failed(&e) };
                             let done = done_state(&run.msg);
@@ -4418,7 +4485,9 @@ async fn run_turn(st: &AppState, id: &str, tx: &mpsc::Sender<Event>, queue_ms: u
                             }
                             // every engine of the list is out: wait for the earliest reset, then
                             // the whole list again from its top (the home engine first)
-                            wait_for_reset(st, id, auto_class, &line, earliest_reset(st, &prof, &first), &mut waits, &mut run).await?;
+                            wait_for_reset(st, id, no_wait, &line, earliest_reset(st, &prof, &first), &mut waits, &mut waited_ms, &mut run).await?;
+                            last_engine = cur.engine;
+                            after_wait = true;
                             restore_home(st, id);
                             continue 'top;
                         }
@@ -4429,7 +4498,9 @@ async fn run_turn(st: &AppState, id: &str, tx: &mpsc::Sender<Event>, queue_ms: u
                             if !quota || tried.len() < 2 {
                                 return Err(line);
                             }
-                            wait_for_reset(st, id, auto_class, &line, earliest_reset(st, &prof, &first), &mut waits, &mut run).await?;
+                            wait_for_reset(st, id, no_wait, &line, earliest_reset(st, &prof, &first), &mut waits, &mut waited_ms, &mut run).await?;
+                            last_engine = cur.engine;
+                            after_wait = true;
                             restore_home(st, id);
                             continue 'top;
                         }
@@ -4463,7 +4534,7 @@ async fn run_turn(st: &AppState, id: &str, tx: &mpsc::Sender<Event>, queue_ms: u
     };
     // the session keeps its home engine whichever engine ran this turn (done, failed or cut)
     restore_home(st, id);
-    if matches!(outcome, Some(Ok(()))) {
+    if matches!(outcome, Some(Ok(()))) && st.sessions.lock().unwrap().get(id).is_some_and(|s| !s.info["paused"].is_null()) {
         with_session(st, id, |s| {
             if let Some(o) = s.info.as_object_mut() {
                 o.remove("paused");
@@ -8487,6 +8558,72 @@ echo '{{"event":"result","result":{{"conversation_id":"agy-conv-1","status":"SUC
         assert!(err.contains("root/glm-5.3 (97% of its 5-hour window used)"), "{err}");
         assert_eq!((hits(&claude_hits), hits(&agy_hits), seen_models.lock().unwrap().len()), (c0, a0, r0));
         assert_eq!(info["engine"], "claude", "nothing moved");
+        clear_usage();
+
+        // 8. set_engine clears stashed info.home so restore_home never reverts a manual switch
+        let sid_sw = new_id("ses");
+        with_session(&st, &sid_sw, |_| {});
+        {
+            let mut m = st.sessions.lock().unwrap();
+            m.insert(
+                sid_sw.clone(),
+                Session {
+                    info: json!({
+                        "id": sid_sw, "title": "Manual switch", "agent": "fix",
+                        "engine": "claude", "model": { "id": "opus", "providerID": "claude" },
+                        "harness": { "kind": "claude" }
+                    }),
+                    messages: vec![],
+                    inbox: vec![],
+                    todo: vec![],
+                },
+            );
+        }
+        stash_home(&st, &sid_sw);
+        apply_fallback(&st, &sid_sw, &profile_of(&st, &json!({ "agent": "fix" })), &Target { engine: Some(harness::Kind::Antigravity), model: "gemini-4-neon-high".into(), variant: None });
+        assert!(st.sessions.lock().unwrap().get(&sid_sw).unwrap().info["home"].is_object());
+        set_engine(&st, &sid_sw, "root", Some("glm-5.3")).expect("manual switch to root");
+        assert!(st.sessions.lock().unwrap().get(&sid_sw).unwrap().info.get("home").is_none(), "set_engine must clear stashed home");
+        restore_home(&st, &sid_sw);
+        assert_eq!(st.sessions.lock().unwrap().get(&sid_sw).unwrap().info["engine"], "root", "restore_home must not revert manual switch");
+
+        // 9. High (~92%) fallback serves immediately instead of waiting hours when home is Out
+        unsafe { std::env::set_var("YGG_FALLBACK_WAIT_MAX_MIN", "360") };
+        usage::set_for_test("claude", vec![usage::Window { label: "5-hour".into(), pct: 100, resets_at: Some(now_ms() + 7_200_000), model: None }]);
+        usage::mark_out("antigravity", Some(now_ms() + 7_200_000), "Individual quota reached. Resets in 2h.");
+        usage::set_for_test("root", vec![usage::Window { label: "5-hour".into(), pct: 92, resets_at: Some(now_ms() + 7_200_000), model: None }]);
+        let (res, info) = run_one(st.clone(), "Serve on high", "fix", None, "serve on high fallback").await;
+        assert_eq!(message_text(&res.expect("high fallback must serve instead of waiting hours")), "SERVED-BY-ROOT:glm-5.3");
+        assert_eq!(info["engine"], "claude");
+        clear_usage();
+
+        // 10. Child session (parentID set) pauses immediately instead of holding a run slot waiting
+        let child_id = new_id("ses");
+        {
+            let mut m = st.sessions.lock().unwrap();
+            m.insert(
+                child_id.clone(),
+                Session {
+                    info: json!({
+                        "id": child_id, "title": "Child worker", "parentID": "ses_parent_test", "agent": "only_agy",
+                        "engine": "claude", "model": { "id": "opus", "providerID": "claude" },
+                        "harness": { "kind": "claude" }
+                    }),
+                    messages: vec![make_message(&child_id, "user", vec![text_part("child task")])],
+                    inbox: vec![],
+                    todo: vec![],
+                },
+            );
+        }
+        let child_tid = st.sessions.lock().unwrap().get(&child_id).unwrap().messages[0]["info"]["id"].as_str().unwrap().to_string();
+        usage::set_for_test("claude", vec![usage::Window { label: "5-hour".into(), pct: 100, resets_at: Some(now_ms() + 3_600_000), model: None }]);
+        usage::mark_out("antigravity", Some(now_ms() + 3_600_000), "Individual quota reached. Resets in 1h.");
+        let (tx_c, _rx_c) = mpsc::channel(8);
+        let t0 = std::time::Instant::now();
+        let child_res = run_turn(&st, &child_id, &tx_c, 0, false, &child_tid).await;
+        assert!(t0.elapsed() < Duration::from_secs(5), "child session must pause immediately, not block waiting");
+        let child_err = child_res.expect_err("child must pause when all engines are out");
+        assert!(child_err.starts_with(PAUSED_PREFIX), "{child_err}");
         clear_usage();
 
         unsafe { std::env::remove_var("YGG_FALLBACK_WAIT_MAX_MIN") };

@@ -874,35 +874,86 @@ fn parse_http_date(s: &str) -> Option<u64> {
     (secs >= 0).then(|| secs as u64 * 1000)
 }
 
-/// Go-style durations as OpenAI sends them: `6m0s`, `1s`, `20ms`, `1h2m3.5s`, or bare seconds.
+/// Go-style and human durations: `6m0s`, `1s`, `20ms`, `1h2m3.5s`, `5 days`, `2h 15m`, or bare seconds.
 pub fn parse_duration_ms(s: &str) -> Option<u64> {
     let s = s.trim();
+    if s.is_empty() {
+        return None;
+    }
     if let Ok(secs) = s.parse::<f64>() {
-        return (secs >= 0.0).then(|| (secs * 1000.0) as u64);
+        return (secs.is_finite() && secs >= 0.0).then(|| (secs * 1000.0).min(u64::MAX as f64) as u64);
     }
     let (mut total, mut i, b) = (0f64, 0, s.as_bytes());
     let mut any = false;
     while i < b.len() {
+        while i < b.len() && b[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        if i >= b.len() {
+            break;
+        }
         let start = i;
         while i < b.len() && (b[i].is_ascii_digit() || b[i] == b'.') {
             i += 1;
         }
+        if start == i {
+            return None;
+        }
         let n: f64 = s[start..i].parse().ok()?;
+        if !n.is_finite() || n < 0.0 {
+            return None;
+        }
+        while i < b.len() && b[i].is_ascii_whitespace() {
+            i += 1;
+        }
         let ustart = i;
         while i < b.len() && b[i].is_ascii_alphabetic() {
             i += 1;
         }
-        let mult = match &s[ustart..i] {
-            "h" => 3_600_000.0,
-            "m" => 60_000.0,
-            "s" => 1000.0,
-            "ms" => 1.0,
+        let unit = s[ustart..i].to_ascii_lowercase();
+        let mult = match unit.as_str() {
+            "d" | "day" | "days" => 86_400_000.0,
+            "h" | "hr" | "hrs" | "hour" | "hours" => 3_600_000.0,
+            "m" | "min" | "mins" | "minute" | "minutes" => 60_000.0,
+            "s" | "sec" | "secs" | "second" | "seconds" => 1000.0,
+            "ms" | "msec" | "millisecond" | "milliseconds" => 1.0,
             _ => return None,
         };
         total += n * mult;
         any = true;
     }
-    any.then_some(total as u64)
+    (any && total.is_finite()).then(|| total.min(u64::MAX as f64) as u64)
+}
+
+/// Extracts a leading duration phrase from `s` (e.g. `"5 days."`, `"29m19s."`, `"2 hours 15 min, please"`).
+fn extract_duration_ms(s: &str) -> Option<u64> {
+    let s = s.trim_start();
+    // Collect alphanumeric + dot + spaces, stopping at non-duration punctuation like comma/paren/newline,
+    // and trim trailing sentence-ending dots or non-unit words by trying longest valid prefix of tokens.
+    let raw: String = s
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || *c == '.' || *c == ' ')
+        .collect();
+    let trimmed = raw.trim().trim_end_matches('.');
+    // If there are multiple whitespace-separated tokens, try shrinking from the right only if trailing
+    // words are English prose (e.g. "5 days from now" -> "5 days"), but NEVER drop a unit word to turn
+    // "5 unknown" into bare "5" seconds!
+    if let Some(ms) = parse_duration_ms(trimmed) {
+        return Some(ms);
+    }
+    let toks: Vec<&str> = trimmed.split_whitespace().collect();
+    for k in (1..toks.len()).rev() {
+        let cand = toks[..k].join(" ");
+        let cand = cand.trim_end_matches('.');
+        // Do not accept a bare number when followed by an unrecognized word (e.g. "5 apples").
+        if cand.parse::<f64>().is_ok() {
+            return None;
+        }
+        if let Some(ms) = parse_duration_ms(cand) {
+            return Some(ms);
+        }
+    }
+    None
 }
 
 /// A reset moment the provider wrote into its message: `reset at <datetime>` (z.ai) or
@@ -917,27 +968,25 @@ pub fn reset_from_message(msg: &str, offset_min: i32, now: u64) -> Option<u64> {
         }
     }
     if let Some(i) = lower.find("try again in ") {
-        let tail: String = msg[i + 13..].chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '.').collect();
-        if let Some(d) = parse_duration_ms(tail.trim_end_matches('.')) {
-            return Some(now + d);
+        if let Some(d) = extract_duration_ms(&msg[i + 13..]) {
+            return Some(now.saturating_add(d));
         }
     }
     None
 }
 
 /// When an engine's quota error says it is back, for ANY engine (harness or root): what
-/// `reset_from_message` reads, plus Antigravity's `Resets in 59m18s` / `Resets in 112h13m39s` and
-/// Claude Code's `resets 6:10pm (Europe/Paris)` / `resets 02:59` (the next such time of day in the
-/// root's zone). `None` when the message names no moment.
+/// `reset_from_message` reads, plus Antigravity's `Resets in 59m18s` / `Resets in 112h13m39s` /
+/// `Resets in 5 days` and Claude Code's `resets 6:10pm (Europe/Paris)` / `resets 02:59` (the next
+/// such time of day in the root's zone). `None` when the message names no moment.
 pub fn reset_hint(msg: &str, offset_min: i32, now: u64) -> Option<u64> {
     if let Some(t) = reset_from_message(msg, offset_min, now) {
         return Some(t);
     }
     let lower = msg.to_ascii_lowercase();
     if let Some(i) = lower.find("resets in ") {
-        let tail: String = lower[i + 10..].chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '.').collect();
-        if let Some(d) = parse_duration_ms(tail.trim_end_matches('.')) {
-            return Some(now + d);
+        if let Some(d) = extract_duration_ms(&lower[i + 10..]) {
+            return Some(now.saturating_add(d));
         }
     }
     if let Some(i) = lower.find("resets ") {
@@ -1012,7 +1061,7 @@ pub fn reset_from_headers(h: &reqwest::header::HeaderMap, now: u64) -> Option<u6
         take(get(k).and_then(|v| parse_datetime(v, 0)));
     }
     for k in ["x-ratelimit-reset-requests", "x-ratelimit-reset-tokens"] {
-        take(get(k).and_then(parse_duration_ms).map(|d| now + d));
+        take(get(k).and_then(parse_duration_ms).map(|d| now.saturating_add(d)));
     }
     best
 }
@@ -1827,6 +1876,17 @@ mod tests {
         let agy = "antigravity: Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 112h13m39s.";
         assert_eq!(reset_hint(agy, 0, now), Some(now + (112 * 3600 + 13 * 60 + 39) * 1000));
         assert_eq!(reset_hint("quota. Resets in 59m18s.", 0, now), Some(now + (59 * 60 + 18) * 1000));
+        assert_eq!(
+            reset_hint("antigravity: Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 29m19s.", 0, now),
+            Some(now + (29 * 60 + 19) * 1000)
+        );
+        // Human durations with spaces and days — must never parse "5 days" as 5 s
+        assert_eq!(reset_hint("quota reached. Resets in 5 days.", 0, now), Some(now + 5 * 86_400_000));
+        assert_eq!(reset_hint("Resets in 2 hours 15 minutes", 0, now), Some(now + (2 * 3600 + 15 * 60) * 1000));
+        assert_eq!(reset_hint("Please try again in 5 minutes.", 0, now), Some(now + 5 * 60_000));
+        assert_eq!(reset_hint("Resets in 5 epochs.", 0, now), None);
+        // Saturating addition never overflows
+        assert_eq!(reset_hint("Resets in 5 days.", 0, u64::MAX - 10), Some(u64::MAX));
         // Claude Code: the next such time of day, within the coming 24 h
         let cc = reset_hint("You've hit your 5-hour limit · resets 6:10pm (Europe/Paris)", 0, now).unwrap();
         assert!(cc > now && cc <= now + 86_400_000 + 1000, "{cc} vs {now}");
