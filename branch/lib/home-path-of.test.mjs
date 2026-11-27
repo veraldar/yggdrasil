@@ -1,9 +1,10 @@
 // unit tests for the pure home-path rule (lib/home-path-of.ts).
 // Run: node --test lib/home-path-of.test.mjs   (node ≥ 23.6 strips the .ts types itself)
 import assert from 'node:assert/strict';
+import { readdirSync } from 'node:fs';
 import { test } from 'node:test';
 
-const { ROOTS_PATH, homePathOf } = await import('./home-path-of.ts');
+const { ROOTS_PATH, RESERVED, homePathOf } = await import('./home-path-of.ts');
 
 test('no name → the bare / (the door, which forwards)', () => {
   assert.equal(homePathOf(), '/');
@@ -39,4 +40,21 @@ test('the name is URL-encoded', () => {
   assert.equal(homePathOf('a/b'), '/a%2Fb');
 });
 
-test('ROOTS_PATH', () => assert.equal(ROOTS_PATH, '/roots/'));
+test('ROOTS_PATH', () => assert.equal(ROOTS_PATH, '/roots'));
+
+test('RESERVED lists every top-level route and public file of the app, and the trunk\'s own paths', () => {
+  const here = new URL('..', import.meta.url);
+  const tops = new Set();
+  for (const e of readdirSync(new URL('app/', here), { withFileTypes: true })) {
+    if (e.name.startsWith('[') || e.name.startsWith('(') || e.name.startsWith('_')) continue; // dynamic / grouped / private
+    if (e.isDirectory()) tops.add(e.name);
+    else if (!/^(page|layout|loading|error|not-found|template|default|route|global-error)\.[jt]sx?$/.test(e.name)) tops.add(e.name);
+  }
+  for (const e of readdirSync(new URL('public/', here))) tops.add(e);
+  const missing = [...tops].filter((n) => !RESERVED.has(n.toLowerCase()));
+  assert.deepEqual(missing, [], 'add to RESERVED (lib/home-path-of.ts)');
+  for (const n of ['login', 'claim', 'add-root', 'offer', 'rtc', 'account', 'auth', 'audit', 'offline', 't', 'install']) {
+    assert.ok(RESERVED.has(n), n);
+    assert.equal(homePathOf(n), `/roots/${n}`);
+  }
+});

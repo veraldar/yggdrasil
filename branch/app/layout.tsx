@@ -41,7 +41,7 @@ export const viewport: Viewport = {
 // (2) html[data-door] says whether this device walked the door yet, so the
 // server-rendered tree paints at once on a first run and never flashes on a
 // returning one (styles/brand.css § door).
-const BOOT = `try{localStorage.removeItem('labmic');document.documentElement.dataset.door=localStorage.getItem('${DOOR_KEY}')?'done':'first';var d=document.documentElement.dataset.door;if(location.pathname==='/'&&d==='done')location.replace('/roots/'+location.search+location.hash);else if((location.pathname==='/roots'||location.pathname==='/roots/')&&d==='first')location.replace('/'+location.search+location.hash)}catch(e){document.documentElement.dataset.door='done'}`;
+const BOOT = `try{localStorage.removeItem('labmic');document.documentElement.dataset.door=localStorage.getItem('${DOOR_KEY}')?'done':'first';var d=document.documentElement.dataset.door;if(location.pathname==='/'&&d==='done')location.replace('/roots'+location.search+location.hash);else if((location.pathname==='/roots'||location.pathname==='/roots/')&&d==='first')location.replace('/'+location.search+location.hash)}catch(e){document.documentElement.dataset.door='done'}`;
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (

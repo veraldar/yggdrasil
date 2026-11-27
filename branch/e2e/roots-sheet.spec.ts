@@ -104,11 +104,12 @@ test('roots sheet → a computer\'s page: its settings, theme saved on lab, sess
       home?: { theme?: string };
       roots?: { id?: string; name?: string; theme?: string; theme_rev?: number }[];
     };
-    const homeWorld = tree.home?.theme ?? '';
     const labT = tree.roots?.find((x) => (x.id || x.name) === 'lab');
-    const labWorld = labT && (labT.theme_rev ?? 0) > 0 && labT.theme ? labT.theme : homeWorld;
-    expect(homeWorld).not.toBe('');
-    await expect(rows.nth(0)).toHaveAttribute('data-theme', homeWorld);
+    // the home row and an unpicked root wear the app's own world, not tree.home.theme
+    const appWorld = (await page.locator('html').getAttribute('data-theme')) ?? '';
+    expect(appWorld).not.toBe('');
+    await expect(rows.nth(0)).toHaveAttribute('data-theme', appWorld);
+    const labWorld = labT && (labT.theme_rev ?? 0) > 0 && labT.theme ? labT.theme : appWorld;
     await expect(rows.nth(0).getByTestId('root-swatch')).toHaveCount(0);
     await expect(rows.nth(0).getByTestId('root-state')).toHaveText('on');
     await expect(rows.nth(1)).toHaveAttribute('data-root', 'lab');
