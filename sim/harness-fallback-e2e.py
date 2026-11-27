@@ -138,7 +138,9 @@ def tool(calls):
 
 def text_of(msg):
     return "".join(
-        p.get("text") or "" for p in (msg or {}).get("parts") or [] if isinstance(p, dict) and p.get("type") == "text"
+        p.get("text") or ""
+        for p in (msg or {}).get("parts") or []
+        if isinstance(p, dict) and p.get("type") == "text" and not p.get("notice")  # the brain's own "↪ moved" line
     )
 
 
@@ -300,6 +302,9 @@ print(json.dumps({{"event": "result", "result": {{"conversation_id": "agy-conv-1
                 "YGG_USAGE_CLAUDE_URL": f"http://127.0.0.1:{usage_port}/api/oauth/usage",
                 "YGG_USAGE_ZAI_URL": f"http://127.0.0.1:{usage_port}/api/monitor/usage/quota/limit",
                 "YGG_USAGE_TTL_MS": "300",
+                # this sim checks the fail-fast shape (an owner's turn with every engine out says
+                # when, one line); the wait for the reset is sim/engine-fallback-smart-e2e.py's
+                "YGG_FALLBACK_WAIT_MAX_MIN": "0",
             }
         )
         env = dict(base_env, YGG_UPSTREAM_API_KEY="mock", YGG_LISTEN=f"127.0.0.1:{brain_port}", YGG_DATA_DIR=data_dir, YGG_ROOT_NAME="fb-sim")
@@ -364,9 +369,10 @@ print(json.dumps({{"event": "result", "result": {{"conversation_id": "agy-conv-1
         )
         check(
             "S1: the card says only who served (antigravity · gemini-4-neon-high); the chain stays in meta",
-            row.get("engine") == "antigravity"
-            and (info.get("model") or {}).get("id") == "gemini-4-neon-high"
+            row.get("engine") == "claude"  # the session keeps its HOME engine
+            and (info.get("model") or {}).get("id") == "opus"
             and (row.get("card") or {}).get("engine") == "antigravity"
+            and (row.get("card") or {}).get("model") == "gemini-4-neon-high"
             and not any(k.startswith("fallback") for k in (row.get("card") or {}))
             and fb.get("from") == "claude" and fb.get("to") == "antigravity"
             and (fb.get("chain") or [{}])[0].get("tools_done") == 2
@@ -389,7 +395,7 @@ print(json.dumps({{"event": "result", "result": {{"conversation_id": "agy-conv-1
         check(
             "S2: 0 tools + quota, no chain of its own -> root glm-5.3 with the one-line brief",
             code == 200 and "SERVED-BY-ROOT-GLM" in text_of(out) and len(lines_of(claude_log)) == c0 + 1
-            and s2.get("engine") == "root" and (s2.get("model") or {}).get("id") == "glm-5.3"
+            and s2.get("engine") == "claude" and ((s2.get("card") or {}).get("engine"), (s2.get("card") or {}).get("model")) == ("root", "glm-5.3")
             and meta_of(out).get("model") == "glm-5.3" and meta_of(out).get("engine") == "root"
             and tiny_brief in json.dumps(raw_ctx, ensure_ascii=False),
             {"code": code, "reply": text_of(out), "engine": s2.get("engine"), "meta": meta_of(out)},
@@ -402,7 +408,7 @@ print(json.dumps({{"event": "result", "result": {{"conversation_id": "agy-conv-1
         check(
             "S3: a cleared chain is automatic: Claude override -> the role's own engine (antigravity), briefed",
             code == 200 and "AGY-FALLBACK-OK" in text_of(out) and len(lines_of(agy_log)) == a0 + 1
-            and s3.get("engine") == "antigravity" and tiny_brief in agy_text(lines_of(agy_log)[-1]),
+            and s3.get("engine") == "claude" and (s3.get("card") or {}).get("engine") == "antigravity" and tiny_brief in agy_text(lines_of(agy_log)[-1]),
             {"code": code, "reply": text_of(out), "engine": s3.get("engine")},
         )
         reset_marks()
@@ -423,7 +429,7 @@ print(json.dumps({{"event": "result", "result": {{"conversation_id": "agy-conv-1
         sid, code, out, s5 = turn("P1 · home root on the trunk (integrator)", "lead", "QUOTA_BOUNCE merge tree-next")
         check(
             "S5: P1 integrator (lead) falls back on its chain (agy) — owner v10: only the coordinator is pinned",
-            code == 200 and "AGY-FALLBACK-OK" in text_of(out) and s5.get("engine") == "antigravity" and len(lines_of(agy_log)) == a0 + 1,
+            code == 200 and "AGY-FALLBACK-OK" in text_of(out) and s5.get("engine") == "claude" and len(lines_of(agy_log)) == a0 + 1,
             {"code": code, "reply": text_of(out), "engine": s5.get("engine")},
         )
         reset_marks()
@@ -476,7 +482,7 @@ print(json.dumps({{"event": "result", "result": {{"conversation_id": "agy-conv-1
         check(
             "S8: Claude at 95% -> the turn starts on agy (fix's entry 1); Claude is never started",
             code == 200 and "AGY-FALLBACK-OK" in text_of(out) and len(lines_of(claude_log)) == c0
-            and len(lines_of(agy_log)) == a0 + 1 and s8.get("engine") == "antigravity"
+            and len(lines_of(agy_log)) == a0 + 1 and s8.get("engine") == "claude"
             and "Previous harness claude is at its usage limit (95% of its 5-hour window used" in agy_in
             and (meta_of(out).get("fallback") or {}).get("reason", "").startswith("usage: 95%"),
             {"code": code, "reply": text_of(out), "claude": len(lines_of(claude_log)) - c0, "brief": agy_in[-300:], "meta": meta_of(out)},
@@ -516,7 +522,7 @@ print(json.dumps({{"event": "result", "result": {{"conversation_id": "agy-conv-1
         agy_in = agy_text((lines_of(agy_log) or [None])[-1])
         check(
             "S10a: research on the root, root used up (1310) -> agy (research's chain ①) at once, briefed",
-            code == 200 and "AGY-FALLBACK-OK" in text_of(out) and r10i.get("engine") == "antigravity"
+            code == 200 and "AGY-FALLBACK-OK" in text_of(out) and r10i.get("engine") == "root" and (r10i.get("card") or {}).get("engine") == "antigravity"
             and key_calls() == k0 + 1 and len(lines_of(agy_log)) == a0 + 1
             and "Previous harness root hit a hard quota before doing any work" in agy_in and time.time() - t0 < 15,
             {"code": code, "reply": text_of(out), "engine": r10i.get("engine"), "secs": round(time.time() - t0, 1), "brief": agy_in[-300:]},

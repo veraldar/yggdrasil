@@ -1254,6 +1254,36 @@ fn notice_of(ev: &Value, m: &Value) -> Value {
     })
 }
 
+/// Engine fallback (smarter, 11-26): ONE plain line from `sid` to its managing parent — an engine
+/// move ("claude out until 02:59 — continuing on antigravity/gemini…") or a pause until a reset.
+/// Filed in the parent's inbox as a `notice` event; `wake` = it is worth a turn of the parent's
+/// own (a pause, once), a move only waits for the parent's next turn. `false` = no local parent.
+pub fn note_parent(st: &AppState, sid: &str, line: &str, wake: bool) -> bool {
+    let Some(Target::Local(parent)) = report_target(st, sid, None) else { return false };
+    let title = st.sessions.lock().unwrap().get(sid).map(title_of).unwrap_or_default();
+    let ev = json!({
+        "id": new_id("evt"), "at": now_ms(), "from": sid, "title": title, "profile": "engine",
+        "status": "working", "headline": line, "summary": line, "needs": "",
+        "relevance": if wake { "worth_knowing" } else { "routine" },
+        "body": line, "delivered": false, "notice": true,
+    });
+    if wake {
+        deliver(st, &parent, ev);
+        return true;
+    }
+    let filed = with_session(st, &parent, |s| {
+        s.inbox.push(ev.clone());
+        if s.inbox.len() > INBOX_CAP {
+            let drop = s.inbox.len() - INBOX_CAP;
+            s.inbox.drain(..drop);
+        }
+    });
+    if filed.is_some() {
+        publish(st, "inbox.updated", json!({ "sessionID": parent, "event": ev }));
+    }
+    filed.is_some()
+}
+
 /// Files an event in `parent`'s inbox and wakes it per its profile.
 pub fn deliver(st: &AppState, parent: &str, ev: Value) {
     let filed = with_session(st, parent, |s| {

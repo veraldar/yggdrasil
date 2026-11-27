@@ -769,13 +769,19 @@ fn text_part(text: &str) -> Value {
     json!({ "type": "text", "text": text })
 }
 
+/// A line the brain says about the turn itself (an engine move, a wait): shown in the chat like
+/// text, never read back as what the session said (digests, quiet check, model history).
+fn notice_part(text: &str) -> Value {
+    json!({ "type": "text", "text": text, "notice": true })
+}
+
 fn message_text(msg: &Value) -> String {
     msg["parts"]
         .as_array()
         .map(|parts| {
             parts
                 .iter()
-                .filter(|p| p["type"] == "text")
+                .filter(|p| p["type"] == "text" && p["notice"] != true)
                 .filter_map(|p| p["text"].as_str())
                 .collect::<Vec<_>>()
                 .join("\n")
@@ -2977,6 +2983,8 @@ fn submit(st: &AppState, id: &str, turn: Turn) -> Result<Submitted, Response> {
             (None, None) => vec![],
         };
         let forced = from_peer;
+        // a session paused until an engine resets: its manager hears it once, not every wake
+        let targets = if pause_already_told(&st, &id, &result) { Vec::new() } else { targets };
         match (!targets.is_empty()).then_some(targets) {
             Some(targets) => tree::on_turn_end_to(&st, &id, targets, forced, result),
             None => {
@@ -3520,7 +3528,7 @@ impl Run {
         let now = now_ms();
         let mut has_text = false;
         for p in self.msg["parts"].as_array_mut().unwrap() {
-            has_text |= p["type"] == "text";
+            has_text |= p["type"] == "text" && p["notice"] != true;
             if p["type"] == "tool" && p["state"]["status"] == "running" {
                 p["state"]["status"] = json!("error");
                 p["state"]["error"] = json!(interrupted);
@@ -3884,8 +3892,9 @@ fn spawn_discovery(st: &AppState) {
 enum Walk {
     /// take this entry; the entries passed over on the way, each with why
     Take(Target, Vec<Value>),
-    /// every untried entry is out or nearly: one line saying so (+ each one's why)
-    AllOut(String, Vec<Value>),
+    /// every untried entry is out or nearly: one line saying so (+ each one's why, + the earliest
+    /// reset any of them names)
+    AllOut(String, Vec<Value>, Option<u64>),
     /// no chain (`"none"`, nothing automatic, every entry tried)
     Nothing,
 }
@@ -3895,6 +3904,7 @@ enum Walk {
 fn walk_chain(st: &AppState, prof: &profiles::Profile, from: &Target, tried: &[Target]) -> Walk {
     let mut skipped = Vec::new();
     let mut said = Vec::new();
+    let mut earliest: Option<u64> = None;
     for t in effective_chain(st, prof, from) {
         if tried.contains(&t) {
             continue;
@@ -3903,6 +3913,7 @@ fn walk_chain(st: &AppState, prof: &profiles::Profile, from: &Target, tried: &[T
         if a.clears() {
             return Walk::Take(t, skipped);
         }
+        earliest = earliest_of(earliest, a.resets_at());
         said.push(format!("{} ({})", t.show(), a.say()));
         skipped.push(json!({ "entry": t.show(), "skipped": a.say() }));
     }
@@ -3910,8 +3921,120 @@ fn walk_chain(st: &AppState, prof: &profiles::Profile, from: &Target, tried: &[T
         return Walk::Nothing;
     }
     // Q5: usage is read again before every turn — the session goes on by itself once one resets
-    Walk::AllOut(format!("no fallback clears: {} — the next turn checks again", said.join("; ")), skipped)
+    Walk::AllOut(format!("no fallback clears: {} — the next turn checks again", said.join("; ")), skipped, earliest)
 }
+
+fn earliest_of(a: Option<u64>, b: Option<u64>) -> Option<u64> {
+    match (a, b) {
+        (Some(x), Some(y)) => Some(x.min(y)),
+        (x, None) => x,
+        (None, y) => y,
+    }
+}
+
+/// The earliest moment any engine of the role's list — home first — is back, among those that do
+/// not clear now (`None`: no reset time known for any of them).
+fn earliest_reset(st: &AppState, prof: &profiles::Profile, home: &Target) -> Option<u64> {
+    let mut all = vec![home.clone()];
+    all.extend(effective_chain(st, prof, home));
+    all.iter().map(|t| target_avail(st, t)).filter(|a| !a.clears()).fold(None, |e, a| earliest_of(e, a.resets_at()))
+}
+
+/// How long an owner's turn may wait for an engine to come back (`YGG_FALLBACK_WAIT_MAX_MIN`,
+/// default 6 h; 0 = never wait, fail the turn with the reset time instead).
+fn fallback_wait_cap_ms() -> u64 {
+    std::env::var("YGG_FALLBACK_WAIT_MAX_MIN").ok().and_then(|v| v.trim().parse::<u64>().ok()).unwrap_or(360) * 60_000
+}
+
+/// A session keeps its HOME engine (the one it was started on, or the user picked): a fallback
+/// moves only the turn. While a turn runs on another engine the home one is parked in
+/// `info.home`; `restore_home` puts it back when the turn ends (and first thing in the next
+/// turn, should a restart have cut this one) — so every turn starts from the top of the list.
+fn stash_home(st: &AppState, id: &str) {
+    with_session(st, id, |s| {
+        if !s.info["home"].is_object() {
+            s.info["home"] = json!({ "engine": s.info["engine"].clone(), "model": s.info["model"].clone(), "harness": s.info["harness"].clone() });
+        }
+    });
+}
+
+fn restore_home(st: &AppState, id: &str) {
+    let back = with_session(st, id, |s| {
+        let home = s.info["home"].clone();
+        if !home.is_object() {
+            return None;
+        }
+        let o = s.info.as_object_mut()?;
+        o.remove("home");
+        for k in ["engine", "model", "harness"] {
+            if home[k].is_null() {
+                o.remove(k);
+            } else {
+                o.insert(k.into(), home[k].clone());
+            }
+        }
+        Some(s.info.clone())
+    })
+    .flatten();
+    if let Some(info) = back {
+        publish(st, "session.updated", json!({ "info": info }));
+    }
+}
+
+/// The one plain line for a move: who is out (until when) and who takes the turn.
+fn move_line(from: &Target, to: &Target, resets: Option<u64>) -> String {
+    let at = resets.map(|t| format!(" until {}", usage::short_time(t))).unwrap_or_default();
+    format!("↪ {} is out{at} — this turn continues on {}", from.show(), to.show())
+}
+
+/// All engines are out. An owner's turn waits for the earliest reset (the run stays alive, the
+/// app sees it busy), then the caller starts again from the top of the list; a turn nobody is
+/// watching (a wake, a heartbeat) pauses the session until then and ends at once; with no reset
+/// time known, or one beyond the cap, the turn fails and says when.
+async fn wait_for_reset(st: &AppState, id: &str, auto: bool, line: &str, resets: Option<u64>, waits: &mut u32, run: &mut Run) -> Result<(), String> {
+    let now = now_ms();
+    let Some(t) = resets.filter(|t| *t > now) else { return Err(line.to_string()) };
+    let when = usage::short_time(t);
+    if auto {
+        with_session(st, id, |s| {
+            if s.info["paused"]["until"].as_u64() != Some(t) {
+                s.info["paused"] = json!({ "until": t, "told": false });
+            }
+        });
+        return Err(format!("{PAUSED_PREFIX} {when} — {line}"));
+    }
+    // (a reset that keeps being wrong ends the turn after three waits)
+    if t - now > fallback_wait_cap_ms() || *waits >= 3 {
+        return Err(format!("{line} — the earliest comes back at {when}"));
+    }
+    *waits += 1;
+    eprintln!("FALLBACK-WAIT session={id} until={when}");
+    let note = format!("↪ every engine is out — waiting until {when}, then this turn goes on");
+    run.push_part(notice_part(&note));
+    replace_message(st, id, &run.msg);
+    tree::note_parent(st, id, &note, false);
+    while now_ms() < t {
+        publish(st, "session.status", json!({ "sessionID": id, "status": { "type": "busy" } }));
+        tokio::time::sleep(Duration::from_millis((t - now_ms()).clamp(50, 60_000))).await;
+    }
+    Ok(())
+}
+
+/// A paused session's turn ended by `wait_for_reset`: its manager is told ONCE per pause.
+fn pause_already_told(st: &AppState, id: &str, result: &Result<Value, String>) -> bool {
+    let Err(e) = result else { return false };
+    if !e.starts_with(PAUSED_PREFIX) {
+        return false;
+    }
+    with_session(st, id, |s| {
+        let told = s.info["paused"]["told"] == true;
+        s.info["paused"]["told"] = json!(true);
+        told
+    })
+    .unwrap_or(false)
+}
+
+const PAUSED_PREFIX: &str = "paused until";
 
 /// Switches `id` onto `to` so the retry (and subsequent turns) run there.
 fn apply_fallback(st: &AppState, id: &str, prof: &profiles::Profile, to: &Target) -> Option<Value> {
@@ -4142,25 +4265,27 @@ async fn run_turn(st: &AppState, id: &str, tx: &mpsc::Sender<Event>, queue_ms: u
     };
     // the session's own engine (roles rework): a terminal's conversation on its harness, else the
     // engine stamped on the session, else its role's default
+    // a turn a restart cut on another engine left the session there: it goes home first
+    restore_home(st, id);
     let info = st.sessions.lock().unwrap().get(id).map(|s| s.info.clone()).unwrap_or(Value::Null);
     let prof = profile_of(st, &info);
-    // harness chains (v10): the usage check before the turn, then — when an engine runs out, even
-    // mid-work — the role's chain, one try per entry, at most 3 hops; only the coordinator (and a
-    // pinned role / session, a terminal's conversation) never moves
+    // harness chains (v10, smarter 11-26): every turn starts from the top of the role's list —
+    // the session's HOME engine, then its chain — and takes the first one not known to be out
+    // (usage numbers, a quota error seen until its reset); the home engine is never rewritten,
+    // only the engine that ran the turn is recorded. Even mid-work an engine that runs out hands
+    // over (3 hops at most); when everything is out an owner's turn waits for the earliest reset
+    // and starts again from the top. Only the coordinator (and a pinned role / session, a
+    // terminal's conversation) never moves.
     let pinned = is_pinned_for_fallback(&info, &prof);
     let first = current_target(st, id, &info);
-    let mut served_engine: Option<harness::Kind> = first.engine;
+    let served_engine: Mutex<Option<harness::Kind>> = Mutex::new(first.engine);
     let mut fallback_used: Option<FallbackPlan> = None;
     let mut fb_steps: Vec<Value> = Vec::new();
     let outcome = {
         let fut = async {
-            let mut cur = first.clone();
-            let mut tried = vec![cur.clone()];
-            let mut note: Option<String> = None;
-            let mut hops = 0usize;
-            let mut first_why = "quota";
-            // moves the turn onto `to`: the session's engine, the step on record, the streamed
-            // error text gone (steps already done stay — they happened)
+            // moves the turn onto `to`: the home engine parked, the step on record, the streamed
+            // error text gone (steps already done stay — they happened), one line to the owner
+            // and the manager
             let mut take_over = |run: &mut Run, cur: &Target, to: &Target, reason: String, skipped: Vec<Value>, steps: &mut Vec<Value>| {
                 eprintln!(
                     "FALLBACK session={id} role={} from={} to={} tools_done={} reason={}",
@@ -4170,18 +4295,25 @@ async fn run_turn(st: &AppState, id: &str, tx: &mpsc::Sender<Event>, queue_ms: u
                     run.tool_count(),
                     reason.chars().take(160).collect::<String>()
                 );
+                stash_home(st, id);
                 apply_fallback(st, id, &prof, to);
                 run.text.clear();
                 if run.tool_count() == 0 {
-                    run.msg["parts"] = json!([]);
+                    // (the lines about earlier moves of this turn stay)
+                    run.msg["parts"].as_array_mut().unwrap().retain(|p| p["notice"] == true);
                 }
                 run.first_delta_ms = None;
                 run.first_token_seen = false;
                 run.retries += 1;
+                let line = move_line(cur, to, target_avail(st, cur).resets_at());
+                if !auto_class {
+                    run.push_part(notice_part(&line));
+                }
+                tree::note_parent(st, id, &line, false);
                 replace_message(st, id, &run.msg);
                 steps.extend(skipped);
                 steps.push(json!({ "from": cur.show(), "to": to.show(), "reason": reason, "tools_done": run.tool_count() }));
-                served_engine = to.engine;
+                *served_engine.lock().unwrap() = to.engine;
                 let plan = fallback_used.get_or_insert_with(|| FallbackPlan {
                     from_engine: cur.engine,
                     from_model: cur.model.clone(),
@@ -4192,79 +4324,116 @@ async fn run_turn(st: &AppState, id: &str, tx: &mpsc::Sender<Event>, queue_ms: u
                 plan.to_engine = to.engine;
                 plan.to_model = to.model.clone();
             };
-            if !pinned {
-                let a = target_avail(st, &cur);
-                if !a.clears() {
-                    match walk_chain(st, &prof, &cur, &tried) {
+            let mut waits = 0u32;
+            'top: loop {
+                // (a second round after a wait starts on the home engine again)
+                *served_engine.lock().unwrap() = first.engine;
+                run.text.clear();
+                run.first_delta_ms = None;
+                run.first_token_seen = false;
+                let mut cur = first.clone();
+                let mut tried = vec![cur.clone()];
+                let mut note: Option<String> = None;
+                let mut hops = 0usize;
+                let mut first_why = "quota";
+                if !pinned {
+                    let a = target_avail(st, &cur);
+                    if !a.clears() {
+                        match walk_chain(st, &prof, &cur, &tried) {
+                            Walk::Take(to, skipped) => {
+                                first_why = "usage";
+                                take_over(&mut run, &cur, &to, format!("usage: {}", a.say()), skipped, &mut fb_steps);
+                                note = Some(fallback_takeover_note(cur.engine, Why::Usage(&a), &done_state(&run.msg)));
+                                tried.push(to.clone());
+                                cur = to;
+                                hops += 1;
+                            }
+                            // out for sure and nothing else clears: no doomed run — the turn
+                            // waits for the earliest reset (or pauses, or says when)
+                            Walk::AllOut(line, _, resets) if a.out() => {
+                                let line = format!("{}: {} — {line}", cur.show(), a.say());
+                                wait_for_reset(st, id, auto_class, &line, earliest_of(resets, a.resets_at()), &mut waits, &mut run).await?;
+                                restore_home(st, id);
+                                continue 'top;
+                            }
+                            // nearly used up and nothing better: it runs where it is — it may finish
+                            _ => {}
+                        }
+                    }
+                }
+                loop {
+                    let before = run.tool_count();
+                    let r = match cur.engine {
+                        Some(kind) => {
+                            let mut prompt = harness_prompt(&history, turn_id, auto_class);
+                            if hops > 0 {
+                                // a new conversation on this harness: it gets the session's so far
+                                prompt = format!("{}{prompt}", takeover_transcript(&history, turn_id));
+                            }
+                            harness_loop(st, id, prompt, tx, &mut run, kind, note.as_deref()).await
+                        }
+                        None => agent_loop(st, id, history.clone(), tx, &mut run, note.as_deref()).await,
+                    };
+                    let e = match r {
+                        Ok(()) => {
+                            usage::mark_ok(&usage_key(&cur));
+                            return Ok(());
+                        }
+                        Err(e) => e,
+                    };
+                    let quota = harness::is_quota_error(&e);
+                    if quota {
+                        // the reset the engine itself names: z.ai ("reset at 2026-11-24 23:44:03",
+                        // Beijing time), Antigravity ("Resets in 112h13m39s"), Claude Code
+                        // ("resets 6:10pm") — an engine with no hint is skipped for a short while
+                        let off = if cur.engine.is_none() { root_reset_offset(st) } else { 0 };
+                        let until = provider::reset_hint(&e, off, provider::now_ms());
+                        usage::mark_out(&usage_key(&cur), until, e.lines().next().unwrap_or_default());
+                    }
+                    let decorate = |e: String, cur: &Target| {
+                        if hops == 0 { e } else { format!("{e} (fallback {} after {} {first_why})", cur.show(), engine_word(first.engine)) }
+                    };
+                    // a quota error moves on (mid-work too); a fallback that could not even start
+                    // (no step of its own) gives the next entry its try
+                    let failed_to_start = hops > 0 && run.tool_count() == before;
+                    if pinned || hops >= profiles::FALLBACK_CAP || !(quota || failed_to_start) {
+                        return Err(decorate(e, &cur));
+                    }
+                    match walk_chain(st, &prof, &first, &tried) {
                         Walk::Take(to, skipped) => {
-                            first_why = "usage";
-                            take_over(&mut run, &cur, &to, format!("usage: {}", a.say()), skipped, &mut fb_steps);
-                            note = Some(fallback_takeover_note(cur.engine, Why::Usage(&a), &done_state(&run.msg)));
+                            let why = if quota { Why::Quota } else { Why::Failed(&e) };
+                            let done = done_state(&run.msg);
+                            let reason = format!("{}: {}", if quota { "quota" } else { "error" }, e.lines().next().unwrap_or_default());
+                            take_over(&mut run, &cur, &to, reason, skipped, &mut fb_steps);
+                            note = Some(fallback_takeover_note(cur.engine, why, &done));
                             tried.push(to.clone());
                             cur = to;
                             hops += 1;
                         }
-                        // out for sure and nothing else clears: one line, no doomed run (the
-                        // next turn reads the numbers again)
-                        Walk::AllOut(line, _) if a.out() => {
-                            return Err(format!("{}: {} — {line}", cur.show(), a.say()));
+                        Walk::AllOut(line, skipped, _) => {
+                            fb_steps.extend(skipped);
+                            let line = format!("{} — {line}", decorate(e, &cur));
+                            if !quota {
+                                return Err(line);
+                            }
+                            // every engine of the list is out: wait for the earliest reset, then
+                            // the whole list again from its top (the home engine first)
+                            wait_for_reset(st, id, auto_class, &line, earliest_reset(st, &prof, &first), &mut waits, &mut run).await?;
+                            restore_home(st, id);
+                            continue 'top;
                         }
-                        // nearly used up and nothing better: it runs where it is — it may finish
-                        _ => {}
-                    }
-                }
-            }
-            loop {
-                let before = run.tool_count();
-                let r = match cur.engine {
-                    Some(kind) => {
-                        let mut prompt = harness_prompt(&history, turn_id, auto_class);
-                        if hops > 0 {
-                            // a new conversation on this harness: it gets the session's so far
-                            prompt = format!("{}{prompt}", takeover_transcript(&history, turn_id));
+                        Walk::Nothing => {
+                            // the list is spent (one entry, or all tried): a quota error that
+                            // names a reset waits for it like any "all out"
+                            let line = decorate(e, &cur);
+                            if !quota || tried.len() < 2 {
+                                return Err(line);
+                            }
+                            wait_for_reset(st, id, auto_class, &line, earliest_reset(st, &prof, &first), &mut waits, &mut run).await?;
+                            restore_home(st, id);
+                            continue 'top;
                         }
-                        harness_loop(st, id, prompt, tx, &mut run, kind, note.as_deref()).await
                     }
-                    None => agent_loop(st, id, history.clone(), tx, &mut run, note.as_deref()).await,
-                };
-                let e = match r {
-                    Ok(()) => {
-                        usage::mark_ok(&usage_key(&cur));
-                        return Ok(());
-                    }
-                    Err(e) => e,
-                };
-                let quota = harness::is_quota_error(&e);
-                if quota {
-                    // z.ai prints when its window resets ("reset at 2026-11-24 23:44:03", Beijing time)
-                    let until = cur.engine.is_none().then(|| provider::reset_from_message(&e, root_reset_offset(st), provider::now_ms())).flatten();
-                    usage::mark_out(&usage_key(&cur), until, e.lines().next().unwrap_or_default());
-                }
-                let decorate = |e: String, cur: &Target| {
-                    if hops == 0 { e } else { format!("{e} (fallback {} after {} {first_why})", cur.show(), engine_word(first.engine)) }
-                };
-                // a quota error moves on (mid-work too); a fallback that could not even start
-                // (no step of its own) gives the next entry its try
-                let failed_to_start = hops > 0 && run.tool_count() == before;
-                if pinned || hops >= profiles::FALLBACK_CAP || !(quota || failed_to_start) {
-                    return Err(decorate(e, &cur));
-                }
-                match walk_chain(st, &prof, &cur, &tried) {
-                    Walk::Take(to, skipped) => {
-                        let why = if quota { Why::Quota } else { Why::Failed(&e) };
-                        let done = done_state(&run.msg);
-                        let reason = format!("{}: {}", if quota { "quota" } else { "error" }, e.lines().next().unwrap_or_default());
-                        take_over(&mut run, &cur, &to, reason, skipped, &mut fb_steps);
-                        note = Some(fallback_takeover_note(cur.engine, why, &done));
-                        tried.push(to.clone());
-                        cur = to;
-                        hops += 1;
-                    }
-                    Walk::AllOut(line, skipped) => {
-                        fb_steps.extend(skipped);
-                        return Err(format!("{} — {line}", decorate(e, &cur)));
-                    }
-                    Walk::Nothing => return Err(decorate(e, &cur)),
                 }
             }
         };
@@ -4280,6 +4449,7 @@ async fn run_turn(st: &AppState, id: &str, tx: &mpsc::Sender<Event>, queue_ms: u
             running.remove(id);
         }
     }
+    let served_engine = *served_engine.lock().unwrap();
     let served_name = engine_word(served_engine);
     let served_model = match served_engine {
         None => run.served.clone().unwrap_or_else(|| session_upstream(st, id).0),
@@ -4291,6 +4461,15 @@ async fn run_turn(st: &AppState, id: &str, tx: &mpsc::Sender<Event>, queue_ms: u
             .and_then(|s| s.info["model"]["id"].as_str().map(String::from))
             .unwrap_or_else(|| "default".into()),
     };
+    // the session keeps its home engine whichever engine ran this turn (done, failed or cut)
+    restore_home(st, id);
+    if matches!(outcome, Some(Ok(()))) {
+        with_session(st, id, |s| {
+            if let Some(o) = s.info.as_object_mut() {
+                o.remove("paused");
+            }
+        });
+    }
     let result = match outcome {
         Some(Ok(())) => {
             if let Some(ms) = run.first_delta_ms {
@@ -7889,7 +8068,7 @@ mod fallback_tests {
         assert!(skipped[0]["skipped"].as_str().unwrap().contains("hit its limit"), "{skipped:?}");
         // root at 92% of its 5-hour window: skipped too -> everything out, one line
         usage::set_for_test("root", vec![usage::Window { label: "5-hour".into(), pct: 92, resets_at: None, model: None }]);
-        let Walk::AllOut(line, skipped) = walk_chain(&st, &get("fix"), &from, &[from.clone()]) else { panic!("all out") };
+        let Walk::AllOut(line, skipped, _) = walk_chain(&st, &get("fix"), &from, &[from.clone()]) else { panic!("all out") };
         assert!(line.contains("no fallback clears") && line.contains("92% of its 5-hour window") && line.contains("next turn checks again"), "{line}");
         assert_eq!(skipped.len(), 2);
         // 89% clears again
@@ -7899,7 +8078,8 @@ mod fallback_tests {
         assert_eq!(walk_chain(&st, &get("fix"), &from, &[from.clone(), t(None, "glm-5.3")]), Walk::AllOut(
             "no fallback clears: antigravity/gemini-4-neon-high (hit its limit (RESOURCE_EXHAUSTED: quota exceeded), resets ".to_string()
                 + &usage::short_time(usage::out_until("antigravity").unwrap().0) + ") — the next turn checks again",
-            vec![json!({"entry": "antigravity/gemini-4-neon-high", "skipped": usage::judge(None, usage::out_until("antigravity"), None).say()})]
+            vec![json!({"entry": "antigravity/gemini-4-neon-high", "skipped": usage::judge(None, usage::out_until("antigravity"), None).say()})],
+            Some(usage::out_until("antigravity").unwrap().0)
         ));
         // claude/sonnet shares Claude's plan: a Claude quota error rules it out with opus
         usage::mark_ok("antigravity");
@@ -7907,7 +8087,7 @@ mod fallback_tests {
         let lead_from = t(claude, "opus");
         // (its agy entry names no model: agy's default, "default" here)
         let tried = [lead_from.clone(), t(agy, "default"), t(None, "glm-5.3")];
-        assert!(matches!(walk_chain(&st, &get("lead"), &lead_from, &tried), Walk::AllOut(ref l, _) if l.contains("claude/sonnet (hit its limit")));
+        assert!(matches!(walk_chain(&st, &get("lead"), &lead_from, &tried), Walk::AllOut(ref l, _, _) if l.contains("claude/sonnet (hit its limit")));
         // but a week scoped to Fable leaves sonnet free (proactive check, numbers only)
         usage::mark_ok("claude");
         usage::set_for_test("claude", vec![
@@ -7982,6 +8162,89 @@ mod fallback_tests {
         let tr = takeover_transcript(&hist, "m3");
         assert!(tr.contains("USER: fix the login\n\nASSISTANT ran Bash: pytest\n\nASSISTANT: 2 tests fail\n</earlier_conversation>"), "{tr}");
         assert_eq!(takeover_transcript(&hist[..1], "m1"), "", "a first message has nothing earlier");
+    }
+
+    /// The proposal's walk, 4 engines: every try starts from the top of the role's list and takes
+    /// the first engine not known to be out; one that resets is taken again; all out = the
+    /// earliest reset says when.
+    #[test]
+    fn every_try_starts_from_the_top_of_the_list() {
+        let _g = harness::TEST_PATH_LOCK.blocking_lock();
+        clear_usage();
+        let (dir, ps) = agents(
+            "top",
+            r#"{"agent":{"four":{"harness":"claude","model":"opus","fallback":["agy/gemini-4-neon-high","root/glm-5.3","opencode"]}}}"#,
+        );
+        let (st, sdir) = fb_app("http://127.0.0.1:1".into(), ps, vec!["glm-5.3-flash".into(), "glm-5.3".into()]);
+        let prof = st.config.profiles.read().unwrap().get("four").cloned().unwrap();
+        let home = t(Some(harness::Kind::Claude), "opus");
+        let (agy, root, oc) = (t(Some(harness::Kind::Antigravity), "gemini-4-neon-high"), t(None, "glm-5.3"), t(Some(harness::Kind::Opencode), "default"));
+        // what a turn does first: the home engine if it clears, else the walk
+        let pick = || -> Result<Target, Option<u64>> {
+            if target_avail(&st, &home).clears() {
+                return Ok(home.clone());
+            }
+            match walk_chain(&st, &prof, &home, &[home.clone()]) {
+                Walk::Take(t, _) => Ok(t),
+                Walk::AllOut(_, _, earliest) => Err(earliest_of(earliest, target_avail(&st, &home).resets_at())),
+                Walk::Nothing => Err(None),
+            }
+        };
+        let in_min = |m: u64| Some(now_ms() + m * 60_000);
+        assert_eq!(pick(), Ok(home.clone()), "nothing out: the home engine");
+        usage::mark_out("claude", in_min(300), "hit your limit");
+        assert_eq!(pick(), Ok(agy.clone()), "1 out: engine 2");
+        usage::mark_out("antigravity", in_min(100), "quota");
+        assert_eq!(pick(), Ok(root.clone()), "2 out: looks at 1 again, still out, so 3");
+        usage::mark_ok("claude");
+        assert_eq!(pick(), Ok(home.clone()), "1 reset meanwhile: back on 1, never stays lower");
+        usage::mark_out("claude", in_min(300), "hit your limit");
+        usage::mark_ok("antigravity");
+        assert_eq!(pick(), Ok(agy.clone()), "1 out again, 2 reset: 2");
+        usage::mark_out("antigravity", in_min(100), "quota");
+        usage::mark_out("root", in_min(200), "429");
+        usage::mark_out("opencode", in_min(250), "quota");
+        let Err(Some(at)) = pick() else { panic!("all out") };
+        let want = usage::out_until("antigravity").unwrap().0;
+        assert_eq!(at, want, "all out: wait for the EARLIEST reset (agy, 100 min), not the first or last");
+        // a window that has reset since it was read is not full any more
+        clear_usage();
+        usage::set_for_test("claude", vec![usage::Window { label: "5-hour".into(), pct: 96, resets_at: Some(now_ms() - 1000), model: None }]);
+        assert_eq!(pick(), Ok(home.clone()), "the 90% read before its reset no longer counts");
+        usage::set_for_test("claude", vec![usage::Window { label: "5-hour".into(), pct: 96, resets_at: Some(now_ms() + 3_600_000), model: None }]);
+        assert_eq!(pick(), Ok(agy.clone()));
+        clear_usage();
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&sdir);
+    }
+
+    /// A session keeps its home engine: parked while another engine runs a turn, put back after
+    /// (and by the next turn's start when a restart cut that turn).
+    #[test]
+    fn the_home_engine_is_parked_and_comes_back() {
+        let (dir, ps) = agents("home", r#"{"agent":{"fix":{"harness":"claude","model":"opus"}}}"#);
+        let (st, sdir) = fb_app("http://127.0.0.1:1".into(), ps, vec!["glm-5.3".into()]);
+        let prof = st.config.profiles.read().unwrap().get("fix").cloned().unwrap();
+        let mut s = Session { info: json!({ "id": "ses_h", "engine": "claude", "model": {"id": "opus", "providerID": "claude"}, "harness": {"kind": "claude", "id": "cc-conv-9"} }), messages: Vec::new(), todo: Vec::new(), inbox: Vec::new() };
+        s.info["agent"] = json!("fix");
+        st.sessions.lock().unwrap().insert("ses_h".into(), s);
+        stash_home(&st, "ses_h");
+        apply_fallback(&st, "ses_h", &prof, &t(None, "glm-5.3"));
+        let mid = st.sessions.lock().unwrap().get("ses_h").unwrap().info.clone();
+        assert_eq!(mid["engine"], "root");
+        assert!(mid.get("harness").is_none() && mid["home"]["harness"]["id"] == "cc-conv-9");
+        // a second hop in the same turn does not park the fallback engine as home
+        stash_home(&st, "ses_h");
+        assert_eq!(st.sessions.lock().unwrap().get("ses_h").unwrap().info["home"]["engine"], "claude");
+        restore_home(&st, "ses_h");
+        let back = st.sessions.lock().unwrap().get("ses_h").unwrap().info.clone();
+        assert_eq!(back["engine"], "claude");
+        assert_eq!(back["model"]["id"], "opus");
+        assert_eq!(back["harness"]["id"], "cc-conv-9", "Claude's own conversation is resumed");
+        assert!(back.get("home").is_none());
+        restore_home(&st, "ses_h"); // nothing parked: no change
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&sdir);
     }
 
     /// End-to-end `run_turn` with fake `claude` + fake `agy` binaries and an in-process root upstream.
@@ -8096,6 +8359,9 @@ echo '{{"event":"result","result":{{"conversation_id":"agy-conv-1","status":"SUC
         }
         // SAFETY: serialized by harness::TEST_PATH_LOCK
         unsafe { std::env::set_var("PATH", format!("{}:{}", bin_dir.display(), orig_path)) };
+        // wait cap 0 = a turn with every engine out says when instead of waiting for the reset
+        // (the wait has its own test)
+        unsafe { std::env::set_var("YGG_FALLBACK_WAIT_MAX_MIN", "0") };
 
         let agents_file = tmp.join("agents.json");
         std::fs::write(
@@ -8147,9 +8413,15 @@ echo '{{"event":"result","result":{{"conversation_id":"agy-conv-1","status":"SUC
         );
         assert!(brief.contains("- Bash: pytest -q\n- Edit: src/app.py"), "{brief}");
         assert_eq!((hits(&claude_hits), hits(&agy_hits)), (1, 1), "Claude once, agy once");
-        assert_eq!(info["engine"], "antigravity");
+        // the session keeps its HOME engine; the card says who ran the turn
+        assert_eq!(info["engine"], "claude");
+        assert!(info.get("home").is_none(), "home parked only while a turn runs elsewhere");
         assert_eq!(info["card"]["engine"], "antigravity");
         assert!(info["card"].get("fallback_from").is_none(), "no fallback label on the card");
+        // one plain line on the reply for the owner, never read back as the session's own words
+        let notice: Vec<&str> = msg["parts"].as_array().unwrap().iter().filter(|p| p["notice"] == true).map(|p| p["text"].as_str().unwrap()).collect();
+        assert_eq!(notice.len(), 1, "{notice:?}");
+        assert!(notice[0].starts_with("↪ claude/opus is out") && notice[0].ends_with("continues on antigravity/gemini-4-neon-high"), "{notice:?}");
         let fb = &msg["info"]["meta"]["fallback"];
         assert_eq!((fb["from"].as_str(), fb["to"].as_str()), (Some("claude"), Some("antigravity")));
         assert_eq!(fb["chain"][0]["tools_done"], 2);
@@ -8162,7 +8434,7 @@ echo '{{"event":"result","result":{{"conversation_id":"agy-conv-1","status":"SUC
         let (res, info) = run_one(st.clone(), "Fix again", "fix", None, "MIDWORK_QUOTA AGY_QUOTA fix it").await;
         let msg = res.expect("the walk goes on to entry 2");
         assert_eq!(message_text(&msg), "SERVED-BY-ROOT:glm-5.3");
-        assert_eq!(info["engine"], "root");
+        assert_eq!((info["engine"].as_str(), info["card"]["engine"].as_str()), (Some("claude"), Some("root")));
         assert_eq!(msg["info"]["meta"]["fallback"]["chain"].as_array().unwrap().len(), 2);
         let sys = seen_systems.lock().unwrap().last().cloned().unwrap();
         assert!(sys.contains("Previous harness antigravity hit a hard quota mid-work (steps done: 2 tool calls"), "{sys}");
@@ -8172,7 +8444,8 @@ echo '{{"event":"result","result":{{"conversation_id":"agy-conv-1","status":"SUC
         let (res, info) = run_one(st.clone(), "Fix auth", "fixer", None, "QUOTA_BOUNCE please fix").await;
         let msg = res.expect("fallback to root must succeed");
         assert_eq!(message_text(&msg), "SERVED-BY-ROOT:glm-5.3");
-        assert_eq!((info["engine"].as_str(), info["model"]["id"].as_str()), (Some("root"), Some("glm-5.3")));
+        assert_eq!((info["engine"].as_str(), info["model"]["id"].as_str()), (Some("claude"), Some("opus")), "home engine kept");
+        assert_eq!((info["card"]["engine"].as_str(), info["card"]["model"].as_str()), (Some("root"), Some("glm-5.3")));
         assert!(seen_systems.lock().unwrap().last().unwrap().contains(&fallback_takeover_note(Some(harness::Kind::Claude), Why::Quota, &(0, vec![], vec![]))));
         clear_usage();
 
@@ -8199,7 +8472,7 @@ echo '{{"event":"result","result":{{"conversation_id":"agy-conv-1","status":"SUC
         let (res, info) = run_one(st.clone(), "Fix early", "fix", None, "please fix early").await;
         assert_eq!(message_text(&res.expect("switches before the turn")), "AGY-TOOK-OVER");
         assert_eq!(hits(&claude_hits), c0, "Claude at 95% is not even started");
-        assert_eq!(info["engine"], "antigravity");
+        assert_eq!(info["engine"], "claude");
         assert!(last_agy_in().contains("Previous harness claude is at its usage limit (95% of its 5-hour window used)"), "{}", last_agy_in());
         clear_usage();
 
@@ -8216,6 +8489,7 @@ echo '{{"event":"result","result":{{"conversation_id":"agy-conv-1","status":"SUC
         assert_eq!(info["engine"], "claude", "nothing moved");
         clear_usage();
 
+        unsafe { std::env::remove_var("YGG_FALLBACK_WAIT_MAX_MIN") };
         unsafe { std::env::set_var("PATH", orig_path) };
         srv.abort();
         let _ = std::fs::remove_dir_all(&tmp);
