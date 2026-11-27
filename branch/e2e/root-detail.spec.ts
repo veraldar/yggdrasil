@@ -66,7 +66,8 @@ test('a computer\'s page on sim twin at 360px: page, artifacts, settings, per-ro
     await expect(page.getByTestId('roots-sheet')).toBeVisible();
     const homeRow = page.locator(`[data-testid="root-row"][data-root="${home}"]`);
     await expect(homeRow).toBeVisible();
-    await expect(homeRow.getByTestId('root-swatch')).toBeVisible();
+    // the roots page is plain white: no swatch, each row wears its own root's world (roots-page.spec)
+    await expect(homeRow.getByTestId('root-swatch')).toHaveCount(0);
     await expect(homeRow.getByTestId('root-state')).toHaveText('on');
     await shot(page, '1-roots-sheet');
 
@@ -380,13 +381,13 @@ test.describe('same design as the home screen at 360px', () => {
       );
     };
     const homeKeys = await keyBoxes();
+    const homeBg = await bgOf('main'); // the home screen's, before the roots page replaces it
     await page.getByTestId('roots-key').click();
     const row = page.locator('[data-testid="root-row"][data-root="debian-box"]');
     await expect(row).toBeVisible();
     await expect(page.locator('html')).toHaveAttribute('data-theme', 'utopia');
-    // its swatch shows no world of its own (none picked)
-    expect(await row.getByTestId('root-swatch').getAttribute('data-theme')).toBeNull();
-    const homeBg = await bgOf('main');
+    // its row shows no world of its own (none picked): the app's
+    await expect(row).toHaveAttribute('data-theme', 'utopia');
     await shot(page, '7-home-utopia');
 
     // its page: the app's world, the home screen's parts

@@ -1,6 +1,6 @@
 import { appendFileSync, mkdirSync } from 'node:fs';
 import { type Page, expect, test } from '@playwright/test';
-import { gotoHome } from './home';
+import { gotoHome, homePath } from './home';
 
 /** UX-SPACING (10-27): the chrome holds still. One header height on every
  *  page; the session footer (dock + phase line) reserves the same box in every
@@ -110,7 +110,7 @@ async function finger(page: Page) {
 test('the header is one height on every page', async ({ page }) => {
   const sess = await newSession(page, `e2e-spacing-h-${Date.now().toString(36)}`);
   const pages: [string, string][] = [
-    ['home', '/'],
+    ['home', await homePath(page.request)],
     ['session', sess],
     ['main', '/session/main'],
     ['settings', '/settings'],
@@ -264,9 +264,10 @@ for (const width of [412, 430, 1280]) {
   test(`widths: ${width}px keeps the same chrome`, async ({ page }) => {
     await page.setViewportSize({ width, height: width > 500 ? 800 : 915 });
     const sess = await newSession(page, `e2e-spacing-w-${Date.now().toString(36)}`);
+    const homeAt = await homePath(page.request);
     const got: Record<string, Chrome> = {};
     for (const [where, url] of [
-      ['home', '/'],
+      ['home', homeAt],
       ['session', sess],
     ] as const) {
       await page.goto(url);
