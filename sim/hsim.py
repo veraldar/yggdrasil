@@ -399,13 +399,20 @@ def main():
                 f"SESSION TREE\n" + "\n".join(tree_lines) +
                 f"\n\nDETERMINISTIC CHECKS\n" + "\n".join(f"- {'PASS' if c['ok'] else 'FAIL'} {c['name']}: {c['detail'][:300]}" for c in checks) +
                 f"\n\nTHE PERSON'S OWN VERDICT: {json.dumps(verdict) if verdict else 'none (ran out of time/turns)'}")
-    try:
-        jt, jc = claude(JUDGE_SYSTEM, judge_in, JUDGE_MODEL, timeout=300)
-        costs += jc
-        judgement = jobj(jt)
-    except Exception as e:  # noqa: BLE001
-        log(f"judge failed: {e}")
-        judgement = {"pass": False, "summary": f"judge failed: {e}", "scores": {}}
+    judgement = None
+    last_err = None
+    for attempt in range(3):
+        try:
+            jt, jc = claude(JUDGE_SYSTEM, judge_in, JUDGE_MODEL, timeout=300)
+            costs += jc
+            judgement = jobj(jt)
+            break
+        except Exception as e:  # noqa: BLE001
+            last_err = e
+            log(f"judge attempt {attempt + 1}/3 failed: {e}")
+    if judgement is None:
+        log(f"judge failed: {last_err}")
+        judgement = {"pass": False, "summary": f"judge failed: {last_err}", "scores": {}}
     checks_ok = all(c["ok"] for c in checks)
     persona_ok = bool(verdict and verdict.get("satisfied"))
     passed = bool(judgement.get("pass")) and checks_ok and persona_ok
