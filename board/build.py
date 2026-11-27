@@ -48,7 +48,7 @@ for x in json.load(open(os.path.join(here, "approvals.json"))):
     elif stt == "approved": line.append("not landed yet")
     lk = f'<div class="d"><a href="/api/artifact/{e(x["link"])}">{e(x["link"])}</a></div>' if x.get("link") else ""
     ls = f' · session {e(live.get(x["sid"], "?"))}' if live is not None and x.get("sid") else ""
-    nt = (f'<div class="n">{e(x["note"])}</div>' if x.get("note") else "") + (f'<div class="n">▶ {e(x["action"])}</div>' if x.get("action") and x["state"] == "pending" else "")
+    nt = (f'<div class="ans">owner: {e(x["answer"])}</div>' if x.get("answer") else "") + (f'<div class="n">{e(x["note"])}</div>' if x.get("note") else "") + (f'<div class="n">▶ {e(x["action"])}</div>' if x.get("action") and x["state"] == "pending" else "")
     pend = "pending" if stt == "pending" else "ok"
     (lcards if x.get("group") == "lead" else acards).append(f'<div class="c ap {pend}"><div class="t"><span class="k">{e(x["code"])}</span><span class="w">asked {e(x["asked"])}</span></div>'
                   f'<div class="q">{e(x["ask"])}</div><div class="o">{e(x["who"])} ({e(x["role"])}){ls}</div>'
@@ -70,7 +70,7 @@ h1{{font-size:16px;margin:0 0 2px}} .s{{color:#5a6a48;font-size:12px;margin-bott
 .blocked .k{{color:#c0392b}} .stalled .k{{color:#b9770e}} .running .k{{color:#2e86c1}} .done .k{{color:#2e8b57}} .w{{color:#6b7a58}}
 .q{{font-weight:700;margin:2px 0}} .o{{font-size:12px;color:#4a5a38}} .n{{font-size:12px;color:#8a3a10}} .d{{font-size:12px;margin-top:2px;overflow-wrap:break-word}}
 h2{{font-size:14px;margin:14px 0 4px}} .c.ap{{border-left-color:#2e8b57}} .c.ap.pending{{border-left-color:#c0392b;background:#fff8e6}}
-.ap.pending .k{{color:#c0392b;font-weight:700}} .st{{font-size:12px;font-weight:700;margin-top:4px}}
+.ap.pending .k{{color:#c0392b;font-weight:700}} .ans{{font-size:12px;font-weight:700;color:#1d6a3f;margin-top:2px}} .st{{font-size:12px;font-weight:700;margin-top:4px}}
 code{{background:#e3ebcd;padding:0 3px;border-radius:3px}} a{{color:#1d5a8c}}
 </style></head><body><h1>Requests</h1><div class="s">snapshot {now} · {npend} to approve · {e(summ)}<br>refresh: ask MAIN “refresh the requests board”, then reload</div>
 {approvals}<h2>## requests</h2>{"".join(cards)}</body></html>'''

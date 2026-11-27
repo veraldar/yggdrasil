@@ -39,18 +39,21 @@
   "sid": "4f5704",
   "asked": "11-26 21:30",
   "unblocks": "final trunk v1 steps + VPS switchover.",
-  "state": "pending"
+  "state": "approved",
+  "at": "11-27 08:55",
+  "answer": "yes"
  },
  {
   "code": "A5",
   "ask": "Switchover time (spec §14 Q3): moving `ap.veraldar.org` to the v1 trunk cuts it for about 5 seconds, plus a planned window of under 10 minutes. What time should it happen?",
-  "action": "reply with a time, e.g. 'A5 14:00'",
   "who": "New trunk build lead",
   "role": "lead",
   "sid": "4f5704",
   "asked": "11-26 21:30",
   "unblocks": "final trunk v1 steps + VPS switchover.",
-  "state": "pending"
+  "state": "approved",
+  "at": "11-27 08:55",
+  "answer": "as soon as possible, ~5s downtime accepted"
  },
  {
   "code": "A6",
@@ -60,7 +63,9 @@
   "sid": "4f5704",
   "asked": "11-26 21:30",
   "unblocks": "final trunk v1 steps + VPS switchover.",
-  "state": "pending"
+  "state": "approved",
+  "at": "11-27 08:55",
+  "answer": "yes"
  },
  {
   "code": "A7",
@@ -70,7 +75,9 @@
   "sid": "4f5704",
   "asked": "11-26 21:30",
   "unblocks": "final trunk v1 steps + VPS switchover.",
-  "state": "pending"
+  "state": "approved",
+  "at": "11-27 08:55",
+  "answer": "yes"
  },
  {
   "code": "A8",
@@ -81,6 +88,8 @@
   "sid": "4f5704",
   "asked": "11-26 21:30",
   "unblocks": "final trunk v1 steps + VPS switchover.",
-  "state": "pending"
+  "state": "approved",
+  "at": "11-27 08:55",
+  "answer": "Google sign-in at launch if possible — client id + secret to be handed over later; buttons hidden if not ready in time"
  }
 ]
