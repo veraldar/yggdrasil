@@ -1,0 +1,40 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 300" width="1200" height="300" role="img" aria-label="yggdrasil — your own AI. it grows like a tree.">
+  <defs>
+    <clipPath id="card-clip"><rect x="1" y="1" width="1198" height="298" rx="12"/></clipPath>
+    <linearGradient id="tree-fade" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#080810" stop-opacity="1"/>
+      <stop offset="40%" stop-color="#080810" stop-opacity="0.72"/>
+      <stop offset="100%" stop-color="#080810" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+
+  <g clip-path="url(#card-clip)">
+    <rect width="1200" height="300" fill="#080810"/>
+
+    <!-- Circuit-tree artwork on the right -->
+    <g transform="translate(650, -8) scale(0.41)" fill="#4ade80" opacity="0.88">
+      <path d="M195 0 296 102 296 178 358 242 488 243 528 284 527 305 355 305 373 325 545 325 650 431 650 489 508 344 345 344 228 222 199 222 335 364 498 364 568 435 512 436 429 520 323 520 243 600 272 600 332 540 438 540 521 456 588 456 651 520 651 641 525 767 555 767 650 672 651 703 587 767 617 767 672 712 671 423 549 299 548 275 497 223 369 223 335 188 544 187 594 237 594 308 671 386 671 313 714 270 714 154 777 92 777 0 756 0 756 83 693 146 694 260 671 283 670 96 714 52 714 0 693 0 693 44 671 65 670 20 650 0 621 0 650 30 649 176 556 81 556 0 535 0 534 70 462 0 432 0 472 41 409 41 368 0 338 0 400 62 495 62 516 82 419 83 438 103 548 104 567 123 461 124 481 145 589 145 650 207 649 335 615 299 615 229 554 167 422 167 354 99 353 64 289 0 259 0 333 74 333 108 391 165 390 167 318 167 317 93 225 0Z"/><path d="M1407 58 1284 183 1213 183 1066 344 900 344 737 510 737 711 792 767 821 767 758 703 759 673 852 767 882 767 758 642 758 518 819 456 887 457 969 540 1076 540 1136 600 1164 600 1106 542 1107 540 1139 540 1181 582 1407 582 1407 562 1191 562 1148 520 978 520 895 436 840 435 909 364 1047 365 1009 407 905 407 886 427 1075 427 1209 281 1321 281 1341 261 1199 261 1065 407 1039 407 1044 399 1187 242 1407 242 1407 222 1206 221 1223 203 1294 203 1407 88Z"/><path d="M1211 0 1181 0 1065 117 1065 196 1033 229 905 229 860 275 860 329 825 366 816 366 816 236 865 187 963 187 1025 124 1026 159 975 210 1003 211 1047 166 1047 102 1148 0 1118 0 953 167 855 167 794 229 794 359 737 417 737 473 814 386 834 386 894 325 1034 325 1053 305 882 306 881 284 915 249 1042 249 1085 205 1086 125Z"/><path d="M1069 0 1040 0 999 41 936 41 975 0 946 0 874 70 873 0 852 0 853 80 737 198 737 320 693 364 694 767 714 767 714 373 758 329 758 207 819 145 878 145 918 104 968 104 990 83 910 83 869 124 840 123 875 88 886 88 912 62 1007 62Z"/><path d="M0 582 226 582 306 501 423 501 443 481 208 481 155 422 155 453 198 501 216 502 199 520 0 520 0 540 208 540 246 501 276 502 217 562 0 562Z"/><path d="M1407 303 1257 303 1115 449 932 449 952 469 1187 469 1267 387 1238 387 1177 449 1146 448 1267 323 1407 323Z"/><path d="M1277 0 1247 0 1108 141 1109 170 1156 122 1158 126 1157 160 1054 272 930 273 912 293 1063 293 1177 169 1178 100Z"/><path d="M0 303 0 323 176 323 278 427 524 427 505 407 287 407 186 303Z"/><path d="M1407 540 1407 520 1209 520 1192 503 1215 502 1246 470 1246 441 1206 482 965 482 985 502 1161 502 1199 540Z"/><path d="M128 0 253 126 253 193 255 199 338 285 489 286 470 265 348 265 275 190 274 118 157 0Z"/><path d="M0 197 0 217 135 217 178 260 116 261 136 281 199 282 302 386 331 386 145 197Z"/><path d="M80 344 100 364 154 364 156 387 228 469 454 469 474 449 237 449 176 378 176 362 159 344Z"/><path d="M1250 364 1313 364 1332 344 1269 344Z"/>
+    </g>
+    <!-- Soft blend on the left edge of the tree so text stays razor-sharp -->
+    <rect x="635" y="0" width="145" height="300" fill="url(#tree-fade)"/>
+
+    <!-- Brand mark (the triangle mark) + wordmark -->
+    <g transform="translate(56, 46)">
+      <circle cx="22" cy="22" r="22" fill="#000000" stroke="#2b324a" stroke-width="1.5"/>
+      <path d="M22 10.5 32.6 29.2H11.4z" fill="#ffffff"/>
+      <text x="58" y="29" font-family="ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,'Liberation Mono',monospace" font-size="24" font-weight="600" letter-spacing="-0.3" fill="#eef0f8">yggdrasil</text>
+    </g>
+
+    <!-- Main headline -->
+    <text x="56" y="152" font-family="ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,'Liberation Mono',monospace" font-size="38" font-weight="600" letter-spacing="-0.8" fill="#eef0f8">your own ai.</text>
+    <text x="56" y="200" font-family="ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,'Liberation Mono',monospace" font-size="38" font-weight="600" letter-spacing="-0.8" fill="#eef0f8">it grows like a tree.</text>
+
+    <!-- Subline -->
+    <text x="56" y="244" font-family="ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,'Liberation Mono',monospace" font-size="15.5" fill="#8d94ae">your phone · one private line · all your computers · by voice</text>
+
+    <!-- Subtle bottom accent hairline -->
+    <rect x="56" y="297" width="1088" height="3" fill="#4ade80" opacity="0.18"/>
+  </g>
+
+  <rect x="0.75" y="0.75" width="1198.5" height="298.5" rx="12" fill="none" stroke="#20263b" stroke-width="1.5"/>
+</svg>
