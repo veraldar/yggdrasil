@@ -22,7 +22,7 @@ other computers ─────────┘  (they dial out too, and join you
   carries everything. Port 80 is only for Let's Encrypt, which checks that the name is yours.
 - **Your home computer** with yggdrasil installed, or about to be (`root/install/README.md`).
 
-Every file comes from a **release** of github.com/veraldar/yggdrasil (this guide: `v0.9.1`; the newest
+Every file comes from a **release** of github.com/veraldar/yggdrasil (this guide: `v0.9.2`; the newest
 is on the releases page). The scripts check what they download before they run any of it: the release's
 list of checksums must be signed by the yggdrasil release key, which is written into each script, and
 every file must match that list. A changed or foreign release is refused, and nothing is installed.
@@ -32,7 +32,7 @@ every file must match that list. A changed or foreign release is refused, and no
 **1. On the server: install the trunk.**
 
 ```sh
-curl -fsSLO https://github.com/veraldar/yggdrasil/releases/download/v0.9.1/trunk.sh
+curl -fsSLO https://github.com/veraldar/yggdrasil/releases/download/v0.9.2/trunk.sh
 sudo bash trunk.sh --name trunk.example.org
 ```
 
@@ -51,8 +51,8 @@ working.
 Want to check the download yourself first? The release key is in the repository (`allowed_signers`):
 
 ```sh
-curl -fsSLO https://github.com/veraldar/yggdrasil/releases/download/v0.9.1/SHA256SUMS
-curl -fsSLO https://github.com/veraldar/yggdrasil/releases/download/v0.9.1/SHA256SUMS.sig
+curl -fsSLO https://github.com/veraldar/yggdrasil/releases/download/v0.9.2/SHA256SUMS
+curl -fsSLO https://github.com/veraldar/yggdrasil/releases/download/v0.9.2/SHA256SUMS.sig
 echo 'release@yggdrasil namespaces="yggdrasil-release" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIJyKwTSmRf3Cy1cHpzKHl3teRvCQtgK8/dcFRvlNCDJg' >allowed_signers
 ssh-keygen -Y verify -f allowed_signers -I release@yggdrasil -n yggdrasil-release -s SHA256SUMS.sig <SHA256SUMS
 sha256sum --ignore-missing -c SHA256SUMS
@@ -63,7 +63,7 @@ Running a website on that server already? See [A website on the same server](#a-
 **2. At home: connect to your trunk.**
 
 ```sh
-curl -fsSLO https://github.com/veraldar/yggdrasil/releases/download/v0.9.1/install.sh
+curl -fsSLO https://github.com/veraldar/yggdrasil/releases/download/v0.9.2/install.sh
 bash install.sh --trunk
 ```
 
@@ -87,7 +87,7 @@ too (see [Voice through the trunk](#voice-through-the-trunk)).
 **4. More computers: join them.** On each one (Linux; Windows is untested in this release):
 
 ```sh
-curl -fsSLO https://github.com/veraldar/yggdrasil/releases/download/v0.9.1/join.sh
+curl -fsSLO https://github.com/veraldar/yggdrasil/releases/download/v0.9.2/join.sh
 bash join.sh --hub https://trunk.example.org
 ```
 

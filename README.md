@@ -63,14 +63,14 @@ veraldar/              the world: all your trees                        → vera
 
 ## Quick start
 
-Each machine runs one script from a signed release (`v0.9.1`). No Docker, no compilers, no account with us. Secrets (your model key and connect line) are pasted interactively and never typed on a command line.
+Each machine runs one script from a signed release (`v0.9.2`). No Docker, no compilers, no account with us. Secrets (your model key and connect line) are pasted interactively and never typed on a command line.
 
 1. **Set up your private trunk** *(optional — needed for remote access and phone voice)*
 
    On a small Linux VPS (1 CPU / 512 MB, Debian 11+ or Ubuntu 20.04+, ports 80 and 443 open, DNS pointed at it):
 
    ```bash
-   curl -fsSLO https://github.com/veraldar/yggdrasil/releases/download/v0.9.1/trunk.sh
+   curl -fsSLO https://github.com/veraldar/yggdrasil/releases/download/v0.9.2/trunk.sh
    sudo bash trunk.sh --name trunk.example.org
    ```
 
@@ -79,7 +79,7 @@ Each machine runs one script from a signed release (`v0.9.1`). No Docker, no com
 2. **Install on your home computer** *(Linux `x86_64`, Debian 11+ / Ubuntu 20.04+ / Arch, no `sudo` needed)*
 
    ```bash
-   curl -fsSLO https://github.com/veraldar/yggdrasil/releases/download/v0.9.1/install.sh
+   curl -fsSLO https://github.com/veraldar/yggdrasil/releases/download/v0.9.2/install.sh
    bash install.sh --trunk
    ```
 
@@ -98,11 +98,11 @@ Each machine runs one script from a signed release (`v0.9.1`). No Docker, no com
    On another **Linux** machine or **Apple-silicon Mac** (prebuilt signed binaries):
 
    ```bash
-   curl -fsSLO https://github.com/veraldar/yggdrasil/releases/download/v0.9.1/join.sh
+   curl -fsSLO https://github.com/veraldar/yggdrasil/releases/download/v0.9.2/join.sh
    bash join.sh --hub https://trunk.example.org
    ```
 
-   On **Windows 10/11 (beta)**: download [`Veraldar-Setup-0.9.1.exe`](https://github.com/veraldar/yggdrasil/releases/download/v0.9.1/Veraldar-Setup-0.9.1.exe) from the [v0.9.1 release](https://github.com/veraldar/yggdrasil/releases/tag/v0.9.1) — sets up WSL2 if needed, joins your trunk, and shows a code to approve on your phone.
+   On **Windows 10/11 (beta)**: download [`Veraldar-Setup-0.9.2.exe`](https://github.com/veraldar/yggdrasil/releases/download/v0.9.2/Veraldar-Setup-0.9.2.exe) from the [v0.9.2 release](https://github.com/veraldar/yggdrasil/releases/tag/v0.9.2) — sets up WSL2 if needed, joins your trunk, and shows a code to approve on your phone.
 
    Pick **Same as the home root** to share your home model config over the encrypted WireGuard link, or choose a separate provider. `--uninstall` cleanly reverses any step.
 

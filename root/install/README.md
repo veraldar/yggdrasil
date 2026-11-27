@@ -8,7 +8,7 @@ have. You talk to it from your phone over your own Wi-Fi, or from anywhere throu
 ## One command
 
 ```sh
-curl -fsSLO https://github.com/veraldar/yggdrasil/releases/download/v0.9.1/install.sh
+curl -fsSLO https://github.com/veraldar/yggdrasil/releases/download/v0.9.2/install.sh
 bash install.sh
 ```
 
@@ -24,7 +24,7 @@ or `--upstream-env FILE` with lines like `YGG_UPSTREAM_BASE_URL=https://api.open
 `YGG_UPSTREAM_API_KEY=…`, `YGG_UPSTREAM_MODEL=gpt-4o-mini` (and `YGG_UPSTREAM_STYLE=anthropic` for an
 Anthropic-shaped API).
 
-**What it downloads, and how it checks it.** `install.sh` belongs to one release (here `v0.9.1`).
+**What it downloads, and how it checks it.** `install.sh` belongs to one release (here `v0.9.2`).
 It fetches that release's list of checksums (`SHA256SUMS`) and its signature, and checks the
 signature against the yggdrasil release key written into the script itself (`ssh-keygen -Y verify`).
 Then it downloads the release archive and checks it against the list. Anything that does not match
@@ -193,7 +193,7 @@ to the hub's public access point (`wss://<hub>/rootlink`). It needs no open port
 and no certificate, and the phone doesn't have to be on the same Wi-Fi. No sudo.
 
 ```sh
-curl -fsSLO https://github.com/veraldar/yggdrasil/releases/download/v0.9.1/join.sh
+curl -fsSLO https://github.com/veraldar/yggdrasil/releases/download/v0.9.2/join.sh
 bash join.sh --hub https://tree.example.org
 ```
 
