@@ -1,108 +1,128 @@
-# yggdrasil — your personal AI tree
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="./docs/readme/hero-dark.svg">
+    <img alt="yggdrasil — your own AI. it grows like a tree. your phone, one private line, all your computers, by voice." src="./docs/readme/hero-light.svg" width="100%">
+  </picture>
+</p>
 
-Run your own AI assistant at home, reach it from your phone anywhere, and keep your files, models, and conversations on hardware you control.
+<p align="center">
+  <a href="#quick-start">Quick start</a> ·
+  <a href="https://github.com/veraldar/yggdrasil/releases">Releases</a> ·
+  <a href="./SECURITY.md">Security</a> ·
+  <a href="#documentation">Docs</a> ·
+  <a href="https://veraldar.org">veraldar.org</a>
+</p>
 
-```
-veraldar/              all your trees                         → veraldar.org
-└─ yggdrasil/          the tree: your computers working for you (this repository)
+<p align="center">
+  <a href="https://github.com/veraldar/yggdrasil/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/veraldar/yggdrasil?label=release&color=111111"></a>
+  <a href="./LICENSE"><img alt="AGPL-3.0 license" src="https://img.shields.io/badge/license-AGPL--3.0-111111"></a>
+  <img alt="Linux, macOS, Windows (beta)" src="https://img.shields.io/badge/platforms-Linux%20%7C%20macOS%20%7C%20Windows%20(beta)-111111">
+  <img alt="Built in Switzerland" src="https://img.shields.io/badge/built%20in-Switzerland-111111">
+</p>
+
+**yggdrasil** is a personal AI that lives on the machines you own — all of them, whatever they are — and comes with you on your phone. Talk or type from anywhere through one private line you control: your computers do the work on your real files and real programs, and answer out loud. Nothing in the middle can read your messages, files, or voice. You own all of it.
+
+<p align="center">
+  <img alt="Three real screens from Bifrost: talking to your home computer with a spoken reply, listing every connected computer on the tree (home, studio, workshop), and sending a PDF to receive an inline HTML summary." src="./docs/readme/app-showcase.png" width="100%">
+  <br>
+  <sub>Real screens from Bifrost — voice, every computer in one list, and files both ways. <a href="https://veraldar.org/#films">Watch the 80-second film with sound on veraldar.org.</a></sub>
+</p>
+
+## One tree across every machine you own
+
+Not an app in someone else's cloud — one tree that spreads across the computers you own. Every computer you add becomes another **root**, one small server you rent is the **trunk** that carries encrypted bytes without holding a key, and **Bifrost** on your phone is the **branch** in your hand. Your computers dial out to the trunk, so nothing at home ever opens an inbound port.
+
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="./docs/readme/tree-dark.svg">
+    <img alt="Architecture schematic: branches (phone chat, web app, voice) connect through a safe trunk (one small server carrying scrambled bytes, reviewed by latest models) to roots (your Linux, Mac, and Windows computers)." src="./docs/readme/tree-light.svg" width="100%">
+  </picture>
+</p>
+
+```text
+$ tree veraldar
+veraldar/              the world: all your trees                        → veraldar.org
+└─ yggdrasil/          the tree: your computers, working for you        (this repository)
    ├─ root/            the brain on each computer (Rust binary `yggdrasil`)
-   │  ├─ extensions/   optional plugins outside the core (such as `librarian` memory)
+   │  ├─ extensions/   isolated plugins outside the core (such as `librarian` memory)
    │  └─ install/      home and multi-machine installers (`install.sh`, `join.sh`)
-   ├─ trunk/           your private line (Rust binary `bifrost-net`)
-   └─ branch/          bifrost, the phone app (Next.js PWA) + `branch/voice/` agent
+   ├─ trunk/           your private line: small server you rent (`bifrost-net`)
+   └─ branch/          bifrost, the phone app (Next.js PWA) + local voice worker
 ```
 
-In plain words: **root** thinks and runs tools on your home computer, **branch** (`bifrost`) is the app in your hand that lets you type or talk to it, and **trunk** (`bifrost-net`) is a tiny relay you run on a rented server so your phone and extra computers can find home without opening ports on your home router or needing a third-party VPN.
+## What yggdrasil gives you
 
-## How the pieces fit
+- **Private by architecture, not by promise.** Your files, model keys, and speech stay on your machines. After scanning a pairing QR code, phone-to-home data rides a DTLS-pinned WebRTC channel straight to your home computer, and computer-to-computer calls travel inside userspace WireGuard (`boringtun` + `smoltcp`) — the trunk only forwards scrambled bytes it cannot read.
+- **By voice, from anywhere.** Hold to speak or go hands-free. Speech recognition and text-to-speech run locally on your own hardware (CPU via `sherpa-onnx`, or MLX on a Mac on your LAN), with barge-in echo filtering and spoken playback controls (`stop`, `pause`, `faster`, `slower`).
+- **One conversation, work across every computer.** Talk or type to `MAIN`; it answers quick questions directly, starts role-scoped child sessions (`build`, `fix`, `research`, `review`, `marketer`, `lead`) on any computer in your tree, and reports back when work finishes or needs a decision.
+- **Your model subscriptions — or models at home.** Works with the AI subscriptions and APIs you already pay for (OpenAI, Anthropic, OpenRouter, Z.ai, and coding tools such as Claude Code, Antigravity, OpenCode, and Codex) — or point it at Ollama, `llama.cpp`, or vLLM at home so nothing leaves your network at all.
+- **Terminal sessions, both ways.** Watch active terminal conversations from your phone, send input into `tmux` or background runs (including answering prompts), or continue a closed terminal session through the brain with single-writer safety.
+- **Files both ways & searchable memory.** Attach PDFs, images, or files from your phone, open generated HTML previews right in the app, and search across all your sessions with the isolated `librarian` SQLite FTS5 extension.
+- **Signed releases & instant revocation.** Every installer verifies the release's signed `SHA256SUMS` against [RELEASE-KEY.pub](./RELEASE-KEY.pub) before running anything. Revoke a lost phone — or every device at once — from `/devices` or the terminal in about a second.
+- **Built to be shaped — skins and extensions.** Eight themes, editable roles, and process-isolated extensions (`root/extensions/`) ship today. Full **skins** (swapping the whole face — a library, a character, a game world) and community **extensions** are next, not shipped yet.
 
-```
-Phone (branch: bifrost PWA)
-  │
-  │  WebRTC data channel (QR-pinned DTLS) + LiveKit ICE-TCP voice
-  ▼  all over TCP 443 through your rented VPS
-VPS (trunk: bifrost-net ap)  ── only relays bytes it cannot read after pairing
-  ▲
-  │  dials OUT (no open port at home)
-  │
-Home computer (root: yggdrasil + bifrost-net bridge/wg + app + voice)
-  ▲
-  │  WireGuard inside the root-link (through the trunk)
-  │
-Other computers (additional roots: Linux; macOS from a checkout)
-```
+## Quick start
 
-- **root (`root/`, binary `yggdrasil`)** — A coordinator called `MAIN` that you talk to through one conversation. When work takes multiple steps, `MAIN` starts and follows child sessions (`lead`, `build`, `fix`, `research`, `review`, `marketer`), or delegates to coding harnesses (`claude` for Claude Code, `agy` for Antigravity, `opencode`, `codex`). Multiple machines form one tree of roots.
-- **trunk (`trunk/`, binary `bifrost-net`)** — An access point on a small VPS with only TCP port 443 open (plus port 80 for Let's Encrypt certificate checks). Your home computer dials out to it. Once paired, your phone connects straight to your home bridge over WebRTC whose DTLS key is pinned by the pairing QR code, and roots talk to each other over WireGuard (`bifrost-net wg`). The VPS forwards encrypted bytes it cannot read.
-- **branch (`branch/`)** — The phone web app (Next.js 15 PWA) served from your home computer. Its `/api/*` proxy is the single seam to the brain, which never listens publicly. `branch/voice/` runs a Python `livekit-agents` worker (speech-to-text → `yggdrasil` → text-to-speech, push-to-talk and hands-free).
+Each machine runs one script from a signed release (`v0.9.1`). No Docker, no compilers, no account with us. Secrets (your model key and connect line) are pasted interactively and never typed on a command line.
 
-## What you need
+1. **Set up your private trunk** *(optional — needed for remote access and phone voice)*
 
-**To use at home (same Wi-Fi):**
-- One Linux `x86_64` computer with glibc 2.31 or newer (Debian 11+, Ubuntu 20.04+; voice needs Python ≥ 3.10 with `venv`: Debian 12+, Ubuntu 22.04+), a systemd user session, `curl`, `ssh-keygen` (to check the release signature), `libopus0`, `bzip2` and about 2 GB of free disk with voice (about 0.5 GB without). The release brings everything else prebuilt, its own Node included — no git, compilers or npm. (macOS and `aarch64` build from a checkout for now.)
-- A phone on the same Wi-Fi.
-- An AI model key or local model server: any OpenAI-compatible `/v1` API (OpenAI, OpenRouter, Ollama, `llama.cpp`, vLLM) or Anthropic-style API (Anthropic, Z.ai), plus optional Claude Code or Antigravity CLI installs.
-- Optional speech upgrade: a Mac on the same LAN serving MLX speech (`SPEACHES_URL`). Without it, `bifrost-voice` runs local CPU speech (`sherpa-onnx`, ~200 MB of models downloaded on first start).
+   On a small Linux VPS (1 CPU / 512 MB, Debian 11+ or Ubuntu 20.04+, ports 80 and 443 open, DNS pointed at it):
 
-**To reach your tree from anywhere (mobile data or other Wi-Fi):**
-- A small rented VPS (Linux `x86_64` with systemd and glibc 2.31+: Debian 11+ or Ubuntu 20.04+, tested on Debian 12; 1 CPU / 512 MB RAM is enough) with a domain name pointing to it and TCP ports 443 and 80 open.
-- Optional extra computers (Linux; macOS from a checkout) to join as additional roots on your tree.
+   ```bash
+   curl -fsSLO https://github.com/veraldar/yggdrasil/releases/download/v0.9.1/trunk.sh
+   sudo bash trunk.sh --name trunk.example.org
+   ```
 
-## How to install
+   Installs the relay, sets up a Let's Encrypt certificate, firewall, and automatic security updates, and prints one connect line for step 2. Already running a website on port 443? See [docs/own-trunk.md](./docs/own-trunk.md).
 
-Each machine gets one script from a release. Before anything runs, the script checks the release's signed checksums against the yggdrasil release key written into the script ([RELEASE-KEY.pub](RELEASE-KEY.pub)), then the archive against them; anything that does not match is refused. Secrets (your model key, the trunk's connect line) are asked for and pasted — never typed on a command line.
+2. **Install on your home computer** *(Linux `x86_64`, Debian 11+ / Ubuntu 20.04+ / Arch, no `sudo` needed)*
 
-1. **On your rented VPS (optional, for remote access):** `trunk.sh` sets up the access point on port 443, its Let's Encrypt certificate, the firewall, security updates and a weekly signed update, then prints the connect line for your home computer.
-2. **At home:** `install.sh` (with `--trunk` it asks you to paste that connect line).
-3. **On your phone:** `install.sh pair` shows a QR code on the home computer; scan it.
-4. **On a second computer (optional):** `join.sh --hub https://<your trunk>`, then approve its QR code on your paired phone.
+   ```bash
+   curl -fsSLO https://github.com/veraldar/yggdrasil/releases/download/v0.9.1/install.sh
+   bash install.sh --trunk
+   ```
 
-`--uninstall` undoes each of them. The exact commands are in [root/install/README.md](root/install/README.md) (home, phone, second computer) and [docs/own-trunk.md](docs/own-trunk.md) (the VPS). **Windows is not part of v0.9.0:** the launcher in `win/` has never run on a real Windows PC and still clones the repository instead of fetching the signed release — untested, use at your own risk.
+   Paste the connect line when asked, pick your model provider (or a local model), and let it start the systemd user services. *Trying it on home Wi-Fi only, without a VPS? Run `bash install.sh` without `--trunk`.*
 
-Read [root/install/README.md](root/install/README.md) for home and multi-machine installation options, and [docs/own-trunk.md](docs/own-trunk.md) for setting up your VPS trunk (including sharing port 443 with an existing website).
+3. **Pair your phone**
 
-## What it does today
+   ```bash
+   bash install.sh pair
+   ```
 
-- **One conversation, managed work behind it:** Talk or type to `MAIN`; it answers simple questions directly, starts sub-sessions with role-scoped tool rules (`build`, `fix`, `research`, `review`, `marketer`, `lead`), and summarizes finished or blocked reports back to you.
-- **Multiple AI engines and editable agents:** Built-in `yggdrasil` tool loop plus `claude` (Claude Code), `agy` (Antigravity), `opencode`, and `codex` harnesses; edit agent prompts, models, thinking levels, and shared instructions in the app.
-- **Terminal sessions both ways (`root/cc-live/`, `branch/app/cc/[id]/`):** Browse and watch active terminal conversations (Claude Code, Antigravity, `opencode`) from your phone, send input into `tmux` or Claude Code background sessions (including answering interactive prompts), or continue closed sessions through the brain with single-writer safety.
-- **Multi-machine trees over WireGuard:** Join extra Linux (or, from a checkout, macOS) machines via phone-approved QR (`docs/spec-join.md`). `MAIN` can start sessions on any linked root (`session_start … root=<name>`), and root-to-root brain traffic travels inside WireGuard (`boringtun` + `smoltcp`) without opening ports or needing root privileges.
-- **End-to-end encrypted trunk transport:** After QR pairing, `/api/*` app traffic (outside `/api/pair/*`) and `/rtc` LiveKit signaling ride a DTLS-pinned WebRTC data channel (`branch/lib/pinned.ts`); voice media rides LiveKit ICE-TCP over port 443 with end-to-end DTLS-SRTP.
-- **Push-to-talk and hands-free voice:** Speak and hear replies with barge-in echo filtering, session-pinned TTS language, spoken playback controls (`stop`, `faster`, `slower`, `pause`, `resume`), and local CPU or LAN MLX speech models.
-- **Phone PWA and extensions:** Streaming markdown transcripts, image/file attachments, sandboxed HTML artifact previews, per-device revocation and emergency kill-switch (`/devices`), and process-isolated extensions (`root/extensions/librarian/` for SQLite FTS5 cross-session search and memory).
+   Scan the QR code with your phone camera and add Bifrost to your home screen. No app store.
 
-## What it does not do yet
+4. **Add your other computers** *(optional)*
 
-- **No phone microphone over plain LAN HTTP:** Browsers block microphone access on insecure `http://<LAN IP>` origins; typing and hearing replies work on LAN HTTP, while speaking from the phone requires HTTPS (such as your own trunk).
-- **The VPS still serves the web app shell and sees pairing:** Your rented VPS terminates TLS for the web page HTML/JS, the pairing exchange (`/api/pair/*`), and WebRTC `POST /offer` signaling. See [SECURITY.md](SECURITY.md) for the exact trust boundary.
-- **First-contact WebRTC fallback:** If a strict network blocks WebRTC on initial page load before the pinned channel connects, the app falls back to the trunk's TLS (`via the trunk's TLS`). Once pinned in a session, a dropped connection pauses in `reconnecting` rather than falling back.
-- **No direct root-to-root UDP leg:** WireGuard packets between roots travel inside the WebSocket root-link through the hub's relay (TCP inside TCP), so lossy paths can stack retransmits.
-- **Phone-to-root `/branch` turns:** Direct phone turns targeting a specific joined root via `/branch` still cross the hub's bridge as frames rather than inside the WireGuard tunnel.
-- **No per-root revoke UI or key rotation yet:** Revoking the approving phone cuts its joined roots' WireGuard tunnels within ~1–2 s, while revoking or rotating an individual root uses `roots.json` / `join.sh --rejoin` (`docs/spec-join.md`).
-- **Single-user and platform scope:** Designed for one owner per tree (no multi-user accounts); prebuilt release binaries focus on Linux `x86_64` (other Linux architectures and macOS compile with Cargo; Windows via WSL2 is untested); mobile OS background/screen-off microphone limits vary by device; short replies containing symbols can occasionally misdetect TTS language.
-- **Not yet run on a real phone over a real trunk.** Every phone in the tests below is a simulated one (Chromium as a Pixel 7) and every VPS a container or a namespace; the end design has not yet run on a real VPS with a real iPhone or Android over mobile data. iOS Safari (home-screen app, WebRTC data channel) is the biggest unknown.
-- **Voice rough edges** (seen in the voice persona suite): a long spoken reply is cut after about 60 s; a report can be read twice; code in a reply is read as it is written (`delete N` → "delete-end"); in one run of two, phrases of a soft, breathy voice were lost before speech recognition (not reproduced since, also not under CPU load).
+   On another **Linux** machine or **Apple-silicon Mac** (prebuilt signed binaries):
 
-## How it is tested
+   ```bash
+   curl -fsSLO https://github.com/veraldar/yggdrasil/releases/download/v0.9.1/join.sh
+   bash join.sh --hub https://trunk.example.org
+   ```
 
-Verification relies on deterministic simulations and isolated network-namespace suites in `sim/` alongside crate and Playwright tests:
+   On **Windows 10/11 (beta)**: download [`Veraldar-Setup-0.9.1.exe`](https://github.com/veraldar/yggdrasil/releases/download/v0.9.1/Veraldar-Setup-0.9.1.exe) from the [v0.9.1 release](https://github.com/veraldar/yggdrasil/releases/tag/v0.9.1) — sets up WSL2 if needed, joins your trunk, and shows a code to approve on your phone.
 
-- `sim/trunk-e2e.sh` — Full end-design world in private Linux namespaces (`unshare` + `nftables` blocking all UDP so only TCP 443 reaches the simulated VPS): tests QR pairing, pinned app data, voice over ICE-TCP, multi-root WireGuard delegation, hub restarts, active MITM rejection, traffic inspection at the VPS (`vps-eye.py`), and ~1 s revocation.
-- `sim/trunk-rtc-e2e.sh` & `sim/trunk-full-e2e.sh` — Isolated WebRTC voice-over-trunk and full phone→VPS→hub→joined-root Playwright runs (`branch/e2e/trunk-*.spec.ts`).
-- `sim/trunk-roots-e2e.py` — Multi-root WireGuard relay, directory push, replay/tamper/impostor rejection, rekeying, and revocation checks.
-- `sim/own-trunk-e2e.sh` — Boots clean Debian 12 and Ubuntu 24.04 systemd containers with Pebble (test ACME) and runs the real `trunk.sh`, `install.sh`, `join.sh`, and a Chromium phone.
-- `sim/tree-e2e.py`, `sim/hsim.py`, & `sim/voice/` — Deterministic coordinator tree tests, LLM-persona end-to-end runs, and voice persona barge-in/echo/latency suites (`sim/voice/suite.py`).
-- Unit & suite checks: `cargo test` in `root/` and `trunk/`, `root/verify.sh`, `branch/` Playwright e2e specs.
+   Pick **Same as the home root** to share your home model config over the encrypted WireGuard link, or choose a separate provider. `--uninstall` cleanly reverses any step.
 
-## Further reading
+## Documentation
 
-- [SECURITY.md](SECURITY.md) — Trust boundaries, token storage, key pinning, revocation, and vulnerability reporting.
-- [VERSIONS.md](VERSIONS.md) — Release changelog (`v0.8.0`, `v0.8.1`, and `Unreleased (v0.9.0)`).
-- [docs/own-trunk.md](docs/own-trunk.md) & [root/install/README.md](root/install/README.md) — Step-by-step installation and VPS setup.
-- [root/ROOT-COORD.md](root/ROOT-COORD.md) & [root/extensions/README.md](root/extensions/README.md) — Coordinator tree model, harnesses, and extension protocol.
+| To | Read |
+| --- | --- |
+| Install at home, update, or troubleshoot | [Home & multi-machine install](./root/install/README.md) · [Backup](./docs/backup.md) |
+| Run your own trunk on a VPS | [Your own trunk](./docs/own-trunk.md) |
+| Check security, trust boundaries & revocation | [Security model](./SECURITY.md) · [Pairing spec](./docs/spec-pairing.md) · [Multi-root join spec](./docs/spec-join.md) |
+| Configure voice & extensions | [Voice & TTS](./docs/tts-voice.md) · [Extensions protocol](./root/extensions/README.md) · [Plugins](./docs/plugins.md) |
+| Understand the architecture & releases | [Repo map](./docs/REPO-MAP.md) · [Coordinator model](./root/ROOT-COORD.md) · [Changelog](./VERSIONS.md) |
+
+## Honest scope & verification
+
+- **What it does not do yet:** Built for one owner per tree (no multi-user accounts). On plain LAN HTTP without a trunk, browsers block the phone microphone (typing and hearing replies work; speaking requires HTTPS). The trunk still serves the web app HTML/JS and handles initial pairing before the pinned WebRTC channel takes over — see [SECURITY.md](./SECURITY.md) for the full trust boundary. Windows (`Veraldar-Setup-0.9.1.exe`, not yet code-signed) and Apple-silicon Mac joins are in beta; Intel Macs and non-`x86_64` Linux build from source (`--from-source` / `--build`).
+- **How it is verified:** Deterministic network-namespace end-to-end suites in `sim/` (`sim/trunk-e2e.sh`, `sim/trunk-rtc-e2e.sh`, `sim/trunk-roots-e2e.py`, `sim/own-trunk-e2e.sh`, `sim/tree-e2e.py`, `sim/voice/suite.py`) verify QR pairing, active MITM rejection, VPS traffic inspection, ~1 s revocation, and voice barge-in alongside `cargo test` (`root/`, `trunk/`) and Playwright e2e tests (`branch/`).
 
 ## License
 
-yggdrasil is licensed under [AGPL-3.0](LICENSE) — copyleft including network use: modified versions offered as a network service must make their source code available. Talking to yggdrasil over its API does not make your client a derivative work.
+Built in Switzerland. Licensed under [AGPL-3.0](./LICENSE) — copyleft including network use: modified versions offered as a network service must make their source code available. Talking to yggdrasil over its API does not make your client a derivative work.
 
-Attributions: the web app in `branch/` derives from [livekit-examples/agent-starter-react](https://github.com/livekit-examples/agent-starter-react) (MIT, see [branch/LICENSE](branch/LICENSE)); icons from [pixelarticons](https://github.com/halfmage/pixelarticons) (MIT).
+Attributions: the web app in `branch/` derives from [livekit-examples/agent-starter-react](https://github.com/livekit-examples/agent-starter-react) (MIT, see [branch/LICENSE](./branch/LICENSE)); icons from [pixelarticons](https://github.com/halfmage/pixelarticons) (MIT).
