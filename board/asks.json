@@ -1,7 +1,7 @@
 [
  {"what":"Engines into settings","when":"11-25 07:07","who":"Engines into settings","sid":"28a4e5","status":"done","branch":"settings-row-buttons","commit":"dc0ff90a"},
  {"what":"Smarter engine fallback","when":"11-26 17:26","who":"Build smarter engine fallback","sid":"0045e8","status":"done","branch":"engine-fallback-smart","commit":"c961a3d0"},
- {"what":"Settings v2.1 — every row one bare button","when":"11-26 19:34","who":"Settings v2.1","sid":"ca3f64","status":"blocked","note":"stuck rig lock","branch":"settings-buttons-v21","commit":"79c6f710","commit_label":"code at"},
+ {"what":"Settings v2.1 — every row one bare button","when":"11-26 19:34","who":"Settings v2.1","sid":"ca3f64","status":"blocked","note":"stuck rig lock","branch":"settings-buttons-v21","commit":"bfde7d2a","commit_label":"code at"},
  {"what":"v1 APP-5 — apply architect §3 edits","when":"11-26 19:11","who":"v1 · APP-5","sid":"66cf7f","status":"blocked","note":"stuck rig lock; twin proofs queued","branch":"v1-app","commit":"5a0a224f","commit_label":"code at"},
  {"what":"v1 APP-4 — G2.4 pre-existing reds","when":"11-26 16:10","who":"v1 · APP-4","sid":"78e83e","status":"blocked","note":"waiting for your OK on the spec patch"},
  {"what":"Blackout fix — pending question no longer blocks MAIN","when":"11-25 19:53","who":"Architect role instruction","sid":"f8c47a","status":"done","note":"awaiting merge","branch":"owner-approval-flow","commit":"d012d2fa"},
