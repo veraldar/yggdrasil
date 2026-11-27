@@ -1,6 +1,7 @@
 import { type Page, expect, test } from '@playwright/test';
 import { join } from 'path';
 import { homePathOf } from '../lib/home-path-of';
+import { gotoHomeOnDevice } from './home';
 
 /**
  * THE ROOTS PAGE (owner 11-26), at 360 px, on sim/roots-page-e2e.sh (never a live brain):
@@ -84,6 +85,20 @@ test('a walked device: / → /roots/ keeps the query string and the hash', async
   await page.waitForURL(/\/roots\/?\?x=1#y$/, { timeout: 20_000 });
   const u = new URL(page.url());
   expect([u.pathname.replace(/\/$/, ''), u.search, u.hash]).toEqual(['/roots', '?x=1', '#y']); // next drops the trailing slash
+});
+
+test('gotoHomeOnDevice: a new tab (about:blank) on a walked device lands on the home path', async ({ page, context }) => {
+  test.setTimeout(60_000);
+  await setup(page, true);
+  await page.goto('/');
+  await page.waitForURL(/\/roots\/?$/, { timeout: 20_000 }); // the roots list stores the home root's name
+  await expect(page.getByTestId('root-row')).toHaveCount(4);
+  const tab = await context.newPage();
+  expect(tab.url()).toBe('about:blank');
+  await setup(tab, true);
+  await gotoHomeOnDevice(tab);
+  expect(new URL(tab.url()).pathname).toBe(homePathOf(TREE.home.name));
+  await expect(tab.getByTestId('home-title')).toBeVisible({ timeout: 15_000 });
 });
 
 test('a walked device: / → /roots/ (white page, rows tinted per root), /<home>, back', async ({ page }) => {

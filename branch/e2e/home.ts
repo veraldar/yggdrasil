@@ -23,9 +23,19 @@ export async function gotoHome(
 
 /** the home root's name as the app on this device stored it — no request of the test's own */
 export async function gotoHomeOnDevice(page: Page, base = ''): Promise<void> {
+  // a tab that has not loaded the app yet: the bare address first — a walked device lands on the
+  // roots list, which stores the home root's name
+  if (!/^https?:/.test(page.url())) {
+    await page.goto(`${base}/`);
+    await page.waitForURL((u) => u.pathname.replace(/\/$/, '') === '/roots');
+  }
   let name = '';
   await expect
-    .poll(async () => (name = (await page.evaluate(() => localStorage.getItem('oz-home-root'))) || ''), { timeout: 30_000 })
+    .poll(
+      async () =>
+        (name = (await page.evaluate(() => localStorage.getItem('oz-home-root')).catch(() => null)) || ''),
+      { timeout: 30_000 }
+    )
     .not.toBe('');
   await page.goto(`${base}${homePathOf(name)}`);
 }
