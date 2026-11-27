@@ -65,7 +65,9 @@ test('settings hosts the engines block, saves default model, and fits 360px clea
     );
     await eng('claude').getByRole('button', { name: nextModel, exact: true }).tap();
     expect((await put).status()).toBe(200);
-    await expect(eng('claude')).toContainText(`${nextModel} ›`);
+    await expect(eng('claude')).toContainText(
+      `· ${nextModel === 'default' ? 'its default' : nextModel}`
+    );
 
     await expect
       .poll(
@@ -78,7 +80,9 @@ test('settings hosts the engines block, saves default model, and fits 360px clea
 
     // reload /settings: saved default stays
     await page.reload();
-    await expect(eng('claude')).toContainText(`${nextModel} ›`);
+    await expect(eng('claude')).toContainText(
+      `· ${nextModel === 'default' ? 'its default' : nextModel}`
+    );
     await shot(page, '2-settings-engines-saved');
   } finally {
     await request.put(`${OC}/engine/claude`, { data: { model: before.model } }).catch(() => {});

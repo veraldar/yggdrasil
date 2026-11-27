@@ -23,7 +23,6 @@ import { HOME_ROOT_KEY } from '@/components/roots-sheet';
 import { WorldPicker } from '@/components/world-picker';
 import {
   type AgentRow,
-  ENGINE_NOTE,
   type EngineRow,
   MORE_ENGINES,
   byRole,
@@ -323,7 +322,7 @@ function RootSettings({ rootId }: { rootId: string }) {
         {roles.length === 0 ? (
           <p className="text-[11px] text-[var(--oz-dim)]">{settings ? 'none' : '…'}</p>
         ) : (
-          <ul className="oz-alist">
+          <ul className="plist">
             {roles.map((r) => {
               const eng = r.harness || 'root';
               const model = r.model || engineModel(eng) || 'default';
@@ -344,30 +343,27 @@ function RootSettings({ rootId }: { rootId: string }) {
                     { name: 'antigravity', label: 'Antigravity', model: null, models: [] },
                   ];
               return (
-                <li key={r.name} className="eng" data-testid="root-role" data-role={r.name}>
+                <li key={r.name} className="prow" data-testid="root-role" data-role={r.name}>
                   <button
                     type="button"
+                    className="oz-k bar"
                     disabled={!reachable || locked}
                     aria-expanded={isOpen}
                     onClick={() => setOpenRole(isOpen ? '' : r.name)}
                   >
-                    <span className="r1">
-                      <span className="truncate">
-                        <span className="mr-1 opacity-60" aria-hidden="true">
-                          [{roleTag(r.name)}]
-                        </span>
-                        {r.name === 'coordinator' ? 'main' : r.name}
+                    <span className="truncate">
+                      <span className="mr-1 opacity-60" aria-hidden="true">
+                        [{roleTag(r.name)}]
                       </span>
-                      <span className="tag" data-testid="role-engine">
-                        {engineLabel(eng)}
-                      </span>
-                      <span className="m" data-testid="role-model">
-                        {model} {!locked && reachable ? (isOpen ? '▲' : '›') : ''}
-                      </span>
+                      {r.name === 'coordinator' ? 'main' : r.name}
+                      {' · '}
+                      <span data-testid="role-engine">{engineLabel(eng)}</span>
+                      {' · '}
+                      <span data-testid="role-model">{model}</span>
                     </span>
                   </button>
                   {isOpen && (
-                    <div className="pt-1 pb-2.5">
+                    <div className="pt-1.5 pb-2.5">
                       <div className="mb-1 text-[10px] tracking-[.1em] text-[var(--oz-dim)]">
                         runs on
                       </div>
@@ -426,7 +422,7 @@ function RootSettings({ rootId }: { rootId: string }) {
           data-testid="root-engines-block"
         >
           <h2>engines</h2>
-          <ul className="oz-alist">
+          <ul className="plist">
             {mainEngines.map((e) => {
               const label = e.label || engineLabel(e.name);
               const isOpen = reachable && openEng === e.name;
@@ -434,9 +430,10 @@ function RootSettings({ rootId }: { rootId: string }) {
               const free =
                 !e.models?.length || (e.models.length === 1 && e.models[0] === 'default');
               return (
-                <li key={e.name} className="eng" data-testid="root-engine" data-engine={e.name}>
+                <li key={e.name} className="prow" data-testid="root-engine" data-engine={e.name}>
                   <button
                     type="button"
+                    className="oz-k bar"
                     disabled={!reachable}
                     aria-expanded={isOpen}
                     onClick={() => {
@@ -444,17 +441,15 @@ function RootSettings({ rootId }: { rootId: string }) {
                       setEngText(e.model || '');
                     }}
                   >
-                    <span className="r1">
-                      <span className="truncate">{label}</span>
-                      <span className="m" data-testid="engine-model">
-                        {e.model || 'its default'} {reachable ? (isOpen ? '▲' : '›') : ''}
-                      </span>
+                    <span className="truncate">
+                      {label}
+                      {' · '}
+                      <span data-testid="engine-model">{e.model || 'its default'}</span>
                     </span>
-                    {ENGINE_NOTE[e.name] && <span className="r2">{ENGINE_NOTE[e.name]}</span>}
                   </button>
                   {isOpen &&
                     (free ? (
-                      <div className="flex gap-1.5 pb-2">
+                      <div className="flex gap-1.5 pt-1.5 pb-2">
                         <input
                           value={engText}
                           onChange={(x) => setEngText(x.target.value)}
@@ -474,7 +469,7 @@ function RootSettings({ rootId }: { rootId: string }) {
                         </button>
                       </div>
                     ) : (
-                      <div className="oz-chips pb-2">
+                      <div className="oz-chips pt-1.5 pb-2">
                         {e.models.slice(0, 8).map((m) => (
                           <button
                             key={m}
@@ -497,13 +492,12 @@ function RootSettings({ rootId }: { rootId: string }) {
               <summary className="cursor-pointer text-[11px] text-[var(--oz-dim)]">
                 more engines
               </summary>
-              <ul className="oz-alist mt-1">
+              <ul className="plist mt-1.5">
                 {moreEngines.map((e) => (
-                  <li key={e.name} className="eng">
-                    <div className="py-2 text-[12px]">
-                      <span className="r1">
-                        <span className="truncate">{e.label || engineLabel(e.name)}</span>
-                        <span className="m">{e.model || 'its default'}</span>
+                  <li key={e.name} className="prow">
+                    <div className="oz-k bar" aria-disabled="true">
+                      <span className="truncate">
+                        {e.label || engineLabel(e.name)} · {e.model || 'its default'}
                       </span>
                     </div>
                   </li>

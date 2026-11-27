@@ -5,7 +5,6 @@
  *  (PUT /api/engines/:name). opencode and Codex sit in a "more engines" fold. */
 import { useState } from 'react';
 import {
-  ENGINE_NOTE,
   type EngineRow,
   applyEngineSave,
   engineControlKind,
@@ -44,9 +43,10 @@ export function EnginesBlock({
     const cur = e.model || 'default';
     const kind = engineControlKind(e);
     return (
-      <li key={e.name} className="eng" data-testid="engine-row" data-engine={e.name}>
+      <li key={e.name} className="prow" data-testid="engine-row" data-engine={e.name}>
         <button
           type="button"
+          className="oz-k bar"
           aria-expanded={isOpen}
           onClick={() => {
             setOpen(isOpen ? '' : e.name);
@@ -54,18 +54,14 @@ export function EnginesBlock({
             setText(e.model || '');
           }}
         >
-          <span className="r1">
-            <span className="truncate">{label}</span>
-            <span className="m">
-              {e.model || 'its default'} {isOpen ? '▲' : '›'}
-            </span>
+          <span className="truncate">
+            {label} · {e.model || 'its default'}
           </span>
-          {ENGINE_NOTE[e.name] && <span className="r2">{ENGINE_NOTE[e.name]}</span>}
         </button>
         {isOpen &&
           (kind === 'free' ? (
             // free text: the engine takes any id it knows (empty = its own pick)
-            <div className="flex gap-1.5 pb-2">
+            <div className="flex gap-1.5 pt-1.5 pb-2">
               <input
                 value={text}
                 onChange={(x) => setText(x.target.value)}
@@ -96,7 +92,7 @@ export function EnginesBlock({
               ))}
             </div>
           ) : (
-            <div className="pb-2">
+            <div className="pt-1.5 pb-2">
               <select
                 value={e.models.includes(cur) ? cur : ''}
                 onChange={(x) =>
@@ -116,8 +112,10 @@ export function EnginesBlock({
               </select>
             </div>
           ))}
-        {isOpen && e.labels?.[cur] && (
-          <p className="pb-2 text-[10.5px] text-[var(--oz-dim)]">{e.labels[cur]}</p>
+        {isOpen && kind !== 'free' && (
+          <p className="xnote">
+            a tap picks and saves at once{e.labels?.[cur] ? ` · ${e.labels[cur]}` : ''}
+          </p>
         )}
         {refused?.name === e.name && (
           <p role="alert" className="pb-2 text-[11px] text-[var(--oz-danger)]">
@@ -132,13 +130,13 @@ export function EnginesBlock({
   return (
     <section className="oz-blk" data-testid="engines-block">
       <h2>engines</h2>
-      <ul className="oz-alist">{main.map(rowOf)}</ul>
+      <ul className="plist">{main.map(rowOf)}</ul>
       {more.length > 0 && (
-        <details className="pt-0" data-testid="more-engines">
+        <details className="pt-2" data-testid="more-engines">
           <summary className="cursor-pointer text-[11px] text-[var(--oz-dim)]">
             more engines (installed, unused)
           </summary>
-          <ul className="oz-alist mt-1">{more.map(rowOf)}</ul>
+          <ul className="plist mt-1.5">{more.map(rowOf)}</ul>
         </details>
       )}
       <p className="note">

@@ -170,32 +170,24 @@ export default function SettingsPage() {
           roles opens the roles page; walk-through re-walks in the test room;
           voice tests toggle their own room */}
       <section className="oz-blk">
-        <ul className="oz-kv">
-          <li>
-            <span>roles</span>
-            <span />
-            <Link href="/agents" data-testid="agents-link" className="oz-k sm">
-              ›
+        <ul className="plist">
+          <li className="prow">
+            <Link href="/agents" data-testid="agents-link" className="oz-k bar">
+              <span className="truncate">roles ›</span>
             </Link>
           </li>
-          <li>
-            <span>walk-through</span>
-            <span />
+          <li className="prow">
             <button
               type="button"
               data-testid="walk-again"
               disabled={walkBusy}
               onClick={() => void walkAgain()}
-              className="oz-k sm"
+              className="oz-k bar"
             >
-              walk it
+              <span className="truncate">walk-through · walk it</span>
             </button>
           </li>
-          <li>
-            <span>voice tests</span>
-            <span data-testid="voice-test-state">
-              {vt && <Link href={`/session/${VOICE_TEST_SLUG}`}>{VOICE_TEST_SLUG} ›</Link>}
-            </span>
+          <li className="prow">
             <button
               type="button"
               role="switch"
@@ -204,11 +196,23 @@ export default function SettingsPage() {
               data-testid="voice-test-toggle"
               disabled={vtBusy}
               onClick={() => void toggleVoiceTest()}
-              className={`oz-k sm ${vt ? 'on' : ''}`}
+              className={`oz-k bar ${vt ? 'on' : ''}`}
             >
-              {vt ? 'on' : 'off'}
+              <span className="truncate">voice tests · {vt ? 'on' : 'off'}</span>
             </button>
           </li>
+          {vt && (
+            // the way into the test room, as it was beside the switch: its own bare button
+            <li className="prow">
+              <Link
+                href={`/session/${VOICE_TEST_SLUG}`}
+                data-testid="voice-test-state"
+                className="oz-k bar"
+              >
+                <span className="truncate">{VOICE_TEST_SLUG}</span>
+              </Link>
+            </li>
+          )}
         </ul>
         {walkErr && <p className="note text-[var(--oz-danger)]">{walkErr}</p>}
         {vtErr && <p className="note text-[var(--oz-danger)]">{vtErr}</p>}

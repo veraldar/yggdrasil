@@ -653,6 +653,14 @@
   .oz-alist li.eng { border-bottom: 1px var(--oz-rule) var(--oz-border); }
   .oz-alist li.eng:last-child { border-bottom: 0; }
   .oz-alist li.eng > button { display: block; width: 100%; min-width: 0; padding: 8px 2px; text-align: left; font-size: 12px; }
+  /* a settings row is ONE bare button (owner 11-26): its own text the placeholder — no label, no
+     chevron, no icon; "on" keeps "name · value" with the accent border */
+  .plist { display: grid; gap: 8px; }
+  .plist .prow > .oz-k.bar { display: flex; width: 100%; justify-content: flex-start; padding: 0 12px; text-align: left; }
+  .plist .prow > .oz-k.bar > .truncate { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .plist .prow .xnote { padding: 2px 2px 0; font-size: 10.5px; line-height: 1.6; color: var(--oz-dim); }
+  .plist .prow .oz-chips { padding-top: 6px; }
+  .plist .prow .oz-field { margin-top: 6px; }
   /* what changes when a session takes another agent */
   .oz-diff li { grid-template-columns: 7em 1fr; }
   .oz-del { width: 100%; height: 38px; border: 1px solid var(--oz-border); color: var(--oz-dim); font-size: 13px; }
